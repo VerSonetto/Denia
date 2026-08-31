@@ -41,10 +41,13 @@ async fn list_sessions(State(state): State<Arc<AppState>>) -> Result<impl IntoRe
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct CreateBody {
-    /// Real working directory; ignored while `sandbox` is true.
+    /// 目标工作区;与 cwd 互斥(抄 dsh:二者同时给 → bad-request)。
+    #[serde(default)]
+    workspace_id: Option<String>,
+    /// 直接指定目录;不挂任何工作区(落"未分组")。
     #[serde(default)]
     cwd: Option<String>,
-    /// Default true: run inside the home workspace sandbox.
+    /// Overrides the console `sandbox` default for this session.
     #[serde(default)]
     sandbox: Option<bool>,
 }
@@ -54,32 +57,60 @@ async fn create_session(
     body: Option<Json<CreateBody>>,
 ) -> Result<impl IntoResponse, ApiError> {
     let body = body.map(|Json(body)| body).unwrap_or(CreateBody {
+        workspace_id: None,
         cwd: None,
         sandbox: None,
     });
-    let sandboxed = body.sandbox.unwrap_or(true) || body.cwd.is_none();
-    let cwd = if sandboxed {
-        state.workspace.clone()
-    } else {
-        let raw = body.cwd.unwrap_or_default();
-        let dir = std::path::PathBuf::from(&raw);
-        if !dir.is_dir() {
-            return Err(ApiError::bad_request(
-                "session/bad-cwd",
-                format!("'{raw}' is not a directory"),
-            ));
-        }
-        dir
+    if body.workspace_id.is_some() && body.cwd.is_some() {
+        return Err(ApiError::bad_request(
+            "gateway/bad-request",
+            "workspaceId and cwd are mutually exclusive",
+        ));
+    }
+    let workspace = match &body.workspace_id {
+        Some(id) => Some(
+            state
+                .workspaces
+                .get(id)
+                .ok_or_else(|| ApiError::new(StatusCode::NOT_FOUND, "workspace/not-found", "workspace not found"))?,
+        ),
+        None => None,
     };
+    let cwd = match &workspace {
+        Some(ws) => std::path::PathBuf::from(ws.path.clone()),
+        None => {
+            let Some(raw) = body.cwd.filter(|cwd| !cwd.trim().is_empty()) else {
+                return Err(ApiError::bad_request(
+                    "session/workspace-required",
+                    "先选择工作区,再开始会话",
+                ));
+            };
+            let dir = std::path::PathBuf::from(raw.trim());
+            if !dir.is_dir() {
+                return Err(ApiError::bad_request(
+                    "session/bad-cwd",
+                    format!("'{raw}' 不是目录"),
+                ));
+            }
+            dir
+        }
+    };
+    let console = crate::state::console_settings(&state.settings);
+    let sandbox = body.sandbox.unwrap_or(console.sandbox);
     let session = state
         .sessions
-        .create(&cwd)
+        .create(&cwd, sandbox)
         .map_err(ApiError::from_session)?;
+    if let Some(ws) = &workspace {
+        // 会话头 cwd == 工作区路径(构造保证);账本 prepend。
+        state.workspaces.attach(&ws.id, session.id());
+    }
     let summary = json!({
         "id": session.id(),
         "created_at": session.header().created_at,
         "excerpt": null,
         "cwd": session.header().cwd,
+        "sandbox": session.header().sandbox,
     });
     let _ = state.events.send(ServerEvent::SessionsUpdated);
     Ok((StatusCode::CREATED, Json(json!({ "session": summary }))))
@@ -141,6 +172,18 @@ async fn prompt_session(
         .live
         .get_or_load(&state.sessions, &id)
         .map_err(ApiError::from_session)?;
+    {
+        let session = live.session.lock().await;
+        let cwd = session.header().cwd.clone();
+        if !std::path::Path::new(&cwd).is_dir() {
+            return Err(ApiError::bad_request(
+                "session/dead-cwd",
+                format!(
+                    "this session's working directory no longer exists: {cwd} — start a new session in an existing directory"
+                ),
+            ));
+        }
+    }
     if live
         .running
         .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
@@ -153,6 +196,7 @@ async fn prompt_session(
         ));
     }
 
+    let console = crate::state::console_settings(&state.settings);
     let default = current_default_selection(&state.settings);
     let selection = ModelSelection {
         provider: body.provider.unwrap_or(default.provider),
@@ -184,6 +228,7 @@ async fn prompt_session(
                 &mut session,
                 &selection,
                 &prompt,
+                console.max_steps_per_turn,
                 token,
                 &move |envelope: &SessionEnvelope| {
                     let _ = followers.send(envelope.clone());

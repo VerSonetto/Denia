@@ -49,8 +49,8 @@ pub struct Session {
 impl Session {
     /// Creates a fresh session file (header line only) inside `dir`.
     /// `id` becomes both the header id and, by store convention, the
-    /// directory name.
-    pub fn create(dir: &Path, id: String, cwd: &Path) -> Result<Session, SessionError> {
+    /// directory name. `sandbox` confines file tools to `cwd`.
+    pub fn create(dir: &Path, id: String, cwd: &Path, sandbox: bool) -> Result<Session, SessionError> {
         std::fs::create_dir_all(dir)?;
         let file = dir.join("session.jsonl");
         let header = SessionHeader {
@@ -59,6 +59,7 @@ impl Session {
             id,
             created_at: now_millis(),
             cwd: cwd.to_string_lossy().to_string(),
+            sandbox,
         };
         let mut handle = File::create(&file)?;
         writeln!(handle, "{}", serde_json::to_string(&header)?)?;
@@ -206,6 +207,11 @@ pub struct SessionSummary {
     pub id: String,
     pub created_at: u64,
     pub excerpt: Option<String>,
+    pub cwd: Option<String>,
+    pub sandbox: Option<bool>,
+    /// Whether the recorded working directory still exists; sessions with a
+    /// dead cwd refuse new prompts.
+    pub cwd_alive: bool,
 }
 
 /// The sessions root: `<home>/sessions`.
@@ -224,10 +230,10 @@ impl SessionStore {
         &self.root
     }
 
-    pub fn create(&self, cwd: &Path) -> Result<Session, SessionError> {
+    pub fn create(&self, cwd: &Path, sandbox: bool) -> Result<Session, SessionError> {
         let id = uuid::Uuid::new_v4().to_string();
         let dir = self.root.join(&id);
-        Session::create(&dir, id, cwd)
+        Session::create(&dir, id, cwd, sandbox)
     }
 
     pub fn load(&self, id: &str) -> Result<Session, SessionError> {
@@ -312,6 +318,9 @@ fn read_summary(file: &Path) -> Option<SessionSummary> {
         id,
         created_at: header.created_at,
         excerpt,
+        cwd: Some(header.cwd.clone()),
+        sandbox: Some(header.sandbox),
+        cwd_alive: std::path::Path::new(&header.cwd).is_dir(),
     })
 }
 
@@ -338,7 +347,7 @@ mod tests {
         let cwd = root.join("work");
         std::fs::create_dir_all(&cwd).unwrap();
 
-        let mut session = store.create(&cwd).unwrap();
+        let mut session = store.create(&cwd, true).unwrap();
         let id = session.id().to_string();
         session
             .append(SessionEvent::TurnStart { turn: 1 })
@@ -377,7 +386,7 @@ mod tests {
     fn torn_tail_is_truncated_and_open_turn_closed() {
         let root = temp_root();
         let store = SessionStore::open(&root).unwrap();
-        let mut session = store.create(&root).unwrap();
+        let mut session = store.create(&root, true).unwrap();
         let id = session.id().to_string();
         session
             .append(SessionEvent::TurnStart { turn: 1 })
@@ -425,7 +434,7 @@ mod tests {
     fn derive_messages_delegates() {
         let root = temp_root();
         let store = SessionStore::open(&root).unwrap();
-        let mut session = store.create(&root).unwrap();
+        let mut session = store.create(&root, true).unwrap();
         session
             .append(SessionEvent::UserMessage { text: "ping".into() })
             .unwrap();

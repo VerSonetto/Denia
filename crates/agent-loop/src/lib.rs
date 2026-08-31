@@ -21,54 +21,66 @@ use dshrs_tools::{ToolContext, ToolRegistry};
 use futures::StreamExt;
 use tokio_util::sync::CancellationToken;
 
-/// The standing system prompt for phase-2 sessions.
-pub const DEFAULT_SYSTEM_PROMPT: &str = "You are a coding agent running inside dsh-rs. Use the bash, read_file, and write_file tools to complete the user's task. When a tool fails, inspect the error and try again. Reply in the user's language.";
-
-/// Guard rails for one turn.
-#[derive(Debug, Clone)]
-pub struct LoopLimits {
-    pub max_steps_per_turn: u32,
+/// 常驻系统提示;工作目录/平台/日期上下文按会话注入(抄 dsh 的 context
+/// 插件:环境事实进提示,模型不用猜)。中文优先,与控制台 zh-source 一致。
+pub fn build_system_prompt(cwd: &str) -> String {
+    format!(
+        "你是运行在 dsh-rs 里的编码 agent。\n\
+         工作目录:{cwd}(该目录存在,相对路径以它为根)。\n\
+         平台:{os}。日期:{date}。\n\
+         工具:bash、read_file、write_file。\n\
+         规矩:不要猜文件路径;读取失败时先用 bash 列目录再重试;每步聚焦一件事;能回答时就停止调用工具。\n\
+         始终使用简体中文回复,除非用户明确要求其他语言。",
+        os = std::env::consts::OS,
+        date = today_string(),
+    )
 }
 
-impl Default for LoopLimits {
-    fn default() -> Self {
-        Self {
-            max_steps_per_turn: 25,
-        }
-    }
+/// 公历日期 yyyy-mm-dd,不引 chrono:unix 秒 → civil 算法。
+fn today_string() -> String {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let days = secs.div_euclid(86_400);
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    format!("{:04}-{:02}-{:02}", y, m, d)
 }
 
 /// Drives user turns on one session at a time.
 pub struct SessionDriver {
     registry: Arc<LlmRegistry>,
     tools: Arc<ToolRegistry>,
-    limits: LoopLimits,
 }
 
 impl SessionDriver {
-    pub fn new(
-        registry: Arc<LlmRegistry>,
-        tools: Arc<ToolRegistry>,
-        limits: LoopLimits,
-    ) -> Self {
-        Self {
-            registry,
-            tools,
-            limits,
-        }
+    pub fn new(registry: Arc<LlmRegistry>, tools: Arc<ToolRegistry>) -> Self {
+        Self { registry, tools }
     }
 
     /// Runs one user turn to completion and returns the reason it ended.
+    /// `max_steps` comes from the console settings (dsh-style validated
+    /// config, not a hardcoded tunable).
     pub async fn run_turn(
         &self,
         session: &mut Session,
         selection: &ModelSelection,
         prompt: &str,
+        max_steps: u32,
         cancel: CancellationToken,
         emit: &(dyn Fn(&SessionEnvelope) + Send + Sync),
     ) -> TurnEndReason {
         match self
-            .run_turn_inner(session, selection, prompt, cancel, emit)
+            .run_turn_inner(session, selection, prompt, max_steps, cancel, emit)
             .await
         {
             Ok(reason) => reason,
@@ -83,6 +95,7 @@ impl SessionDriver {
         session: &mut Session,
         selection: &ModelSelection,
         prompt: &str,
+        max_steps: u32,
         cancel: CancellationToken,
         emit: &(dyn Fn(&SessionEnvelope) + Send + Sync),
     ) -> Result<TurnEndReason, LlmFailure> {
@@ -93,11 +106,11 @@ impl SessionDriver {
         let mut step: u32 = 0;
         loop {
             step += 1;
-            if step > self.limits.max_steps_per_turn {
+            if step > max_steps {
                 let reason = TurnEndReason::Error {
                     failure: LlmFailure::new(
                         codes::STEP_LIMIT,
-                        format!("turn exceeded {} steps", self.limits.max_steps_per_turn),
+                        format!("单轮超过 {} 步上限", max_steps),
                     ),
                 };
                 append(session, emit, SessionEvent::TurnEnd { turn, reason: reason.clone() })?;
@@ -109,7 +122,7 @@ impl SessionDriver {
                 model: selection.model.clone(),
                 reasoning_effort: selection.reasoning_effort.clone(),
                 messages: session.derive_messages(),
-                system: Some(DEFAULT_SYSTEM_PROMPT.to_string()),
+                system: Some(build_system_prompt(&session.header().cwd)),
                 tools: self.tools.schemas(),
                 temperature: None,
                 max_tokens: None,
@@ -266,6 +279,7 @@ impl SessionDriver {
                     let context = ToolContext {
                         cwd: cwd.clone(),
                         cancel: cancel.child_token(),
+                        confined: session.header().sandbox,
                     };
                     tool.execute(&call.arguments, &context).await
                 } else {
@@ -464,7 +478,7 @@ mod tests {
         ]
     }
 
-    fn driver(scripts: Vec<Vec<StreamChunk>>, limits: LoopLimits) -> (SessionDriver, Arc<LlmRegistry>) {
+    fn driver(scripts: Vec<Vec<StreamChunk>>) -> (SessionDriver, Arc<LlmRegistry>) {
         let registry = Arc::new(LlmRegistry::new());
         registry
             .register(
@@ -478,7 +492,7 @@ mod tests {
         let mut tools = ToolRegistry::default();
         tools.register(Arc::new(EchoTool));
         (
-            SessionDriver::new(registry.clone(), Arc::new(tools), limits),
+            SessionDriver::new(registry.clone(), Arc::new(tools)),
             registry,
         )
     }
@@ -491,7 +505,7 @@ mod tests {
                 .unwrap()
                 .as_nanos()
         ));
-        Session::create(&dir, uuid::Uuid::new_v4().to_string(), &dir).unwrap()
+        Session::create(&dir, uuid::Uuid::new_v4().to_string(), &dir, true).unwrap()
     }
 
     fn selection() -> ModelSelection {
@@ -508,10 +522,10 @@ mod tests {
 
     #[tokio::test]
     async fn plain_text_turn_completes() {
-        let (driver, _registry) = driver(vec![text_script("done!")], LoopLimits::default());
+        let (driver, _registry) = driver(vec![text_script("done!")]);
         let mut session = temp_session();
         let reason = driver
-            .run_turn(&mut session, &selection(), "hello", CancellationToken::new(), &noop_emit())
+            .run_turn(&mut session, &selection(), "hello", 25, CancellationToken::new(), &noop_emit())
             .await;
         assert_eq!(reason, TurnEndReason::Completed);
 
@@ -540,13 +554,10 @@ mod tests {
 
     #[tokio::test]
     async fn tool_call_continues_to_second_step() {
-        let (driver, _registry) = driver(
-            vec![tool_script(), text_script("after tool")],
-            LoopLimits::default(),
-        );
+        let (driver, _registry) = driver(vec![tool_script(), text_script("after tool")]);
         let mut session = temp_session();
         let reason = driver
-            .run_turn(&mut session, &selection(), "use the tool", CancellationToken::new(), &noop_emit())
+            .run_turn(&mut session, &selection(), "use the tool", 25, CancellationToken::new(), &noop_emit())
             .await;
         assert_eq!(reason, TurnEndReason::Completed);
 
@@ -580,10 +591,10 @@ mod tests {
                 arguments: "{}".to_string(),
             };
         }
-        let (driver, _registry) = driver(vec![unknown, text_script("ok")], LoopLimits::default());
+        let (driver, _registry) = driver(vec![unknown, text_script("ok")]);
         let mut session = temp_session();
         let reason = driver
-            .run_turn(&mut session, &selection(), "go", CancellationToken::new(), &noop_emit())
+            .run_turn(&mut session, &selection(), "go", 25, CancellationToken::new(), &noop_emit())
             .await;
         assert_eq!(reason, TurnEndReason::Completed);
         let result = session.events().iter().find_map(|envelope| match &envelope.event {
@@ -646,7 +657,7 @@ mod tests {
             cancel_clone.cancel();
         });
         let reason = driver
-            .run_turn(&mut session, &selection(), "go", cancel, &noop_emit())
+            .run_turn(&mut session, &selection(), "go", 25, cancel, &noop_emit())
             .await;
         assert_eq!(reason, TurnEndReason::Aborted);
         let has_interrupted = session.events().iter().any(|envelope| {
@@ -661,15 +672,10 @@ mod tests {
     #[tokio::test]
     async fn step_limit_ends_turn_with_error() {
         let scripts: Vec<Vec<StreamChunk>> = (0..5).map(|_| tool_script()).collect();
-        let (driver, _registry) = driver(
-            scripts,
-            LoopLimits {
-                max_steps_per_turn: 2,
-            },
-        );
+        let (driver, _registry) = driver(scripts);
         let mut session = temp_session();
         let reason = driver
-            .run_turn(&mut session, &selection(), "loop", CancellationToken::new(), &noop_emit())
+            .run_turn(&mut session, &selection(), "loop", 2, CancellationToken::new(), &noop_emit())
             .await;
         match reason {
             TurnEndReason::Error { failure } => assert_eq!(failure.code, codes::STEP_LIMIT),

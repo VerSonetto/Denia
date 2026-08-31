@@ -155,6 +155,7 @@ mod tests {
         ToolContext {
             cwd: dir.to_path_buf(),
             cancel: CancellationToken::new(),
+            confined: true,
         }
     }
 
@@ -209,6 +210,7 @@ mod tests {
         let context = ToolContext {
             cwd: dir.clone(),
             cancel: cancel.clone(),
+            confined: true,
         };
         let command = if cfg!(windows) {
             r#"{"command":"ping -n 10 127.0.0.1 >nul"}"#

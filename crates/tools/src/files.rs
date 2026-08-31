@@ -62,7 +62,7 @@ impl Tool for ReadFileTool {
                 };
             }
         };
-        let path = match resolve_within(&ctx.cwd, &args.path) {
+        let path = match resolve_within(&ctx.cwd, &args.path, ctx.confined) {
             Ok(path) => path,
             Err(message) => return ToolOutput { content: message, is_error: true },
         };
@@ -125,7 +125,7 @@ impl Tool for WriteFileTool {
                 };
             }
         };
-        let path = match resolve_within(&ctx.cwd, &args.path) {
+        let path = match resolve_within(&ctx.cwd, &args.path, ctx.confined) {
             Ok(path) => path,
             Err(message) => return ToolOutput { content: message, is_error: true },
         };
@@ -161,6 +161,7 @@ mod tests {
         let context = ToolContext {
             cwd: dir.clone(),
             cancel: CancellationToken::new(),
+            confined: true,
         };
         (tempfile_like::TempDir(dir), context)
     }

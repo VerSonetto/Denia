@@ -2,11 +2,11 @@
 //! keeps OpenAI-compatible routes in sync with settings.
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
-use dshrs_agent_loop::{LoopLimits, SessionDriver};
+use dshrs_agent_loop::SessionDriver;
 use dshrs_core::config::ModelSelection;
 use dshrs_credentials::{CredentialEvent, CredentialStore};
 use dshrs_llm::{
@@ -23,6 +23,79 @@ use tokio_util::sync::CancellationToken;
 
 pub const DEFAULT_MODEL_NS: &str = "agent-default-model";
 
+/// Console preferences namespace (settings page).
+pub const CONSOLE_NS: &str = "console";
+
+/// The `console` settings section shape.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConsoleSettings {
+    /// Confine file tools to the working directory.
+    #[serde(default = "default_true")]
+    pub sandbox: bool,
+    /// `system` | `light` | `dark`.
+    #[serde(default = "default_theme")]
+    pub theme: String,
+    /// `zh` | `en`;zh 是源语言(学 dsh 的 i18n 约定)。
+    #[serde(default = "default_locale")]
+    pub locale: String,
+    /// 单轮步上限(dsh 式 validated config,非硬编码)。
+    #[serde(default = "default_max_steps")]
+    pub max_steps_per_turn: u32,
+}
+
+
+fn default_true() -> bool {
+    true
+}
+
+fn default_theme() -> String {
+    "system".to_string()
+}
+
+fn default_locale() -> String {
+    "zh".to_string()
+}
+
+fn default_max_steps() -> u32 {
+    100
+}
+
+fn validate_console(value: Value) -> Result<Value, String> {
+    let parsed: ConsoleSettings = serde_json::from_value(value).map_err(|e| e.to_string())?;
+    if !matches!(parsed.theme.as_str(), "system" | "light" | "dark") {
+        return Err(format!(
+            "theme must be 'system', 'light', or 'dark'; got '{}'",
+            parsed.theme
+        ));
+    }
+    if !matches!(parsed.locale.as_str(), "zh" | "en") {
+        return Err(format!("locale must be 'zh' or 'en'; got '{}'", parsed.locale));
+    }
+    if !(1..=500).contains(&parsed.max_steps_per_turn) {
+        return Err(format!(
+            "maxStepsPerTurn must be 1..=500; got {}",
+            parsed.max_steps_per_turn
+        ));
+    }
+    serde_json::to_value(parsed).map_err(|e| e.to_string())
+}
+
+/// Reads the resolved console settings, tolerating an absent provider.
+pub fn console_settings(settings: &SettingsStore) -> ConsoleSettings {
+    settings
+        .resolved(CONSOLE_NS)
+        .ok()
+        .and_then(|value| serde_json::from_value(value).ok())
+        .unwrap_or(ConsoleSettings {
+            sandbox: true,
+            theme: "system".to_string(),
+            locale: "zh".to_string(),
+            max_steps_per_turn: 100,
+        })
+}
+
+
 /// Process-wide shared state handed to every handler.
 pub struct AppState {
     pub settings: Arc<SettingsStore>,
@@ -33,8 +106,9 @@ pub struct AppState {
     pub sessions: Arc<SessionStore>,
     pub live: Arc<LiveSessions>,
     pub driver: Arc<SessionDriver>,
-    /// The sandboxed default working directory for sessions.
-    pub workspace: PathBuf,
+    pub workspaces: Arc<crate::workspace::WorkspaceRegistry>,
+    /// 绑定地址非回环 ⇒ 远程浏览器 ⇒ 目录选择器走 browse。
+    pub bound_remote: bool,
 }
 
 /// Wire push events for the console.
@@ -116,7 +190,7 @@ where
     serde_json::to_value(parsed).map_err(|e| e.to_string())
 }
 
-pub fn build_state(home: &Path) -> Result<AppState, Box<dyn std::error::Error>> {
+pub fn build_state(home: &Path, bound_remote: bool) -> Result<AppState, Box<dyn std::error::Error>> {
     let events = broadcast::channel::<ServerEvent>(64).0;
 
     let settings_events = broadcast::channel::<SettingsEvent>(64);
@@ -151,16 +225,25 @@ pub fn build_state(home: &Path) -> Result<AppState, Box<dyn std::error::Error>> 
     sync_openai_routes(&registry, &settings, &openai);
 
     // Sessions, tools, and the driver.
-    let workspace = home.join("workspace");
-    std::fs::create_dir_all(&workspace)?;
     let sessions = Arc::new(SessionStore::open(home)?);
+    // 工作区注册表:独立持久化域;首启按会话头 cwd 自动分组。
+    let workspaces = Arc::new(crate::workspace::WorkspaceRegistry::open(home)?);
+    workspaces.bootstrap(
+        &sessions
+            .list()?
+            .iter()
+            .map(|summary| {
+                (
+                    summary.id.clone(),
+                    summary.cwd.clone().unwrap_or_default(),
+                    summary.created_at,
+                )
+            })
+            .collect::<Vec<_>>(),
+    );
     let live = Arc::new(LiveSessions::default());
     let tools = Arc::new(dshrs_tools::default_registry());
-    let driver = Arc::new(SessionDriver::new(
-        registry.clone(),
-        tools,
-        LoopLimits::default(),
-    ));
+    let driver = Arc::new(SessionDriver::new(registry.clone(), tools));
 
     spawn_forwarders(
         settings_events.1,
@@ -182,7 +265,8 @@ pub fn build_state(home: &Path) -> Result<AppState, Box<dyn std::error::Error>> 
         sessions,
         live,
         driver,
-        workspace,
+        workspaces,
+        bound_remote,
     };
 
     Ok(state)
@@ -215,6 +299,16 @@ fn register_namespaces(settings: &SettingsStore) -> Result<(), Box<dyn std::erro
                 models: None,
             })?,
             validate: validate_with::<DeepSeekSection>,
+            secrets: &[],
+            applies: Applies::Live,
+        },
+        json!({}),
+    )?;
+    settings.register(
+        CONSOLE_NS,
+        NamespaceSpec {
+            defaults: json!({ "sandbox": true, "theme": "system", "locale": "zh", "maxStepsPerTurn": 100 }),
+            validate: validate_console,
             secrets: &[],
             applies: Applies::Live,
         },

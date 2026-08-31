@@ -22,6 +22,13 @@ pub struct SessionHeader {
     pub id: String,
     pub created_at: u64,
     pub cwd: String,
+    /// Confines file tools to `cwd`; orthogonal to the directory choice.
+    #[serde(default = "default_true")]
+    pub sandbox: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -202,11 +209,12 @@ mod tests {
             id: "0f8c".to_string(),
             created_at: 1_700_000_000_000,
             cwd: "/tmp/work".to_string(),
+            sandbox: true,
         };
         let json = serde_json::to_string(&header).unwrap();
         assert_eq!(
             json,
-            r#"{"type":"session","version":0,"id":"0f8c","created_at":1700000000000,"cwd":"/tmp/work"}"#
+            r#"{"type":"session","version":0,"id":"0f8c","created_at":1700000000000,"cwd":"/tmp/work","sandbox":true}"#
         );
         assert_eq!(serde_json::from_str::<SessionHeader>(&json).unwrap(), header);
     }

@@ -3,9 +3,11 @@
 
 mod credentials;
 mod events;
+mod fs;
 mod llm;
 mod sessions;
 mod settings;
+mod workspaces;
 
 use std::sync::Arc;
 
@@ -19,5 +21,7 @@ pub fn router() -> Router<Arc<AppState>> {
         .merge(credentials::router())
         .merge(llm::router())
         .merge(sessions::router())
+        .merge(workspaces::router())
+        .merge(fs::router())
         .merge(events::router())
 }

@@ -24,6 +24,9 @@ pub struct ToolContext {
     pub cwd: PathBuf,
     /// Cancels the running call when the turn is aborted.
     pub cancel: CancellationToken,
+    /// Sandbox: confine file access to `cwd`. Off allows absolute paths
+    /// outside the workspace.
+    pub confined: bool,
 }
 
 /// One model-facing tool outcome.
@@ -75,15 +78,20 @@ pub fn default_registry() -> ToolRegistry {
     registry
 }
 
-/// Resolves one raw path inside the session workspace.
+/// Resolves one raw path for a tool call.
 ///
-/// Relative paths anchor at `cwd`; absolute paths are accepted only when they
-/// stay inside it. Lexical normalization rejects `..` escapes.
-pub(crate) fn resolve_within(cwd: &Path, raw: &str) -> Result<PathBuf, String> {
+/// Relative paths anchor at `cwd`. Absolute paths are accepted as-is when
+/// the session is not confined; with the sandbox on, every resolved path
+/// must stay inside `cwd`.
+pub(crate) fn resolve_within(cwd: &Path, raw: &str, confined: bool) -> Result<PathBuf, String> {
     if raw.trim().is_empty() {
         return Err("an empty path is not a path".to_string());
     }
-    let mut out = cwd.to_path_buf();
+    let mut out = if Path::new(raw).is_absolute() {
+        PathBuf::new()
+    } else {
+        cwd.to_path_buf()
+    };
     for component in Path::new(raw).components() {
         match component {
             Component::Prefix(_) | Component::RootDir => {
@@ -98,8 +106,8 @@ pub(crate) fn resolve_within(cwd: &Path, raw: &str) -> Result<PathBuf, String> {
             Component::Normal(part) => out.push(part),
         }
     }
-    if !out.starts_with(cwd) {
-        return Err(format!("path '{raw}' escapes the session workspace"));
+    if confined && !out.starts_with(cwd) {
+        return Err(format!("path '{raw}' escapes the session workspace (sandbox on)"));
     }
     Ok(out)
 }
@@ -125,11 +133,13 @@ mod tests {
         } else {
             PathBuf::from("/work")
         };
-        let inside = resolve_within(&cwd, "src/main.rs").unwrap();
+        let inside = resolve_within(&cwd, "src/main.rs", true).unwrap();
         assert!(inside.starts_with(&cwd));
-        assert!(resolve_within(&cwd, "../secret").is_err());
-        assert!(resolve_within(&cwd, "a/../../secret").is_err());
-        assert!(resolve_within(&cwd, "").is_err());
+        assert!(resolve_within(&cwd, "../secret", true).is_err());
+        assert!(resolve_within(&cwd, "a/../../secret", true).is_err());
+        // Unconfined sessions may leave the workspace.
+        assert!(resolve_within(&cwd, "../elsewhere", false).is_ok());
+        assert!(resolve_within(&cwd, "", true).is_err());
     }
 
     #[test]

@@ -4,6 +4,7 @@ mod api;
 mod error;
 mod state;
 mod web_assets;
+mod workspace;
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -31,7 +32,8 @@ fn main() {
     let runtime = tokio::runtime::Runtime::new().expect("tokio runtime starts");
     runtime.block_on(async move {
         let home = resolve_home(args.home.as_deref());
-        let state = match build_state(&home) {
+        let bound_remote = !matches!(args.host.as_str(), "127.0.0.1" | "localhost" | "::1");
+        let state = match build_state(&home, bound_remote) {
             Ok(state) => Arc::new(state),
             Err(error) => {
                 tracing::error!(%error, "failed to initialize");
