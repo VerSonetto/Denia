@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import type { ReactNode } from 'react'
 import { t } from '../i18n'
-import type { TranscriptNode } from '../fold'
+import { groupTranscript, type OverviewRow, type TranscriptNode } from '../fold'
 import {
   IconChevron,
   IconRead,
@@ -15,56 +15,34 @@ export function Transcript({ nodes }: { nodes: TranscriptNode[] }) {
   if (nodes.length === 0) {
     return <div className="empty-hint">{t('emptyTranscript')}</div>
   }
-  // dsh 式 turn 过程折叠:连续工具行收进一个可折叠"过程"组。
-  type Group =
-    | { kind: 'node'; node: TranscriptNode }
-    | { kind: 'process'; tools: Extract<TranscriptNode, { kind: 'tool' }>[] }
-  const groups: Group[] = []
-  for (const node of nodes) {
-    if (node.kind === 'tool') {
-      const last = groups[groups.length - 1]
-      if (last && last.kind === 'process') last.tools.push(node)
-      else groups.push({ kind: 'process', tools: [node] })
-    } else {
-      groups.push({ kind: 'node', node })
-    }
-  }
+  const rows = groupTranscript(nodes)
   return (
     <>
-      {groups.map((group, index) =>
-        group.kind === 'node' ? (
-          <NodeView key={index} node={group.node} />
+      {rows.map((row, index) =>
+        row.kind === 'node' ? (
+          <NodeView key={index} node={row.node} />
         ) : (
-          <ProcessGroup key={index} tools={group.tools} />
+          <TurnOverview key={index} row={row} />
         ),
       )}
     </>
   )
 }
 
-function NodeView({ node }: { node: TranscriptNode }) {
-  switch (node.kind) {
-    case 'user':
-      return <div className="msg-user">{node.text}</div>
-    case 'assistant':
-      return <AssistantNode node={node} />
-    case 'turn-end':
-      return <TurnChrome node={node} />
-    case 'tool':
-      return <ToolRow node={node} />
-  }
+/** Compact duration: 45秒 below a minute, 2分30秒 beyond, 1小时02分30秒 past an hour. */
+function formatDuration(ms: number): string {
+  const total = Math.max(0, Math.floor(ms / 1000))
+  const hours = Math.floor(total / 3600)
+  const minutes = Math.floor((total % 3600) / 60)
+  const seconds = total % 60
+  const pad = (value: number) => String(value).padStart(2, '0')
+  if (hours > 0) return t('durationHours', { h: hours, m: pad(minutes), s: pad(seconds) })
+  if (minutes > 0) return t('durationMinutes', { m: minutes, s: pad(seconds) })
+  return t('durationSeconds', { s: seconds })
 }
 
-function ProcessGroup({
-  tools,
-}: {
-  tools: Extract<TranscriptNode, { kind: 'tool' }>[]
-}) {
-  const running = tools.some((tool) => !tool.result)
-  const [open, setOpen] = useState(running)
-  useEffect(() => {
-    if (running) setOpen(true)
-  }, [running])
+function TurnOverview({ row }: { row: OverviewRow }) {
+  const [open, setOpen] = useState(false)
   return (
     <div className="process-group">
       <button className="process-head" onClick={() => setOpen((o) => !o)}>
@@ -72,18 +50,41 @@ function ProcessGroup({
           <IconChevron size={11} />
         </span>
         <span className="title">
-          {running ? t('processRunning') : t('processLabel', { n: tools.length })}
+          {t('processOverview', {
+            duration: formatDuration(row.durationMs),
+            n: row.toolCount,
+          })}
         </span>
       </button>
       {open && (
         <div className="process-body">
-          {tools.map((tool, index) => (
-            <ToolRow key={tool.callId || index} node={tool} />
+          {row.hidden.map((node, index) => (
+            <NodeView key={index} node={node} />
           ))}
         </div>
       )}
     </div>
   )
+}
+
+function NodeView({ node }: { node: TranscriptNode }) {
+  switch (node.kind) {
+    case 'user':
+      return (
+        <div className={`msg-user${node.injected ? ' injected' : ''}`}>
+          {node.text}
+        </div>
+      )
+    case 'assistant':
+      return <AssistantNode node={node} />
+    case 'turn-start':
+      // Boundary marker; only carries the turn's start time.
+      return null
+    case 'turn-end':
+      return <TurnChrome node={node} />
+    case 'tool':
+      return <ToolRow node={node} />
+  }
 }
 
 function AssistantNode({
@@ -106,7 +107,7 @@ function AssistantNode({
     <div className="msg-assistant">
       {node.blocks.map((block, index) => {
         if (block.kind === 'reasoning') {
-          return <ThinkRow key={index} text={block.text} />
+          return <ThinkRow key={index} text={block.text} streaming={node.streaming} />
         }
         if (block.kind === 'tool-call') {
           // Rendered by the correlated tool node below.
@@ -126,8 +127,18 @@ function AssistantNode({
   )
 }
 
-function ThinkRow({ text }: { text: string }) {
-  const [open, setOpen] = useState(false)
+function ThinkRow({
+  text,
+  streaming = false,
+}: {
+  text: string
+  /** 流式期间自动展开;输出结束后收起为摘要行。 */
+  streaming?: boolean
+}) {
+  const [open, setOpen] = useState(streaming)
+  useEffect(() => {
+    if (open && !streaming) setOpen(false)
+  }, [streaming])
   const firstLine = text.split('\n')[0].slice(0, 80)
   return (
     <div className={`disc-row${open ? ' open' : ''}`}>
