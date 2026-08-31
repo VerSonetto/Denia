@@ -1,1 +1,0 @@
-{"root":["./src/app.tsx","./src/api.ts","./src/fold.ts","./src/i18n.ts","./src/main.tsx","./src/types.ts","./src/vite-env.d.ts","./src/components/modelpicker.tsx","./src/components/sessionview.tsx","./src/components/icons.tsx","./src/components/transcript.tsx","./src/pages/modelspage.tsx","./src/pages/sessionspage.tsx","./vite.config.ts"],"version":"5.8.3"}
