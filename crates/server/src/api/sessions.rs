@@ -261,6 +261,12 @@ struct FollowQuery {
 
 /// SSE: replays persisted envelopes with `seq > after`, then live frames.
 /// Lag closes the stream; the client resumes with a fresh snapshot.
+///
+/// The broadcast subscription is created BEFORE the replay snapshot: events
+/// appended between the two are delivered twice (replay + live) instead of
+/// being lost, and the client dedupes by seq. Losing them would leave a
+/// permanent hole from the client's cursor and force an endless re-snapshot
+/// loop while a turn is appending fast.
 async fn follow_session(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -270,12 +276,6 @@ async fn follow_session(
         .live
         .get_or_load(&state.sessions, &id)
         .map_err(ApiError::from_session)?;
-    let replay: Vec<SessionEnvelope> = live
-        .session
-        .events()
-        .into_iter()
-        .filter(|envelope| envelope.seq > query.after)
-        .collect();
     let live_stream = BroadcastStream::new(live.followers.subscribe()).filter_map(
         |result| async move {
             match result {
@@ -285,6 +285,12 @@ async fn follow_session(
             }
         },
     );
+    let replay: Vec<SessionEnvelope> = live
+        .session
+        .events()
+        .into_iter()
+        .filter(|envelope| envelope.seq > query.after)
+        .collect();
     let stream = futures::stream::iter(replay)
         .chain(live_stream)
         .map(|envelope| {
