@@ -1,0 +1,13 @@
+[package]
+name = "dshrs-session"
+description = "Event-sourced session storage (JSONL)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+dshrs-core = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+uuid = { workspace = true }

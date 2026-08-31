@@ -1,0 +1,18 @@
+[package]
+name = "dshrs-agent-loop"
+description = "The session driver: turn/step loop over the llm registry and tools"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+dshrs-core = { workspace = true }
+dshrs-llm = { workspace = true }
+dshrs-tools = { workspace = true }
+dshrs-session = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+futures = { workspace = true }
+serde_json = { workspace = true }
+async-trait = { workspace = true }
+uuid = { workspace = true }

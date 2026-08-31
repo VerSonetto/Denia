@@ -1,0 +1,34 @@
+[package]
+name = "dshrs-server"
+description = "axum HTTP API + SSE push + console hosting (bin: dsh-rs)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "dsh-rs"
+path = "src/main.rs"
+
+[dependencies]
+dshrs-core = { workspace = true }
+dshrs-settings = { workspace = true }
+dshrs-credentials = { workspace = true }
+dshrs-llm = { workspace = true }
+dshrs-tools = { workspace = true }
+dshrs-session = { workspace = true }
+dshrs-agent-loop = { workspace = true }
+
+tokio = { workspace = true }
+tokio-stream = { workspace = true }
+tokio-util = { workspace = true }
+futures = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+axum = { workspace = true }
+http = { workspace = true }
+reqwest = { workspace = true }
+rust-embed = { workspace = true }
+mime_guess = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }

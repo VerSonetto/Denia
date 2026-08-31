@@ -1,0 +1,53 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/core",
+    "crates/settings",
+    "crates/credentials",
+    "crates/llm",
+    "crates/tools",
+    "crates/session",
+    "crates/agent-loop",
+    "crates/server",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/local/dsh-rs"
+
+[workspace.dependencies]
+dshrs-core = { path = "crates/core" }
+dshrs-settings = { path = "crates/settings" }
+dshrs-credentials = { path = "crates/credentials" }
+dshrs-llm = { path = "crates/llm" }
+dshrs-tools = { path = "crates/tools" }
+dshrs-session = { path = "crates/session" }
+dshrs-agent-loop = { path = "crates/agent-loop" }
+
+tokio = { version = "1", features = ["full"] }
+tokio-stream = { version = "0.1", features = ["sync"] }
+tokio-util = "0.7"
+futures = "0.3"
+async-trait = "0.1"
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+
+axum = { version = "0.8", features = ["macros"] }
+tower-http = { version = "0.6", features = ["fs", "cors", "trace"] }
+http = "1"
+rust-embed = "8"
+mime_guess = "2"
+
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
+eventsource-stream = "0.2"
+
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+regex = "1"
+uuid = { version = "1", features = ["v4"] }
+rand = "0.8"

@@ -1,0 +1,436 @@
+//! Event-sourced session storage: one JSONL file per session.
+//!
+//! Layout: `<home>/sessions/<id>/session.jsonl`; line 1 is the header, every
+//! following line one envelope. Loads repair torn tails (truncating at the
+//! first unparseable line) and close crash-orphaned turns with a synthetic
+//! `turn-end { aborted }` — events are never dropped.
+
+use std::fs::{File, OpenOptions};
+use std::io::{Read, Write};
+use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use dshrs_core::message::ChatMessage;
+use dshrs_core::session::{
+    SessionEnvelope, SessionEvent, SessionHeader, SessionHeaderKind, TurnEndReason,
+    SESSION_FORMAT_VERSION, derive_messages,
+};
+use thiserror::Error;
+
+#[derive(Debug, Error)]
+pub enum SessionError {
+    #[error("session not found: {0}")]
+    NotFound(String),
+    #[error("session id is not usable: {0}")]
+    InvalidId(String),
+    #[error("session document is corrupt: {0}")]
+    Corrupt(String),
+    #[error("session serialization: {0}")]
+    Json(#[from] serde_json::Error),
+    #[error("session I/O: {0}")]
+    Io(#[from] std::io::Error),
+}
+
+fn now_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// One live session: header, in-memory log, and its append handle.
+pub struct Session {
+    header: SessionHeader,
+    events: Vec<SessionEnvelope>,
+    file: PathBuf,
+    handle: File,
+}
+
+impl Session {
+    /// Creates a fresh session file (header line only) inside `dir`.
+    /// `id` becomes both the header id and, by store convention, the
+    /// directory name.
+    pub fn create(dir: &Path, id: String, cwd: &Path) -> Result<Session, SessionError> {
+        std::fs::create_dir_all(dir)?;
+        let file = dir.join("session.jsonl");
+        let header = SessionHeader {
+            kind: SessionHeaderKind::Session,
+            version: SESSION_FORMAT_VERSION,
+            id,
+            created_at: now_millis(),
+            cwd: cwd.to_string_lossy().to_string(),
+        };
+        let mut handle = File::create(&file)?;
+        writeln!(handle, "{}", serde_json::to_string(&header)?)?;
+        handle.flush()?;
+        let handle = open_append(&file)?;
+        Ok(Session {
+            header,
+            events: Vec::new(),
+            file,
+            handle,
+        })
+    }
+
+    /// Loads one session, repairing torn tails and orphaned turns.
+    pub fn load(file: &Path) -> Result<Session, SessionError> {
+        let mut raw = String::new();
+        File::open(file)?.read_to_string(&mut raw)?;
+
+        let mut lines = raw.split('\n');
+        let header_line = lines.next().unwrap_or_default();
+        let header: SessionHeader = serde_json::from_str(header_line)
+            .map_err(|e| SessionError::Corrupt(format!("bad header: {e}")))?;
+        if header.version != SESSION_FORMAT_VERSION {
+            return Err(SessionError::Corrupt(format!(
+                "unsupported session format version {}",
+                header.version
+            )));
+        }
+
+        // Byte offsets track the committed prefix for torn-tail truncation.
+        let mut consumed = header_line.len() + 1;
+        let mut events: Vec<SessionEnvelope> = Vec::new();
+        let mut torn_at: Option<usize> = None;
+        for line in lines {
+            let with_newline = line.len() + 1;
+            if line.trim().is_empty() {
+                consumed += with_newline;
+                continue;
+            }
+            match serde_json::from_str::<SessionEnvelope>(line) {
+                Ok(envelope) => events.push(envelope),
+                Err(_) => {
+                    torn_at = Some(consumed);
+                    break;
+                }
+            }
+            consumed += with_newline;
+        }
+
+        if let Some(torn) = torn_at {
+            // Truncate to the last good boundary; the torn tail is discarded.
+            let file_handle = OpenOptions::new().write(true).open(file)?;
+            file_handle.set_len(torn as u64)?;
+        }
+
+        let mut session = Session {
+            header,
+            events,
+            file: file.to_path_buf(),
+            handle: open_append(file)?,
+        };
+        session.close_orphaned_turn()?;
+        Ok(session)
+    }
+
+    pub fn id(&self) -> &str {
+        &self.header.id
+    }
+
+    pub fn header(&self) -> &SessionHeader {
+        &self.header
+    }
+
+    pub fn events(&self) -> &[SessionEnvelope] {
+        &self.events
+    }
+
+    pub fn file(&self) -> &Path {
+        &self.file
+    }
+
+    /// Appends one event, assigning contiguous seq and wall-clock time.
+    pub fn append(&mut self, event: SessionEvent) -> Result<&SessionEnvelope, SessionError> {
+        let envelope = SessionEnvelope {
+            seq: self.events.len() as u64 + 1,
+            time: now_millis(),
+            event,
+        };
+        let line = serde_json::to_string(&envelope)?;
+        writeln!(self.handle, "{line}")?;
+        self.handle.flush()?;
+        self.events.push(envelope);
+        Ok(self.events.last().unwrap())
+    }
+
+    /// The model-facing history projected from the log.
+    pub fn derive_messages(&self) -> Vec<ChatMessage> {
+        derive_messages(&self.events)
+    }
+
+    /// The first user prompt, trimmed, for list views.
+    pub fn first_prompt_excerpt(&self, max_chars: usize) -> Option<String> {
+        let text = self.events.iter().find_map(|envelope| match &envelope.event {
+            SessionEvent::UserMessage { text } => Some(text),
+            _ => None,
+        })?;
+        let trimmed = text.trim();
+        let mut chars = trimmed.chars();
+        let head: String = chars.by_ref().take(max_chars).collect();
+        Some(if chars.next().is_some() {
+            format!("{head}…")
+        } else {
+            head
+        })
+    }
+
+    /// Crash recovery: a `turn-start` without `turn/end` gets a synthetic
+    /// aborted close, persisted like any other event.
+    fn close_orphaned_turn(&mut self) -> Result<(), SessionError> {
+        let mut open_turn: Option<u32> = None;
+        for envelope in &self.events {
+            match &envelope.event {
+                SessionEvent::TurnStart { turn } => open_turn = Some(*turn),
+                SessionEvent::TurnEnd { .. } => open_turn = None,
+                _ => {}
+            }
+        }
+        if let Some(turn) = open_turn {
+            self.append(SessionEvent::TurnEnd {
+                turn,
+                reason: TurnEndReason::Aborted,
+            })?;
+        }
+        Ok(())
+    }
+}
+
+fn open_append(file: &Path) -> Result<File, SessionError> {
+    Ok(OpenOptions::new().append(true).create(true).open(file)?)
+}
+
+/// One row of the session list.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SessionSummary {
+    pub id: String,
+    pub created_at: u64,
+    pub excerpt: Option<String>,
+}
+
+/// The sessions root: `<home>/sessions`.
+pub struct SessionStore {
+    root: PathBuf,
+}
+
+impl SessionStore {
+    pub fn open(home: &Path) -> Result<Self, SessionError> {
+        let root = home.join("sessions");
+        std::fs::create_dir_all(&root)?;
+        Ok(Self { root })
+    }
+
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
+    pub fn create(&self, cwd: &Path) -> Result<Session, SessionError> {
+        let id = uuid::Uuid::new_v4().to_string();
+        let dir = self.root.join(&id);
+        Session::create(&dir, id, cwd)
+    }
+
+    pub fn load(&self, id: &str) -> Result<Session, SessionError> {
+        let file = self.file_for(id)?;
+        if !file.exists() {
+            return Err(SessionError::NotFound(id.to_string()));
+        }
+        Session::load(&file)
+    }
+
+    /// Newest-first summaries; header + first prompt only, no repair.
+    pub fn list(&self) -> Result<Vec<SessionSummary>, SessionError> {
+        let mut summaries = Vec::new();
+        for entry in std::fs::read_dir(&self.root)? {
+            let entry = entry?;
+            let file = entry.path().join("session.jsonl");
+            if !file.is_file() {
+                continue;
+            }
+            if let Some(summary) = read_summary(&file) {
+                summaries.push(summary);
+            }
+        }
+        summaries.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        Ok(summaries)
+    }
+
+    pub fn delete(&self, id: &str) -> Result<(), SessionError> {
+        let dir = self.root.join(validate_id(id)?);
+        if !dir.exists() {
+            return Err(SessionError::NotFound(id.to_string()));
+        }
+        std::fs::remove_dir_all(dir)?;
+        Ok(())
+    }
+
+    fn file_for(&self, id: &str) -> Result<PathBuf, SessionError> {
+        Ok(self.root.join(validate_id(id)?).join("session.jsonl"))
+    }
+}
+
+fn validate_id(id: &str) -> Result<&str, SessionError> {
+    let valid = !id.is_empty()
+        && id
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() || c == '-');
+    if valid {
+        Ok(id)
+    } else {
+        Err(SessionError::InvalidId(id.to_string()))
+    }
+}
+
+fn read_summary(file: &Path) -> Option<SessionSummary> {
+    let mut raw = String::new();
+    File::open(file).ok()?.read_to_string(&mut raw).ok()?;
+    let mut lines = raw.lines();
+    let header: SessionHeader = serde_json::from_str(lines.next()?).ok()?;
+    let id = file
+        .parent()?
+        .file_name()?
+        .to_string_lossy()
+        .to_string();
+    let excerpt = lines.find_map(|line| {
+        let envelope = serde_json::from_str::<SessionEnvelope>(line).ok()?;
+        match envelope.event {
+            SessionEvent::UserMessage { text } => Some(text),
+            _ => None,
+        }
+    });
+    let excerpt = excerpt.map(|text| {
+        let trimmed = text.trim();
+        let mut chars = trimmed.chars();
+        let head: String = chars.by_ref().take(80).collect();
+        if chars.next().is_some() {
+            format!("{head}…")
+        } else {
+            head
+        }
+    });
+    Some(SessionSummary {
+        id,
+        created_at: header.created_at,
+        excerpt,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_root() -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "dshrs-session-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn create_append_load_round_trip() {
+        let root = temp_root();
+        let store = SessionStore::open(&root).unwrap();
+        let cwd = root.join("work");
+        std::fs::create_dir_all(&cwd).unwrap();
+
+        let mut session = store.create(&cwd).unwrap();
+        let id = session.id().to_string();
+        session
+            .append(SessionEvent::TurnStart { turn: 1 })
+            .unwrap();
+        session
+            .append(SessionEvent::UserMessage { text: "hello world, this is a prompt".into() })
+            .unwrap();
+        session
+            .append(SessionEvent::TurnEnd {
+                turn: 1,
+                reason: TurnEndReason::Completed,
+            })
+            .unwrap();
+        drop(session);
+
+        let loaded = store.load(&id).unwrap();
+        assert_eq!(loaded.events().len(), 3);
+        assert_eq!(loaded.events()[0].seq, 1);
+        assert_eq!(loaded.events()[2].seq, 3);
+        assert_eq!(loaded.header().cwd, cwd.to_string_lossy().to_string());
+
+        let summaries = store.list().unwrap();
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(summaries[0].id, id);
+        assert!(summaries[0].excerpt.as_deref().unwrap().starts_with("hello world"));
+
+        store.delete(&id).unwrap();
+        assert!(matches!(
+            store.load(&id),
+            Err(SessionError::NotFound(_))
+        ));
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn torn_tail_is_truncated_and_open_turn_closed() {
+        let root = temp_root();
+        let store = SessionStore::open(&root).unwrap();
+        let mut session = store.create(&root).unwrap();
+        let id = session.id().to_string();
+        session
+            .append(SessionEvent::TurnStart { turn: 1 })
+            .unwrap();
+        session
+            .append(SessionEvent::UserMessage { text: "hi".into() })
+            .unwrap();
+        let file = session.file().to_path_buf();
+        drop(session);
+
+        // Simulate a crash mid-append: garbage after the committed prefix.
+        {
+            use std::io::Write as _;
+            let mut f = OpenOptions::new().append(true).open(&file).unwrap();
+            f.write_all(b"{\"seq\":3,\"time\":1,\"type\":\"user-mess").unwrap();
+            f.flush().unwrap();
+        }
+
+        let loaded = store.load(&id).unwrap();
+        // Two good events + the synthetic turn-end close.
+        assert_eq!(loaded.events().len(), 3);
+        match &loaded.events()[2].event {
+            SessionEvent::TurnEnd { turn, reason } => {
+                assert_eq!(*turn, 1);
+                assert_eq!(*reason, TurnEndReason::Aborted);
+            }
+            other => panic!("expected turn-end, got {other:?}"),
+        }
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn ids_are_validated_before_path_use() {
+        let root = temp_root();
+        let store = SessionStore::open(&root).unwrap();
+        assert!(matches!(
+            store.load("../escape"),
+            Err(SessionError::InvalidId(_))
+        ));
+        assert!(matches!(store.delete(""), Err(SessionError::InvalidId(_))));
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn derive_messages_delegates() {
+        let root = temp_root();
+        let store = SessionStore::open(&root).unwrap();
+        let mut session = store.create(&root).unwrap();
+        session
+            .append(SessionEvent::UserMessage { text: "ping".into() })
+            .unwrap();
+        let messages = session.derive_messages();
+        assert_eq!(messages, vec![ChatMessage::user("ping")]);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+}
