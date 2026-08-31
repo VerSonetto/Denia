@@ -660,8 +660,8 @@ button {
 }
 
 .disc-head .sep {
-  width: 3px;
-  height: 3px;
+  width: 4px;
+  height: 4px;
   border-radius: 50%;
   background: var(--label-caption);
   flex: none;
@@ -675,6 +675,9 @@ button {
   text-overflow: ellipsis;
   min-width: 0;
   font-family: var(--font-mono);
+  /* 中文摘要首字是实心方块,没有英文的词前空格;留白防止与"思考"
+     标题(及圆点分隔)视觉粘连。 */
+  padding-left: 4px;
 }
 
 .disc-head .chev {
