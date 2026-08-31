@@ -364,11 +364,11 @@ export type TranscriptRow =
   | OverviewRow
 
 /**
- * Groups transcript nodes for display. A closed turn folds everything before
- * its last tool call into one "worked X · N tool calls" overview row, keeping
- * the last tool call and the answer that follows it visible; genuine user
- * messages stay in place. An open (running) turn is left flat: tool calls
- * render as individual rows so the reader always sees live progress.
+ * Groups transcript nodes for display. A closed turn folds everything through
+ * its last tool call (inclusive) into one "worked X · N tool calls" overview
+ * row, keeping only the answer that follows it visible; genuine user messages
+ * stay in place. An open (running) turn is left flat: tool calls render as
+ * individual rows so the reader always sees live progress.
  */
 export function groupTranscript(nodes: TranscriptNode[]): TranscriptRow[] {
   const rows: TranscriptRow[] = []
@@ -406,7 +406,7 @@ export function groupTranscript(nodes: TranscriptNode[]): TranscriptRow[] {
   return rows
 }
 
-/** Fold one closed turn's prefix before its last tool call into an overview row. */
+/** Fold one closed turn's prefix *through* its last tool call into an overview row. */
 function closedTurnRows(
   span: TranscriptNode[],
   marker: Extract<TranscriptNode, { kind: 'turn-start' }>,
@@ -420,7 +420,10 @@ function closedTurnRows(
     }
   }
   if (lastTool < 0) return span.map((node) => ({ kind: 'node', node }) as TranscriptRow)
-  const prefix = span.slice(0, lastTool)
+  // 折叠窗口含最后一条工具调用(用户规格:最后一条工具调用"以上"全部折叠),
+  // 可见部分只剩其后的最终回答。
+  const foldEnd = lastTool + 1
+  const prefix = span.slice(0, foldEnd)
   const hidden = prefix.filter((node) => !(node.kind === 'user' && !node.injected))
   // The overview is inserted where the first folded row would sit; when there
   // is nothing expandable, no overview is shown at all.
@@ -446,7 +449,7 @@ function closedTurnRows(
     }
   }
   if (overview !== null && !placed) rows.push(overview)
-  rows.push(...span.slice(lastTool).map((node) => ({ kind: 'node', node }) as TranscriptRow))
+  rows.push(...span.slice(foldEnd).map((node) => ({ kind: 'node', node }) as TranscriptRow))
   return rows
 }
 
