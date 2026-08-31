@@ -121,7 +121,7 @@ async fn get_session(
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, ApiError> {
     let live = state.live.get_or_load(&state.sessions, &id).map_err(ApiError::from_session)?;
-    let session = live.session.lock().await;
+    let session = live.session.clone();
     Ok(Json(json!({
         "header": session.header(),
         "events": session.events(),
@@ -173,7 +173,7 @@ async fn prompt_session(
         .get_or_load(&state.sessions, &id)
         .map_err(ApiError::from_session)?;
     {
-        let session = live.session.lock().await;
+        let session = live.session.clone();
         let cwd = session.header().cwd.clone();
         if !std::path::Path::new(&cwd).is_dir() {
             return Err(ApiError::bad_request(
@@ -221,11 +221,11 @@ async fn prompt_session(
 
     let driver = state.driver.clone();
     tokio::spawn(async move {
-        let mut session = live.session.lock().await;
+        let session = live.session.clone();
         let followers = live.followers.clone();
         driver
             .run_turn(
-                &mut session,
+                &session,
                 &selection,
                 &prompt,
                 console.max_steps_per_turn,
@@ -235,7 +235,6 @@ async fn prompt_session(
                 },
             )
             .await;
-        drop(session);
         live.running.store(false, Ordering::SeqCst);
         *live.cancel.lock().await = None;
     });
@@ -271,15 +270,12 @@ async fn follow_session(
         .live
         .get_or_load(&state.sessions, &id)
         .map_err(ApiError::from_session)?;
-    let replay: Vec<SessionEnvelope> = {
-        let session = live.session.lock().await;
-        session
-            .events()
-            .iter()
-            .filter(|envelope| envelope.seq > query.after)
-            .cloned()
-            .collect()
-    };
+    let replay: Vec<SessionEnvelope> = live
+        .session
+        .events()
+        .into_iter()
+        .filter(|envelope| envelope.seq > query.after)
+        .collect();
     let live_stream = BroadcastStream::new(live.followers.subscribe()).filter_map(
         |result| async move {
             match result {

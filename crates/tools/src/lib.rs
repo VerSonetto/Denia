@@ -112,6 +112,19 @@ pub(crate) fn resolve_within(cwd: &Path, raw: &str, confined: bool) -> Result<Pa
     Ok(out)
 }
 
+/// 宽容参数解析:只取第一个 JSON 值,忽略尾部垃圾。
+/// 模型偶尔在参数后吐多余字符,硬失败会浪费一整步。
+pub(crate) fn parse_args_lenient<T: serde::de::DeserializeOwned>(
+    raw: &str,
+) -> Result<T, String> {
+    let mut iter = serde_json::Deserializer::from_str(raw.trim()).into_iter::<T>();
+    match iter.next() {
+        Some(Ok(value)) => Ok(value),
+        Some(Err(error)) => Err(error.to_string()),
+        None => Err("参数为空".to_string()),
+    }
+}
+
 pub(crate) fn truncate(text: &str, cap: usize) -> String {
     let mut chars = text.chars();
     let head: String = chars.by_ref().take(cap).collect();
@@ -140,6 +153,17 @@ mod tests {
         // Unconfined sessions may leave the workspace.
         assert!(resolve_within(&cwd, "../elsewhere", false).is_ok());
         assert!(resolve_within(&cwd, "", true).is_err());
+    }
+
+    #[test]
+    fn lenient_parse_ignores_trailing_junk() {
+        #[derive(serde::Deserialize)]
+        struct Args {
+            path: String,
+        }
+        let parsed: Args = parse_args_lenient(r#"{"path": "app/src"} 谢谢"#).unwrap();
+        assert_eq!(parsed.path, "app/src");
+        assert!(parse_args_lenient::<Args>("not json").is_err());
     }
 
     #[test]

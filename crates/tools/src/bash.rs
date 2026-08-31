@@ -8,7 +8,7 @@ use dshrs_core::tool::ToolSchema;
 use serde::Deserialize;
 use tokio::process::Command;
 
-use crate::{Tool, ToolContext, ToolOutput, truncate};
+use crate::{Tool, ToolContext, ToolOutput, parse_args_lenient, truncate};
 
 const DEFAULT_TIMEOUT_MS: u64 = 120_000;
 const MAX_TIMEOUT_MS: u64 = 600_000;
@@ -58,7 +58,7 @@ impl Tool for BashTool {
     }
 
     async fn execute(&self, arguments: &str, ctx: &ToolContext) -> ToolOutput {
-        let args: BashArgs = match serde_json::from_str(arguments) {
+        let args: BashArgs = match parse_args_lenient(arguments) {
             Ok(args) => args,
             Err(error) => {
                 return ToolOutput {

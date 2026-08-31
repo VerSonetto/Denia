@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use dshrs_core::tool::ToolSchema;
 use serde::Deserialize;
 
-use crate::{Tool, ToolContext, ToolOutput, resolve_within, truncate};
+use crate::{Tool, ToolContext, ToolOutput, parse_args_lenient, resolve_within, truncate};
 
 const READ_CAP: usize = 256_000;
 
@@ -53,7 +53,7 @@ impl Tool for ReadFileTool {
     }
 
     async fn execute(&self, arguments: &str, ctx: &ToolContext) -> ToolOutput {
-        let args: PathArgs = match serde_json::from_str(arguments) {
+        let args: PathArgs = match parse_args_lenient(arguments) {
             Ok(args) => args,
             Err(error) => {
                 return ToolOutput {
@@ -116,7 +116,7 @@ impl Tool for WriteFileTool {
     }
 
     async fn execute(&self, arguments: &str, ctx: &ToolContext) -> ToolOutput {
-        let args: WriteArgs = match serde_json::from_str(arguments) {
+        let args: WriteArgs = match parse_args_lenient(arguments) {
             Ok(args) => args,
             Err(error) => {
                 return ToolOutput {

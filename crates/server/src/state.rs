@@ -121,9 +121,10 @@ pub enum ServerEvent {
     SessionsUpdated,
 }
 
-/// One materialized session: durable log plus live fan-out.
+/// One materialized session: durable log plus live fan-out. `session` is an
+/// internally synchronized log, so readers never wait behind a running turn.
 pub struct LiveSession {
-    pub session: tokio::sync::Mutex<Session>,
+    pub session: Arc<Session>,
     pub followers: broadcast::Sender<dshrs_core::session::SessionEnvelope>,
     pub running: AtomicBool,
     pub cancel: tokio::sync::Mutex<Option<CancellationToken>>,
@@ -147,7 +148,7 @@ impl LiveSessions {
         }
         let session = store.load(id)?;
         let live = Arc::new(LiveSession {
-            session: tokio::sync::Mutex::new(session),
+            session: Arc::new(session),
             followers: broadcast::channel(1024).0,
             running: AtomicBool::new(false),
             cancel: tokio::sync::Mutex::new(None),

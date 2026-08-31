@@ -8,6 +8,7 @@
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use dshrs_core::message::ChatMessage;
@@ -38,12 +39,19 @@ fn now_millis() -> u64 {
         .unwrap_or(0)
 }
 
-/// One live session: header, in-memory log, and its append handle.
+/// Mutable log state behind the per-session lock.
+struct SessionInner {
+    events: Vec<SessionEnvelope>,
+    handle: File,
+}
+
+/// One live session: header, in-memory log, and its append handle. The log is
+/// internally synchronized, so readers (snapshot, SSE replay) never wait for
+/// a running turn to finish.
 pub struct Session {
     header: SessionHeader,
-    events: Vec<SessionEnvelope>,
     file: PathBuf,
-    handle: File,
+    inner: Mutex<SessionInner>,
 }
 
 impl Session {
@@ -67,9 +75,11 @@ impl Session {
         let handle = open_append(&file)?;
         Ok(Session {
             header,
-            events: Vec::new(),
             file,
-            handle,
+            inner: Mutex::new(SessionInner {
+                events: Vec::new(),
+                handle,
+            }),
         })
     }
 
@@ -115,11 +125,13 @@ impl Session {
             file_handle.set_len(torn as u64)?;
         }
 
-        let mut session = Session {
+        let session = Session {
             header,
-            events,
             file: file.to_path_buf(),
-            handle: open_append(file)?,
+            inner: Mutex::new(SessionInner {
+                events,
+                handle: open_append(file)?,
+            }),
         };
         session.close_orphaned_turn()?;
         Ok(session)
@@ -133,37 +145,47 @@ impl Session {
         &self.header
     }
 
-    pub fn events(&self) -> &[SessionEnvelope] {
-        &self.events
+    /// A detached copy of the log; readers never borrow through the lock.
+    pub fn events(&self) -> Vec<SessionEnvelope> {
+        self.inner
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .events
+            .clone()
     }
 
     pub fn file(&self) -> &Path {
         &self.file
     }
 
-    /// Appends one event, assigning contiguous seq and wall-clock time.
-    pub fn append(&mut self, event: SessionEvent) -> Result<&SessionEnvelope, SessionError> {
+    /// Appends one event, assigning contiguous seq and wall-clock time. The
+    /// log lock is held only for this write, so concurrent readers observe
+    /// live progress instead of waiting for the whole turn.
+    pub fn append(&self, event: SessionEvent) -> Result<SessionEnvelope, SessionError> {
+        let mut inner = self.inner.lock().unwrap_or_else(|poison| poison.into_inner());
         let envelope = SessionEnvelope {
-            seq: self.events.len() as u64 + 1,
+            seq: inner.events.len() as u64 + 1,
             time: now_millis(),
             event,
         };
         let line = serde_json::to_string(&envelope)?;
-        writeln!(self.handle, "{line}")?;
-        self.handle.flush()?;
-        self.events.push(envelope);
-        Ok(self.events.last().unwrap())
+        writeln!(inner.handle, "{line}")?;
+        inner.handle.flush()?;
+        inner.events.push(envelope.clone());
+        Ok(envelope)
     }
 
     /// The model-facing history projected from the log.
     pub fn derive_messages(&self) -> Vec<ChatMessage> {
-        derive_messages(&self.events)
+        let inner = self.inner.lock().unwrap_or_else(|poison| poison.into_inner());
+        derive_messages(&inner.events)
     }
 
     /// The first user prompt, trimmed, for list views.
     pub fn first_prompt_excerpt(&self, max_chars: usize) -> Option<String> {
-        let text = self.events.iter().find_map(|envelope| match &envelope.event {
-            SessionEvent::UserMessage { text } => Some(text),
+        let inner = self.inner.lock().unwrap_or_else(|poison| poison.into_inner());
+        let text = inner.events.iter().find_map(|envelope| match &envelope.event {
+            SessionEvent::UserMessage { text, .. } => Some(text),
             _ => None,
         })?;
         let trimmed = text.trim();
@@ -178,15 +200,19 @@ impl Session {
 
     /// Crash recovery: a `turn-start` without `turn/end` gets a synthetic
     /// aborted close, persisted like any other event.
-    fn close_orphaned_turn(&mut self) -> Result<(), SessionError> {
-        let mut open_turn: Option<u32> = None;
-        for envelope in &self.events {
-            match &envelope.event {
-                SessionEvent::TurnStart { turn } => open_turn = Some(*turn),
-                SessionEvent::TurnEnd { .. } => open_turn = None,
-                _ => {}
+    fn close_orphaned_turn(&self) -> Result<(), SessionError> {
+        let open_turn = {
+            let inner = self.inner.lock().unwrap_or_else(|poison| poison.into_inner());
+            let mut open_turn: Option<u32> = None;
+            for envelope in &inner.events {
+                match &envelope.event {
+                    SessionEvent::TurnStart { turn } => open_turn = Some(*turn),
+                    SessionEvent::TurnEnd { .. } => open_turn = None,
+                    _ => {}
+                }
             }
-        }
+            open_turn
+        };
         if let Some(turn) = open_turn {
             self.append(SessionEvent::TurnEnd {
                 turn,
@@ -300,7 +326,7 @@ fn read_summary(file: &Path) -> Option<SessionSummary> {
     let excerpt = lines.find_map(|line| {
         let envelope = serde_json::from_str::<SessionEnvelope>(line).ok()?;
         match envelope.event {
-            SessionEvent::UserMessage { text } => Some(text),
+            SessionEvent::UserMessage { text, .. } => Some(text),
             _ => None,
         }
     });
@@ -347,13 +373,13 @@ mod tests {
         let cwd = root.join("work");
         std::fs::create_dir_all(&cwd).unwrap();
 
-        let mut session = store.create(&cwd, true).unwrap();
+        let session = store.create(&cwd, true).unwrap();
         let id = session.id().to_string();
         session
             .append(SessionEvent::TurnStart { turn: 1 })
             .unwrap();
         session
-            .append(SessionEvent::UserMessage { text: "hello world, this is a prompt".into() })
+            .append(SessionEvent::UserMessage { text: "hello world, this is a prompt".into(), injected: false })
             .unwrap();
         session
             .append(SessionEvent::TurnEnd {
@@ -386,13 +412,13 @@ mod tests {
     fn torn_tail_is_truncated_and_open_turn_closed() {
         let root = temp_root();
         let store = SessionStore::open(&root).unwrap();
-        let mut session = store.create(&root, true).unwrap();
+        let session = store.create(&root, true).unwrap();
         let id = session.id().to_string();
         session
             .append(SessionEvent::TurnStart { turn: 1 })
             .unwrap();
         session
-            .append(SessionEvent::UserMessage { text: "hi".into() })
+            .append(SessionEvent::UserMessage { text: "hi".into(), injected: false })
             .unwrap();
         let file = session.file().to_path_buf();
         drop(session);
@@ -434,9 +460,9 @@ mod tests {
     fn derive_messages_delegates() {
         let root = temp_root();
         let store = SessionStore::open(&root).unwrap();
-        let mut session = store.create(&root, true).unwrap();
+        let session = store.create(&root, true).unwrap();
         session
-            .append(SessionEvent::UserMessage { text: "ping".into() })
+            .append(SessionEvent::UserMessage { text: "ping".into(), injected: false })
             .unwrap();
         let messages = session.derive_messages();
         assert_eq!(messages, vec![ChatMessage::user("ping")]);

@@ -68,6 +68,9 @@ pub enum SessionEvent {
     },
     UserMessage {
         text: String,
+        /// harness 注入的纠错/上下文消息,非用户手打;UI 弱化渲染。
+        #[serde(default)]
+        injected: bool,
     },
     AssistantChunk {
         turn: u32,
@@ -129,7 +132,7 @@ pub fn derive_messages(events: &[SessionEnvelope]) -> Vec<ChatMessage> {
 
     for envelope in events {
         match &envelope.event {
-            SessionEvent::UserMessage { text } => messages.push(ChatMessage::user(text)),
+            SessionEvent::UserMessage { text, .. } => messages.push(ChatMessage::user(text)),
             SessionEvent::AssistantMessage { blocks, .. } => {
                 let text: String = blocks
                     .iter()
@@ -269,7 +272,7 @@ mod tests {
     fn derive_projects_user_assistant_and_tool() {
         let events = vec![
             envelope(1, SessionEvent::TurnStart { turn: 1 }),
-            envelope(2, SessionEvent::UserMessage { text: "hi".into() }),
+            envelope(2, SessionEvent::UserMessage { text: "hi".into(), injected: false }),
             envelope(3, SessionEvent::StepStart { turn: 1, step: 1 }),
             envelope(
                 4,
@@ -350,7 +353,7 @@ mod tests {
     #[test]
     fn derive_skips_empty_assistant_and_synthesizes_missing_results() {
         let events = vec![
-            envelope(1, SessionEvent::UserMessage { text: "go".into() }),
+            envelope(1, SessionEvent::UserMessage { text: "go".into(), injected: false }),
             envelope(
                 2,
                 SessionEvent::AssistantMessage {

@@ -36,6 +36,18 @@ pub fn build_system_prompt(cwd: &str) -> String {
     )
 }
 
+/// 请求失败时回注给模型的纠错提示(抄 dsh inject 上下文思路):
+/// 不中断,让模型看见拒绝原因自己纠正;每轮最多 MAX_FEEDBACK 次防死循环。
+const MAX_FEEDBACK: u32 = 2;
+
+fn feedback_text(failure: &LlmFailure) -> String {
+    format!(
+        "[harness] 上一次模型请求被提供方拒绝({code}:{message})。         请检查并纠正上一条输出(尤其是工具参数格式)后继续,不要原样重复。",
+        code = failure.code,
+        message = failure.message,
+    )
+}
+
 /// 公历日期 yyyy-mm-dd,不引 chrono:unix 秒 → civil 算法。
 fn today_string() -> String {
     let secs = std::time::SystemTime::now()
@@ -72,7 +84,7 @@ impl SessionDriver {
     /// config, not a hardcoded tunable).
     pub async fn run_turn(
         &self,
-        session: &mut Session,
+        session: &Session,
         selection: &ModelSelection,
         prompt: &str,
         max_steps: u32,
@@ -92,7 +104,7 @@ impl SessionDriver {
 
     async fn run_turn_inner(
         &self,
-        session: &mut Session,
+        session: &Session,
         selection: &ModelSelection,
         prompt: &str,
         max_steps: u32,
@@ -100,10 +112,11 @@ impl SessionDriver {
         emit: &(dyn Fn(&SessionEnvelope) + Send + Sync),
     ) -> Result<TurnEndReason, LlmFailure> {
         let turn = next_turn_number(session);
-        append(session, emit, SessionEvent::UserMessage { text: prompt.to_string() })?;
+        append(session, emit, SessionEvent::UserMessage { text: prompt.to_string(), injected: false })?;
         append(session, emit, SessionEvent::TurnStart { turn })?;
 
         let mut step: u32 = 0;
+        let mut feedback: u32 = 0;
         loop {
             step += 1;
             if step > max_steps {
@@ -131,10 +144,21 @@ impl SessionDriver {
             let mut stream = match self.registry.stream(&selection.provider, &request).await {
                 Ok(stream) => stream,
                 Err(error) => {
-                    let reason = TurnEndReason::Error {
-                        failure: error.failure.clone(),
-                    };
+                    let failure = error.failure.clone();
                     append(session, emit, SessionEvent::StepEnd { turn, step })?;
+                    if feedback < MAX_FEEDBACK {
+                        feedback += 1;
+                        append(
+                            session,
+                            emit,
+                            SessionEvent::UserMessage {
+                                text: feedback_text(&failure),
+                                injected: true,
+                            },
+                        )?;
+                        continue;
+                    }
+                    let reason = TurnEndReason::Error { failure };
                     append(session, emit, SessionEvent::TurnEnd { turn, reason: reason.clone() })?;
                     return Ok(reason);
                 }
@@ -210,6 +234,18 @@ impl SessionDriver {
                     },
                 )?;
                 append(session, emit, SessionEvent::StepEnd { turn, step })?;
+                if feedback < MAX_FEEDBACK {
+                    feedback += 1;
+                    append(
+                        session,
+                        emit,
+                        SessionEvent::UserMessage {
+                            text: feedback_text(&failure),
+                            injected: true,
+                        },
+                    )?;
+                    continue;
+                }
                 let reason = TurnEndReason::Error { failure };
                 append(session, emit, SessionEvent::TurnEnd { turn, reason: reason.clone() })?;
                 return Ok(reason);
@@ -319,14 +355,14 @@ fn next_turn_number(session: &Session) -> u32 {
 }
 
 fn append(
-    session: &mut Session,
+    session: &Session,
     emit: &(dyn Fn(&SessionEnvelope) + Send + Sync),
     event: SessionEvent,
 ) -> Result<(), LlmFailure> {
     let envelope = session
         .append(event)
         .map_err(|error| LlmFailure::new(codes::UNKNOWN, error.to_string()))?;
-    emit(envelope);
+    emit(&envelope);
     Ok(())
 }
 
@@ -342,8 +378,13 @@ mod tests {
     use std::sync::Mutex;
 
     /// Scripted adapter: each `stream` call pops the next queued chunk run.
+    enum MockScript {
+        Chunks(Vec<StreamChunk>),
+        Fail(LlmFailure),
+    }
+
     struct MockAdapter {
-        scripts: Mutex<VecDeque<Vec<StreamChunk>>>,
+        scripts: Mutex<VecDeque<MockScript>>,
     }
 
     #[async_trait]
@@ -389,15 +430,15 @@ mod tests {
             _provider: &str,
             _request: &GenerateRequest,
         ) -> Result<ChunkStream, LlmError> {
-            let script = self
-                .scripts
-                .lock()
-                .unwrap()
-                .pop_front()
-                .unwrap_or_default();
-            Ok(Box::pin(futures::stream::iter(
-                script.into_iter().map(Ok),
-            )))
+            match self.scripts.lock().unwrap().pop_front() {
+                Some(MockScript::Fail(failure)) => {
+                    Err(dshrs_core::error::LlmError::from_failure(failure))
+                }
+                Some(MockScript::Chunks(chunks)) => Ok(Box::pin(
+                    futures::stream::iter(chunks.into_iter().map(Ok)),
+                )),
+                None => Ok(Box::pin(futures::stream::empty())),
+            }
         }
     }
 
@@ -478,7 +519,7 @@ mod tests {
         ]
     }
 
-    fn driver(scripts: Vec<Vec<StreamChunk>>) -> (SessionDriver, Arc<LlmRegistry>) {
+    fn driver(scripts: Vec<MockScript>) -> (SessionDriver, Arc<LlmRegistry>) {
         let registry = Arc::new(LlmRegistry::new());
         registry
             .register(
@@ -522,10 +563,10 @@ mod tests {
 
     #[tokio::test]
     async fn plain_text_turn_completes() {
-        let (driver, _registry) = driver(vec![text_script("done!")]);
-        let mut session = temp_session();
+        let (driver, _registry) = driver(vec![MockScript::Chunks(text_script("done!"))]);
+        let session = temp_session();
         let reason = driver
-            .run_turn(&mut session, &selection(), "hello", 25, CancellationToken::new(), &noop_emit())
+            .run_turn(&session, &selection(), "hello", 25, CancellationToken::new(), &noop_emit())
             .await;
         assert_eq!(reason, TurnEndReason::Completed);
 
@@ -554,10 +595,10 @@ mod tests {
 
     #[tokio::test]
     async fn tool_call_continues_to_second_step() {
-        let (driver, _registry) = driver(vec![tool_script(), text_script("after tool")]);
-        let mut session = temp_session();
+        let (driver, _registry) = driver(vec![MockScript::Chunks(tool_script()), MockScript::Chunks(text_script("after tool"))]);
+        let session = temp_session();
         let reason = driver
-            .run_turn(&mut session, &selection(), "use the tool", 25, CancellationToken::new(), &noop_emit())
+            .run_turn(&session, &selection(), "use the tool", 25, CancellationToken::new(), &noop_emit())
             .await;
         assert_eq!(reason, TurnEndReason::Completed);
 
@@ -591,10 +632,10 @@ mod tests {
                 arguments: "{}".to_string(),
             };
         }
-        let (driver, _registry) = driver(vec![unknown, text_script("ok")]);
-        let mut session = temp_session();
+        let (driver, _registry) = driver(vec![MockScript::Chunks(unknown), MockScript::Chunks(text_script("ok"))]);
+        let session = temp_session();
         let reason = driver
-            .run_turn(&mut session, &selection(), "go", 25, CancellationToken::new(), &noop_emit())
+            .run_turn(&session, &selection(), "go", 25, CancellationToken::new(), &noop_emit())
             .await;
         assert_eq!(reason, TurnEndReason::Completed);
         let result = session.events().iter().find_map(|envelope| match &envelope.event {
@@ -644,12 +685,8 @@ mod tests {
         registry
             .register(&["mock".to_string()], Arc::new(PendingAdapter), dshrs_llm::RetryPolicy::default())
             .unwrap();
-        let driver = SessionDriver::new(
-            registry,
-            Arc::new(ToolRegistry::default()),
-            LoopLimits::default(),
-        );
-        let mut session = temp_session();
+        let driver = SessionDriver::new(registry, Arc::new(ToolRegistry::default()));
+        let session = temp_session();
         let cancel = CancellationToken::new();
         let cancel_clone = cancel.clone();
         tokio::spawn(async move {
@@ -657,7 +694,7 @@ mod tests {
             cancel_clone.cancel();
         });
         let reason = driver
-            .run_turn(&mut session, &selection(), "go", 25, cancel, &noop_emit())
+            .run_turn(&session, &selection(), "go", 25, cancel, &noop_emit())
             .await;
         assert_eq!(reason, TurnEndReason::Aborted);
         let has_interrupted = session.events().iter().any(|envelope| {
@@ -672,14 +709,34 @@ mod tests {
     #[tokio::test]
     async fn step_limit_ends_turn_with_error() {
         let scripts: Vec<Vec<StreamChunk>> = (0..5).map(|_| tool_script()).collect();
-        let (driver, _registry) = driver(scripts);
-        let mut session = temp_session();
+        let (driver, _registry) = driver(scripts.into_iter().map(MockScript::Chunks).collect());
+        let session = temp_session();
         let reason = driver
-            .run_turn(&mut session, &selection(), "loop", 2, CancellationToken::new(), &noop_emit())
+            .run_turn(&session, &selection(), "loop", 2, CancellationToken::new(), &noop_emit())
             .await;
         match reason {
             TurnEndReason::Error { failure } => assert_eq!(failure.code, codes::STEP_LIMIT),
             other => panic!("expected step limit, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn request_failure_is_fed_back_for_self_correction() {
+        let (driver, _registry) = driver(vec![
+            MockScript::Fail(LlmFailure::new("INVALID_REQUEST", "bad params")),
+            MockScript::Chunks(text_script("fixed")),
+        ]);
+        let session = temp_session();
+        let reason = driver
+            .run_turn(&session, &selection(), "go", 25, CancellationToken::new(), &noop_emit())
+            .await;
+        assert_eq!(reason, TurnEndReason::Completed);
+        // 纠错提示以 injected 用户消息落日志,模型看得见。
+        let injected = session.events().iter().filter_map(|e| match &e.event {
+            SessionEvent::UserMessage { text, injected } if *injected => Some(text.clone()),
+            _ => None,
+        }).collect::<Vec<_>>();
+        assert_eq!(injected.len(), 1);
+        assert!(injected[0].contains("INVALID_REQUEST"));
     }
 }

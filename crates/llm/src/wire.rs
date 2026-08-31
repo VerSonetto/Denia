@@ -166,6 +166,20 @@ pub struct WireFunctionRef {
     pub arguments: String,
 }
 
+
+/// 回传清洗:部分网关(如 MiniMax)会把 arguments 再解析成 dict,
+/// 畸形原始串会毒化下一轮请求。抢救第一个 JSON 值,否则 {}。
+fn wire_arguments(raw: &str) -> String {
+    if serde_json::from_str::<serde_json::Value>(raw).is_ok() {
+        return raw.to_string();
+    }
+    let mut iter = serde_json::Deserializer::from_str(raw.trim())
+        .into_iter::<serde_json::Value>();
+    match iter.next() {
+        Some(Ok(value)) => value.to_string(),
+        _ => "{}".to_string(),
+    }
+}
 /// Serializes the request history into wire messages.
 pub fn build_wire_messages(request: &GenerateRequest) -> Vec<WireMessage> {
     let plain = |role: &'static str, content: String| WireMessage {
@@ -195,7 +209,7 @@ pub fn build_wire_messages(request: &GenerateRequest) -> Vec<WireMessage> {
                             call_type: "function",
                             function: WireFunctionRef {
                                 name: call.name.clone(),
-                                arguments: call.arguments.clone(),
+                                arguments: wire_arguments(&call.arguments),
                             },
                         })
                         .collect()
@@ -576,5 +590,20 @@ mod tests {
         };
         let body = crate::openai::build_openai_body(&without_tools);
         assert!(body.get("tools").is_none());
+    }
+}
+
+#[cfg(test)]
+mod wire_tests {
+    use super::wire_arguments;
+
+    #[test]
+    fn wire_arguments_salvages_malformed() {
+        assert_eq!(wire_arguments(r#"{"path": "x"}"#), r#"{"path": "x"}"#);
+        assert_eq!(
+            wire_arguments(r#"{"path": "x"} trailing junk"#),
+            r#"{"path":"x"}"#
+        );
+        assert_eq!(wire_arguments("complete garbage"), "{}");
     }
 }
