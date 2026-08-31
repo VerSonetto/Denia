@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { memo, useEffect, useState } from 'react'
 import type { ReactNode } from 'react'
 import { t } from '../i18n'
 import { groupTranscript, type OverviewRow, type TranscriptNode } from '../fold'
@@ -67,7 +67,8 @@ function TurnOverview({ row }: { row: OverviewRow }) {
   )
 }
 
-function NodeView({ node }: { node: TranscriptNode }) {
+// 行组件 memo 化:流式帧只有引用变化的行重渲染,历史行全部跳过。
+const NodeView = memo(function NodeView({ node }: { node: TranscriptNode }) {
   switch (node.kind) {
     case 'user':
       return (
@@ -85,7 +86,7 @@ function NodeView({ node }: { node: TranscriptNode }) {
     case 'tool':
       return <ToolRow node={node} />
   }
-}
+})
 
 function AssistantNode({
   node,
@@ -139,7 +140,7 @@ function ThinkRow({
   useEffect(() => {
     if (open && !streaming) setOpen(false)
   }, [streaming])
-  const firstLine = text.split('\n')[0].slice(0, 80)
+  const summary = firstLine(text, 80)
   return (
     <div className={`disc-row${open ? ' open' : ''}`}>
       <button className="disc-head" onClick={() => setOpen(!open)}>
@@ -149,7 +150,7 @@ function ThinkRow({
         <span className="title">{t('thinkTitle')}</span>
         <span className="sep" />
         <span className="summary" style={{ fontFamily: 'inherit' }}>
-          {firstLine}
+          {summary}
         </span>
         <span className="chev">
           <IconChevron size={12} />
@@ -179,9 +180,17 @@ function toolMeta(name: string): { title: string; icon: ReactNode } {
   }
 }
 
+/** 首个非空行;indexOf 切片,不 split 整个大文本(流式每帧调用)。 */
 function firstLine(text: string, max = 90): string {
-  const line = text.split('\n').find((l) => l.trim().length > 0) ?? ''
-  return line.length > max ? `${line.slice(0, max)}…` : line
+  let rest = text
+  for (;;) {
+    const nl = rest.indexOf('\n')
+    const line = (nl < 0 ? rest : rest.slice(0, nl)).trim()
+    if (line.length > 0 || nl < 0) {
+      return line.length > max ? `${line.slice(0, max)}…` : line
+    }
+    rest = rest.slice(nl + 1)
+  }
 }
 
 function ToolRow({ node }: { node: Extract<TranscriptNode, { kind: 'tool' }> }) {

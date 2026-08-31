@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import * as api from '../api'
 import { applyEnvelope, foldEvents, hasOpenTurn } from '../fold'
 import type { TranscriptNode } from '../fold'
@@ -7,6 +7,9 @@ import type { Notify } from '../App'
 import { IconFolder } from './icons'
 import { Transcript } from './transcript'
 import type { SessionHeader } from '../types'
+
+/** dsh FOLLOW_THRESHOLD:离开底部超过该距离即停止自动跟随。 */
+const FOLLOW_THRESHOLD = 24
 
 /** Transcript pane for one session: snapshot + follow-SSE, incremental fold. */
 export function SessionView({
@@ -25,6 +28,25 @@ export function SessionView({
   const follow = useRef<AbortController | null>(null)
   const scrollRef = useRef<HTMLDivElement | null>(null)
   const resnapshotRef = useRef<() => void>(() => {})
+  // dsh 式跟随:贴底时内容变化才吸附;上翻越过阈值即停,回到底部恢复。
+  const atBottomRef = useRef(true)
+  const [, setAtBottom] = useState(true)
+
+  const handleScroll = useCallback(() => {
+    const el = scrollRef.current
+    if (el === null) return
+    const bottom = el.scrollHeight - el.scrollTop - el.clientHeight <= FOLLOW_THRESHOLD + 1
+    if (bottom !== atBottomRef.current) {
+      atBottomRef.current = bottom
+      setAtBottom(bottom)
+    }
+  }, [])
+
+  useEffect(() => {
+    const el = scrollRef.current
+    if (el === null || !atBottomRef.current) return
+    el.scrollTop = el.scrollHeight
+  }, [nodes, running])
 
   useEffect(() => {
     onRunningChange?.(id, running)
@@ -69,13 +91,11 @@ export function SessionView({
     setHeader(null)
     cursor.current = 0
     setRunning(false)
+    atBottomRef.current = true
+    setAtBottom(true)
     resnapshotRef.current()
     return () => follow.current?.abort()
   }, [id])
-
-  useEffect(() => {
-    scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight })
-  }, [nodes, running])
 
   return (
     <div className="column">
@@ -87,7 +107,7 @@ export function SessionView({
           </span>
         )}
       </div>
-      <div className="transcript" ref={scrollRef}>
+      <div className="transcript" ref={scrollRef} onScroll={handleScroll}>
         <Transcript nodes={nodes} />
         {running && <StatusLine />}
       </div>
