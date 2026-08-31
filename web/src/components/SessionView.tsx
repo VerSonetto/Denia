@@ -24,10 +24,12 @@ export function SessionView({
   const [nodes, setNodes] = useState<TranscriptNode[]>([])
   const [header, setHeader] = useState<SessionHeader | null>(null)
   const [running, setRunning] = useState(false)
+  const [loading, setLoading] = useState(true)
   const cursor = useRef(0)
   const follow = useRef<AbortController | null>(null)
   const scrollRef = useRef<HTMLDivElement | null>(null)
   const resnapshotRef = useRef<() => void>(() => {})
+  const lastResnapshotAt = useRef(0)
   // dsh 式跟随:贴底时内容变化才吸附;上翻越过阈值即停,回到底部恢复。
   const atBottomRef = useRef(true)
   const [, setAtBottom] = useState(true)
@@ -53,6 +55,14 @@ export function SessionView({
     return () => onRunningChange?.(id, false)
   }, [id, running, onRunningChange])
 
+  // 断线/gap 重连限流:连续触发会让 SSE 反复断连,卡在重连循环。
+  const scheduleResnapshot = () => {
+    const now = Date.now()
+    if (now - lastResnapshotAt.current < 300) return
+    lastResnapshotAt.current = now
+    resnapshotRef.current()
+  }
+
   resnapshotRef.current = () => {
     const resnapshot = async () => {
       try {
@@ -63,6 +73,7 @@ export function SessionView({
         setNodes(foldEvents(data.events))
         setHeader(data.header)
         setRunning(hasOpenTurn(data.events))
+        setLoading(false)
         follow.current?.abort()
         follow.current = api.followSession(
           id,
@@ -73,13 +84,14 @@ export function SessionView({
               cursor.current = envelope.seq
               setNodes((previous) => applyEnvelope(previous, envelope))
             } else {
-              resnapshotRef.current()
+              scheduleResnapshot()
             }
             if (envelope.type === 'turn-end') setRunning(false)
           },
-          () => resnapshotRef.current(),
+          () => scheduleResnapshot(),
         )
       } catch (error) {
+        setLoading(false)
         notify('err', error instanceof Error ? error.message : String(error))
       }
     }
@@ -91,6 +103,7 @@ export function SessionView({
     setHeader(null)
     cursor.current = 0
     setRunning(false)
+    setLoading(true)
     atBottomRef.current = true
     setAtBottom(true)
     resnapshotRef.current()
@@ -108,7 +121,11 @@ export function SessionView({
         )}
       </div>
       <div className="transcript" ref={scrollRef} onScroll={handleScroll}>
-        <Transcript nodes={nodes} />
+        {loading ? (
+          <div className="empty-hint">{t('loading')}</div>
+        ) : (
+          <Transcript nodes={nodes} />
+        )}
         {running && <StatusLine />}
       </div>
     </div>

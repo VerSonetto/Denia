@@ -62,7 +62,12 @@ export default function App() {
 
   useEffect(() => {
     const source = new EventSource('/api/events')
-    source.onopen = () => setConnLost(false)
+    source.onopen = () => {
+      setConnLost(false)
+      // 连接建立/恢复即重拉列表:自愈"后端未就绪时首拉失败"的启动竞态
+      // 与后端重启后的静默空态。
+      setReloadKey((key) => key + 1)
+    }
     source.onerror = () => setConnLost(true)
     return () => source.close()
   }, [])
