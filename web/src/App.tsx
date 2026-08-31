@@ -154,7 +154,8 @@ export default function App() {
     if (recent) void connectWorkspace(recent)
   }, [workspaces, activeId, recentWorkspace, connectWorkspace])
 
-  // 顶栏新建会话:当前会话工作区 → 最近 → 空态(dsh startSession)。
+  // 显式"新建会话":总是创建全新会话,不复用空白会话;
+  // 复用只属于自动落点/切换工作区(connectWorkspace)。
   const startSession = useCallback(
     async (targetWsId?: string) => {
       const target =
@@ -166,9 +167,16 @@ export default function App() {
         setPendingWsId(null)
         return
       }
-      await connectWorkspace(target)
+      try {
+        const { session } = await api.createSession({ workspaceId: target.id })
+        setActiveId(session.id)
+        setPendingWsId(target.id)
+        setReloadKey((key) => key + 1)
+      } catch (error) {
+        notify('err', error instanceof Error ? error.message : String(error))
+      }
     },
-    [workspaces, activeSession, recentWorkspace, connectWorkspace, wsOfSession],
+    [workspaces, activeSession, recentWorkspace, wsOfSession, notify],
   )
 
   // 目录流入口:capability 分流 native/browse;失败进"无法打开文件夹"。
