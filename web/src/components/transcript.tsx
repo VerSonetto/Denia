@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import type { ReactNode } from 'react'
 import { t } from '../i18n'
 import type { TranscriptNode } from '../fold'
@@ -15,25 +15,74 @@ export function Transcript({ nodes }: { nodes: TranscriptNode[] }) {
   if (nodes.length === 0) {
     return <div className="empty-hint">{t('emptyTranscript')}</div>
   }
+  // dsh 式 turn 过程折叠:连续工具行收进一个可折叠"过程"组。
+  type Group =
+    | { kind: 'node'; node: TranscriptNode }
+    | { kind: 'process'; tools: Extract<TranscriptNode, { kind: 'tool' }>[] }
+  const groups: Group[] = []
+  for (const node of nodes) {
+    if (node.kind === 'tool') {
+      const last = groups[groups.length - 1]
+      if (last && last.kind === 'process') last.tools.push(node)
+      else groups.push({ kind: 'process', tools: [node] })
+    } else {
+      groups.push({ kind: 'node', node })
+    }
+  }
   return (
     <>
-      {nodes.map((node, index) => {
-        switch (node.kind) {
-          case 'user':
-            return (
-              <div className="msg-user" key={index}>
-                {node.text}
-              </div>
-            )
-          case 'assistant':
-            return <AssistantNode key={index} node={node} />
-          case 'tool':
-            return <ToolRow key={index} node={node} />
-          case 'turn-end':
-            return <TurnChrome key={index} node={node} />
-        }
-      })}
+      {groups.map((group, index) =>
+        group.kind === 'node' ? (
+          <NodeView key={index} node={group.node} />
+        ) : (
+          <ProcessGroup key={index} tools={group.tools} />
+        ),
+      )}
     </>
+  )
+}
+
+function NodeView({ node }: { node: TranscriptNode }) {
+  switch (node.kind) {
+    case 'user':
+      return <div className="msg-user">{node.text}</div>
+    case 'assistant':
+      return <AssistantNode node={node} />
+    case 'turn-end':
+      return <TurnChrome node={node} />
+    case 'tool':
+      return <ToolRow node={node} />
+  }
+}
+
+function ProcessGroup({
+  tools,
+}: {
+  tools: Extract<TranscriptNode, { kind: 'tool' }>[]
+}) {
+  const running = tools.some((tool) => !tool.result)
+  const [open, setOpen] = useState(running)
+  useEffect(() => {
+    if (running) setOpen(true)
+  }, [running])
+  return (
+    <div className="process-group">
+      <button className="process-head" onClick={() => setOpen((o) => !o)}>
+        <span className={`chev${open ? ' open' : ''}`}>
+          <IconChevron size={11} />
+        </span>
+        <span className="title">
+          {running ? t('processRunning') : t('processLabel', { n: tools.length })}
+        </span>
+      </button>
+      {open && (
+        <div className="process-body">
+          {tools.map((tool, index) => (
+            <ToolRow key={tool.callId || index} node={tool} />
+          ))}
+        </div>
+      )}
+    </div>
   )
 }
 

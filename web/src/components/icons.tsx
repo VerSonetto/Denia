@@ -122,6 +122,20 @@ export function IconSliders(props: IconProps) {
   )
 }
 
+export function IconGear(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <circle cx="8" cy="8" r="2.2" stroke="currentColor" strokeWidth="1.3" />
+      <path
+        d="M8 2.2v1.6M8 12.2v1.6M2.2 8h1.6M12.2 8h1.6M3.9 3.9l1.1 1.1M11 11l1.1 1.1M12.1 3.9 11 5M5 11l-1.1 1.1"
+        stroke="currentColor"
+        strokeWidth="1.3"
+        strokeLinecap="round"
+      />
+    </Svg>
+  )
+}
+
 export function IconFolder(props: IconProps) {
   return (
     <Svg {...props}>

@@ -5,19 +5,16 @@ import {
   getCatalog,
   getSettings,
   replaceNamespace,
-  saveDefaultModel,
   setCredential,
   unsetCredential,
   updateNamespace,
 } from '../api'
 import { t } from '../i18n'
 import type { Notify } from '../App'
-import { ModelPicker } from '../components/ModelPicker'
 import type {
   CredentialInfo,
   DiscoveredModel,
   ModelCatalog,
-  ModelSelection,
   NamespaceView,
   OpenAiProfile,
   SettingsDescribe,
@@ -104,7 +101,6 @@ export default function ModelsPage({ notify }: { notify: Notify }) {
   return (
     <div className="models-main">
       <div className="models-inner">
-      <DefaultModelSection catalog={catalog} notify={notify} />
       <DeepSeekCard settings={settings} credentials={credentials} notify={notify} />
       <CustomProvidersSection
         settings={settings}
@@ -114,56 +110,6 @@ export default function ModelsPage({ notify }: { notify: Notify }) {
       />
       </div>
     </div>
-  )
-}
-
-function DefaultModelSection({
-  catalog,
-  notify,
-}: {
-  catalog: ModelCatalog
-  notify: Notify
-}) {
-  const [draft, setDraft] = useState<ModelSelection>(catalog.default)
-  const [saving, setSaving] = useState(false)
-
-  useEffect(() => {
-    setDraft(catalog.default)
-  }, [catalog.default.provider, catalog.default.model, catalog.default.reasoningEffort])
-
-  const dirty =
-    draft.provider !== catalog.default.provider ||
-    draft.model !== catalog.default.model ||
-    (draft.reasoningEffort ?? '') !== (catalog.default.reasoningEffort ?? '')
-
-  const apply = async () => {
-    setSaving(true)
-    try {
-      await saveDefaultModel(draft)
-      notify('ok', t('defaultModelSaved'))
-    } catch (err) {
-      notify('err', err instanceof Error ? err.message : String(err))
-    } finally {
-      setSaving(false)
-    }
-  }
-
-  return (
-    <section className="card">
-      <h2>{t('defaultModelTitle')}</h2>
-      <p className="hint">{t('defaultModelHint')}</p>
-      <ModelPicker catalog={catalog} value={draft} onChange={setDraft} />
-      <div className="row" style={{ marginTop: 12 }}>
-        <button className="btn" disabled={!dirty || saving} onClick={() => void apply()}>
-          {t('saveDefaultModel')}
-        </button>
-      </div>
-      {catalog.failures.length > 0 && (
-        <p className="hint" style={{ marginTop: 12 }}>
-          {t('catalogFailure')}: {catalog.failures.map((f) => `${f.name}: ${f.message}`).join('; ')}
-        </p>
-      )}
-    </section>
   )
 }
 

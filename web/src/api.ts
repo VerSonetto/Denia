@@ -8,6 +8,7 @@ import type {
   SessionSummary,
   SettingsDescribe,
   ModelSelection,
+  WorkspaceRecord,
 } from './types'
 
 export class ApiError extends Error {
@@ -165,13 +166,57 @@ export function listSessions(): Promise<{ sessions: SessionSummary[] }> {
 }
 
 export function createSession(options: {
-  sandbox: boolean
+  workspaceId?: string
   cwd?: string
+  sandbox?: boolean
 }): Promise<{ session: SessionSummary & { cwd: string } }> {
   return http('/api/sessions', {
     method: 'POST',
     body: JSON.stringify(options),
   })
+}
+
+export function listWorkspaces(): Promise<{ workspaces: WorkspaceRecord[] }> {
+  return http('/api/workspaces')
+}
+
+export function createWorkspace(
+  path: string,
+  title?: string,
+): Promise<{ workspace: WorkspaceRecord }> {
+  return http('/api/workspaces', {
+    method: 'POST',
+    body: JSON.stringify({ path, title }),
+  })
+}
+
+export function deleteWorkspace(id: string): Promise<unknown> {
+  return http(`/api/workspaces/${encodeURIComponent(id)}`, { method: 'DELETE' })
+}
+
+export function pickerCapability(): Promise<{ kind: 'native' | 'browse' }> {
+  return http('/api/fs/capability')
+}
+
+export function mkdir(path: string, name: string): Promise<{ path: string }> {
+  return http('/api/fs/mkdir', {
+    method: 'POST',
+    body: JSON.stringify({ path, name }),
+  })
+}
+
+export function browseDirs(path?: string): Promise<{
+  path: string
+  parent: string | null
+  dirs: string[]
+}> {
+  const query = path ? `?path=${encodeURIComponent(path)}` : ''
+  return http(`/api/fs/dirs${query}`)
+}
+
+/** Opens the OS-native directory chooser on the host; null when cancelled. */
+export function pickDirectory(): Promise<{ path: string | null }> {
+  return http('/api/fs/pick', { method: 'POST' })
 }
 
 export function getSession(id: string): Promise<{

@@ -211,3 +211,149 @@ export function hasOpenTurn(events: SessionEnvelope[]): boolean {
   }
   return open
 }
+
+/**
+ * Incremental fold: applies one envelope to an existing node list without
+ * refolding the prefix. Only the affected tail node is copied, so a live
+ * stream costs O(1) per envelope instead of O(n).
+ */
+export function applyEnvelope(
+  nodes: TranscriptNode[],
+  event: SessionEnvelope,
+): TranscriptNode[] {
+  switch (event.type) {
+    case 'user-message':
+      return [...nodes, { kind: 'user', text: event.text }]
+    case 'assistant-chunk': {
+      const last = nodes[nodes.length - 1]
+      if (
+        last?.kind === 'assistant' &&
+        last.streaming &&
+        last.turn === event.turn &&
+        last.step === event.step
+      ) {
+        const blocks = last.blocks.slice()
+        const chunk = event.chunk
+        switch (chunk.type) {
+          case 'block-start':
+            blocks.push({ kind: chunk.block_type, text: '' })
+            break
+          case 'text-delta':
+          case 'reasoning-delta': {
+            const block = blocks[chunk.index] ?? { kind: 'text' as const, text: '' }
+            blocks[chunk.index] = { ...block, text: block.text + chunk.text }
+            break
+          }
+          case 'tool-call-delta': {
+            const block = blocks[chunk.index] ?? { kind: 'tool-call' as const, text: '' }
+            blocks[chunk.index] = {
+              ...block,
+              args: (block.args ?? '') + chunk.arguments_delta,
+              id: chunk.id || block.id,
+              name: chunk.name ?? block.name,
+            }
+            break
+          }
+          case 'block-end': {
+            const settled = toUiBlock(chunk.block)
+            const previous = blocks[chunk.index]
+            blocks[chunk.index] = {
+              ...settled,
+              text: settled.text || previous?.text || '',
+            }
+            break
+          }
+          default:
+            break
+        }
+        return [...nodes.slice(0, -1), { ...last, blocks }]
+      }
+      return [
+        ...nodes,
+        {
+          kind: 'assistant',
+          turn: event.turn,
+          step: event.step,
+          blocks: [],
+          interrupted: false,
+          streaming: true,
+        },
+      ]
+    }
+    case 'assistant-message': {
+      const settled: TranscriptNode = {
+        kind: 'assistant',
+        turn: event.turn,
+        step: event.step,
+        blocks: event.blocks.map(toUiBlock),
+        usage: event.usage,
+        interrupted: event.interrupted ?? false,
+        streaming: false,
+      }
+      const last = nodes[nodes.length - 1]
+      if (
+        last?.kind === 'assistant' &&
+        last.streaming &&
+        last.turn === event.turn &&
+        last.step === event.step
+      ) {
+        return [...nodes.slice(0, -1), settled]
+      }
+      return [...nodes, settled]
+    }
+    case 'tool-call':
+      return [
+        ...nodes,
+        { kind: 'tool', callId: event.call_id, name: event.name, args: event.arguments },
+      ]
+    case 'tool-result': {
+      for (let i = nodes.length - 1; i >= 0; i--) {
+        const node = nodes[i]
+        if (node.kind === 'tool' && node.callId === event.call_id) {
+          const copy = nodes.slice()
+          copy[i] = {
+            ...node,
+            result: { content: event.content, isError: event.is_error },
+          }
+          return copy
+        }
+      }
+      return [
+        ...nodes,
+        {
+          kind: 'tool',
+          callId: event.call_id,
+          name: '?',
+          args: '',
+          result: { content: event.content, isError: event.is_error },
+        },
+      ]
+    }
+    case 'turn-end': {
+      let input = 0
+      let output = 0
+      for (let i = nodes.length - 1; i >= 0; i--) {
+        const node = nodes[i]
+        if (node.kind === 'turn-end') break
+        if (node.kind === 'assistant' && node.usage) {
+          input += node.usage.inputTokens
+          output += node.usage.outputTokens
+        }
+      }
+      return [
+        ...nodes,
+        {
+          kind: 'turn-end',
+          turn: event.turn,
+          reason: event.reason,
+          usage:
+            input || output
+              ? { inputTokens: input, outputTokens: output }
+              : undefined,
+        },
+      ]
+    }
+    default:
+      return nodes
+  }
+}

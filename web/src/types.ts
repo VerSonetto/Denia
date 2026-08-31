@@ -190,6 +190,7 @@ export interface SessionHeader {
   id: string
   created_at: number
   cwd: string
+  sandbox: boolean
 }
 
 export interface SessionSummary {
@@ -197,4 +198,20 @@ export interface SessionSummary {
   created_at: number
   excerpt: string | null
   cwd?: string
+  sandbox?: boolean
+  cwd_alive?: boolean
+}
+
+export interface WorkspaceEntry {
+  path: string
+  name?: string
+}
+
+/** 工作区注册表记录(抄 dsh workspace 实体)。 */
+export interface WorkspaceRecord {
+  id: string
+  path: string
+  title: string
+  createdAt: number
+  sessionIds: string[]
 }

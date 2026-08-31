@@ -7,9 +7,41 @@ const zh = {
   appName: 'dsh-rs 控制台',
   navSessions: '会话',
   navModels: '模型配置',
+  navSettings: '设置',
   connectionLost: '与服务器的连接断开,正在重试…',
 
   newSession: '新建会话',
+  newWorkspace: '新工作区',
+  createWorkspace: '创建工作区',
+  selectWorkspace: '选择工作区',
+  workspacePathPlaceholder: '已有目录的绝对路径,例如 D:\\code\\my-project',
+  workspaceAdded: '工作区已创建',
+  workspaceInvalid: '目录不存在,工作区必须是一个已存在的目录',
+  workspaceRequired: '先选择或创建一个工作区',
+  deadCwd: '目录已失效',
+  deadCwdHint: '该会话的工作目录已不存在,只能查看历史;请新建会话',
+  processLabel: '过程 · {n} 个工具调用',
+  processRunning: '处理中…',
+  ungrouped: '未分组',
+  expandRest: '展开其余 {n} 个会话',
+  collapse: '收起',
+  addWorkspace: '添加工作区',
+  addWorkspaceMenu: '添加工作区…',
+  newSessionIn: '在"{name}"中新建会话',
+  deleteWorkspace: '删除工作区',
+  deleteWorkspaceDesc: '将把"{name}"从工作区列表中移除。文件夹与会话记录会保留,其会话将显示在"未分组"下。',
+  blankSession: '新会话',
+  heroChooseWorkspace: '选择工作区',
+  placeholderWorkspace: '选择一个工作区开始',
+  lockedWorkspace: '首条消息发出后工作区已锁死',
+  folderError: '无法打开文件夹',
+  newFolder: '新建文件夹',
+  workspacesTitle: '工作区',
+  upDir: '上级目录',
+  noSubdirs: '没有子目录',
+  selectCurrentDir: '选择当前目录',
+  manualPathToggle: '手动输入路径…',
+  browseServer: '浏览服务器目录…',
   sandboxLabel: '沙箱工作区',
   cwdLabel: '工作目录',
   cwdPlaceholder: '真实目录的绝对路径(关沙箱时生效)',
@@ -97,15 +129,59 @@ const zh = {
   save: '保存',
   close: '关闭',
   error: '出错了',
+
+  catGeneral: '常规',
+  catSecurity: '安全',
+  catAppearance: '外观',
+  defaultModelLabel: '默认模型',
+  sandboxDesc: '沙箱将文件工具限制在工作目录内(bash 等命令工具不受此限制,请自行留意命令行为)。关闭后允许读写工作目录之外的路径。',
+  themeLabel: '主题',
+  languageLabel: '语言',
+  themeSystem: '跟随系统',
+  themeLight: '浅色',
+  themeDark: '深色',
+  settingsSaved: '设置已保存',
 }
 
 const en: typeof zh = {
   appName: 'dsh-rs console',
   navSessions: 'Sessions',
   navModels: 'Models',
+  navSettings: 'Settings',
   connectionLost: 'Lost connection to the server, retrying…',
 
   newSession: 'New session',
+  newWorkspace: 'New workspace',
+  createWorkspace: 'Create workspace',
+  selectWorkspace: 'Select workspace',
+  workspacePathPlaceholder: 'Absolute path of an existing directory, e.g. /home/me/project',
+  workspaceAdded: 'Workspace created',
+  workspaceInvalid: 'Directory does not exist; a workspace must be an existing directory',
+  workspaceRequired: 'Choose or create a workspace first',
+  deadCwd: 'directory missing',
+  deadCwdHint: "This session's working directory is gone; history is read-only. Start a new session.",
+  processLabel: 'Process · {n} tool calls',
+  processRunning: 'Working…',
+  ungrouped: 'Ungrouped',
+  expandRest: 'Show {n} more sessions',
+  collapse: 'Collapse',
+  addWorkspace: 'Add workspace',
+  addWorkspaceMenu: 'Add workspace…',
+  newSessionIn: 'New session in "{name}"',
+  deleteWorkspace: 'Delete workspace',
+  deleteWorkspaceDesc: 'Removes "{name}" from the list. The folder and session logs are kept; its sessions move to Ungrouped.',
+  blankSession: 'New session',
+  heroChooseWorkspace: 'Choose a workspace',
+  placeholderWorkspace: 'Choose a workspace to start',
+  lockedWorkspace: 'The workspace locks after the first message',
+  folderError: "Can't open folder",
+  newFolder: 'New folder',
+  workspacesTitle: 'Workspaces',
+  upDir: 'Up one level',
+  noSubdirs: 'No subdirectories',
+  selectCurrentDir: 'Use this directory',
+  manualPathToggle: 'Type a path…',
+  browseServer: 'Browse server directories…',
   sandboxLabel: 'Sandbox workspace',
   cwdLabel: 'Working directory',
   cwdPlaceholder: 'Absolute path to a real directory (when sandbox is off)',
@@ -193,20 +269,31 @@ const en: typeof zh = {
   save: 'Save',
   close: 'Close',
   error: 'Something went wrong',
+
+  catGeneral: 'General',
+  catSecurity: 'Security',
+  catAppearance: 'Appearance',
+  defaultModelLabel: 'Default model',
+  sandboxDesc: 'The sandbox confines file tools to the working directory (command tools like bash are not confined; mind what they run). Turning it off allows reads and writes outside the working directory.',
+  themeLabel: 'Theme',
+  languageLabel: 'Language',
+  themeSystem: 'Follow system',
+  themeLight: 'Light',
+  themeDark: 'Dark',
+  settingsSaved: 'Settings saved',
 }
 
 type LocaleId = 'zh' | 'en'
 
 const dictionaries: Record<LocaleId, typeof zh> = { zh, en }
 
-function detectLocale(): LocaleId {
-  if (typeof navigator !== 'undefined' && navigator.language?.toLowerCase().startsWith('en')) {
-    return 'en'
-  }
-  return 'zh'
-}
+// zh 是源语言(学 dsh 的 i18n 约定);语言由设置驱动,不靠浏览器猜。
+let active: LocaleId = 'zh'
 
-const active: LocaleId = detectLocale()
+/** Applies the console locale; called when settings load or change. */
+export function setLocale(locale: string) {
+  active = locale === 'en' ? 'en' : 'zh'
+}
 
 /** Translates one key, interpolating `{name}` params. */
 export function t(key: keyof typeof zh, params?: Record<string, string | number>): string {
