@@ -1,4 +1,4 @@
-import { memo, useEffect, useState } from 'react'
+import { memo, useEffect, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import { t } from '../i18n'
 import { groupTranscript, type OverviewRow, type TranscriptNode } from '../fold'
@@ -133,17 +133,25 @@ function ThinkRow({
   streaming = false,
 }: {
   text: string
-  /** 流式期间自动展开;输出结束后收起为摘要行。 */
+  /** 流式期间自动展开;输出结束后,自动展开的块收起,手动展开的保留。 */
   streaming?: boolean
 }) {
   const [open, setOpen] = useState(streaming)
+  // 用户手动点过开关后,输出结束不再强制收起。
+  const userToggled = useRef(false)
   useEffect(() => {
-    if (open && !streaming) setOpen(false)
-  }, [streaming])
+    if (open && !streaming && !userToggled.current) setOpen(false)
+  }, [streaming, open])
   const summary = firstLine(text, 80)
   return (
     <div className={`disc-row${open ? ' open' : ''}`}>
-      <button className="disc-head" onClick={() => setOpen(!open)}>
+      <button
+        className="disc-head"
+        onClick={() => {
+          userToggled.current = true
+          setOpen(!open)
+        }}
+      >
         <span className="glyph">
           <IconThink size={14} />
         </span>

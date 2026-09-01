@@ -4,6 +4,7 @@ import ModelsPage from './pages/ModelsPage'
 import SessionsPage from './pages/SessionsPage'
 import SettingsPage from './pages/SettingsPage'
 import * as api from './api'
+import { useSessionStreams } from './hooks/useSessionStreams'
 import {
   BrandMark,
   IconChat,
@@ -36,8 +37,22 @@ export default function App() {
   const [activeId, setActiveId] = useState<string | null>(null)
   // 首条消息前可切换的目标工作区(dsh pendingWorkspace)。
   const [pendingWsId, setPendingWsId] = useState<string | null>(null)
-  const [runningIds, setRunningIds] = useState<Record<string, boolean>>({})
   const [reloadKey, setReloadKey] = useState(0)
+  // 会话流总线:running 状态与事件流生命周期统一在 App 层。
+  const { attach, runningIds } = useSessionStreams()
+  // 本会话内已发出首条消息的会话(excerpt 异步刷新前的锁定依据)。
+  const [startedIds, setStartedIds] = useState<Record<string, true>>({})
+  // 设置页改动默认模型后驱动会话页重拉 catalog。
+  const [catalogTick, setCatalogTick] = useState(0)
+  // A2:URL 会话状态。挂载时读 hash;列表加载完成后判定恢复或放弃,
+  // 判定结束前启动导航不运行(避免覆盖恢复结果)。
+  const [pendingHashId] = useState<string | null>(() => {
+    const match = window.location.hash.match(/^#s=([^#]+)$/)
+    return match ? decodeURIComponent(match[1]) : null
+  })
+  const [sessionsLoaded, setSessionsLoaded] = useState(false)
+  const [hashSettled, setHashSettled] = useState(false)
+  const firstRenderRef = useRef(true)
 
   // 目录流:capability 决定 native 还是 browse。
   const [pickerOpen, setPickerOpen] = useState(false)
@@ -49,6 +64,10 @@ export default function App() {
     setToast({ kind, message })
     window.clearTimeout(timer.current)
     timer.current = window.setTimeout(() => setToast(null), 3500)
+  }, [])
+
+  const markStarted = useCallback((id: string) => {
+    setStartedIds((previous) => (previous[id] ? previous : { ...previous, [id]: true }))
   }, [])
 
   useEffect(() => {
@@ -77,9 +96,49 @@ export default function App() {
       .then(([sess, ws]) => {
         setSessions(sess.sessions)
         setWorkspaces(ws.workspaces)
+        setSessionsLoaded(true)
       })
       .catch(() => {})
   }, [reloadKey])
+
+  /* ---- A2:URL 会话状态 ---- */
+
+  // 列表加载完成后判定 URL 里的会话:存在则恢复,不存在则放弃(交给 launch
+  // 导航);判定结束前自动导航不运行,避免旧闭包覆盖恢复结果。
+  useEffect(() => {
+    if (!sessionsLoaded) return
+    if (pendingHashId !== null && sessions.some((s) => s.id === pendingHashId)) {
+      setActiveId(pendingHashId)
+    }
+    setHashSettled(true)
+  }, [sessions, sessionsLoaded, pendingHashId])
+
+  // activeId 变化时同步 hash(replaceState 不触发 hashchange,无回环)。
+  useEffect(() => {
+    if (firstRenderRef.current) {
+      firstRenderRef.current = false
+      return
+    }
+    const target = activeId === null ? '' : `#s=${encodeURIComponent(activeId)}`
+    if (window.location.hash !== target) {
+      window.history.replaceState(null, '', target || window.location.pathname)
+    }
+  }, [activeId])
+
+  // 前进/后退恢复;目标会话不存在则不响应。
+  useEffect(() => {
+    const onHashChange = () => {
+      const match = window.location.hash.match(/^#s=([^#]+)$/)
+      const id = match ? decodeURIComponent(match[1]) : null
+      if (id === null) {
+        setActiveId(null)
+      } else if (sessions.some((s) => s.id === id)) {
+        setActiveId(id)
+      }
+    }
+    window.addEventListener('hashchange', onHashChange)
+    return () => window.removeEventListener('hashchange', onHashChange)
+  }, [sessions])
 
   useEffect(() => {
     const applyConsole = () => {
@@ -91,6 +150,8 @@ export default function App() {
           if (theme === 'system') delete document.documentElement.dataset.theme
           else document.documentElement.dataset.theme = theme
           setLocale((console?.value.locale as string) ?? 'zh')
+          // 设置页可能改过默认模型:驱动会话页重拉 catalog。
+          setCatalogTick((tick) => tick + 1)
         })
         .catch(() => {})
     }
@@ -104,6 +165,10 @@ export default function App() {
 
   const activeSession = sessions.find((s) => s.id === activeId) ?? null
   const isBlank = (s: SessionSummary) => !s.excerpt
+  // 首条消息后(或已有历史)会话与工作区绑定,不能换。
+  const locked =
+    activeSession !== null &&
+    (!!startedIds[activeSession.id] || !isBlank(activeSession))
   const wsOfSession = (s: SessionSummary) =>
     workspaces.find((w) => w.path === s.cwd) ?? null
   const activeWs = activeSession
@@ -130,9 +195,14 @@ export default function App() {
     return best
   }, [workspaces, sessions])
 
-  // 复用该工作区的 blank 会话,没有才建(dsh connectWorkspace)。
+  // 复用该工作区的 blank 会话;没有则只落目标工作区(首条消息时才创建,
+  // 切换工作区与启动导航都不静默建会话实体)。
   const connectWorkspace = useCallback(
     async (ws: WorkspaceRecord) => {
+      if (activeSession && activeSession.cwd === ws.path) {
+        setPendingWsId(ws.id)
+        return
+      }
       const blank = sessions.find(
         (s) => isBlank(s) && s.cwd === ws.path && s.cwd_alive !== false,
       )
@@ -141,23 +211,23 @@ export default function App() {
         setPendingWsId(ws.id)
         return
       }
-      const { session } = await api.createSession({ workspaceId: ws.id })
-      setActiveId(session.id)
+      setActiveId(null)
       setPendingWsId(ws.id)
-      setReloadKey((key) => key + 1)
     },
-    [sessions],
+    [sessions, activeSession],
   )
 
   // 启动自动导航:有工作区且无当前会话 → 落最近工作区(dsh watchNavigation)。
+  // hashSettled 前不运行:URL 恢复与自动导航共用同一会话槽,避免旧闭包覆盖。
   const bootedRef = useRef(false)
   useEffect(() => {
     if (bootedRef.current || activeId) return
+    if (!hashSettled) return
     if (workspaces.length === 0) return
     bootedRef.current = true
     const recent = recentWorkspace()
     if (recent) void connectWorkspace(recent)
-  }, [workspaces, activeId, recentWorkspace, connectWorkspace])
+  }, [workspaces, activeId, hashSettled, recentWorkspace, connectWorkspace])
 
   // 显式"新建会话":总是创建全新会话,不复用空白会话;
   // 复用只属于自动落点/切换工作区(connectWorkspace)。
@@ -234,10 +304,6 @@ export default function App() {
     [notify],
   )
 
-  const onRunningChange = useCallback((id: string, running: boolean) => {
-    setRunningIds((previous) => ({ ...previous, [id]: running }))
-  }, [])
-
   // 发送时确保会话存在:复用 active,否则在目标工作区建(dsh blank 复用)。
   const ensureSession = useCallback(async (): Promise<string | null> => {
     if (activeId) return activeId
@@ -299,18 +365,21 @@ export default function App() {
         )}
       </aside>
       <main className="main">
-        {page === 'sessions' ? (
+        <div className="page-pane" hidden={page !== 'sessions'}>
           <SessionsPage
             activeId={activeId}
             activeSession={activeSession}
             activeWs={activeWs}
             workspaces={workspaces}
-            runningIds={runningIds}
+            running={activeId ? !!runningIds[activeId] : false}
+            attach={attach}
+            locked={locked}
+            catalogTick={catalogTick}
             notify={notify}
-            onRunningChange={onRunningChange}
+            onStarted={markStarted}
             onSelectWorkspace={(ws) => {
               // 首条消息前可切换;已发消息则锁死(dsh 交互)。
-              if (activeSession && !isBlank(activeSession)) {
+              if (locked) {
                 notify('err', t('lockedWorkspace'))
                 return
               }
@@ -323,11 +392,13 @@ export default function App() {
             onAddWorkspace={openDirectoryFlow}
             onEnsureSession={ensureSession}
           />
-        ) : page === 'models' ? (
+        </div>
+        <div className="page-pane" hidden={page !== 'models'}>
           <ModelsPage notify={notify} />
-        ) : (
+        </div>
+        <div className="page-pane" hidden={page !== 'settings'}>
           <SettingsPage notify={notify} />
-        )}
+        </div>
       </main>
       {pickerOpen && (
         <DirPicker

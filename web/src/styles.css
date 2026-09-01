@@ -526,6 +526,19 @@ button {
   position: relative;
 }
 
+/* 页面常驻:隐藏面板保留状态与滚动位置,只是不可见。
+   pane 自身补齐 main 的 flex 链,否则内部 flex:1(transcript 滚动区)失效。 */
+.page-pane {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+
+.page-pane[hidden] {
+  display: none !important;
+}
+
 .column {
   width: clamp(640px, 68%, 920px);
   margin: 0 auto;
@@ -533,6 +546,7 @@ button {
   min-height: 0;
   display: flex;
   flex-direction: column;
+  position: relative;
 }
 
 .column-head {
@@ -570,6 +584,31 @@ button {
   flex-direction: column;
   gap: 18px;
   padding: 22px 4px 12px;
+}
+
+/* 悬浮"回到底部"按钮:离开底部时出现,点击吸附回底。 */
+.jump-bottom {
+  position: absolute;
+  right: 18px;
+  bottom: 64px;
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  border: 1px solid var(--border-l2);
+  background: var(--selector);
+  color: var(--label-secondary);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  box-shadow: 0 4px 14px rgb(0 0 0 / 0.16);
+  transition: color 0.15s var(--ease), border-color 0.15s var(--ease);
+  z-index: 5;
+}
+
+.jump-bottom:hover {
+  color: var(--label-primary);
+  border-color: var(--accent);
 }
 
 /* user bubble */
@@ -1175,6 +1214,17 @@ button {
   color: var(--label-primary);
 }
 
+/* 会话已发消息锁定工作区:不可选项直接置灰,不响应悬停。 */
+.ws-menu-item:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.ws-menu-item:disabled:hover {
+  background: none;
+  color: var(--label-secondary);
+}
+
 .ws-menu-item.active {
   background: var(--active-fill);
   color: var(--label-primary);
@@ -1291,6 +1341,12 @@ button {
 .chip-select:hover {
   color: var(--label-primary);
   border-color: var(--border-l2);
+}
+
+/* 运行中锁定模型选择。 */
+.chip-select:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
 .btn-send {

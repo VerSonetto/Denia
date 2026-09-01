@@ -1,38 +1,39 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import * as api from '../api'
-import { applyEnvelope, foldEvents, hasOpenTurn } from '../fold'
+import { applyEnvelope, foldEvents } from '../fold'
 import type { TranscriptNode } from '../fold'
 import { t } from '../i18n'
-import type { Notify } from '../App'
-import { IconFolder } from './icons'
+import type { StreamListener } from '../hooks/useSessionStreams'
+import { IconChevron, IconFolder } from './icons'
 import { Transcript } from './transcript'
 import type { SessionHeader } from '../types'
 
 /** dsh FOLLOW_THRESHOLD:离开底部超过该距离即停止自动跟随。 */
 const FOLLOW_THRESHOLD = 24
 
-/** Transcript pane for one session: snapshot + follow-SSE, incremental fold. */
+/**
+ * Transcript pane for one session. The event stream (snapshot + follow,
+ * dedupe, gap self-heal) lives in the App-level stream bus; this view only
+ * subscribes and folds.
+ */
 export function SessionView({
   id,
-  notify,
-  onRunningChange,
+  running,
+  scrollTick,
+  attach,
 }: {
   id: string
-  notify: Notify
-  onRunningChange?: (id: string, running: boolean) => void
+  running: boolean
+  /** 发送成功后递增:强制吸附回底部(离开底部时发送也拉回)。 */
+  scrollTick?: number
+  attach: (id: string, listener: StreamListener) => () => void
 }) {
   const [nodes, setNodes] = useState<TranscriptNode[]>([])
   const [header, setHeader] = useState<SessionHeader | null>(null)
-  const [running, setRunning] = useState(false)
   const [loading, setLoading] = useState(true)
-  const cursor = useRef(0)
-  const follow = useRef<AbortController | null>(null)
   const scrollRef = useRef<HTMLDivElement | null>(null)
-  const resnapshotRef = useRef<() => void>(() => {})
-  const lastResnapshotAt = useRef(0)
   // dsh 式跟随:贴底时内容变化才吸附;上翻越过阈值即停,回到底部恢复。
   const atBottomRef = useRef(true)
-  const [, setAtBottom] = useState(true)
+  const [atBottom, setAtBottom] = useState(true)
 
   const handleScroll = useCallback(() => {
     const el = scrollRef.current
@@ -44,71 +45,48 @@ export function SessionView({
     }
   }, [])
 
+  // 贴底跟随:内容变化且仍在底部时才吸附。
   useEffect(() => {
     const el = scrollRef.current
     if (el === null || !atBottomRef.current) return
     el.scrollTop = el.scrollHeight
   }, [nodes, running])
 
+  // 发送意图:无条件拉回底部。
   useEffect(() => {
-    onRunningChange?.(id, running)
-    return () => onRunningChange?.(id, false)
-  }, [id, running, onRunningChange])
-
-  // 断线/gap 重连限流:连续触发会让 SSE 反复断连,卡在重连循环。
-  const scheduleResnapshot = () => {
-    const now = Date.now()
-    if (now - lastResnapshotAt.current < 300) return
-    lastResnapshotAt.current = now
-    resnapshotRef.current()
-  }
-
-  resnapshotRef.current = () => {
-    const resnapshot = async () => {
-      try {
-        const data = await api.getSession(id)
-        cursor.current = data.events.length
-          ? data.events[data.events.length - 1].seq
-          : 0
-        setNodes(foldEvents(data.events))
-        setHeader(data.header)
-        setRunning(hasOpenTurn(data.events))
-        setLoading(false)
-        follow.current?.abort()
-        follow.current = api.followSession(
-          id,
-          cursor.current,
-          (envelope) => {
-            if (envelope.seq <= cursor.current) return
-            if (envelope.seq === cursor.current + 1) {
-              cursor.current = envelope.seq
-              setNodes((previous) => applyEnvelope(previous, envelope))
-            } else {
-              scheduleResnapshot()
-            }
-            if (envelope.type === 'turn-end') setRunning(false)
-          },
-          () => scheduleResnapshot(),
-        )
-      } catch (error) {
-        setLoading(false)
-        notify('err', error instanceof Error ? error.message : String(error))
-      }
-    }
-    void resnapshot()
-  }
+    if (scrollTick === undefined || scrollTick === 0) return
+    const el = scrollRef.current
+    if (el === null) return
+    el.scrollTop = el.scrollHeight
+    atBottomRef.current = true
+    setAtBottom(true)
+  }, [scrollTick])
 
   useEffect(() => {
     setNodes([])
     setHeader(null)
-    cursor.current = 0
-    setRunning(false)
     setLoading(true)
     atBottomRef.current = true
     setAtBottom(true)
-    resnapshotRef.current()
-    return () => follow.current?.abort()
-  }, [id])
+    return attach(id, {
+      onSnapshot: (nextHeader, events) => {
+        setNodes(foldEvents(events))
+        setHeader(nextHeader)
+        setLoading(false)
+      },
+      onEnvelope: (envelope) => {
+        setNodes((previous) => applyEnvelope(previous, envelope))
+      },
+    })
+  }, [id, attach])
+
+  const jumpToBottom = () => {
+    const el = scrollRef.current
+    if (el === null) return
+    el.scrollTop = el.scrollHeight
+    atBottomRef.current = true
+    setAtBottom(true)
+  }
 
   return (
     <div className="column">
@@ -128,6 +106,11 @@ export function SessionView({
         )}
         {running && <StatusLine />}
       </div>
+      {!atBottom && (
+        <button className="jump-bottom" onClick={jumpToBottom} title={t('jumpToBottom')}>
+          <IconChevron size={14} />
+        </button>
+      )}
     </div>
   )
 }
