@@ -196,7 +196,6 @@ async fn prompt_session(
         ));
     }
 
-    let console = crate::state::console_settings(&state.settings);
     let default = current_default_selection(&state.settings);
     let selection = ModelSelection {
         provider: body.provider.unwrap_or(default.provider),
@@ -228,7 +227,6 @@ async fn prompt_session(
                 &session,
                 &selection,
                 &prompt,
-                console.max_steps_per_turn,
                 token,
                 &move |envelope: &SessionEnvelope| {
                     let _ = followers.send(envelope.clone());

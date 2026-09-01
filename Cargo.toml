@@ -7,6 +7,7 @@ members = [
     "crates/llm",
     "crates/tools",
     "crates/session",
+    "crates/system-prompt",
     "crates/agent-loop",
     "crates/server",
 ]
@@ -25,6 +26,7 @@ dshrs-llm = { path = "crates/llm" }
 dshrs-tools = { path = "crates/tools" }
 dshrs-session = { path = "crates/session" }
 dshrs-agent-loop = { path = "crates/agent-loop" }
+dshrs-system-prompt = { path = "crates/system-prompt" }
 
 tokio = { version = "1", features = ["full"] }
 tokio-stream = { version = "0.1", features = ["sync"] }

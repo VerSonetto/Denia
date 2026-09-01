@@ -72,6 +72,12 @@ pub enum SessionEvent {
         #[serde(default)]
         injected: bool,
     },
+    /// 模型请求使用的系统提示词(用户可见副本,不含优先级框架)。
+    SystemPrompt {
+        turn: u32,
+        step: u32,
+        text: String,
+    },
     AssistantChunk {
         turn: u32,
         step: u32,
@@ -220,6 +226,22 @@ mod tests {
             r#"{"type":"session","version":0,"id":"0f8c","created_at":1700000000000,"cwd":"/tmp/work","sandbox":true}"#
         );
         assert_eq!(serde_json::from_str::<SessionHeader>(&json).unwrap(), header);
+    }
+
+    #[test]
+    fn system_prompt_event_round_trips() {
+        let env = envelope(
+            3,
+            SessionEvent::SystemPrompt {
+                turn: 1,
+                step: 1,
+                text: "你是 agent".into(),
+            },
+        );
+        assert_eq!(
+            serde_json::to_string(&env).unwrap(),
+            r#"{"seq":3,"time":1700000000003,"type":"system-prompt","turn":1,"step":1,"text":"你是 agent"}"#
+        );
     }
 
     #[test]

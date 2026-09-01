@@ -1,0 +1,478 @@
+//! System-prompt assembly for model requests (mirrors `@deepseek-ai/dsh-system-prompt`).
+//!
+//! Plugins contribute ordered [`PromptSection`]s, dynamic [`PromptContext`]s,
+//! tool-schema providers, and named variables. The loop calls [`SystemPrompt::assemble`]
+//! once per step, renders sections into the system string, and materializes
+//! runtime context as injected user messages.
+
+mod render;
+
+use std::collections::{BTreeMap, HashMap, HashSet};
+
+use dshrs_core::tool::ToolSchema;
+
+pub use render::{
+    frame_system_prompt_for_model, is_runtime_context_snapshot, join_context_sections,
+    render_context_sections, render_context_snapshot, render_prompt,
+};
+
+/// Deployment persona section name; shadowing replaces the global persona.
+pub const PERSONA_SECTION: &str = "deployment:persona";
+
+/// Reserved rest marker for explicit [`SystemPromptConfig::tool_order`].
+pub const TOOL_ORDER_REST: &str = "<unlisted-tools>";
+
+/// Prefix for a materialized runtime-context snapshot (DSH-compatible prose).
+pub const RUNTIME_CONTEXT_HEADER: &str =
+    "Current runtime context. This snapshot supersedes earlier runtime-context snapshots.";
+
+/// Cleared-runtime marker when no context contributions remain.
+pub const RUNTIME_CONTEXT_CLEARED: &str =
+    "Current runtime context: none. Earlier runtime-context snapshots no longer apply.";
+
+/// Centrally allocated section positions (subset for the shipped tool set).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SectionOrder {
+    HarnessIdentity,
+    DeploymentPersona,
+    ToolBash,
+    ToolRead,
+    ToolWrite,
+}
+
+impl SectionOrder {
+    /// Numeric sort key for one repository-owned section placement.
+    pub fn value(self) -> i32 {
+        match self {
+            Self::HarnessIdentity => -1000,
+            Self::DeploymentPersona => 0,
+            Self::ToolBash => 1000,
+            Self::ToolRead => 1100,
+            Self::ToolWrite => 1200,
+        }
+    }
+}
+
+/// Per-step inputs resolved while assembling a prompt.
+#[derive(Debug, Clone, Default)]
+pub struct AssembleContext {
+    pub cwd: Option<String>,
+    pub model: Option<String>,
+    pub provider: Option<String>,
+}
+
+/// One contributed system-prompt section.
+#[derive(Clone)]
+pub struct PromptSection {
+    pub name: String,
+    pub order: i32,
+    pub text: PromptText,
+    pub complete: bool,
+}
+
+/// Static or per-assembly section/context text.
+#[derive(Clone)]
+pub enum PromptText {
+    Static(String),
+    Dynamic(std::sync::Arc<dyn Fn(&AssembleContext) -> String + Send + Sync>),
+}
+
+impl PromptText {
+    fn resolve(&self, context: &AssembleContext) -> String {
+        match self {
+            Self::Static(text) => text.clone(),
+            Self::Dynamic(provider) => provider(context),
+        }
+    }
+}
+
+/// One dynamic runtime-context contribution.
+#[derive(Clone)]
+pub struct PromptContext {
+    pub name: String,
+    pub order: i32,
+    pub text: PromptText,
+}
+
+/// One resolved section before variable interpolation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AssembledSection {
+    pub name: String,
+    pub text: String,
+}
+
+/// One resolved runtime-context contribution.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AssembledContext {
+    pub name: String,
+    pub text: String,
+}
+
+/// Tool schemas visible in one assembly plus the pre-restriction name universe.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ToolProviderResult {
+    pub schemas: Vec<ToolSchema>,
+    pub known_names: Option<Vec<String>>,
+}
+
+/// Merge-extensible assembled model input.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PromptAssembly {
+    pub sections: Vec<AssembledSection>,
+    pub contexts: Vec<AssembledContext>,
+    pub tools: Vec<ToolSchema>,
+    pub variables: BTreeMap<String, String>,
+}
+
+/// Plugin config for the shipped system-prompt registry.
+#[derive(Debug, Clone)]
+pub struct SystemPromptConfig {
+    pub include_harness_identity: bool,
+    pub include_runtime_context: bool,
+    pub persona: String,
+    pub tool_order: Option<Vec<String>>,
+}
+
+impl Default for SystemPromptConfig {
+    fn default() -> Self {
+        Self {
+            include_harness_identity: true,
+            include_runtime_context: true,
+            persona: default_persona_template().to_string(),
+            tool_order: None,
+        }
+    }
+}
+
+/// Registry for prompt inputs assembled before each model step.
+#[derive(Clone)]
+pub struct SystemPrompt {
+    config: SystemPromptConfig,
+    sections: HashMap<String, PromptSection>,
+    contexts: HashMap<String, PromptContext>,
+    tool_providers: Vec<std::sync::Arc<dyn Fn(&AssembleContext) -> ToolProviderResult + Send + Sync>>,
+    variables: HashMap<String, std::sync::Arc<dyn Fn(&AssembleContext) -> Option<String> + Send + Sync>>,
+    runtime_context_suppressed: bool,
+}
+
+impl SystemPrompt {
+    /// Create an empty registry with validated config defaults.
+    pub fn new(config: SystemPromptConfig) -> Self {
+        let tool_order = config.tool_order.clone().map(|order| validate_tool_order(&order));
+        let mut prompt = Self {
+            config: SystemPromptConfig {
+                tool_order,
+                ..config
+            },
+            sections: HashMap::new(),
+            contexts: HashMap::new(),
+            tool_providers: Vec::new(),
+            variables: HashMap::new(),
+            runtime_context_suppressed: false,
+        };
+        if prompt.config.include_harness_identity {
+            let _ = prompt.section(PromptSection {
+                name: "harness:identity".to_string(),
+                order: SectionOrder::HarnessIdentity.value(),
+                text: PromptText::Static(
+                    "你是由 dsh-rs 驱动的 AI 编码 agent。".to_string(),
+                ),
+                complete: false,
+            });
+        }
+        let _ = prompt.section(PromptSection {
+            name: PERSONA_SECTION.to_string(),
+            order: SectionOrder::DeploymentPersona.value(),
+            text: PromptText::Static(prompt.config.persona.clone()),
+            complete: false,
+        });
+        if !prompt.config.include_runtime_context {
+            prompt.suppress_runtime_context();
+        }
+        prompt
+    }
+
+    /// Register an ordered prompt section. Duplicate names within one registry fail.
+    pub fn section(&mut self, section: PromptSection) -> Result<(), String> {
+        if self.sections.contains_key(&section.name) {
+            return Err(format!("prompt section \"{}\" is already registered", section.name));
+        }
+        self.sections.insert(section.name.clone(), section);
+        Ok(())
+    }
+
+    /// Register ordered dynamic runtime context.
+    pub fn context(&mut self, context: PromptContext) -> Result<(), String> {
+        if self.contexts.contains_key(&context.name) {
+            return Err(format!("prompt context \"{}\" is already registered", context.name));
+        }
+        self.contexts.insert(context.name.clone(), context);
+        Ok(())
+    }
+
+    /// Suppress every dynamic runtime-context contribution.
+    pub fn suppress_runtime_context(&mut self) {
+        self.runtime_context_suppressed = true;
+    }
+
+    /// Register a tool-schema provider evaluated on each assembly.
+    pub fn tools(
+        &mut self,
+        provider: impl Fn(&AssembleContext) -> ToolProviderResult + Send + Sync + 'static,
+    ) {
+        self.tool_providers
+            .push(std::sync::Arc::new(provider));
+    }
+
+    /// Register a prompt variable referenced as `{{name}}` during render.
+    pub fn variable(
+        &mut self,
+        name: &str,
+        provider: impl Fn(&AssembleContext) -> Option<String> + Send + Sync + 'static,
+    ) -> Result<(), String> {
+        if !is_valid_variable_name(name) {
+            return Err(format!(
+                "invalid prompt variable name \"{name}\" (must match [a-z][a-z0-9_]*)"
+            ));
+        }
+        if self.variables.contains_key(name) {
+            return Err(format!("prompt variable \"{name}\" is already registered"));
+        }
+        self.variables
+            .insert(name.to_string(), std::sync::Arc::new(provider));
+        Ok(())
+    }
+
+    /// Assemble registered providers into one model-facing snapshot.
+    pub fn assemble(&self, context: &AssembleContext) -> Result<PromptAssembly, String> {
+        let mut variables = BTreeMap::new();
+        for (name, provider) in &self.variables {
+            let value = provider(context);
+            if let Some(value) = value {
+                variables.insert(name.clone(), value);
+            }
+        }
+
+        let mut section_definitions: Vec<&PromptSection> = self.sections.values().collect();
+        section_definitions.sort_by(|left, right| {
+            left.order
+                .cmp(&right.order)
+                .then_with(|| left.name.cmp(&right.name))
+        });
+
+        let complete_sections: Vec<&PromptSection> = section_definitions
+            .iter()
+            .copied()
+            .filter(|section| section.complete)
+            .collect();
+        if complete_sections.len() > 1 {
+            return Err(format!(
+                "multiple complete prompt sections are active: {}",
+                complete_sections
+                    .iter()
+                    .map(|section| format!("\"{}\"", section.name))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+        let complete_section = complete_sections.first().map(|section| AssembledSection {
+            name: section.name.clone(),
+            text: section.text.resolve(context),
+        });
+
+        let sections = section_definitions
+            .into_iter()
+            .map(|section| AssembledSection {
+                name: section.name.clone(),
+                text: section.text.resolve(context),
+            })
+            .collect::<Vec<_>>();
+
+        let contexts: Vec<AssembledContext> = if self.runtime_context_suppressed {
+            Vec::new()
+        } else {
+            let mut entries: Vec<&PromptContext> = self.contexts.values().collect();
+            entries.sort_by_key(|entry| entry.order);
+            entries
+                .into_iter()
+                .map(|entry| AssembledContext {
+                    name: entry.name.clone(),
+                    text: entry.text.resolve(context),
+                })
+                .collect()
+        };
+
+        let mut collected = Vec::new();
+        let mut known_names = HashSet::new();
+        for provider in &self.tool_providers {
+            let result = provider(context);
+            let schemas = result.schemas;
+            let accepted = result
+                .known_names
+                .unwrap_or_else(|| schemas.iter().map(|tool| tool.name.clone()).collect());
+            collected.extend(schemas);
+            known_names.extend(accepted);
+        }
+
+        let tools = order_tools(
+            collected,
+            self.config.tool_order.as_deref(),
+            &known_names,
+        )?;
+
+        let mut assembly = PromptAssembly {
+            sections,
+            contexts,
+            tools,
+            variables,
+        };
+
+        if let Some(complete) = complete_section {
+            assembly.sections = vec![complete];
+        }
+        if self.runtime_context_suppressed {
+            assembly.contexts.clear();
+        }
+        Ok(assembly)
+    }
+}
+
+fn default_persona_template() -> &'static str {
+    "你是运行在 dsh-rs 里的编码 agent。工作目录是 {{cwd}}（相对路径以它为根）。\
+     规矩：不要猜文件路径；读取失败时先用 bash 列目录再重试；每步聚焦一件事；能回答时就停止调用工具。\
+     始终使用简体中文回复，除非用户明确要求其他语言。"
+}
+
+fn is_valid_variable_name(name: &str) -> bool {
+    let Some(first) = name.chars().next() else {
+        return false;
+    };
+    first.is_ascii_lowercase()
+        && name.chars().all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '_')
+}
+
+fn validate_tool_order(tool_order: &[String]) -> Vec<String> {
+    let mut seen = HashSet::new();
+    for name in tool_order {
+        if !seen.insert(name.clone()) {
+            panic!("toolOrder lists \"{name}\" more than once");
+        }
+    }
+    if !seen.contains(TOOL_ORDER_REST) {
+        panic!("toolOrder must contain the \"{TOOL_ORDER_REST}\" rest entry");
+    }
+    tool_order.to_vec()
+}
+
+fn order_tools(
+    tools: Vec<ToolSchema>,
+    tool_order: Option<&[String]>,
+    known_names: &HashSet<String>,
+) -> Result<Vec<ToolSchema>, String> {
+    if tools.iter().any(|tool| tool.name == TOOL_ORDER_REST) {
+        return Err(format!(
+            "tool provider returned reserved tool name \"{TOOL_ORDER_REST}\""
+        ));
+    }
+    let Some(tool_order) = tool_order else {
+        let mut ordered = tools;
+        ordered.sort_by(|left, right| left.name.cmp(&right.name));
+        return Ok(ordered);
+    };
+    let unknown: Vec<&String> = tool_order
+        .iter()
+        .filter(|name| **name != TOOL_ORDER_REST && !known_names.contains(*name))
+        .collect();
+    if !unknown.is_empty() {
+        let mut known: Vec<&String> = known_names.iter().collect();
+        known.sort();
+        return Err(format!(
+            "toolOrder lists unregistered tools {}; known tools: {}",
+            unknown
+                .iter()
+                .map(|name| format!("\"{name}\""))
+                .collect::<Vec<_>>()
+                .join(", "),
+            if known.is_empty() {
+                "(none)".to_string()
+            } else {
+                known
+                    .iter()
+                    .map(|name| (*name).as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            }
+        ));
+    }
+    let listed: HashSet<&str> = tool_order.iter().map(String::as_str).collect();
+    let mut by_name: HashMap<String, ToolSchema> = tools
+        .into_iter()
+        .map(|tool| (tool.name.clone(), tool))
+        .collect();
+    let mut rest: Vec<ToolSchema> = by_name
+        .values()
+        .filter(|tool| !listed.contains(tool.name.as_str()))
+        .cloned()
+        .collect();
+    rest.sort_by(|left, right| left.name.cmp(&right.name));
+    Ok(tool_order
+        .iter()
+        .flat_map(|name| {
+            if name == TOOL_ORDER_REST {
+                rest.clone()
+            } else {
+                by_name.remove(name).into_iter().collect::<Vec<_>>()
+            }
+        })
+        .collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn assembles_identity_persona_and_tools() {
+        let mut prompt = SystemPrompt::new(SystemPromptConfig::default());
+        prompt
+            .variable("cwd", |_| Some("/tmp/ws".to_string()))
+            .unwrap();
+        prompt.tools(|_| ToolProviderResult {
+            schemas: vec![ToolSchema {
+                name: "echo".to_string(),
+                description: "echo".to_string(),
+                parameters: serde_json::json!({}),
+            }],
+            known_names: None,
+        });
+        let assembly = prompt
+            .assemble(&AssembleContext {
+                cwd: Some("/tmp/ws".to_string()),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(
+            assembly.sections.first().map(|section| section.name.as_str()),
+            Some("harness:identity")
+        );
+        assert!(render_prompt(&assembly).contains("/tmp/ws"));
+        assert_eq!(assembly.tools.len(), 1);
+    }
+
+    #[test]
+    fn runtime_context_joins_like_dsh() {
+        let mut prompt = SystemPrompt::new(SystemPromptConfig::default());
+        prompt
+            .context(PromptContext {
+                name: "policy".to_string(),
+                order: 10,
+                text: PromptText::Static("Mode: read-only.".to_string()),
+            })
+            .unwrap();
+        let assembly = prompt.assemble(&AssembleContext::default()).unwrap();
+        assert_eq!(
+            render_context_snapshot(&assembly),
+            format!("{RUNTIME_CONTEXT_HEADER}\n\nMode: read-only.")
+        );
+    }
+}

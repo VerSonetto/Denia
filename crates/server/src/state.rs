@@ -39,9 +39,6 @@ pub struct ConsoleSettings {
     /// `zh` | `en`;zh 是源语言(学 dsh 的 i18n 约定)。
     #[serde(default = "default_locale")]
     pub locale: String,
-    /// 单轮步上限(dsh 式 validated config,非硬编码)。
-    #[serde(default = "default_max_steps")]
-    pub max_steps_per_turn: u32,
 }
 
 
@@ -57,10 +54,6 @@ fn default_locale() -> String {
     "zh".to_string()
 }
 
-fn default_max_steps() -> u32 {
-    100
-}
-
 fn validate_console(value: Value) -> Result<Value, String> {
     let parsed: ConsoleSettings = serde_json::from_value(value).map_err(|e| e.to_string())?;
     if !matches!(parsed.theme.as_str(), "system" | "light" | "dark") {
@@ -71,12 +64,6 @@ fn validate_console(value: Value) -> Result<Value, String> {
     }
     if !matches!(parsed.locale.as_str(), "zh" | "en") {
         return Err(format!("locale must be 'zh' or 'en'; got '{}'", parsed.locale));
-    }
-    if !(1..=500).contains(&parsed.max_steps_per_turn) {
-        return Err(format!(
-            "maxStepsPerTurn must be 1..=500; got {}",
-            parsed.max_steps_per_turn
-        ));
     }
     serde_json::to_value(parsed).map_err(|e| e.to_string())
 }
@@ -91,7 +78,6 @@ pub fn console_settings(settings: &SettingsStore) -> ConsoleSettings {
             sandbox: true,
             theme: "system".to_string(),
             locale: "zh".to_string(),
-            max_steps_per_turn: 100,
         })
 }
 
@@ -243,8 +229,12 @@ pub fn build_state(home: &Path, bound_remote: bool) -> Result<AppState, Box<dyn 
             .collect::<Vec<_>>(),
     );
     let live = Arc::new(LiveSessions::default());
-    let tools = Arc::new(dshrs_tools::default_registry());
-    let driver = Arc::new(SessionDriver::new(registry.clone(), tools));
+    let (prompt, tools) = dshrs_tools::default_shipped();
+    let driver = Arc::new(SessionDriver::new(
+        registry.clone(),
+        Arc::new(tools),
+        Arc::new(prompt),
+    ));
 
     spawn_forwarders(
         settings_events.1,
@@ -308,7 +298,7 @@ fn register_namespaces(settings: &SettingsStore) -> Result<(), Box<dyn std::erro
     settings.register(
         CONSOLE_NS,
         NamespaceSpec {
-            defaults: json!({ "sandbox": true, "theme": "system", "locale": "zh", "maxStepsPerTurn": 100 }),
+            defaults: json!({ "sandbox": true, "theme": "system", "locale": "zh" }),
             validate: validate_console,
             secrets: &[],
             applies: Applies::Live,

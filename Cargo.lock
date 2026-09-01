@@ -446,6 +446,7 @@ dependencies = [
  "dshrs-core",
  "dshrs-llm",
  "dshrs-session",
+ "dshrs-system-prompt",
  "dshrs-tools",
  "futures",
  "serde_json",
@@ -548,11 +549,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "dshrs-system-prompt"
+version = "0.1.0"
+dependencies = [
+ "dshrs-core",
+ "serde_json",
+]
+
+[[package]]
 name = "dshrs-tools"
 version = "0.1.0"
 dependencies = [
  "async-trait",
  "dshrs-core",
+ "dshrs-system-prompt",
  "serde",
  "serde_json",
  "tokio",

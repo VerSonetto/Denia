@@ -7,6 +7,8 @@
 //! authority. A turn whose appends fail mid-flight is left open; session
 //! load closes it with a synthetic aborted `turn-end`.
 
+mod runtime_context;
+
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -17,27 +19,13 @@ use dshrs_core::session::{SessionEnvelope, SessionEvent, TurnEndReason};
 use dshrs_core::stream::{ContentBlock, FinishReason, StreamChunk, TokenUsage};
 use dshrs_llm::{GenerateRequest, LlmRegistry};
 use dshrs_session::Session;
-use dshrs_tools::shell;
+use dshrs_system_prompt::{
+    AssembleContext, SystemPrompt, frame_system_prompt_for_model, render_prompt,
+};
 use dshrs_tools::{ToolContext, ToolRegistry};
 use futures::StreamExt;
+use runtime_context::RuntimeContextProjection;
 use tokio_util::sync::CancellationToken;
-
-/// 常驻系统提示;工作目录/平台/日期上下文按会话注入(抄 dsh 的 context
-/// 插件:环境事实进提示,模型不用猜)。中文优先,与控制台 zh-source 一致。
-pub fn build_system_prompt(cwd: &str) -> String {
-    let shell_note = shell::shell_system_prompt_note(&shell::shell_runtime());
-    format!(
-        "你是运行在 dsh-rs 里的编码 agent。\n\
-         工作目录:{cwd}(该目录存在,相对路径以它为根)。\n\
-         平台:{os} ({arch})。日期:{date}。\n\
-         工具:bash、read_file、write_file。{shell_note}\n\
-         规矩:不要猜文件路径;读取失败时先用 bash 列目录再重试;每步聚焦一件事;能回答时就停止调用工具。\n\
-         始终使用简体中文回复,除非用户明确要求其他语言。",
-        os = std::env::consts::OS,
-        arch = std::env::consts::ARCH,
-        date = today_string(),
-    )
-}
 
 /// 请求失败时回注给模型的纠错提示(抄 dsh inject 上下文思路):
 /// 不中断,让模型看见拒绝原因自己纠正;每轮最多 MAX_FEEDBACK 次防死循环。
@@ -51,51 +39,49 @@ fn feedback_text(failure: &LlmFailure) -> String {
     )
 }
 
-/// 公历日期 yyyy-mm-dd,不引 chrono:unix 秒 → civil 算法。
-fn today_string() -> String {
-    let secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0);
-    let days = secs.div_euclid(86_400);
-    let z = days + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z.rem_euclid(146_097);
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = doy - (153 * mp + 2) / 5 + 1;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 };
-    let y = if m <= 2 { y + 1 } else { y };
-    format!("{:04}-{:02}-{:02}", y, m, d)
-}
-
 /// Drives user turns on one session at a time.
 pub struct SessionDriver {
     registry: Arc<LlmRegistry>,
     tools: Arc<ToolRegistry>,
+    system_prompt: Arc<SystemPrompt>,
+}
+
+fn should_log_system_prompt(session: &Session, step: u32, text: &str) -> bool {
+    if step == 1 {
+        return true;
+    }
+    let events = session.events();
+    let last = events.iter().rev().find_map(|envelope| match &envelope.event {
+        SessionEvent::SystemPrompt { text: previous, .. } => Some(previous.as_str()),
+        _ => None,
+    });
+    last != Some(text)
 }
 
 impl SessionDriver {
-    pub fn new(registry: Arc<LlmRegistry>, tools: Arc<ToolRegistry>) -> Self {
-        Self { registry, tools }
+    pub fn new(
+        registry: Arc<LlmRegistry>,
+        tools: Arc<ToolRegistry>,
+        system_prompt: Arc<SystemPrompt>,
+    ) -> Self {
+        Self {
+            registry,
+            tools,
+            system_prompt,
+        }
     }
 
     /// Runs one user turn to completion and returns the reason it ended.
-    /// `max_steps` comes from the console settings (dsh-style validated
-    /// config, not a hardcoded tunable).
     pub async fn run_turn(
         &self,
         session: &Session,
         selection: &ModelSelection,
         prompt: &str,
-        max_steps: u32,
         cancel: CancellationToken,
         emit: &(dyn Fn(&SessionEnvelope) + Send + Sync),
     ) -> TurnEndReason {
         match self
-            .run_turn_inner(session, selection, prompt, max_steps, cancel, emit)
+            .run_turn_inner(session, selection, prompt, cancel, emit)
             .await
         {
             Ok(reason) => reason,
@@ -110,7 +96,6 @@ impl SessionDriver {
         session: &Session,
         selection: &ModelSelection,
         prompt: &str,
-        max_steps: u32,
         cancel: CancellationToken,
         emit: &(dyn Fn(&SessionEnvelope) + Send + Sync),
     ) -> Result<TurnEndReason, LlmFailure> {
@@ -120,26 +105,51 @@ impl SessionDriver {
 
         let mut step: u32 = 0;
         let mut feedback: u32 = 0;
+        let mut runtime_projection = RuntimeContextProjection::restore(session);
         loop {
             step += 1;
-            if step > max_steps {
-                let reason = TurnEndReason::Error {
-                    failure: LlmFailure::new(
-                        codes::STEP_LIMIT,
-                        format!("单轮超过 {} 步上限", max_steps),
-                    ),
-                };
-                append(session, emit, SessionEvent::TurnEnd { turn, reason: reason.clone() })?;
-                return Ok(reason);
-            }
             append(session, emit, SessionEvent::StepStart { turn, step })?;
+
+            let cwd = session.header().cwd.clone();
+            let assembly = self
+                .system_prompt
+                .assemble(&AssembleContext {
+                    cwd: Some(cwd.clone()),
+                    model: Some(selection.model.clone()),
+                    provider: Some(selection.provider.clone()),
+                })
+                .map_err(|error| LlmFailure::new(codes::UNKNOWN, error))?;
+
+            if let Some(snapshot) = runtime_projection.project(&assembly) {
+                append(
+                    session,
+                    emit,
+                    SessionEvent::UserMessage {
+                        text: snapshot,
+                        injected: true,
+                    },
+                )?;
+            }
+
+            let prompt_body = render_prompt(&assembly);
+            if should_log_system_prompt(session, step, &prompt_body) {
+                append(
+                    session,
+                    emit,
+                    SessionEvent::SystemPrompt {
+                        turn,
+                        step,
+                        text: prompt_body.clone(),
+                    },
+                )?;
+            }
 
             let request = GenerateRequest {
                 model: selection.model.clone(),
                 reasoning_effort: selection.reasoning_effort.clone(),
                 messages: session.derive_messages(),
-                system: Some(build_system_prompt(&session.header().cwd)),
-                tools: self.tools.schemas(),
+                system: Some(frame_system_prompt_for_model(&prompt_body)),
+                tools: assembly.tools,
                 temperature: None,
                 max_tokens: None,
                 stop: Vec::new(),
@@ -372,6 +382,27 @@ fn append(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn system_prompt_frames_runtime_authority() {
+        let (prompt, _) = dshrs_tools::default_shipped();
+        let assembly = prompt
+            .assemble(&dshrs_system_prompt::AssembleContext {
+                cwd: Some("/tmp/ws".to_string()),
+                model: Some("mock".to_string()),
+                provider: Some("mock".to_string()),
+            })
+            .unwrap();
+        let body = dshrs_system_prompt::render_prompt(&assembly);
+        assert!(!body.contains("最高优先级"));
+        assert!(body.contains("/tmp/ws"));
+
+        let model = dshrs_system_prompt::frame_system_prompt_for_model(&body);
+        assert!(model.contains("最高优先级"));
+        assert!(model.contains("再次确认"));
+        assert!(model.contains("/tmp/ws"));
+    }
+
     use async_trait::async_trait;
     use dshrs_core::stream::{BlockType, FinishReason};
     use dshrs_core::tool::ToolSchema;
@@ -535,8 +566,24 @@ mod tests {
             .unwrap();
         let mut tools = ToolRegistry::default();
         tools.register(Arc::new(EchoTool));
+        let mut prompt = SystemPrompt::new(dshrs_system_prompt::SystemPromptConfig {
+            include_runtime_context: false,
+            ..Default::default()
+        });
+        let schemas = tools.schemas();
+        prompt.tools(move |_| dshrs_system_prompt::ToolProviderResult {
+            schemas: schemas.clone(),
+            known_names: None,
+        });
+        prompt.variable("cwd", |context| context.cwd.clone()).unwrap();
+        prompt.variable("model", |context| context.model.clone()).unwrap();
+        prompt.variable("provider", |context| context.provider.clone()).unwrap();
         (
-            SessionDriver::new(registry.clone(), Arc::new(tools)),
+            SessionDriver::new(
+                registry.clone(),
+                Arc::new(tools),
+                Arc::new(prompt),
+            ),
             registry,
         )
     }
@@ -569,7 +616,7 @@ mod tests {
         let (driver, _registry) = driver(vec![MockScript::Chunks(text_script("done!"))]);
         let session = temp_session();
         let reason = driver
-            .run_turn(&session, &selection(), "hello", 25, CancellationToken::new(), &noop_emit())
+            .run_turn(&session, &selection(), "hello", CancellationToken::new(), &noop_emit())
             .await;
         assert_eq!(reason, TurnEndReason::Completed);
 
@@ -580,6 +627,7 @@ mod tests {
                 SessionEvent::UserMessage { .. } => "user",
                 SessionEvent::TurnStart { .. } => "turn-start",
                 SessionEvent::StepStart { .. } => "step-start",
+                SessionEvent::SystemPrompt { .. } => "system-prompt",
                 SessionEvent::AssistantMessage { .. } => "assistant",
                 SessionEvent::StepEnd { .. } => "step-end",
                 SessionEvent::TurnEnd { .. } => "turn-end",
@@ -589,7 +637,15 @@ mod tests {
             .collect();
         assert_eq!(
             kinds,
-            vec!["user", "turn-start", "step-start", "assistant", "step-end", "turn-end"]
+            vec![
+                "user",
+                "turn-start",
+                "step-start",
+                "system-prompt",
+                "assistant",
+                "step-end",
+                "turn-end"
+            ]
         );
         let messages = session.derive_messages();
         assert_eq!(messages.len(), 2);
@@ -601,7 +657,7 @@ mod tests {
         let (driver, _registry) = driver(vec![MockScript::Chunks(tool_script()), MockScript::Chunks(text_script("after tool"))]);
         let session = temp_session();
         let reason = driver
-            .run_turn(&session, &selection(), "use the tool", 25, CancellationToken::new(), &noop_emit())
+            .run_turn(&session, &selection(), "use the tool", CancellationToken::new(), &noop_emit())
             .await;
         assert_eq!(reason, TurnEndReason::Completed);
 
@@ -638,7 +694,7 @@ mod tests {
         let (driver, _registry) = driver(vec![MockScript::Chunks(unknown), MockScript::Chunks(text_script("ok"))]);
         let session = temp_session();
         let reason = driver
-            .run_turn(&session, &selection(), "go", 25, CancellationToken::new(), &noop_emit())
+            .run_turn(&session, &selection(), "go", CancellationToken::new(), &noop_emit())
             .await;
         assert_eq!(reason, TurnEndReason::Completed);
         let result = session.events().iter().find_map(|envelope| match &envelope.event {
@@ -688,7 +744,18 @@ mod tests {
         registry
             .register(&["mock".to_string()], Arc::new(PendingAdapter), dshrs_llm::RetryPolicy::default())
             .unwrap();
-        let driver = SessionDriver::new(registry, Arc::new(ToolRegistry::default()));
+        let mut prompt = SystemPrompt::new(dshrs_system_prompt::SystemPromptConfig {
+            include_runtime_context: false,
+            ..Default::default()
+        });
+        prompt.variable("cwd", |context| context.cwd.clone()).unwrap();
+        prompt.variable("model", |context| context.model.clone()).unwrap();
+        prompt.variable("provider", |context| context.provider.clone()).unwrap();
+        let driver = SessionDriver::new(
+            registry,
+            Arc::new(ToolRegistry::default()),
+            Arc::new(prompt),
+        );
         let session = temp_session();
         let cancel = CancellationToken::new();
         let cancel_clone = cancel.clone();
@@ -697,7 +764,7 @@ mod tests {
             cancel_clone.cancel();
         });
         let reason = driver
-            .run_turn(&session, &selection(), "go", 25, cancel, &noop_emit())
+            .run_turn(&session, &selection(), "go", cancel, &noop_emit())
             .await;
         assert_eq!(reason, TurnEndReason::Aborted);
         let has_interrupted = session.events().iter().any(|envelope| {
@@ -710,20 +777,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn step_limit_ends_turn_with_error() {
-        let scripts: Vec<Vec<StreamChunk>> = (0..5).map(|_| tool_script()).collect();
-        let (driver, _registry) = driver(scripts.into_iter().map(MockScript::Chunks).collect());
-        let session = temp_session();
-        let reason = driver
-            .run_turn(&session, &selection(), "loop", 2, CancellationToken::new(), &noop_emit())
-            .await;
-        match reason {
-            TurnEndReason::Error { failure } => assert_eq!(failure.code, codes::STEP_LIMIT),
-            other => panic!("expected step limit, got {other:?}"),
-        }
-    }
-
-    #[tokio::test]
     async fn request_failure_is_fed_back_for_self_correction() {
         let (driver, _registry) = driver(vec![
             MockScript::Fail(LlmFailure::new("INVALID_REQUEST", "bad params")),
@@ -731,7 +784,7 @@ mod tests {
         ]);
         let session = temp_session();
         let reason = driver
-            .run_turn(&session, &selection(), "go", 25, CancellationToken::new(), &noop_emit())
+            .run_turn(&session, &selection(), "go", CancellationToken::new(), &noop_emit())
             .await;
         assert_eq!(reason, TurnEndReason::Completed);
         // 纠错提示以 injected 用户消息落日志,模型看得见。

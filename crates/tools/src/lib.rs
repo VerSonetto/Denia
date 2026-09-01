@@ -7,6 +7,7 @@
 
 mod bash;
 mod files;
+pub mod prompt;
 pub mod shell;
 
 use std::path::{Component, Path, PathBuf};
@@ -18,6 +19,7 @@ use tokio_util::sync::CancellationToken;
 
 pub use bash::BashTool;
 pub use files::{ReadFileTool, WriteFileTool};
+pub use prompt::{default_shipped, register_shipped_prompt};
 
 /// Execution context handed to every tool call.
 pub struct ToolContext {
