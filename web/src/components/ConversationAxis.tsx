@@ -15,21 +15,18 @@ export function ConversationAxis({
   scrollRef: React.RefObject<HTMLDivElement | null>
 }) {
   // 只给可见(未被概览折叠)的用户消息建轴点;anchor 是事件 seq,稳定。
+  // 位置按用户消息之间的顺序均匀分布:单条居中,多条等比排开。
   const markers = useMemo(() => {
     const users = nodes.filter(
       (n): n is Extract<TranscriptNode, { kind: 'user' }> =>
         n.kind === 'user' && n.anchor !== undefined,
     )
-    const total = nodes.length
-    return users.map((node) => {
-      const index = nodes.indexOf(node)
-      return {
-        anchor: node.anchor!,
-        text: node.text,
-        // 相对位置 0..1;单条消息时居中(0.5)。
-        ratio: total > 1 ? index / (total - 1) : 0.5,
-      }
-    })
+    const count = users.length
+    return users.map((node, index) => ({
+      anchor: node.anchor!,
+      text: node.text,
+      ratio: count > 1 ? index / (count - 1) : 0.5,
+    }))
   }, [nodes])
 
   if (markers.length === 0) return null
