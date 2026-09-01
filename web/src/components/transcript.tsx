@@ -1,7 +1,9 @@
-import { memo, useEffect, useRef, useState } from 'react'
+import { memo, useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
-import { t } from '../i18n'
+import { localeRevision, t } from '../i18n'
 import { groupTranscript, type OverviewRow, type TranscriptNode } from '../fold'
+import { MarkdownText } from '../markdown/MarkdownText'
+import type { MarkdownLabels } from '../markdown/MarkdownText'
 import {
   IconChevron,
   IconRead,
@@ -93,6 +95,15 @@ function AssistantNode({
 }: {
   node: Extract<TranscriptNode, { kind: 'assistant' }>
 }) {
+  // markdown chrome 文案:locale 变化时重建(引用变化让流式渲染缓存失效);
+  // locale 稳定时保持同一引用,流式缓存在 chunk 间存活。
+  const labels = useMemo<MarkdownLabels>(
+    () => ({
+      code: { copyLabel: t('copy'), copiedLabel: t('copied') },
+      footnotes: t('footnotes'),
+    }),
+    [localeRevision()],
+  )
   const lastTextIndex = (() => {
     for (let i = node.blocks.length - 1; i >= 0; i--) {
       if (node.blocks[i].kind === 'text') return i
@@ -119,7 +130,7 @@ function AssistantNode({
             key={index}
             className={`prose${node.streaming && index === lastTextIndex ? ' streaming' : ''}`}
           >
-            {block.text}
+            <MarkdownText text={block.text} streaming={node.streaming} labels={labels} />
           </div>
         )
       })}

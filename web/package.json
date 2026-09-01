@@ -9,10 +9,25 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@shikijs/langs": "^4.4.3",
+    "katex": "^0.18.5",
+    "mdast-util-from-markdown": "^2.0.3",
+    "mdast-util-gfm": "^3.1.0",
+    "mdast-util-math": "^3.0.0",
+    "micromark-core-commonmark": "^2.0.3",
+    "micromark-extension-gfm": "^3.0.0",
+    "micromark-extension-math": "^3.1.0",
+    "micromark-util-character": "^2.1.1",
+    "micromark-util-classify-character": "^2.0.1",
+    "micromark-util-sanitize-uri": "^2.0.1",
+    "micromark-util-symbol": "^2.0.1",
+    "micromark-util-types": "^2.0.2",
     "react": "^18.3.1",
-    "react-dom": "^18.3.1"
+    "react-dom": "^18.3.1",
+    "shiki": "^4.4.3"
   },
   "devDependencies": {
+    "@types/mdast": "^4.0.4",
     "@types/react": "^18.3.20",
     "@types/react-dom": "^18.3.7",
     "@vitejs/plugin-react": "^4.4.1",

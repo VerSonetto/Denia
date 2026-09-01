@@ -644,7 +644,6 @@ button {
 .msg-assistant .prose {
   font-size: 14px;
   line-height: 1.7;
-  white-space: pre-wrap;
   word-break: break-word;
   color: var(--label-primary);
 }
@@ -1769,3 +1768,4 @@ button.btn.small {
     transition-duration: 0.01ms !important;
   }
 }
+

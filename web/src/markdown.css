@@ -1,0 +1,418 @@
+/* ---------- markdown(dsh mdast 管线渲染) ---------- */
+
+:root {
+  --md-inline-code: rgba(255, 255, 255, 0.08);
+  --md-code-banner: #20242b;
+  /* shiki css-variables 主题调色板(暗色默认) */
+  --shiki-foreground: #d4d8de;
+  --shiki-background: var(--code-block);
+  --shiki-token-constant: #5ccfe6;
+  --shiki-token-string: #7ec699;
+  --shiki-token-comment: #6d747d;
+  --shiki-token-keyword: #c792ea;
+  --shiki-token-function: #82aaff;
+  --shiki-token-number: #f78c6c;
+  --shiki-token-operator: #89ddff;
+  --shiki-token-parameter: #ffcb6b;
+  --shiki-token-regexp: #e5a53a;
+  --shiki-token-annotation: #f07178;
+  --shiki-token-entity: #f07178;
+  --shiki-token-strong: #f2f4f6;
+  --shiki-token-error: #f26d6d;
+  --shiki-token-string-expression: #7ec699;
+}
+
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme='dark']) {
+    --md-inline-code: rgba(0, 0, 0, 0.06);
+    --md-code-banner: #eceef2;
+    --shiki-foreground: #24292e;
+    --shiki-background: var(--code-block);
+    --shiki-token-constant: #0550ae;
+    --shiki-token-string: #0a3069;
+    --shiki-token-comment: #6e7781;
+    --shiki-token-keyword: #cf222e;
+    --shiki-token-function: #8250df;
+    --shiki-token-number: #0550ae;
+    --shiki-token-operator: #0550ae;
+    --shiki-token-parameter: #953800;
+    --shiki-token-regexp: #953800;
+    --shiki-token-annotation: #953800;
+    --shiki-token-entity: #8250df;
+    --shiki-token-strong: #101318;
+    --shiki-token-error: #cf222e;
+    --shiki-token-string-expression: #0a3069;
+  }
+}
+
+:root[data-theme='light'] {
+  --md-inline-code: rgba(0, 0, 0, 0.06);
+  --md-code-banner: #eceef2;
+  --shiki-foreground: #24292e;
+  --shiki-background: var(--code-block);
+  --shiki-token-constant: #0550ae;
+  --shiki-token-string: #0a3069;
+  --shiki-token-comment: #6e7781;
+  --shiki-token-keyword: #cf222e;
+  --shiki-token-function: #8250df;
+  --shiki-token-number: #0550ae;
+  --shiki-token-operator: #0550ae;
+  --shiki-token-parameter: #953800;
+  --shiki-token-regexp: #953800;
+  --shiki-token-annotation: #953800;
+  --shiki-token-entity: #8250df;
+  --shiki-token-strong: #101318;
+  --shiki-token-error: #cf222e;
+  --shiki-token-string-expression: #0a3069;
+}
+
+.markdown {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  color: var(--label-primary);
+}
+
+.markdown strong {
+  font-weight: 600;
+}
+
+.markdown h1 {
+  font-size: 24px;
+  font-weight: 600;
+  line-height: 1.35;
+  margin: 28px 0 14px;
+}
+
+.markdown h2 {
+  font-size: 20px;
+  font-weight: 600;
+  line-height: 1.35;
+  margin: 28px 0 14px;
+}
+
+.markdown h3 {
+  font-size: 17px;
+  font-weight: 600;
+  line-height: 1.4;
+  margin: 28px 0 14px;
+}
+
+.markdown h4 {
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 1.45;
+  margin: 14px 0;
+}
+
+.markdown :where(h5, h6) {
+  font-size: 14px;
+  font-weight: 600;
+  margin: 14px 0;
+}
+
+.markdown :where(h1, h2, h3, h4, h5, h6) strong {
+  font-weight: inherit;
+}
+
+.markdown p {
+  margin: 14px 0;
+}
+
+.markdown :where(h4, h5, h6) + :where(ul, ol) {
+  margin-top: 8px;
+}
+
+.markdown :where(h4, h5, h6):has(+ :where(ul, ol)) {
+  margin-bottom: 8px;
+}
+
+.markdown a {
+  color: var(--accent);
+  text-decoration: none;
+  border-radius: 2px;
+}
+
+.markdown a:hover,
+.markdown a:focus {
+  outline: none;
+  text-decoration: underline var(--accent);
+}
+
+.markdown a:focus-visible {
+  box-shadow: 0 0 0 2px var(--accent);
+}
+
+.markdown :where(ul, ol) {
+  margin: 14px 0;
+  padding-left: 18px;
+}
+
+.markdown li:not(:first-child) {
+  margin-top: 6px;
+}
+
+.markdown li > :where(ul, ol) {
+  margin-top: 4px;
+}
+
+.markdown li::marker {
+  line-height: 24px;
+  color: var(--label-secondary);
+}
+
+/* Nested ol under ul/ol: markers inside (models sometimes emit this shape). */
+.markdown :where(ul, ol) ol {
+  list-style-position: inside;
+  padding-left: 0;
+}
+
+.markdown :where(ul, ol) ol li p {
+  display: inline;
+}
+
+.markdown li > p {
+  margin: 8px 0;
+}
+
+.markdown li > *:first-child {
+  margin-top: 0;
+}
+
+.markdown li > *:last-child:not(.md-code-block) {
+  margin-bottom: 0;
+}
+
+.markdown hr {
+  display: block;
+  border: none;
+  height: 1px;
+  margin: 28px 0;
+  background: var(--border-l2);
+}
+
+.markdown blockquote {
+  border-left: 2px solid var(--label-caption);
+  margin: 14px 0 0;
+  padding-left: 14px;
+}
+
+.markdown pre {
+  margin: 14px 0;
+  font-family: var(--font-mono);
+  overflow: auto;
+}
+
+.markdown :not(pre) > code {
+  display: inline-flex;
+  align-items: center;
+  box-sizing: border-box;
+  font-family: var(--font-mono);
+  font-size: 0.875em !important;
+  background-color: var(--md-inline-code);
+  border-radius: 6px;
+  padding: 0 5px;
+}
+
+.markdown :where(h1, h2, h3, h4, h5, h6) code {
+  font: inherit;
+  font-family: var(--font-mono);
+}
+
+.markdown .katex-display {
+  max-width: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+
+.markdown input[type='checkbox'] {
+  margin: 0 8px 0 0;
+  accent-color: var(--label-secondary);
+}
+
+.markdown > *:first-child,
+.markdown p:first-child {
+  margin-top: 0 !important;
+}
+
+.markdown > *:last-child,
+.markdown p:last-child {
+  margin-bottom: 0 !important;
+}
+
+.md-image-alt {
+  color: var(--label-tertiary);
+  font-style: italic;
+}
+
+.md-image {
+  display: block;
+  width: auto;
+  max-width: 100%;
+  height: auto;
+  margin: 0;
+  border-radius: 8px;
+  background: var(--bg-base);
+  object-fit: contain;
+}
+
+/* ---------- markdown code block ---------- */
+
+.md-code-block {
+  position: relative;
+  margin: 14px 0;
+  color: var(--label-primary);
+  background: var(--code-block);
+  border-radius: 12px;
+}
+
+.md-code-block:not(:last-child) {
+  margin-bottom: 11px;
+}
+
+.md-code-banner-wrap {
+  position: sticky;
+  top: 0;
+  z-index: 6;
+  background-color: var(--bg-base);
+  border-top-left-radius: 12px;
+  border-top-right-radius: 12px;
+}
+
+.md-code-banner {
+  background: var(--md-code-banner);
+  padding: 9px 14px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  font-size: 11px;
+  line-height: 18px;
+  border-top-left-radius: 12px;
+  border-top-right-radius: 12px;
+}
+
+.md-code-infostring {
+  color: var(--label-primary);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 18px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.md-code-action {
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+}
+
+.md-code-copy {
+  background-color: rgb(255 255 255 / 0);
+  border: none;
+  padding: 0;
+  margin: 0;
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+}
+
+.md-code-block :where(pre) {
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  line-height: 1.6;
+  padding: 16px;
+  margin: 0 !important;
+  overflow-x: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
+  background: var(--code-block);
+  border-bottom-left-radius: 12px;
+  border-bottom-right-radius: 12px;
+}
+
+/* Shiki inlines its theme background var; route it to the repo token. */
+.md-code-block :where(pre.shiki) {
+  background: var(--code-block) !important;
+}
+
+.md-code-block :where(pre) code {
+  font: inherit;
+  background: none;
+  padding: 0;
+}
+
+.md-code-plain {
+  color: var(--label-primary);
+}
+
+/* ---------- markdown tables ---------- */
+
+.md-table-scroll {
+  max-width: 100%;
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+}
+
+/* Wide tables (>= 4 columns) reveal their horizontal bar on hover (or
+   keyboard focus) instead of keeping it painted; the toggle is overflow-x
+   itself — a layout change repaints reliably. */
+.md-table-wide {
+  overflow-x: hidden;
+  padding-bottom: 8px;
+}
+
+.md-table-wide:hover,
+.md-table-wide:focus-visible {
+  overflow-x: auto;
+  padding-bottom: 0;
+}
+
+.md-table-scroll:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px var(--accent);
+}
+
+.md-table-scroll table {
+  border-collapse: collapse;
+  width: max-content;
+  max-width: max-content;
+}
+
+.md-table-fill table {
+  width: 100%;
+  max-width: none;
+}
+
+.md-table-scroll th {
+  text-align: start;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--border-l3);
+  border-top: none;
+  font-size: 12.5px;
+  font-weight: 600;
+  max-width: min(30vw, 320px);
+  min-width: 100px;
+}
+
+.md-table-scroll td {
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--border-l2);
+  font-size: 13px;
+  max-width: min(30vw, 320px);
+  min-width: 100px;
+}
+
+.md-table-scroll th:first-child,
+.md-table-scroll td:first-child {
+  padding-left: 0;
+}
+
+.md-table-scroll td:last-child {
+  padding-right: 0;
+}
+
+.md-table-scroll table code {
+  font-size: 11px;
+}

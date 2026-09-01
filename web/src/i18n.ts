@@ -116,6 +116,9 @@ const zh = {
   sessionModelHint: '仅本会话生效',
   modelLockedWhileRunning: '运行中不可切换模型',
   reasoningBlock: '思考过程',
+  copy: '复制',
+  copied: '已复制',
+  footnotes: '脚注',
   interrupted: '已中断',
   toolResultLabel: '结果',
   usageLabel: '用量',
@@ -262,6 +265,9 @@ const en: typeof zh = {
   sessionModelHint: 'Applies to this session only',
   modelLockedWhileRunning: 'Model is locked while running',
   reasoningBlock: 'Reasoning',
+  copy: 'Copy',
+  copied: 'Copied',
+  footnotes: 'Footnotes',
   interrupted: 'interrupted',
   toolResultLabel: 'result',
   usageLabel: 'Usage',
@@ -301,10 +307,20 @@ const dictionaries: Record<LocaleId, typeof zh> = { zh, en }
 
 // zh 是源语言(学 dsh 的 i18n 约定);语言由设置驱动,不靠浏览器猜。
 let active: LocaleId = 'zh'
+let revision = 0
+
+/** 当前活跃语言版本:locale 变化时自增,供依赖 t() 的缓存(如 markdown chrome)失效。 */
+export function localeRevision(): number {
+  return revision
+}
 
 /** Applies the console locale; called when settings load or change. */
 export function setLocale(locale: string) {
-  active = locale === 'en' ? 'en' : 'zh'
+  const next: LocaleId = locale === 'en' ? 'en' : 'zh'
+  if (next !== active) {
+    active = next
+    revision += 1
+  }
 }
 
 /** Translates one key, interpolating `{name}` params. */
