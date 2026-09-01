@@ -667,7 +667,7 @@ button {
 
 .composer-stack.composer-hero {
   align-self: center;
-  padding-bottom: 32px;
+  /* 状态栏只随 active 渲染;hero 不预留其高度,输入框贴底与 active 一致。 */
 }
 
 .hero-ws-row {
