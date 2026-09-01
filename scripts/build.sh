@@ -3,7 +3,8 @@
 # release-build the server, and install the global `dsh-rs` command.
 #
 #   scripts/build.sh          build + install
-#   scripts/build.sh --run    build + install, then start the server
+#   scripts/build.sh --run    build + install, then start the server (foreground)
+#   scripts/build.sh --run-bg build + install, then start in background
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -33,4 +34,15 @@ log "done"
 echo "start with: dsh-rs        (console on http://127.0.0.1:3600)"
 if [[ "${1:-}" == "--run" ]]; then
   exec dsh-rs
+fi
+if [[ "${1:-}" == "--run-bg" ]]; then
+  case "${OSTYPE:-}" in
+    msys* | cygwin* | win32*)
+      powershell.exe -NoProfile -Command "Start-Process dsh-rs -WindowStyle Hidden"
+      ;;
+    *)
+      nohup dsh-rs >/dev/null 2>&1 &
+      ;;
+  esac
+  echo "server started in background — http://127.0.0.1:3600/"
 fi
