@@ -241,6 +241,7 @@ export default function SessionsPage({
     if (seat === null || scroller === null) return
     const observer = new ResizeObserver(() => {
       scroller.style.setProperty('--composer-height', `${seat.offsetHeight}px`)
+      scroller.style.setProperty('--conversation-viewport-height', `${scroller.clientHeight}px`)
       followIfPinned()
     })
     observer.observe(seat)
@@ -458,6 +459,7 @@ export default function SessionsPage({
         onScroll={handleScroll}
         data-conversation-scroll=""
       >
+        {phase === 'active' && <ConversationAxis nodes={transcriptNodes} scrollRef={scrollRef} />}
         <div className="conversation-view">
           {showTranscript && activeId ? (
             <SessionView
@@ -496,7 +498,6 @@ export default function SessionsPage({
           </div>
         </div>
       </div>
-      {phase === 'active' && <ConversationAxis nodes={transcriptNodes} scrollRef={scrollRef} />}
       {phase === 'active' && !atBottom && (
         <button
           type="button"
