@@ -100,7 +100,16 @@ export function useSessionStreams() {
           }
           openFollow(id, state)
         } catch {
-          // 会话被删/网络错误:保持关闭,下次 attach 再试。
+          // 快照失败也结束 loading,避免视图永久卡在「加载中」。
+          const emptyHeader: SessionHeader = {
+            type: 'session',
+            version: 0,
+            id,
+            created_at: 0,
+            cwd: '',
+            sandbox: false,
+          }
+          for (const listener of state.listeners) listener.onSnapshot(emptyHeader, [])
           if (state.listeners.size === 0) closeStream(id, state)
         }
       })()

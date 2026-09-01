@@ -4,6 +4,7 @@ import { localeRevision, t } from '../i18n'
 import { groupTranscript, type OverviewRow, type TranscriptNode } from '../fold'
 import { MarkdownText } from '../markdown/MarkdownText'
 import type { MarkdownLabels } from '../markdown/MarkdownText'
+import { toolCallInput, toolCallSummary } from '../toolDisplay'
 import {
   IconChevron,
   IconRead,
@@ -74,8 +75,8 @@ const NodeView = memo(function NodeView({ node }: { node: TranscriptNode }) {
   switch (node.kind) {
     case 'user':
       return (
-        <div className={`msg-user${node.injected ? ' injected' : ''}`}>
-          {node.text}
+        <div className="user-row">
+          <div className={`msg-user${node.injected ? ' injected' : ''}`}>{node.text}</div>
         </div>
       )
     case 'assistant':
@@ -216,14 +217,16 @@ function ToolRow({ node }: { node: Extract<TranscriptNode, { kind: 'tool' }> }) 
   const [open, setOpen] = useState(false)
   const running = !node.result
   const meta = toolMeta(node.name)
+  const argSummary = toolCallSummary(node.name, node.args)
   const summary = running
-    ? firstLine(node.args)
+    ? argSummary
     : node.result!.isError
       ? firstLine(node.result!.content)
-      : firstLine(node.args) || firstLine(node.result!.content)
+      : argSummary || firstLine(node.result!.content)
+  const inputBody = toolCallInput(node.name, node.args)
   return (
     <div
-      className={`disc-row${open ? ' open' : ''}${running ? ' running' : ''}`}
+      className={`disc-row tool-row${open ? ' open' : ''}${running ? ' running' : ''}`}
     >
       <button className="disc-head" onClick={() => setOpen(!open)}>
         <span className="glyph">
@@ -243,16 +246,15 @@ function ToolRow({ node }: { node: Extract<TranscriptNode, { kind: 'tool' }> }) 
         >
           {summary}
         </span>
-        <span className="chev">
-          <IconChevron size={12} />
-        </span>
       </button>
       {open && (
         <div className="disc-body">
-          <div className="code-card">
-            <div className="banner">in</div>
-            <pre>{node.args}</pre>
-          </div>
+          {inputBody && (
+            <div className="code-card">
+              <div className="banner">in</div>
+              <pre>{inputBody}</pre>
+            </div>
+          )}
           {node.result && (
             <div className="code-card">
               <div className="banner">

@@ -52,6 +52,7 @@ export default function App() {
   })
   const [sessionsLoaded, setSessionsLoaded] = useState(false)
   const [hashSettled, setHashSettled] = useState(false)
+  const hashRestoredRef = useRef(false)
   const firstRenderRef = useRef(true)
 
   // 目录流:capability 决定 native 还是 browse。
@@ -70,6 +71,20 @@ export default function App() {
     setStartedIds((previous) => (previous[id] ? previous : { ...previous, [id]: true }))
   }, [])
 
+  const applyConsoleSettings = useCallback(() => {
+    api
+      .getSettings()
+      .then((data) => {
+        const console = data.namespaces.find((ns) => ns.ns === 'console')
+        const theme = (console?.value.theme as string) ?? 'system'
+        if (theme === 'system') delete document.documentElement.dataset.theme
+        else document.documentElement.dataset.theme = theme
+        setLocale((console?.value.locale as string) ?? 'zh')
+        setCatalogTick((tick) => tick + 1)
+      })
+      .catch(() => {})
+  }, [])
+
   useEffect(() => {
     api
       .pickerCapability()
@@ -80,33 +95,74 @@ export default function App() {
   }, [])
 
   useEffect(() => {
+    applyConsoleSettings()
+  }, [applyConsoleSettings])
+
+  const sseOpenedRef = useRef(false)
+  const sseWasLostRef = useRef(false)
+
+  useEffect(() => {
     const source = new EventSource('/api/events')
     source.onopen = () => {
       setConnLost(false)
-      // 连接建立/恢复即重拉列表:自愈"后端未就绪时首拉失败"的启动竞态
-      // 与后端重启后的静默空态。
-      setReloadKey((key) => key + 1)
+      // 仅首次连接与断线重连后重拉列表,避免 onopen 抖动造成无限刷新。
+      if (!sseOpenedRef.current) {
+        sseOpenedRef.current = true
+        setReloadKey((key) => key + 1)
+      } else if (sseWasLostRef.current) {
+        sseWasLostRef.current = false
+        setReloadKey((key) => key + 1)
+      }
     }
-    source.onerror = () => setConnLost(true)
+    source.onerror = () => {
+      sseWasLostRef.current = true
+      setConnLost(true)
+    }
+    source.onmessage = (event) => {
+      try {
+        const parsed = JSON.parse(event.data) as { type?: string }
+        if (parsed.type === 'sessions-updated') setReloadKey((key) => key + 1)
+        else if (parsed.type === 'settings-updated') applyConsoleSettings()
+      } catch {
+        /* ignore malformed frame */
+      }
+    }
     return () => source.close()
-  }, [])
+  }, [applyConsoleSettings])
 
   useEffect(() => {
+    let cancelled = false
     Promise.all([api.listSessions(), api.listWorkspaces()])
       .then(([sess, ws]) => {
+        if (cancelled) return
         setSessions(sess.sessions)
         setWorkspaces(ws.workspaces)
+        setStartedIds((previous) => {
+          const next = { ...previous }
+          for (const session of sess.sessions) {
+            if (session.excerpt) next[session.id] = true
+          }
+          return next
+        })
         setSessionsLoaded(true)
       })
-      .catch(() => {})
-  }, [reloadKey])
+      .catch((error) => {
+        if (cancelled) return
+        setSessionsLoaded(true)
+        notify('err', error instanceof Error ? error.message : String(error))
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [reloadKey, notify])
 
   /* ---- A2:URL 会话状态 ---- */
 
-  // 列表加载完成后判定 URL 里的会话:存在则恢复,不存在则放弃(交给 launch
-  // 导航);判定结束前自动导航不运行,避免旧闭包覆盖恢复结果。
+  // 列表首次加载完成后判定 URL 里的会话:存在则恢复,不存在则放弃(交给 launch
+  // 导航)。只运行一次;后续 sessions-updated 重拉列表不得覆盖用户当前导航。
   useEffect(() => {
-    if (!sessionsLoaded) return
+    if (!sessionsLoaded || hashRestoredRef.current) return
+    hashRestoredRef.current = true
     if (pendingHashId !== null && sessions.some((s) => s.id === pendingHashId)) {
       setActiveId(pendingHashId)
     }
@@ -140,28 +196,13 @@ export default function App() {
     return () => window.removeEventListener('hashchange', onHashChange)
   }, [sessions])
 
-  useEffect(() => {
-    const applyConsole = () => {
-      api
-        .getSettings()
-        .then((data) => {
-          const console = data.namespaces.find((ns) => ns.ns === 'console')
-          const theme = (console?.value.theme as string) ?? 'system'
-          if (theme === 'system') delete document.documentElement.dataset.theme
-          else document.documentElement.dataset.theme = theme
-          setLocale((console?.value.locale as string) ?? 'zh')
-          // 设置页可能改过默认模型:驱动会话页重拉 catalog。
-          setCatalogTick((tick) => tick + 1)
-        })
-        .catch(() => {})
-    }
-    applyConsole()
-    const unsubscribe = api.subscribeEvents((type) => {
-      if (type === 'sessions-updated') setReloadKey((key) => key + 1)
-      else if (type === 'settings-updated') applyConsole()
-    })
-    return unsubscribe
-  }, [])
+  const sessionHasStarted = useCallback(
+    (id: string) => {
+      const session = sessions.find((s) => s.id === id)
+      return !!startedIds[id] || !!session?.excerpt
+    },
+    [sessions, startedIds],
+  )
 
   const activeSession = sessions.find((s) => s.id === activeId) ?? null
   const isBlank = (s: SessionSummary) => !s.excerpt
@@ -244,8 +285,25 @@ export default function App() {
       }
       try {
         const { session } = await api.createSession({ workspaceId: target.id })
-        setActiveId(session.id)
+        const summary: SessionSummary = {
+          id: session.id,
+          created_at: session.created_at,
+          excerpt: null,
+          cwd: session.cwd,
+          sandbox: session.sandbox,
+          cwd_alive: true,
+        }
+        setSessions((previous) => [summary, ...previous.filter((s) => s.id !== summary.id)])
+        setWorkspaces((previous) =>
+          previous.map((ws) =>
+            ws.id === target.id
+              ? { ...ws, sessionIds: [summary.id, ...ws.sessionIds.filter((id) => id !== summary.id)] }
+              : ws,
+          ),
+        )
+        setActiveId(summary.id)
         setPendingWsId(target.id)
+        setPage('sessions')
         setReloadKey((key) => key + 1)
       } catch (error) {
         notify('err', error instanceof Error ? error.message : String(error))
@@ -310,63 +368,101 @@ export default function App() {
     const ws = activeWs
     if (!ws) return null
     const { session } = await api.createSession({ workspaceId: ws.id })
-    setActiveId(session.id)
+    const summary: SessionSummary = {
+      id: session.id,
+      created_at: session.created_at,
+      excerpt: null,
+      cwd: session.cwd,
+      sandbox: session.sandbox,
+      cwd_alive: true,
+    }
+    setSessions((previous) => [summary, ...previous.filter((s) => s.id !== summary.id)])
+    setWorkspaces((previous) =>
+      previous.map((item) =>
+        item.id === ws.id
+          ? { ...item, sessionIds: [summary.id, ...item.sessionIds.filter((id) => id !== summary.id)] }
+          : item,
+      ),
+    )
+    setActiveId(summary.id)
     setReloadKey((key) => key + 1)
-    return session.id
+    return summary.id
   }, [activeId, activeWs])
 
   return (
     <div className="shell">
       <aside className="sidebar">
-        <div className="brand-row">
-          <BrandMark />
-          <div>
-            <div className="wordmark">dsh-rs</div>
-            <div className="caption">harness console</div>
-          </div>
+        <div className="sidebar-logo">
+          <BrandMark size={22} />
+          <span className="brand-text">
+            dsh<em>-rs</em>
+          </span>
         </div>
-        <nav className="nav-stack">
-          <button
-            className={`nav-row${page === 'sessions' ? ' active' : ''}`}
-            onClick={() => setPage('sessions')}
-          >
-            <IconChat size={15} />
-            {t('navSessions')}
-          </button>
-          <button
-            className={`nav-row${page === 'models' ? ' active' : ''}`}
-            onClick={() => setPage('models')}
-          >
-            <IconSliders size={15} />
-            {t('navModels')}
-          </button>
-          <button
-            className={`nav-row${page === 'settings' ? ' active' : ''}`}
-            onClick={() => setPage('settings')}
-          >
-            <IconGear size={15} />
-            {t('navSettings')}
-          </button>
-        </nav>
-        {page === 'sessions' && (
+        <button
+          type="button"
+          className="sidebar-new-btn"
+          onClick={() => void startSession()}
+        >
+          <IconPlus size={14} />
+          {t('newSession')}
+        </button>
+        <div className="sidebar-region">
+          <div className="sidebar-region-head">
+            <span className="label">{t('workspacesTitle')}</span>
+            <button
+              type="button"
+              className="icon-btn"
+              title={t('addWorkspace')}
+              onClick={openDirectoryFlow}
+            >
+              <IconPlus size={14} />
+            </button>
+          </div>
           <SidebarWorkspaces
             sessions={sessions}
             workspaces={workspaces}
             activeId={activeId}
             runningIds={runningIds}
             onOpenSession={(id, wsId) => {
+              setPage('sessions')
               setActiveId(id)
               setPendingWsId(wsId ?? null)
             }}
             onNewSession={(wsId) => void startSession(wsId)}
-            onAddWorkspace={openDirectoryFlow}
             onDeleteWorkspace={(ws) => void deleteWorkspace(ws)}
           />
-        )}
+        </div>
+        <nav className="sidebar-foot" aria-label={t('navSettings')}>
+          <button
+            type="button"
+            className={`sidebar-nav${page === 'sessions' ? ' active' : ''}`}
+            onClick={() => setPage('sessions')}
+          >
+            <IconChat size={16} />
+            <span>{t('navSessions')}</span>
+          </button>
+          <button
+            type="button"
+            className={`sidebar-nav${page === 'models' ? ' active' : ''}`}
+            onClick={() => setPage('models')}
+          >
+            <IconSliders size={16} />
+            <span>{t('navModels')}</span>
+          </button>
+          <button
+            type="button"
+            className={`sidebar-nav${page === 'settings' ? ' active' : ''}`}
+            onClick={() => setPage('settings')}
+          >
+            <IconGear size={16} />
+            <span>{t('navSettings')}</span>
+          </button>
+        </nav>
       </aside>
       <main className="main">
         <div className="page-pane" hidden={page !== 'sessions'}>
           <SessionsPage
+            key={activeId ?? 'draft'}
             activeId={activeId}
             activeSession={activeSession}
             activeWs={activeWs}
@@ -374,6 +470,7 @@ export default function App() {
             running={activeId ? !!runningIds[activeId] : false}
             attach={attach}
             locked={locked}
+            hasStarted={activeId ? sessionHasStarted(activeId) : false}
             catalogTick={catalogTick}
             notify={notify}
             onStarted={markStarted}
@@ -422,7 +519,6 @@ function SidebarWorkspaces({
   runningIds,
   onOpenSession,
   onNewSession,
-  onAddWorkspace,
   onDeleteWorkspace,
 }: {
   sessions: SessionSummary[]
@@ -431,12 +527,18 @@ function SidebarWorkspaces({
   runningIds: Record<string, boolean>
   onOpenSession: (id: string, wsId?: string) => void
   onNewSession: (wsId?: string) => void
-  onAddWorkspace: () => void
   onDeleteWorkspace: (ws: WorkspaceRecord) => void
 }) {
   const [expanded, setExpanded] = useState<Record<string, boolean>>({})
   const [showAll, setShowAll] = useState<Record<string, boolean>>({})
   const COLLAPSED_LIMIT = 5
+
+  useEffect(() => {
+    if (!activeId) return
+    const ws = workspaces.find((item) => item.sessionIds.includes(activeId))
+    if (!ws) return
+    setExpanded((previous) => (previous[ws.id] ? previous : { ...previous, [ws.id]: true }))
+  }, [activeId, workspaces])
 
   const membersOf = (ws: WorkspaceRecord) =>
     ws.sessionIds
@@ -449,12 +551,6 @@ function SidebarWorkspaces({
 
   return (
     <div className="sidebar-section">
-      <div className="section-head-row">
-        <span className="section-title">{t('workspacesTitle')}</span>
-        <button className="icon-btn" title={t('addWorkspace')} onClick={onAddWorkspace}>
-          <IconPlus size={13} />
-        </button>
-      </div>
       <div className="session-list">
         {workspaces.length === 0 && ungrouped.length === 0 && (
           <div className="empty-hint">{t('emptySessions')}</div>
@@ -575,18 +671,9 @@ function SessionRow({
           <span className="dot err" title={t('deadCwd')} />
         ) : running ? (
           <span className="dot run" />
-        ) : (
-          <IconChat size={13} />
-        )}
+        ) : null}
       </span>
-      <span className="body">
-        <span className="excerpt">
-          {session.excerpt ?? t('blankSession')}
-        </span>
-        {session.excerpt && (
-          <span className="time">{new Date(session.created_at).toLocaleString()}</span>
-        )}
-      </span>
+      <span className="excerpt">{session.excerpt ?? t('blankSession')}</span>
     </button>
   )
 }
