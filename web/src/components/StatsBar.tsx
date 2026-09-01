@@ -4,7 +4,7 @@ import type { TranscriptNode } from '../fold'
 import { cacheHitPercent, deriveStats, formatCompactDuration, formatTokens } from '../stats'
 
 /**
- * 输入框下方的会话状态栏 —— dsh-rs 自有设计:分段胶囊条。
+ * 输入框下方的会话状态栏 —— Denia 自有设计:分段胶囊条。
  * 每个统计维度一个迷你胶囊(图标+数值),横向排列;
  * 运行中时长胶囊带呼吸灯实时跳秒;token 胶囊带微缩上下文占用环。
  * 无数据的胶囊整组消失;全部无数据时不渲染。

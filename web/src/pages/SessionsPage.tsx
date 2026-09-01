@@ -9,6 +9,7 @@ import { SessionView } from '../components/SessionView'
 import { StatsBar } from '../components/StatsBar'
 import { ComposerModelMenu } from '../components/ComposerModelMenu'
 import {
+  BrandMark,
   IconChevron,
   IconFolder,
   IconPlus,
@@ -33,7 +34,8 @@ function normalizeSelection(catalog: ModelCatalog, selection: ModelSelection): M
   }
 }
 
-const LAST_MODEL_KEY = 'dsh-rs.last-model'
+const LAST_MODEL_KEY = 'denia.last-model'
+const LAST_MODEL_KEY_LEGACY = 'dsh-rs.last-model'
 const TURN_LOCK_TIMEOUT = 5000
 /** dsh ChatView FOLLOW_THRESHOLD */
 const FOLLOW_THRESHOLD = 24
@@ -123,7 +125,15 @@ export default function SessionsPage({
 
   const loadLastModel = (current: ModelCatalog): ModelSelection | null => {
     try {
-      const raw = window.localStorage.getItem(LAST_MODEL_KEY)
+      let raw = window.localStorage.getItem(LAST_MODEL_KEY)
+      if (!raw) {
+        // 改名 dsh-rs → Denia 前的旧 key:搬一次后清掉,用户选择不丢。
+        raw = window.localStorage.getItem(LAST_MODEL_KEY_LEGACY)
+        if (raw) {
+          window.localStorage.setItem(LAST_MODEL_KEY, raw)
+          window.localStorage.removeItem(LAST_MODEL_KEY_LEGACY)
+        }
+      }
       if (!raw) return null
       const parsed = JSON.parse(raw) as ModelSelection
       const group = current.groups.find((g) => g.id === parsed.provider)
@@ -455,14 +465,12 @@ export default function SessionsPage({
             />
           ) : (
             <div className="session-hero">
-              <h1>{t('heroTitle')}</h1>
-              <p>{activeWs ? t('heroSub') : t('placeholderWorkspace')}</p>
-              {!activeWs && (
-                <button type="button" className="btn secondary" onClick={onOpenPicker}>
-                  <IconFolder size={13} />
-                  {t('heroChooseWorkspace')}
-                </button>
-              )}
+              <div className="hero-headline">
+                <span className="hero-mark-hitbox">
+                  <BrandMark size={30} />
+                </span>
+                <span className="hero-headline-text">{t('heroTitle')}</span>
+              </div>
             </div>
           )}
         </div>

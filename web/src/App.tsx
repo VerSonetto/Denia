@@ -469,9 +469,7 @@ export default function App() {
       <aside className="sidebar">
         <div className="sidebar-logo">
           <BrandMark size={22} />
-          <span className="brand-text">
-            dsh<em>-rs</em>
-          </span>
+          <span className="brand-text">Denia</span>
         </div>
         <button
           type="button"

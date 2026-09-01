@@ -1,4 +1,4 @@
-/* dsh-rs — dsh 布局语义 + 自有黑白视觉体系 */
+/* Denia — dsh 布局语义 + 自有黑白视觉体系 */
 
 :root {
   --bg-base: #090909;
@@ -614,6 +614,27 @@ button {
 
 .session-layout[data-phase='hero'] .conversation-scroll {
   justify-content: center;
+  /* dsh HeroGlow:一团 #6187D8 8% 的柔光椭圆,安静垫在输入卡后面。 */
+  background:
+    radial-gradient(
+      ellipse 52% 30% at 50% 58%,
+      rgba(97, 135, 216, 0.08) 0%,
+      transparent 70%
+    );
+}
+
+/* hero 态:标题块不再撑满剩余空间,与输入框作为一个整体垂直居中。
+   视觉上输入框是重心,标题悬在它上方,整组略偏上(52% 光斑处)。 */
+.session-layout[data-phase='hero'] .conversation-view {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  padding-bottom: 20px;
+}
+
+.session-layout[data-phase='hero'] .composer-seat {
+  padding-bottom: 0;
 }
 
 .conversation-view {
@@ -674,7 +695,7 @@ button {
   padding-left: 4px;
 }
 
-/* ---- 状态栏(输入框下方,dsh-rs 自有设计:分段胶囊条) ---- */
+/* ---- 状态栏(输入框下方,Denia 自有设计:分段胶囊条) ---- */
 
 .stats-bar {
   display: flex;
@@ -722,47 +743,57 @@ button {
   font-feature-settings: 'tnum';
 }
 
+/* ---- hero(新会话欢迎屏,抄 dsh HeroShell):logo + 标题一行,别的一概不要 ---- */
+
 .session-hero {
   display: flex;
   flex-direction: column;
-  gap: 12px;
-  padding: 8px 4px 4px;
+  align-items: center;
+  padding: 8px 4px 0;
 }
 
-.session-hero h1 {
-  margin: 0;
+/* figma 34:10411:mark + title,gap 10,居中;26/32 wt500 主色,无渐变无副标题。 */
+.hero-headline {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
   font-size: 26px;
-  font-weight: 500;
-  letter-spacing: -0.03em;
   line-height: 32px;
-  max-width: 480px;
-  text-align: center;
+  font-weight: 500;
   color: var(--label-primary);
 }
 
-.session-hero p {
-  margin: 0;
-  color: var(--label-tertiary);
-  font-size: 14px;
-  line-height: 22px;
-  max-width: 520px;
-  text-align: center;
+.hero-headline-text {
+  white-space: nowrap;
 }
 
-.session-hero .btn.secondary {
-  align-self: flex-start;
-  margin-top: 4px;
+/* hover 时 mark 轻轻摆一下(dsh hero-fish-swim),reduced-motion 不播。 */
+.hero-mark-hitbox {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  justify-content: center;
+  color: var(--label-primary);
 }
 
-.session-hero {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 12px;
-  padding: 8px 4px 4px;
+@keyframes hero-mark-sway {
+  0%,
+  100% {
+    transform: translate(0, 0) rotate(0deg);
+  }
+  35% {
+    transform: translate(-1px, -1px) rotate(-5deg);
+  }
+  70% {
+    transform: translate(1px, 0) rotate(3deg);
+  }
+}
+
+@media (hover: hover) and (prefers-reduced-motion: no-preference) {
+  .hero-mark-hitbox:hover > svg {
+    animation: hero-mark-sway 0.6s var(--ease);
+    transform-origin: 50% 60%;
+  }
 }
 
 /* ---------- transcript turns (dsh MessageItem + DisclosureRow) ---------- */

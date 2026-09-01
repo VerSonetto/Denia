@@ -4,7 +4,7 @@
  */
 
 const zh = {
-  appName: 'dsh-rs 控制台',
+  appName: 'Denia 控制台',
   navSessions: '会话',
   navModels: '模型配置',
   navSettings: '设置',
@@ -53,8 +53,8 @@ const zh = {
   cwdPlaceholder: '真实目录的绝对路径(关沙箱时生效)',
   emptySessions: '还没有会话。新建一个,开始和 agent 对话。',
   emptyTranscript: '发一条消息开始这个会话。',
-  heroTitle: '和 agent 一起干活',
-  heroSub: '新建一个会话,agent 会用 bash、read_file、write_file 在工作区里完成任务,整个过程透明可见。',
+  heroTitle: 'Work with Denia',
+  heroSub: '描述目标,agent 会在工作区里用工具一步步完成,全程透明可见。',
   placeholderHero: '描述你想完成的任务…',
   thinkTitle: '思考',
   systemPromptTitle: '系统提示词',
@@ -202,7 +202,7 @@ const zh = {
 }
 
 const en: typeof zh = {
-  appName: 'dsh-rs console',
+  appName: 'Denia console',
   navSessions: 'Sessions',
   navModels: 'Models',
   navSettings: 'Settings',
@@ -251,8 +251,8 @@ const en: typeof zh = {
   cwdPlaceholder: 'Absolute path to a real directory (when sandbox is off)',
   emptySessions: 'No sessions yet. Create one and start talking to the agent.',
   emptyTranscript: 'Send a message to start this session.',
-  heroTitle: 'Work alongside your agent',
-  heroSub: 'Create a session. The agent gets bash, read_file and write_file in its workspace, and every step stays visible.',
+  heroTitle: 'Work with Denia',
+  heroSub: 'Describe the goal. The agent works through it with tools in the workspace, every step visible.',
   placeholderHero: 'Describe what you want to accomplish…',
   thinkTitle: 'Think',
   systemPromptTitle: 'System prompt',
