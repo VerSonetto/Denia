@@ -39,15 +39,8 @@ export function ConversationAxis({
     if (!scroller) return
     const target = scroller.querySelector<HTMLElement>(`[data-user-anchor="${anchor}"]`)
     if (!target) return
-    // 垂直居中:以可视消息区(扣除底部 sticky composer 遮挡)为基准换算滚动量。
-    const composerHeight = parseFloat(
-      scroller.style.getPropertyValue('--composer-height'),
-    ) || 0
-    const visibleHeight = scroller.clientHeight - composerHeight
-    const sRect = scroller.getBoundingClientRect()
-    const tRect = target.getBoundingClientRect()
-    const delta = tRect.top - sRect.top - (visibleHeight - tRect.height) / 2
-    scroller.scrollTo({ top: scroller.scrollTop + delta, behavior: 'smooth' })
+    // 垂直居中:block:'center' 让浏览器把目标对齐到滚动容器可视区中点。
+    target.scrollIntoView({ behavior: 'smooth', block: 'center' })
   }
 
   return (
