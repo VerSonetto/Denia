@@ -4,6 +4,33 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Denia</title>
+    <script>
+      // 自愈:浏览器会话恢复/bfcache 拿出旧 index.html 时,旧 hash 资产在
+      // 新服务器上已 404——主入口加载失败则带 cache-busting 重取页面,
+      // 让服务器回应当前版本的 HTML。资源错误不冒泡,必须捕获阶段监听。
+      (function () {
+        var retried = false
+        window.addEventListener(
+          'error',
+          function (event) {
+            if (retried) return
+            var el = event.target
+            if (!el || !el.tagName) return
+            var url = el.src || el.href || ''
+            if (
+              (el.tagName === 'SCRIPT' || el.tagName === 'LINK') &&
+              url.indexOf('/assets/') !== -1
+            ) {
+              retried = true
+              location.replace(
+                location.pathname + '?_r=' + Date.now() + location.hash,
+              )
+            }
+          },
+          true,
+        )
+      })()
+    </script>
   </head>
   <body>
     <div id="root"></div>
