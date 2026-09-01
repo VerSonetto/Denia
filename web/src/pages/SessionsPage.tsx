@@ -4,7 +4,9 @@ import { t } from '../i18n'
 import { sessionDisplayTitle } from '../sessionDisplay'
 import type { Notify } from '../App'
 import type { StreamListener } from '../hooks/useSessionStreams'
+import type { TranscriptNode } from '../fold'
 import { SessionView } from '../components/SessionView'
+import { StatsBar } from '../components/StatsBar'
 import { ComposerModelMenu } from '../components/ComposerModelMenu'
 import {
   IconChevron,
@@ -76,6 +78,8 @@ export default function SessionsPage({
   const [sending, setSending] = useState(false)
   const [scrollTick, setScrollTick] = useState(0)
   const [atBottom, setAtBottom] = useState(true)
+  // 当前会话的 transcript 节点,供状态栏统计。
+  const [transcriptNodes, setTranscriptNodes] = useState<TranscriptNode[]>([])
   const lockTimer = useRef<number | undefined>(undefined)
   const promptRef = useRef<HTMLTextAreaElement | null>(null)
   const scrollRef = useRef<HTMLDivElement | null>(null)
@@ -92,6 +96,7 @@ export default function SessionsPage({
   useEffect(() => {
     setPrompt('')
     setSending(false)
+    setTranscriptNodes([])
     window.clearTimeout(lockTimer.current)
     atBottomRef.current = true
     setAtBottom(true)
@@ -168,6 +173,14 @@ export default function SessionsPage({
   const phase = showTranscript ? 'active' : 'hero'
   const promptEmpty = !prompt.trim()
   const primaryStops = running && promptEmpty
+
+  // 当前选中模型的上下文窗口,供状态栏显示占用环。
+  const activeContextWindow = (() => {
+    if (!catalog || !selection) return undefined
+    const group = catalog.groups.find((g) => g.id === selection.provider)
+    const model = group?.models.find((m) => m.id === selection.model)
+    return model?.contextWindow ?? group?.models[0]?.contextWindow
+  })()
 
   const snapToBottom = useCallback(() => {
     const el = scrollRef.current
@@ -435,7 +448,10 @@ export default function SessionsPage({
               id={activeId}
               running={running}
               attach={attach}
-              onNodesChange={followIfPinned}
+              onNodesChange={(nodes) => {
+                setTranscriptNodes(nodes)
+                followIfPinned()
+              }}
             />
           ) : (
             <div className="session-hero">
@@ -454,6 +470,13 @@ export default function SessionsPage({
           <div className={`composer-stack${phase === 'hero' ? ' composer-hero' : ''}`}>
             {phase === 'hero' && workspaceRow}
             {composerCard}
+            {phase === 'active' && (
+              <StatsBar
+                nodes={transcriptNodes}
+                running={running}
+                contextWindow={activeContextWindow}
+              />
+            )}
           </div>
         </div>
       </div>

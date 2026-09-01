@@ -674,6 +674,54 @@ button {
   padding-left: 4px;
 }
 
+/* ---- 状态栏(输入框下方,dsh-rs 自有设计:分段胶囊条) ---- */
+
+.stats-bar {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  padding: 0 4px;
+}
+
+.stats-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 8px;
+  border-radius: var(--r-pill);
+  background: var(--accent-soft);
+  color: var(--label-tertiary);
+  font-size: 11px;
+  line-height: 16px;
+  white-space: nowrap;
+  cursor: default;
+  transition: background 0.15s var(--ease), color 0.15s var(--ease);
+}
+
+.stats-pill:hover {
+  background: var(--hover-fill);
+  color: var(--label-secondary);
+}
+
+.stats-pill.live {
+  color: var(--label-secondary);
+}
+
+.stats-dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: currentColor;
+  animation: pulse 1.4s var(--ease) infinite;
+}
+
+.stats-mono {
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: 'tnum';
+}
+
 .session-hero {
   display: flex;
   flex-direction: column;

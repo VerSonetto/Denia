@@ -21,6 +21,12 @@ export type TranscriptNode =
       usage?: TokenUsage
       interrupted: boolean
       streaming: boolean
+      /** step-start 事件的 epoch ms;无 step-start 时为 undefined。 */
+      stepStartTime?: number
+      /** 第一个 assistant-chunk 的 epoch ms;TTFT = firstChunkTime - stepStartTime。 */
+      firstChunkTime?: number
+      /** assistant-message settle 的 epoch ms;decodeMs = settleTime - firstChunkTime。 */
+      settleTime?: number
     }
   | {
       kind: 'tool'
@@ -109,6 +115,8 @@ export function foldEvents(events: SessionEnvelope[]): TranscriptNode[] {
   let open: Extract<TranscriptNode, { kind: 'assistant' }> | null = null
   const tools = new Map<string, Extract<TranscriptNode, { kind: 'tool' }>>()
   let turnUsage: TokenUsage | null = null
+  // step-start 时间表:turn:step → epoch ms,供 assistant 节点算 TTFT。
+  const stepStarts = new Map<string, number>()
 
   const addUsage = (usage?: TokenUsage) => {
     if (!usage) return
@@ -147,6 +155,11 @@ export function foldEvents(events: SessionEnvelope[]): TranscriptNode[] {
         closeOpen()
         nodes.push({ kind: 'system-prompt', text: event.text })
         break
+      case 'step-start':
+        stepStarts.set(`${event.turn}:${event.step}`, event.time)
+        break
+      case 'step-end':
+        break
       case 'assistant-chunk': {
         if (!open || open.turn !== event.turn || open.step !== event.step) {
           closeOpen()
@@ -157,6 +170,8 @@ export function foldEvents(events: SessionEnvelope[]): TranscriptNode[] {
             blocks: [],
             interrupted: false,
             streaming: true,
+            stepStartTime: stepStarts.get(`${event.turn}:${event.step}`),
+            firstChunkTime: event.time,
           }
           nodes.push(open)
         }
@@ -169,6 +184,7 @@ export function foldEvents(events: SessionEnvelope[]): TranscriptNode[] {
           open.blocks = blocks
           open.usage = event.usage
           open.interrupted = event.interrupted ?? false
+          open.settleTime = event.time
           closeOpen()
         } else {
           closeOpen()
@@ -180,6 +196,8 @@ export function foldEvents(events: SessionEnvelope[]): TranscriptNode[] {
             usage: event.usage,
             interrupted: event.interrupted ?? false,
             streaming: false,
+            stepStartTime: stepStarts.get(`${event.turn}:${event.step}`),
+            settleTime: event.time,
           })
         }
         addUsage(event.usage)
@@ -242,6 +260,9 @@ export function hasOpenTurn(events: SessionEnvelope[]): boolean {
   return open
 }
 
+/** 增量 fold 的 step-start 时间暂存:turn:step → epoch ms。 */
+const incrementalStepStarts = new Map<string, number>()
+
 /**
  * Incremental fold: applies one envelope to an existing node list without
  * refolding the prefix. Only the affected tail node is copied, so a live
@@ -261,6 +282,11 @@ export function applyEnvelope(
       return [...nodes, { kind: 'user', text: event.text }]
     case 'system-prompt':
       return [...nodes, { kind: 'system-prompt', text: event.text }]
+    case 'step-start':
+      incrementalStepStarts.set(`${event.turn}:${event.step}`, event.time)
+      return nodes
+    case 'step-end':
+      return nodes
     case 'assistant-chunk': {
       const last = nodes[nodes.length - 1]
       if (
@@ -278,10 +304,17 @@ export function applyEnvelope(
         blocks: [],
         interrupted: false,
         streaming: true,
+        stepStartTime: incrementalStepStarts.get(`${event.turn}:${event.step}`),
+        firstChunkTime: event.time,
       }
       return [...nodes, { ...fresh, blocks: applyChunk(fresh.blocks, event.chunk) }]
     }
     case 'assistant-message': {
+      const last = nodes[nodes.length - 1]
+      // settle 时保留流式阶段积累的时间戳。
+      const prior = last?.kind === 'assistant' && last.turn === event.turn && last.step === event.step
+        ? last
+        : undefined
       const settled: TranscriptNode = {
         kind: 'assistant',
         turn: event.turn,
@@ -290,8 +323,10 @@ export function applyEnvelope(
         usage: event.usage,
         interrupted: event.interrupted ?? false,
         streaming: false,
+        stepStartTime: prior?.stepStartTime ?? incrementalStepStarts.get(`${event.turn}:${event.step}`),
+        firstChunkTime: prior?.firstChunkTime,
+        settleTime: event.time,
       }
-      const last = nodes[nodes.length - 1]
       if (
         last?.kind === 'assistant' &&
         last.streaming &&
