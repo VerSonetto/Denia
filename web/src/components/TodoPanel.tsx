@@ -75,6 +75,9 @@ export function TodoPanel({ todos }: { todos: readonly TodoItem[] }) {
   const [collapsed, setCollapsed] = useState(true)
   if (todos.length === 0) return null
 
+  // 折叠时把正在进行的任务晾在头部,不用展开就能看到当前在做什么。
+  const active = collapsed ? todos.find((item) => item.status === 'in_progress') : undefined
+
   return (
     <section className="todo-panel" data-testid="todo-panel" aria-label={t('todoTitle')}>
       <button
@@ -85,6 +88,12 @@ export function TodoPanel({ todos }: { todos: readonly TodoItem[] }) {
       >
         <span className="todo-lead" aria-hidden><ChecklistIcon /></span>
         <span className="todo-title">{t('todoTitle')}</span>
+        {active && (
+          <span className="todo-active-now">
+            <span className="todo-glyph" aria-hidden><ProgressGlyph /></span>
+            <span className="todo-active-text">{active.content}</span>
+          </span>
+        )}
         <span className="todo-progress">{progressLabel(todos)}</span>
         <span className="todo-chevron" aria-hidden><ChevronIcon up={collapsed} /></span>
       </button>

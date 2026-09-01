@@ -2487,6 +2487,29 @@ button.btn.form-action {
   color: var(--label-primary);
 }
 
+.todo-active-now {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 13px;
+  line-height: 20px;
+  color: var(--label-secondary);
+}
+
+.todo-active-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 折叠且有进行中任务时,进度计数退居固定位(不再吃剩余空间)。 */
+.todo-active-now ~ .todo-progress {
+  flex: none;
+}
+
 .todo-progress {
   flex: 1 1 auto;
   min-width: 0;
