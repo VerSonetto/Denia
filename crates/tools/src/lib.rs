@@ -7,6 +7,7 @@
 
 mod bash;
 mod files;
+pub mod shell;
 
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;

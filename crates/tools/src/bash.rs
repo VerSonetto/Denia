@@ -6,9 +6,8 @@ use std::time::Duration;
 use async_trait::async_trait;
 use dshrs_core::tool::ToolSchema;
 use serde::Deserialize;
-use tokio::process::Command;
 
-use crate::{Tool, ToolContext, ToolOutput, parse_args_lenient, truncate};
+use crate::{Tool, ToolContext, ToolOutput, parse_args_lenient, shell, truncate};
 
 const DEFAULT_TIMEOUT_MS: u64 = 120_000;
 const MAX_TIMEOUT_MS: u64 = 600_000;
@@ -28,14 +27,19 @@ pub struct BashTool {
 
 impl BashTool {
     pub fn new() -> Self {
+        let runtime = shell::shell_runtime();
+        let command_description = shell::bash_command_param_description(&runtime);
         Self {
             schema: ToolSchema {
                 name: "bash".to_string(),
-                description: "Run one shell command in the session workspace and return its exit code, stdout, and stderr.".to_string(),
+                description: shell::bash_tool_description(&runtime),
                 parameters: serde_json::json!({
                     "type": "object",
                     "properties": {
-                        "command": { "type": "string", "description": "The shell command line." },
+                        "command": {
+                            "type": "string",
+                            "description": command_description,
+                        },
                         "timeout_ms": { "type": "integer", "minimum": 1, "maximum": MAX_TIMEOUT_MS }
                     },
                     "required": ["command"]
@@ -71,7 +75,7 @@ impl Tool for BashTool {
             args.timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS).min(MAX_TIMEOUT_MS),
         );
 
-        let mut command = shell_command(&args.command);
+        let mut command = shell::shell_command(&args.command);
         command
             .current_dir(&ctx.cwd)
             .stdin(Stdio::null())
@@ -134,18 +138,6 @@ impl Tool for BashTool {
     }
 }
 
-fn shell_command(command: &str) -> Command {
-    if cfg!(windows) {
-        let mut child = Command::new("cmd");
-        child.args(["/C", command]);
-        child
-    } else {
-        let mut child = Command::new("sh");
-        child.args(["-c", command]);
-        child
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -160,6 +152,22 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn schema_describes_host_shell() {
+        let tool = BashTool::new();
+        let schema = tool.schema();
+        assert!(schema.description.contains(std::env::consts::OS));
+        assert!(schema.description.contains(std::env::consts::ARCH));
+        let command = schema
+            .parameters
+            .get("properties")
+            .and_then(|props| props.get("command"))
+            .and_then(|field| field.get("description"))
+            .and_then(|value| value.as_str())
+            .expect("command description");
+        assert!(command.contains(std::env::consts::OS));
+    }
+
+    #[tokio::test]
     async fn echoes_and_reports_exit_code() {
         let dir = std::env::temp_dir();
         let tool = BashTool::new();
@@ -171,7 +179,7 @@ mod tests {
         assert!(ok.content.contains("hi"));
 
         let failing = if cfg!(windows) {
-            r#"{"command":"exit /b 3"}"#
+            r#"{"command":"exit 3"}"#
         } else {
             r#"{"command":"exit 3"}"#
         };

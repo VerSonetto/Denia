@@ -17,6 +17,7 @@ use dshrs_core::session::{SessionEnvelope, SessionEvent, TurnEndReason};
 use dshrs_core::stream::{ContentBlock, FinishReason, StreamChunk, TokenUsage};
 use dshrs_llm::{GenerateRequest, LlmRegistry};
 use dshrs_session::Session;
+use dshrs_tools::shell;
 use dshrs_tools::{ToolContext, ToolRegistry};
 use futures::StreamExt;
 use tokio_util::sync::CancellationToken;
@@ -24,14 +25,16 @@ use tokio_util::sync::CancellationToken;
 /// 常驻系统提示;工作目录/平台/日期上下文按会话注入(抄 dsh 的 context
 /// 插件:环境事实进提示,模型不用猜)。中文优先,与控制台 zh-source 一致。
 pub fn build_system_prompt(cwd: &str) -> String {
+    let shell_note = shell::shell_system_prompt_note(&shell::shell_runtime());
     format!(
         "你是运行在 dsh-rs 里的编码 agent。\n\
          工作目录:{cwd}(该目录存在,相对路径以它为根)。\n\
-         平台:{os}。日期:{date}。\n\
-         工具:bash、read_file、write_file。\n\
+         平台:{os} ({arch})。日期:{date}。\n\
+         工具:bash、read_file、write_file。{shell_note}\n\
          规矩:不要猜文件路径;读取失败时先用 bash 列目录再重试;每步聚焦一件事;能回答时就停止调用工具。\n\
          始终使用简体中文回复,除非用户明确要求其他语言。",
         os = std::env::consts::OS,
+        arch = std::env::consts::ARCH,
         date = today_string(),
     )
 }
