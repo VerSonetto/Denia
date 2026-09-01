@@ -1,69 +1,68 @@
-/* ---------- markdown(dsh mdast 管线渲染) ---------- */
+/* markdown — 黑白语法高亮 */
 
 :root {
   --md-inline-code: rgba(255, 255, 255, 0.08);
-  --md-code-banner: #20242b;
-  /* shiki css-variables 主题调色板(暗色默认) */
-  --shiki-foreground: #d4d8de;
+  --md-code-banner: #111111;
+  --shiki-foreground: #e5e5e5;
   --shiki-background: var(--code-block);
-  --shiki-token-constant: #5ccfe6;
-  --shiki-token-string: #7ec699;
-  --shiki-token-comment: #6d747d;
-  --shiki-token-keyword: #c792ea;
-  --shiki-token-function: #82aaff;
-  --shiki-token-number: #f78c6c;
-  --shiki-token-operator: #89ddff;
-  --shiki-token-parameter: #ffcb6b;
-  --shiki-token-regexp: #e5a53a;
-  --shiki-token-annotation: #f07178;
-  --shiki-token-entity: #f07178;
-  --shiki-token-strong: #f2f4f6;
-  --shiki-token-error: #f26d6d;
-  --shiki-token-string-expression: #7ec699;
+  --shiki-token-constant: #d4d4d4;
+  --shiki-token-string: #a3a3a3;
+  --shiki-token-comment: #525252;
+  --shiki-token-keyword: #f5f5f5;
+  --shiki-token-function: #d4d4d4;
+  --shiki-token-number: #a3a3a3;
+  --shiki-token-operator: #737373;
+  --shiki-token-parameter: #a3a3a3;
+  --shiki-token-regexp: #737373;
+  --shiki-token-annotation: #737373;
+  --shiki-token-entity: #d4d4d4;
+  --shiki-token-strong: #f5f5f5;
+  --shiki-token-error: #e5e5e5;
+  --shiki-token-string-expression: #a3a3a3;
 }
 
 @media (prefers-color-scheme: light) {
   :root:not([data-theme='dark']) {
     --md-inline-code: rgba(0, 0, 0, 0.06);
-    --md-code-banner: #eceef2;
-    --shiki-foreground: #24292e;
+    --md-code-banner: #f5f5f5;
+    --shiki-foreground: #171717;
     --shiki-background: var(--code-block);
-    --shiki-token-constant: #0550ae;
-    --shiki-token-string: #0a3069;
-    --shiki-token-comment: #6e7781;
-    --shiki-token-keyword: #cf222e;
-    --shiki-token-function: #8250df;
-    --shiki-token-number: #0550ae;
-    --shiki-token-operator: #0550ae;
-    --shiki-token-parameter: #953800;
-    --shiki-token-regexp: #953800;
-    --shiki-token-annotation: #953800;
-    --shiki-token-entity: #8250df;
-    --shiki-token-strong: #101318;
-    --shiki-token-error: #cf222e;
-    --shiki-token-string-expression: #0a3069;
+    --shiki-token-constant: #404040;
+    --shiki-token-string: #525252;
+    --shiki-token-comment: #a3a3a3;
+    --shiki-token-keyword: #0a0a0a;
+    --shiki-token-function: #404040;
+    --shiki-token-number: #525252;
+    --shiki-token-operator: #737373;
+    --shiki-token-parameter: #525252;
+    --shiki-token-regexp: #737373;
+    --shiki-token-annotation: #737373;
+    --shiki-token-entity: #404040;
+    --shiki-token-strong: #0a0a0a;
+    --shiki-token-error: #262626;
+    --shiki-token-string-expression: #525252;
   }
 }
 
 :root[data-theme='light'] {
   --md-inline-code: rgba(0, 0, 0, 0.06);
-  --md-code-banner: #eceef2;
-  --shiki-foreground: #24292e;
+  --md-code-banner: #f5f5f5;
+  --shiki-foreground: #171717;
   --shiki-background: var(--code-block);
-  --shiki-token-constant: #0550ae;
-  --shiki-token-string: #0a3069;
-  --shiki-token-comment: #6e7781;
-  --shiki-token-keyword: #cf222e;
-  --shiki-token-function: #8250df;
-  --shiki-token-number: #0550ae;
-  --shiki-token-operator: #0550ae;
-  --shiki-token-parameter: #953800;
-  --shiki-token-regexp: #953800;
-  --shiki-token-annotation: #953800;
-  --shiki-token-entity: #8250df;
-  --shiki-token-strong: #101318;
-  --shiki-token-error: #cf222e;
-  --shiki-token-string-expression: #0a3069;
+  --shiki-token-constant: #404040;
+  --shiki-token-string: #525252;
+  --shiki-token-comment: #a3a3a3;
+  --shiki-token-keyword: #0a0a0a;
+  --shiki-token-function: #404040;
+  --shiki-token-number: #525252;
+  --shiki-token-operator: #737373;
+  --shiki-token-parameter: #525252;
+  --shiki-token-regexp: #737373;
+  --shiki-token-annotation: #737373;
+  --shiki-token-entity: #404040;
+  --shiki-token-strong: #0a0a0a;
+  --shiki-token-error: #262626;
+  --shiki-token-string-expression: #525252;
 }
 
 .markdown {
@@ -127,19 +126,20 @@
 }
 
 .markdown a {
-  color: var(--accent);
-  text-decoration: none;
+  color: var(--label-primary);
+  text-decoration: underline;
+  text-decoration-color: var(--border-l3);
   border-radius: 2px;
 }
 
 .markdown a:hover,
 .markdown a:focus {
   outline: none;
-  text-decoration: underline var(--accent);
+  text-decoration-color: var(--label-primary);
 }
 
 .markdown a:focus-visible {
-  box-shadow: 0 0 0 2px var(--accent);
+  box-shadow: 0 0 0 2px var(--border-l3);
 }
 
 .markdown :where(ul, ol) {
@@ -160,7 +160,6 @@
   color: var(--label-secondary);
 }
 
-/* Nested ol under ul/ol: markers inside (models sometimes emit this shape). */
 .markdown :where(ul, ol) ol {
   list-style-position: inside;
   padding-left: 0;
@@ -255,8 +254,6 @@
   object-fit: contain;
 }
 
-/* ---------- markdown code block ---------- */
-
 .md-code-block {
   position: relative;
   margin: 14px 0;
@@ -332,7 +329,6 @@
   border-bottom-right-radius: 12px;
 }
 
-/* Shiki inlines its theme background var; route it to the repo token. */
 .md-code-block :where(pre.shiki) {
   background: var(--code-block) !important;
 }
@@ -347,17 +343,12 @@
   color: var(--label-primary);
 }
 
-/* ---------- markdown tables ---------- */
-
 .md-table-scroll {
   max-width: 100%;
   overflow-x: auto;
   overscroll-behavior-x: contain;
 }
 
-/* Wide tables (>= 4 columns) reveal their horizontal bar on hover (or
-   keyboard focus) instead of keeping it painted; the toggle is overflow-x
-   itself — a layout change repaints reliably. */
 .md-table-wide {
   overflow-x: hidden;
   padding-bottom: 8px;
@@ -371,7 +362,7 @@
 
 .md-table-scroll:focus-visible {
   outline: none;
-  box-shadow: 0 0 0 2px var(--accent);
+  box-shadow: 0 0 0 2px var(--border-l3);
 }
 
 .md-table-scroll table {

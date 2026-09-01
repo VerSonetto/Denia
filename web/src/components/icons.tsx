@@ -26,7 +26,13 @@ function Svg({
 export function IconSend(props: IconProps) {
   return (
     <Svg {...props}>
-      <path d="M2 8h9M8 4.5 11.5 8 8 11.5" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
+      <path
+        d="M8 13V3M8 3l3.5 3.5M8 3 4.5 6.5"
+        stroke="currentColor"
+        strokeWidth="1.6"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
     </Svg>
   )
 }
@@ -34,7 +40,14 @@ export function IconSend(props: IconProps) {
 export function IconStop(props: IconProps) {
   return (
     <Svg {...props}>
-      <rect x="4.5" y="4.5" width="7" height="7" rx="1.5" fill="currentColor" />
+      <rect
+        x="5"
+        y="5"
+        width="6"
+        height="6"
+        rx="1.25"
+        fill="currentColor"
+      />
     </Svg>
   )
 }
@@ -144,12 +157,21 @@ export function IconFolder(props: IconProps) {
   )
 }
 
-/** Brand mark: double chevron in a rounded tile. */
-export function BrandMark({ size = 22 }: IconProps) {
+/** 品牌标识:极简方块 + 横线,黑白体系。 */
+export function BrandMark({ size = 24 }: IconProps) {
   return (
     <svg width={size} height={size} viewBox="0 0 24 24" aria-hidden="true" style={{ flex: 'none' }}>
-      <rect x="1" y="1" width="22" height="22" rx="7" fill="var(--accent)" />
-      <path d="m7 8 4 4-4 4M12.5 8l4 4-4 4" stroke="#fff" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" fill="none" />
+      <rect
+        x="5"
+        y="5"
+        width="14"
+        height="14"
+        rx="3"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.5"
+      />
+      <path d="M8 12h8" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
     </svg>
   )
 }
