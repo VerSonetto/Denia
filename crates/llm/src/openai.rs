@@ -254,6 +254,14 @@ pub(crate) fn build_openai_body(request: &GenerateRequest) -> serde_json::Value 
         "stream": true,
         "stream_options": { "include_usage": true },
     });
+    if let Some(effort) = &request.reasoning_effort {
+        if effort == "off" {
+            body["thinking"] = serde_json::json!({ "type": "disabled" });
+        } else {
+            body["thinking"] = serde_json::json!({ "type": "enabled" });
+            body["reasoning_effort"] = serde_json::json!(effort);
+        }
+    }
     if let Some(temperature) = request.temperature {
         body["temperature"] = serde_json::json!(temperature);
     }

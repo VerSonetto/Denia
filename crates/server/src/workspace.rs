@@ -173,15 +173,13 @@ impl WorkspaceRegistry {
             .cloned()
     }
 
-    /// 删除只删注册;目录与会话日志保留,会话落到"未分组"。
-    pub fn delete(&self, id: &str) -> bool {
+    /// 删除工作区注册并返回被移除的记录。
+    pub fn take(&self, id: &str) -> Option<WorkspaceRecord> {
         let mut state = self.state.write().unwrap();
-        let removed = state.workspaces.remove(id).is_some();
+        let removed = state.workspaces.remove(id)?;
         state.order.retain(|x| x != id);
-        if removed {
-            let _ = self.save_locked(&state);
-        }
-        removed
+        let _ = self.save_locked(&state);
+        Some(removed)
     }
 
     /// 把会话 prepend 进工作区账本;调用方须保证会话头 cwd == 工作区路径

@@ -49,12 +49,36 @@ async fn delete_workspace(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, ApiError> {
-    if !state.workspaces.delete(&id) {
-        return Err(ApiError::new(
+    let record = state.workspaces.take(&id).ok_or_else(|| {
+        ApiError::new(
             axum::http::StatusCode::NOT_FOUND,
             "workspace/not-found",
             "workspace not found",
-        ));
+        )
+    })?;
+    let members = state
+        .sessions
+        .list()
+        .map_err(ApiError::from_session)?
+        .into_iter()
+        .filter(|summary| summary.cwd.as_deref() == Some(record.path.as_str()))
+        .map(|summary| summary.id)
+        .collect::<Vec<_>>();
+    for session_id in members {
+        if let Ok(live) = state.live.get_or_load(&state.sessions, &session_id) {
+            if live.running.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err(ApiError::new(
+                    axum::http::StatusCode::CONFLICT,
+                    "workspace/running-session",
+                    "cancel running sessions in this workspace before deleting it",
+                ));
+            }
+        }
+        state
+            .sessions
+            .delete(&session_id)
+            .map_err(ApiError::from_session)?;
+        state.live.remove(&session_id);
     }
     let _ = state.events.send(crate::state::ServerEvent::SessionsUpdated);
     Ok(Json(json!({ "ok": true })))

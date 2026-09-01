@@ -16,6 +16,7 @@ import {
   IconTrash,
 } from './components/icons'
 import { DirPicker } from './components/DirPicker'
+import { sessionDisplayTitle } from './sessionDisplay'
 import type { SessionSummary, WorkspaceRecord } from './types'
 
 export interface Toast {
@@ -205,7 +206,20 @@ export default function App() {
   )
 
   const activeSession = sessions.find((s) => s.id === activeId) ?? null
-  const isBlank = (s: SessionSummary) => !s.excerpt
+  const isBlank = (s: SessionSummary) =>
+    !s.excerpt && !startedIds[s.id]
+  const findWorkspaceBlank = useCallback(
+    (cwd: string): SessionSummary | undefined =>
+      sessions.find(
+        (s) => s.cwd === cwd && s.cwd_alive !== false && isBlank(s),
+      ),
+    [sessions, startedIds],
+  )
+  const focusSession = useCallback((sessionId: string, wsId: string) => {
+    setActiveId(sessionId)
+    setPendingWsId(wsId)
+    setPage('sessions')
+  }, [])
   // 首条消息后(或已有历史)会话与工作区绑定,不能换。
   const locked =
     activeSession !== null &&
@@ -244,18 +258,15 @@ export default function App() {
         setPendingWsId(ws.id)
         return
       }
-      const blank = sessions.find(
-        (s) => isBlank(s) && s.cwd === ws.path && s.cwd_alive !== false,
-      )
+      const blank = findWorkspaceBlank(ws.path)
       if (blank) {
-        setActiveId(blank.id)
-        setPendingWsId(ws.id)
+        focusSession(blank.id, ws.id)
         return
       }
       setActiveId(null)
       setPendingWsId(ws.id)
     },
-    [sessions, activeSession],
+    [sessions, activeSession, findWorkspaceBlank, focusSession],
   )
 
   // 启动自动导航:有工作区且无当前会话 → 落最近工作区(dsh watchNavigation)。
@@ -270,8 +281,7 @@ export default function App() {
     if (recent) void connectWorkspace(recent)
   }, [workspaces, activeId, hashSettled, recentWorkspace, connectWorkspace])
 
-  // 显式"新建会话":总是创建全新会话,不复用空白会话;
-  // 复用只属于自动落点/切换工作区(connectWorkspace)。
+  // 显式"新建会话":目标工作区已有空白会话则复用,否则创建。
   const startSession = useCallback(
     async (targetWsId?: string) => {
       const target =
@@ -281,6 +291,11 @@ export default function App() {
       if (!target) {
         setActiveId(null)
         setPendingWsId(null)
+        return
+      }
+      const blank = findWorkspaceBlank(target.path)
+      if (blank) {
+        focusSession(blank.id, target.id)
         return
       }
       try {
@@ -309,7 +324,7 @@ export default function App() {
         notify('err', error instanceof Error ? error.message : String(error))
       }
     },
-    [workspaces, activeSession, recentWorkspace, wsOfSession, notify],
+    [workspaces, activeSession, recentWorkspace, wsOfSession, notify, findWorkspaceBlank, focusSession],
   )
 
   // 目录流入口:capability 分流 native/browse;失败进"无法打开文件夹"。
@@ -354,19 +369,79 @@ export default function App() {
       if (!window.confirm(t('deleteWorkspaceDesc', { name: ws.title }))) return
       try {
         await api.deleteWorkspace(ws.id)
+        if (activeId && sessions.some((s) => s.id === activeId && s.cwd === ws.path)) {
+          setActiveId(null)
+          window.location.hash = ''
+        }
         setReloadKey((key) => key + 1)
+        notify('ok', t('workspaceDeleted'))
       } catch (error) {
         notify('err', error instanceof Error ? error.message : String(error))
       }
     },
-    [notify],
+    [activeId, notify, sessions],
   )
 
-  // 发送时确保会话存在:复用 active,否则在目标工作区建(dsh blank 复用)。
+  const removeSessionFromState = useCallback((sessionId: string) => {
+    setSessions((previous) => previous.filter((session) => session.id !== sessionId))
+    setWorkspaces((previous) =>
+      previous.map((workspace) => ({
+        ...workspace,
+        sessionIds: workspace.sessionIds.filter((id) => id !== sessionId),
+      })),
+    )
+    if (activeId === sessionId) {
+      setActiveId(null)
+      window.location.hash = ''
+    }
+  }, [activeId])
+
+  const deleteSession = useCallback(
+    async (session: SessionSummary) => {
+      if (!window.confirm(t('deleteSessionDesc', { title: sessionDisplayTitle(session) }))) {
+        return
+      }
+      try {
+        await api.deleteSession(session.id)
+        removeSessionFromState(session.id)
+        notify('ok', t('sessionDeleted'))
+      } catch (error) {
+        notify('err', error instanceof Error ? error.message : String(error))
+      }
+    },
+    [notify, removeSessionFromState],
+  )
+
+  const deleteUngrouped = useCallback(
+    async (items: SessionSummary[]) => {
+      if (items.length === 0) return
+      if (!window.confirm(t('deleteUngroupedDesc', { n: items.length }))) return
+      try {
+        for (const session of items) {
+          if (runningIds[session.id]) {
+            throw new Error(t('sessionRunningDelete'))
+          }
+          await api.deleteSession(session.id)
+          removeSessionFromState(session.id)
+        }
+        notify('ok', t('sessionDeleted'))
+      } catch (error) {
+        notify('err', error instanceof Error ? error.message : String(error))
+      }
+    },
+    [notify, removeSessionFromState, runningIds],
+  )
+
+  // 发送时确保会话存在:复用 active 或该工作区的空白会话,否则创建。
   const ensureSession = useCallback(async (): Promise<string | null> => {
     if (activeId) return activeId
     const ws = activeWs
     if (!ws) return null
+    const blank = findWorkspaceBlank(ws.path)
+    if (blank) {
+      setActiveId(blank.id)
+      return blank.id
+    }
     const { session } = await api.createSession({ workspaceId: ws.id })
     const summary: SessionSummary = {
       id: session.id,
@@ -387,7 +462,7 @@ export default function App() {
     setActiveId(summary.id)
     setReloadKey((key) => key + 1)
     return summary.id
-  }, [activeId, activeWs])
+  }, [activeId, activeWs, findWorkspaceBlank])
 
   return (
     <div className="shell">
@@ -430,6 +505,8 @@ export default function App() {
             }}
             onNewSession={(wsId) => void startSession(wsId)}
             onDeleteWorkspace={(ws) => void deleteWorkspace(ws)}
+            onDeleteSession={(session) => void deleteSession(session)}
+            onDeleteUngrouped={(items) => void deleteUngrouped(items)}
           />
         </div>
         <nav className="sidebar-foot" aria-label={t('navSettings')}>
@@ -520,6 +597,8 @@ function SidebarWorkspaces({
   onOpenSession,
   onNewSession,
   onDeleteWorkspace,
+  onDeleteSession,
+  onDeleteUngrouped,
 }: {
   sessions: SessionSummary[]
   workspaces: WorkspaceRecord[]
@@ -528,6 +607,8 @@ function SidebarWorkspaces({
   onOpenSession: (id: string, wsId?: string) => void
   onNewSession: (wsId?: string) => void
   onDeleteWorkspace: (ws: WorkspaceRecord) => void
+  onDeleteSession: (session: SessionSummary) => void
+  onDeleteUngrouped: (sessions: SessionSummary[]) => void
 }) {
   const [expanded, setExpanded] = useState<Record<string, boolean>>({})
   const [showAll, setShowAll] = useState<Record<string, boolean>>({})
@@ -602,6 +683,7 @@ function SidebarWorkspaces({
                       active={session.id === activeId}
                       running={!!runningIds[session.id]}
                       onOpen={() => onOpenSession(session.id, ws.id)}
+                      onDelete={() => onDeleteSession(session)}
                     />
                   ))}
                   {members.length > COLLAPSED_LIMIT && (
@@ -623,19 +705,31 @@ function SidebarWorkspaces({
         })}
         {ungrouped.length > 0 && (
           <div className="ws-group">
-            <button
-              className={`ws-group-head${ungrouped.some((s) => s.id === activeId) ? ' active' : ''}`}
-              onClick={() =>
-                setExpanded((prev) => ({ ...prev, ungrouped: !(expanded.ungrouped ?? true) }))
-              }
-            >
-              <span className={`chev${expanded.ungrouped ?? true ? ' open' : ''}`}>
-                <IconChevron size={11} />
+            <div className="ws-group-head-row">
+              <button
+                className={`ws-group-head${ungrouped.some((s) => s.id === activeId) ? ' active' : ''}`}
+                onClick={() =>
+                  setExpanded((prev) => ({ ...prev, ungrouped: !(expanded.ungrouped ?? true) }))
+                }
+              >
+                <span className={`chev${expanded.ungrouped ?? true ? ' open' : ''}`}>
+                  <IconChevron size={11} />
+                </span>
+                <IconFolder size={13} />
+                <span className="name">{t('ungrouped')}</span>
+                <span className="count">{ungrouped.length}</span>
+              </button>
+              <span className="ungrouped-actions">
+                <button
+                  type="button"
+                  className="ungrouped-clear"
+                  title={t('deleteUngroupedDesc', { n: ungrouped.length })}
+                  onClick={() => onDeleteUngrouped(ungrouped)}
+                >
+                  {t('deleteUngrouped')}
+                </button>
               </span>
-              <IconFolder size={13} />
-              <span className="name">{t('ungrouped')}</span>
-              <span className="count">{ungrouped.length}</span>
-            </button>
+            </div>
             {(expanded.ungrouped ?? true) &&
               ungrouped.map((session) => (
                 <SessionRow
@@ -644,6 +738,7 @@ function SidebarWorkspaces({
                   active={session.id === activeId}
                   running={!!runningIds[session.id]}
                   onOpen={() => onOpenSession(session.id)}
+                  onDelete={() => onDeleteSession(session)}
                 />
               ))}
           </div>
@@ -658,22 +753,40 @@ function SessionRow({
   active,
   running,
   onOpen,
+  onDelete,
 }: {
   session: SessionSummary
   active: boolean
   running: boolean
   onOpen: () => void
+  onDelete: () => void
 }) {
   return (
-    <button className={`session-row${active ? ' active' : ''}`} onClick={onOpen}>
-      <span className="lead">
-        {session.cwd_alive === false ? (
-          <span className="dot err" title={t('deadCwd')} />
-        ) : running ? (
-          <span className="dot run" />
-        ) : null}
+    <div className={`session-row-wrap${active ? ' active' : ''}`}>
+      <button type="button" className={`session-row${active ? ' active' : ''}`} onClick={onOpen}>
+        <span className="lead">
+          {session.cwd_alive === false ? (
+            <span className="dot err" title={t('deadCwd')} />
+          ) : running ? (
+            <span className="dot run" />
+          ) : null}
+        </span>
+        <span className="excerpt">{sessionDisplayTitle(session)}</span>
+      </button>
+      <span className="row-actions">
+        <button
+          type="button"
+          className="icon-btn"
+          title={t('deleteSession')}
+          disabled={running}
+          onClick={(event) => {
+            event.stopPropagation()
+            onDelete()
+          }}
+        >
+          <IconTrash size={12} />
+        </button>
       </span>
-      <span className="excerpt">{session.excerpt ?? t('blankSession')}</span>
-    </button>
+    </div>
   )
 }

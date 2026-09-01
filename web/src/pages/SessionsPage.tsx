@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type KeyboardEvent, type WheelEvent } from 'react'
 import * as api from '../api'
 import { t } from '../i18n'
+import { sessionDisplayTitle } from '../sessionDisplay'
 import type { Notify } from '../App'
 import type { StreamListener } from '../hooks/useSessionStreams'
 import { SessionView } from '../components/SessionView'
@@ -220,6 +221,7 @@ export default function SessionsPage({
         onOpenPicker()
         return
       }
+      onStarted(id)
       await api.postPrompt(id, {
         prompt: message,
         provider: selection?.provider,
@@ -227,7 +229,6 @@ export default function SessionsPage({
         reasoningEffort: selection?.reasoningEffort,
       })
       setPrompt('')
-      onStarted(id)
       setScrollTick((tick) => tick + 1)
       window.clearTimeout(lockTimer.current)
       lockTimer.current = window.setTimeout(() => setSending(false), TURN_LOCK_TIMEOUT)
@@ -399,17 +400,9 @@ export default function SessionsPage({
     <div className="session-layout" data-phase={phase}>
       {phase === 'active' && (
         <header className="session-header">
-          <div className="session-crumbs">
-            {activeWs && <span className="crumb ws">{activeWs.title}</span>}
-            {activeSession?.cwd && (
-              <>
-                <span className="crumb-sep">/</span>
-                <span className="crumb path" title={activeSession.cwd}>
-                  {activeSession.cwd}
-                </span>
-              </>
-            )}
-          </div>
+          <h1 className="session-title">
+            {activeSession ? sessionDisplayTitle(activeSession) : t('blankSession')}
+          </h1>
           {activeSession?.cwd_alive === false && (
             <span className="badge err" title={t('deadCwdHint')}>
               {t('deadCwd')}

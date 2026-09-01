@@ -112,6 +112,12 @@ impl Session {
             match serde_json::from_str::<SessionEnvelope>(line) {
                 Ok(envelope) => events.push(envelope),
                 Err(_) => {
+                    if line.trim_end().ends_with('}') {
+                        // Retired or unknown event types are skipped so older
+                        // logs keep loading.
+                        consumed += with_newline;
+                        continue;
+                    }
                     torn_at = Some(consumed);
                     break;
                 }
@@ -316,30 +322,21 @@ fn validate_id(id: &str) -> Result<&str, SessionError> {
 fn read_summary(file: &Path) -> Option<SessionSummary> {
     let mut raw = String::new();
     File::open(file).ok()?.read_to_string(&mut raw).ok()?;
-    let mut lines = raw.lines();
-    let header: SessionHeader = serde_json::from_str(lines.next()?).ok()?;
+    let lines: Vec<&str> = raw.lines().collect();
+    let header: SessionHeader = serde_json::from_str(lines.first()?).ok()?;
     let id = file
         .parent()?
         .file_name()?
         .to_string_lossy()
         .to_string();
-    let excerpt = lines.find_map(|line| {
+    let excerpt = lines.iter().find_map(|line| {
         let envelope = serde_json::from_str::<SessionEnvelope>(line).ok()?;
         match envelope.event {
-            SessionEvent::UserMessage { text, .. } => Some(text),
+            SessionEvent::UserMessage { text, injected: false, .. } => Some(text),
             _ => None,
         }
     });
-    let excerpt = excerpt.map(|text| {
-        let trimmed = text.trim();
-        let mut chars = trimmed.chars();
-        let head: String = chars.by_ref().take(80).collect();
-        if chars.next().is_some() {
-            format!("{head}…")
-        } else {
-            head
-        }
-    });
+    let excerpt = excerpt.as_ref().map(|text| excerpt_text(text, 80));
     Some(SessionSummary {
         id,
         created_at: header.created_at,
@@ -348,6 +345,17 @@ fn read_summary(file: &Path) -> Option<SessionSummary> {
         sandbox: Some(header.sandbox),
         cwd_alive: std::path::Path::new(&header.cwd).is_dir(),
     })
+}
+
+fn excerpt_text(text: &str, max_chars: usize) -> String {
+    let trimmed = text.trim();
+    let mut chars = trimmed.chars();
+    let head: String = chars.by_ref().take(max_chars).collect();
+    if chars.next().is_some() {
+        format!("{head}…")
+    } else {
+        head
+    }
 }
 
 #[cfg(test)]

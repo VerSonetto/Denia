@@ -18,7 +18,7 @@ dsh-rs 是 DeepSeek Harness(dsh)的 Rust 重写版:后端 Rust(axum + tokio),控
 ## 架构规范
 
 - **事件源**:session 是 append-only JSONL 日志,模型历史由 `derive_messages()` 派生;model-visible == logged。会话头 cwd 不可变。
-- **工作区是独立持久化域**(`workspaces.json`),不从会话派生:uuid id、规范化 path、sessionIds 账本;成员显示 = 账本 ∩(会话头 cwd == 工作区路径);创建幂等;首启 bootstrap 按会话头 cwd 自动分组;删除只删注册,会话落"未分组"。
+- **工作区是独立持久化域**(`workspaces.json`),不从会话派生:uuid id、规范化 path、sessionIds 账本;成员显示 = 账本 ∩(会话头 cwd == 工作区路径);创建幂等;首启 bootstrap 按会话头 cwd 自动分组;删除工作区会一并删除其全部会话(文件夹保留)。
 - **目录选择器是 seam**:`/api/fs/capability` 启动时一次决策(远程/SSH → browse;win/mac → native;linux 看 DISPLAY+zenity),上层代码零分支。
 - **配置驱动,无硬编码可调量**(dsh 式 validated config):`console` 命名空间管 sandbox/theme/locale/maxStepsPerTurn,校验失败在写入层拒绝。
 - **fail loud**:死目录 prompt 400、坏配置拒绝、未知事件类型拒绝;不静默跳过。
@@ -32,7 +32,7 @@ dsh-rs 是 DeepSeek Harness(dsh)的 Rust 重写版:后端 Rust(axum + tokio),控
 - 新会话页即 blank 欢迎态:品牌问候 + 居中输入卡;发出首条消息立即切 transcript,不回欢迎页。
 - **先选工作区才能发消息**:无工作区时输入栏 inert,点击弹选择器。
 - 首条消息前可切工作区,发出后锁死。
-- 侧栏工作区树:分组、默认 5 个会话 +"展开其余 n"、未分组桶、组内新建、删除带确认。
+- 侧栏工作区树:分组、默认 5 个会话 +"展开其余 n"、未分组桶(可单删/清空)、组内新建、删除带确认。
 - 轮次关闭后,到最后一条工具调用为止(含最后一条)的过程内容折叠成一行"已工作 <时长> · N 次工具调用"概览(时长:<60秒直接秒数,≥60秒为分秒,≥1小时为时分秒),点击展开;其后的回答保持可见,真实用户消息不折。运行中不设"过程"组:工具调用逐行平铺显示,过程透明可见。
 
 ## 前端规范

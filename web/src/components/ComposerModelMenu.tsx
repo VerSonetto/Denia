@@ -49,7 +49,7 @@ export function ComposerModelMenu({
   }
 
   return (
-    <div className="model-menu-anchor" ref={rootRef}>
+    <div className={`model-menu-anchor${open ? ' open' : ''}`} ref={rootRef}>
       <button
         type="button"
         className={`model-chip${open ? ' open' : ''}`}

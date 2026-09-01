@@ -591,6 +591,26 @@ mod tests {
         let body = crate::openai::build_openai_body(&without_tools);
         assert!(body.get("tools").is_none());
     }
+
+    #[test]
+    fn openai_off_effort_disables_thinking() {
+        use crate::request::GenerateRequest;
+
+        let request = GenerateRequest {
+            model: "MiniMax-M3".to_string(),
+            reasoning_effort: Some("off".to_string()),
+            messages: vec![dshrs_core::message::ChatMessage::user("title")],
+            system: Some("system".to_string()),
+            tools: Vec::new(),
+            temperature: None,
+            max_tokens: Some(64),
+            stop: Vec::new(),
+        };
+        let body = crate::openai::build_openai_body(&request);
+        assert_eq!(body["thinking"], serde_json::json!({ "type": "disabled" }));
+        assert!(body.get("reasoning_effort").is_none());
+        assert_eq!(body["max_tokens"], 64);
+    }
 }
 
 #[cfg(test)]

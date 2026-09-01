@@ -218,18 +218,19 @@ async fn prompt_session(
     let token = CancellationToken::new();
     *live.cancel.lock().await = Some(token.clone());
 
+    let followers_for_turn = live.followers.clone();
     let driver = state.driver.clone();
+    let session = live.session.clone();
+    let live = live.clone();
     tokio::spawn(async move {
-        let session = live.session.clone();
-        let followers = live.followers.clone();
-        driver
+        let _reason = driver
             .run_turn(
                 &session,
                 &selection,
                 &prompt,
                 token,
                 &move |envelope: &SessionEnvelope| {
-                    let _ = followers.send(envelope.clone());
+                    let _ = followers_for_turn.send(envelope.clone());
                 },
             )
             .await;

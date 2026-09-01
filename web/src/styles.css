@@ -355,10 +355,41 @@ button {
 .ws-group-head-row {
   display: flex;
   align-items: center;
+  gap: 2px;
+}
+
+.ws-group-head-row .ws-group-head {
+  flex: 1;
+  min-width: 0;
+  width: auto;
 }
 
 .ws-group-head-row:hover .row-actions {
   display: flex;
+}
+
+.ungrouped-actions {
+  display: flex;
+  align-items: center;
+  flex: none;
+}
+
+.ungrouped-clear {
+  height: 28px;
+  padding: 0 8px;
+  border: none;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--label-tertiary);
+  font-size: 12px;
+  font-weight: 500;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.ungrouped-clear:hover {
+  color: var(--label-primary);
+  background: var(--hover-fill);
 }
 
 .ws-group + .ws-group {
@@ -415,9 +446,27 @@ button {
   font-variant-numeric: tabular-nums;
 }
 
-.ws-group .session-row {
+.ws-group .session-row-wrap {
   margin-left: 8px;
   width: calc(100% - 8px);
+}
+
+.session-row-wrap {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+}
+
+.session-row-wrap:hover .row-actions,
+.session-row-wrap.active .row-actions {
+  display: flex;
+}
+
+.session-row-wrap .session-row {
+  flex: 1;
+  min-width: 0;
+  margin-left: 0;
+  width: auto;
 }
 
 .session-row {
@@ -504,9 +553,22 @@ button {
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 10px 20px 8px;
+  padding: 12px 20px 10px;
   border-bottom: 1px solid var(--border-l1);
   background: color-mix(in srgb, var(--bg-layer-1) 85%, transparent);
+}
+
+.session-title {
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 1.35;
+  color: var(--label-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .session-crumbs {
@@ -1136,7 +1198,7 @@ button {
   border-radius: var(--r-pill);
   background: var(--input-major);
   box-shadow: var(--shadow-lv2);
-  overflow: hidden;
+  overflow: visible;
 }
 
 .prompt-panel.pick-target {
@@ -1188,6 +1250,8 @@ button {
   padding: 2px 8px 8px;
   border-top: none;
   background: transparent;
+  position: relative;
+  z-index: 2;
 }
 
 .composer-modes {
@@ -1228,6 +1292,10 @@ button {
 
 .model-menu-anchor {
   position: relative;
+}
+
+.model-menu-anchor.open {
+  z-index: 52;
 }
 
 .model-chip {
@@ -1287,7 +1355,7 @@ button {
   position: absolute;
   bottom: calc(100% + 8px);
   left: 0;
-  z-index: 40;
+  z-index: 53;
   width: min(320px, calc(100vw - 48px));
   max-height: min(420px, 60vh);
   display: flex;
