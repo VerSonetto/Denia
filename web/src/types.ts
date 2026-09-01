@@ -20,6 +20,9 @@ export interface CatalogModel {
   id: string
   name: string
   description?: string
+  contextWindow?: number
+  inputModalities?: string[]
+  thinkingSupported?: boolean
   reasoning?: ReasoningInfo
 }
 
@@ -122,7 +125,17 @@ export interface OpenAiProfile {
   baseURL: string
   displayName?: string
   apiKeyEnv?: string
-  models: { id: string; name?: string }[]
+  models: {
+    id: string
+    name?: string
+    description?: string
+    contextWindow?: number
+    inputModalities?: string[]
+    thinkingSupported?: boolean
+    reasoningEfforts?: string[]
+  }[]
+  defaultContextWindow?: number
+  defaultMaxTokens?: number
 }
 
 /* ---- session vocabulary (snake_case mirrors the Rust serde wire) ---- */

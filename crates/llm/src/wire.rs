@@ -593,7 +593,7 @@ mod tests {
     }
 
     #[test]
-    fn openai_off_effort_disables_thinking() {
+    fn openai_off_effort_omits_reasoning_fields() {
         use crate::request::GenerateRequest;
 
         let request = GenerateRequest {
@@ -607,9 +607,28 @@ mod tests {
             stop: Vec::new(),
         };
         let body = crate::openai::build_openai_body(&request);
-        assert_eq!(body["thinking"], serde_json::json!({ "type": "disabled" }));
+        assert!(body.get("thinking").is_none());
         assert!(body.get("reasoning_effort").is_none());
         assert_eq!(body["max_tokens"], 64);
+    }
+
+    #[test]
+    fn openai_effort_sends_reasoning_effort_only() {
+        use crate::request::GenerateRequest;
+
+        let request = GenerateRequest {
+            model: "gpt-5".to_string(),
+            reasoning_effort: Some("high".to_string()),
+            messages: vec![dshrs_core::message::ChatMessage::user("hello")],
+            system: None,
+            tools: Vec::new(),
+            temperature: None,
+            max_tokens: None,
+            stop: Vec::new(),
+        };
+        let body = crate::openai::build_openai_body(&request);
+        assert!(body.get("thinking").is_none());
+        assert_eq!(body["reasoning_effort"], "high");
     }
 }
 

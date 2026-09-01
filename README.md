@@ -5,10 +5,9 @@ web console in React.
 
 ## Status
 
-- **Phase 1 — model configuration**: provider registry (DeepSeek + any
-  OpenAI-compatible gateway), layered settings with revision OCC, credential
-  chain (`env > file > .env`), model catalog, default-model selection, chat
-  smoke endpoint.
+- **Phase 1 — model configuration**: OpenAI-compatible provider registry,
+  layered settings with revision OCC, credential chain (`env > file > .env`),
+  model catalog, default-model selection, chat smoke endpoint.
 - **Phase 2 — harness core**: event-sourced sessions (JSONL, torn-tail
   repair, orphan-turn close), agent loop (turn/step, tool continuation,
   cancellation, step limit), tools (`bash`, `read_file`, `write_file`, all
@@ -22,7 +21,7 @@ crates/
   core/         shared domain types (StreamChunk, SessionEvent, derive_messages)
   settings/     namespaced YAML settings store (layered resolve, OCC, redaction)
   credentials/  credential store (env > file > .env resolution chain)
-  llm/          provider adapter registry + DeepSeek / OpenAI-compatible adapters
+  llm/          provider adapter registry + OpenAI-compatible adapters
   tools/        bash / read_file / write_file
   session/      JSONL session storage
   agent-loop/   the session driver (turn/step loop)
@@ -86,5 +85,5 @@ result get text. Register it as a provider (`llm-openai` section,
 
 State lives in `$DSH_RS_HOME` (default `~/.dsh-rs`):
 
-- `settings.yaml` — namespaced configuration (agent-default-model, llm-deepseek, llm-openai)
+- `settings.yaml` — namespaced configuration (agent-default-model, llm-openai)
 - `.credentials.yaml` — stored API keys (0600), resolved after process env

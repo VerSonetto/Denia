@@ -13,12 +13,23 @@ import {
   IconSend,
   IconStop,
 } from '../components/icons'
+import { resolveSessionReasoningEffort } from '../modelCatalog'
 import type {
   ModelCatalog,
   ModelSelection,
   SessionSummary,
   WorkspaceRecord,
 } from '../types'
+
+function normalizeSelection(catalog: ModelCatalog, selection: ModelSelection): ModelSelection {
+  const group = catalog.groups.find((entry) => entry.id === selection.provider)
+  const model = group?.models.find((entry) => entry.id === selection.model)
+  const efforts = model?.reasoning?.efforts ?? []
+  return {
+    ...selection,
+    reasoningEffort: resolveSessionReasoningEffort(efforts, selection.reasoningEffort),
+  }
+}
 
 const LAST_MODEL_KEY = 'dsh-rs.last-model'
 const TURN_LOCK_TIMEOUT = 5000
@@ -112,7 +123,7 @@ export default function SessionsPage({
       const parsed = JSON.parse(raw) as ModelSelection
       const group = current.groups.find((g) => g.id === parsed.provider)
       if (!group?.models.some((m) => m.id === parsed.model)) return null
-      return parsed
+      return normalizeSelection(current, parsed)
     } catch {
       return null
     }
@@ -120,7 +131,7 @@ export default function SessionsPage({
 
   useEffect(() => {
     if (!catalog || selection) return
-    setSelection(loadLastModel(catalog) ?? catalog.default)
+    setSelection(normalizeSelection(catalog, loadLastModel(catalog) ?? catalog.default))
   }, [catalog, selection])
 
   useEffect(() => {
@@ -128,13 +139,15 @@ export default function SessionsPage({
     const valid = catalog.groups.some(
       (g) => g.id === selection.provider && g.models.some((m) => m.id === selection.model),
     )
-    if (!valid) setSelection(loadLastModel(catalog) ?? catalog.default)
+    if (!valid) setSelection(normalizeSelection(catalog, loadLastModel(catalog) ?? catalog.default))
   }, [catalog, selection])
 
   const applySelection = (next: ModelSelection) => {
-    setSelection(next)
+    if (!catalog) return
+    const normalized = normalizeSelection(catalog, next)
+    setSelection(normalized)
     try {
-      window.localStorage.setItem(LAST_MODEL_KEY, JSON.stringify(next))
+      window.localStorage.setItem(LAST_MODEL_KEY, JSON.stringify(normalized))
     } catch {
       /* storage unavailable */
     }

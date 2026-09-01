@@ -74,6 +74,12 @@ pub struct CatalogModel {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_window: Option<u64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub input_modalities: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking_supported: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning: Option<ReasoningInfo>,
 }
 
@@ -92,6 +98,19 @@ pub struct ModelCatalogFailure {
     pub id: String,
     pub name: String,
     pub message: String,
+}
+
+/// Picks the highest-ranked effort id present in `efforts` using `known_order`.
+pub fn highest_reasoning_effort<'a>(
+    efforts: impl IntoIterator<Item = &'a str>,
+    known_order: &[&str],
+) -> Option<String> {
+    let available: std::collections::HashSet<&str> = efforts.into_iter().collect();
+    known_order
+        .iter()
+        .rev()
+        .find(|id| available.contains(*id))
+        .map(|id| (*id).to_string())
 }
 
 /// The console's whole-model view: default selection, routable providers,
@@ -135,15 +154,22 @@ pub async fn build_model_catalog(
                 }
                 let mut catalog_models = Vec::new();
                 for model in models {
-                    let reasoning = match adapter.resolve_model(&provider.id, &model.id).await {
-                        Ok(resolved) => resolved.reasoning,
-                        Err(_) => None,
+                    let resolved = match adapter.resolve_model(&provider.id, &model.id).await {
+                        Ok(resolved) => resolved,
+                        Err(_) => continue,
                     };
+                    let thinking_supported = resolved
+                        .reasoning
+                        .as_ref()
+                        .map(|info| !info.efforts.is_empty());
                     catalog_models.push(CatalogModel {
                         id: model.id,
-                        name: model.name,
-                        description: model.description,
-                        reasoning,
+                        name: resolved.info.name,
+                        description: resolved.info.description,
+                        context_window: resolved.context_window,
+                        input_modalities: resolved.info.input_modalities,
+                        thinking_supported,
+                        reasoning: resolved.reasoning,
                     });
                 }
                 groups.push(ModelProviderGroup {

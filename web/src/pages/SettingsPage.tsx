@@ -3,7 +3,18 @@ import * as api from '../api'
 import { t } from '../i18n'
 import type { Notify } from '../App'
 import { ModelPicker } from '../components/ModelPicker'
+import { SegmentControl, Toggle } from '../components/ui/controls'
+import { resolveSessionReasoningEffort } from '../modelCatalog'
 import type { ModelCatalog, ModelSelection } from '../types'
+
+function normalizeModelDraft(catalog: ModelCatalog, draft: ModelSelection): ModelSelection {
+  const group = catalog.groups.find((entry) => entry.id === draft.provider)
+  const model = group?.models.find((entry) => entry.id === draft.model)
+  return {
+    ...draft,
+    reasoningEffort: resolveSessionReasoningEffort(model?.reasoning?.efforts ?? [], draft.reasoningEffort),
+  }
+}
 
 type Category = 'general' | 'security' | 'appearance'
 
@@ -40,14 +51,16 @@ export default function SettingsPage({ notify }: { notify: Notify }) {
       }
       const model = nextDescribe.namespaces.find((n) => n.ns === MODEL_NS)
       if (model) {
-        setModelDraft({
-          provider: (model.value.provider as string) ?? nextCatalog.default.provider,
-          model: (model.value.model as string) ?? nextCatalog.default.model,
-          reasoningEffort: (model.value.reasoningEffort as string) ?? undefined,
-        })
+        setModelDraft(
+          normalizeModelDraft(nextCatalog, {
+            provider: (model.value.provider as string) ?? nextCatalog.default.provider,
+            model: (model.value.model as string) ?? nextCatalog.default.model,
+            reasoningEffort: (model.value.reasoningEffort as string) ?? undefined,
+          }),
+        )
         setModelRevision(model.revision)
       } else {
-        setModelDraft(nextCatalog.default)
+        setModelDraft(normalizeModelDraft(nextCatalog, nextCatalog.default))
       }
     } catch (error) {
       notify('err', error instanceof Error ? error.message : String(error))
@@ -140,14 +153,11 @@ export default function SettingsPage({ notify }: { notify: Notify }) {
               <h2>{t('catSecurity')}</h2>
               <p className="hint">{t('sandboxDesc')}</p>
               <div className="row">
-                <label className="check-row">
-                  <input
-                    type="checkbox"
-                    checked={sandbox}
-                    onChange={(event) => setSandbox(event.target.checked)}
-                  />
-                  {t('sandboxLabel')}
-                </label>
+                <Toggle
+                  checked={sandbox}
+                  label={t('sandboxLabel')}
+                  onChange={setSandbox}
+                />
                 <button className="btn" disabled={saving} onClick={() => void saveConsole()}>
                   {t('save')}
                 </button>
@@ -157,30 +167,29 @@ export default function SettingsPage({ notify }: { notify: Notify }) {
           {category === 'appearance' && (
             <section className="card">
               <h2>{t('catAppearance')}</h2>
-              <p className="hint">{t('themeLabel')}</p>
-              <div className="row">
+              <div className="row" style={{ alignItems: 'flex-end' }}>
                 <div className="field narrow">
                   <label>{t('themeLabel')}</label>
-                  <select
-                    className="plain"
+                  <SegmentControl
                     value={theme}
-                    onChange={(event) => setTheme(event.target.value)}
-                  >
-                    <option value="system">{t('themeSystem')}</option>
-                    <option value="light">{t('themeLight')}</option>
-                    <option value="dark">{t('themeDark')}</option>
-                  </select>
+                    options={[
+                      { id: 'system', label: t('themeSystem') },
+                      { id: 'light', label: t('themeLight') },
+                      { id: 'dark', label: t('themeDark') },
+                    ]}
+                    onChange={setTheme}
+                  />
                 </div>
                 <div className="field narrow">
                   <label>{t('languageLabel')}</label>
-                  <select
-                    className="plain"
+                  <SegmentControl
                     value={locale}
-                    onChange={(event) => setLocaleState(event.target.value)}
-                  >
-                    <option value="zh">中文</option>
-                    <option value="en">English</option>
-                  </select>
+                    options={[
+                      { id: 'zh', label: '中文' },
+                      { id: 'en', label: 'English' },
+                    ]}
+                    onChange={setLocaleState}
+                  />
                 </div>
                 <button className="btn" disabled={saving} onClick={() => void saveConsole()}>
                   {t('save')}

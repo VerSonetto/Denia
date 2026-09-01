@@ -12,7 +12,7 @@ use dshrs_credentials::CredentialStore;
 use dshrs_settings::SettingsStore;
 use serde::{Deserialize, Serialize};
 
-use crate::catalog::{LlmModelInfo, LlmResolvedModelInfo, ProviderInfo, ReasoningEffortInfo, ReasoningInfo};
+use crate::catalog::{highest_reasoning_effort, LlmModelInfo, LlmResolvedModelInfo, ProviderInfo, ReasoningEffortInfo, ReasoningInfo};
 use crate::http::http_error_failure;
 use crate::request::GenerateRequest;
 use crate::sse::sse_chunk_stream;
@@ -60,14 +60,16 @@ pub enum ThinkingMode {
     Disabled,
 }
 
-/// The four DeepSeek reasoning effort levels.
+/// The five reasoning effort levels.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ReasoningEffort {
     Off,
     Low,
+    Medium,
     #[default]
     High,
+    XHigh,
     Max,
 }
 
@@ -77,7 +79,9 @@ impl ReasoningEffort {
         match self {
             ReasoningEffort::Off => "off",
             ReasoningEffort::Low => "low",
+            ReasoningEffort::Medium => "medium",
             ReasoningEffort::High => "high",
+            ReasoningEffort::XHigh => "xhigh",
             ReasoningEffort::Max => "max",
         }
     }
@@ -87,7 +91,9 @@ impl ReasoningEffort {
         match id {
             "off" => Some(Self::Off),
             "low" => Some(Self::Low),
+            "medium" => Some(Self::Medium),
             "high" => Some(Self::High),
+            "xhigh" => Some(Self::XHigh),
             "max" => Some(Self::Max),
             _ => None,
         }
@@ -113,6 +119,12 @@ pub struct DeepSeekCatalogModel {
     pub max_tokens: Option<u64>,
     #[serde(default)]
     pub input_modalities: Option<Vec<String>>,
+    /// When false, only the `off` effort is advertised for this model.
+    #[serde(default)]
+    pub thinking_supported: Option<bool>,
+    /// Subset of off/low/medium/high/xhigh/max; absent inherits deployment efforts.
+    #[serde(default)]
+    pub reasoning_efforts: Option<Vec<String>>,
 }
 
 fn default_catalog() -> Vec<DeepSeekCatalogModel> {
@@ -120,26 +132,39 @@ fn default_catalog() -> Vec<DeepSeekCatalogModel> {
         DeepSeekCatalogModel {
             id: "deepseek-v4-flash".to_string(),
             name: Some("DeepSeek V4 Flash".to_string()),
-            description: Some("Fast general-purpose model".to_string()),
+            description: Some("快速通用模型".to_string()),
             context_window: None,
             max_tokens: None,
             input_modalities: Some(vec!["text".to_string()]),
+            thinking_supported: Some(true),
+            reasoning_efforts: Some(vec!["off".to_string()]),
         },
         DeepSeekCatalogModel {
             id: "deepseek-v4-pro".to_string(),
             name: Some("DeepSeek V4 Pro".to_string()),
-            description: Some("High-capability reasoning model".to_string()),
+            description: Some("高能力推理模型".to_string()),
             context_window: None,
             max_tokens: None,
             input_modalities: Some(vec!["text".to_string()]),
+            thinking_supported: Some(true),
+            reasoning_efforts: Some(vec![
+                "off".to_string(),
+                "low".to_string(),
+                "medium".to_string(),
+                "high".to_string(),
+                "xhigh".to_string(),
+                "max".to_string(),
+            ]),
         },
         DeepSeekCatalogModel {
             id: "deepseek-v4-flash-vision-exp".to_string(),
-            name: Some("DeepSeek V4 Flash Vision (experimental)".to_string()),
-            description: Some("Text + image input".to_string()),
+            name: Some("DeepSeek V4 Flash Vision (实验)".to_string()),
+            description: Some("文本 + 图像输入".to_string()),
             context_window: None,
             max_tokens: None,
             input_modalities: Some(vec!["text".to_string(), "image".to_string()]),
+            thinking_supported: Some(false),
+            reasoning_efforts: None,
         },
     ]
 }
@@ -147,7 +172,9 @@ fn default_catalog() -> Vec<DeepSeekCatalogModel> {
 const KNOWN_EFFORTS: &[(&str, &str)] = &[
     ("off", "Off"),
     ("low", "Low"),
+    ("medium", "Medium"),
     ("high", "High"),
+    ("xhigh", "XHigh"),
     ("max", "Max"),
 ];
 
@@ -249,6 +276,13 @@ impl DeepSeekAdapter {
     }
 
     fn reasoning_info(section: &DeepSeekSection) -> ReasoningInfo {
+        Self::reasoning_info_for_efforts(
+            section,
+            KNOWN_EFFORTS.iter().map(|(id, _)| id.to_string()).collect(),
+        )
+    }
+
+    fn reasoning_info_for_efforts(section: &DeepSeekSection, effort_ids: Vec<String>) -> ReasoningInfo {
         if section.thinking == ThinkingMode::Disabled {
             return ReasoningInfo {
                 efforts: vec![ReasoningEffortInfo {
@@ -259,17 +293,60 @@ impl DeepSeekAdapter {
                 default_effort: Some("off".to_string()),
             };
         }
+        let efforts: Vec<ReasoningEffortInfo> = effort_ids
+            .iter()
+            .filter_map(|id| {
+                KNOWN_EFFORTS
+                    .iter()
+                    .find(|(known_id, _)| known_id == id)
+                    .map(|(_, name)| ReasoningEffortInfo {
+                        id: id.clone(),
+                        name: name.to_string(),
+                        description: None,
+                    })
+            })
+            .collect();
+        let default_effort = if efforts.iter().any(|effort| effort.id == section.reasoning_effort.as_id()) {
+            Some(section.reasoning_effort.as_id().to_string())
+        } else {
+            let known_order: Vec<&str> = KNOWN_EFFORTS.iter().map(|(id, _)| *id).collect();
+            highest_reasoning_effort(efforts.iter().map(|effort| effort.id.as_str()), &known_order)
+                .or_else(|| efforts.first().map(|effort| effort.id.clone()))
+        };
         ReasoningInfo {
-            efforts: KNOWN_EFFORTS
-                .iter()
-                .map(|(id, name)| ReasoningEffortInfo {
-                    id: id.to_string(),
-                    name: name.to_string(),
-                    description: None,
-                })
-                .collect(),
-            default_effort: Some(section.reasoning_effort.as_id().to_string()),
+            efforts,
+            default_effort,
         }
+    }
+
+    fn model_reasoning_info(
+        section: &DeepSeekSection,
+        model: Option<&DeepSeekCatalogModel>,
+    ) -> ReasoningInfo {
+        if model.and_then(|entry| entry.thinking_supported) == Some(false) {
+            return ReasoningInfo {
+                efforts: vec![ReasoningEffortInfo {
+                    id: "off".to_string(),
+                    name: "Off".to_string(),
+                    description: None,
+                }],
+                default_effort: Some("off".to_string()),
+            };
+        }
+        if section.thinking == ThinkingMode::Disabled {
+            return ReasoningInfo {
+                efforts: vec![ReasoningEffortInfo {
+                    id: "off".to_string(),
+                    name: "Off".to_string(),
+                    description: None,
+                }],
+                default_effort: Some("off".to_string()),
+            };
+        }
+        if let Some(efforts) = model.and_then(|entry| entry.reasoning_efforts.as_ref()) {
+            return Self::reasoning_info_for_efforts(section, efforts.clone());
+        }
+        Self::reasoning_info(section)
     }
 }
 
@@ -310,13 +387,14 @@ impl LlmAdapter for DeepSeekAdapter {
             .unwrap_or(DEFAULT_CONTEXT_WINDOW);
         let max_tokens_default = section.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS);
         let found = Self::catalog(&section).into_iter().find(|m| m.id == model);
-        let (name, description, modalities, context_window, max_tokens) = match found {
+        let (name, description, modalities, context_window, max_tokens, reasoning) = match &found {
             Some(model) => (
-                model.name.unwrap_or_else(|| model.id.clone()),
-                model.description,
-                model.input_modalities.unwrap_or_else(|| vec!["text".to_string()]),
+                model.name.clone().unwrap_or_else(|| model.id.clone()),
+                model.description.clone(),
+                model.input_modalities.clone().unwrap_or_else(|| vec!["text".to_string()]),
                 model.context_window.unwrap_or(context_window_default),
                 model.max_tokens.unwrap_or(max_tokens_default),
+                Some(Self::model_reasoning_info(&section, Some(model))),
             ),
             // The catalog is advisory: unknown models pass as text-only.
             None => (
@@ -325,6 +403,7 @@ impl LlmAdapter for DeepSeekAdapter {
                 vec!["text".to_string()],
                 context_window_default,
                 max_tokens_default,
+                Some(Self::model_reasoning_info(&section, None)),
             ),
         };
         Ok(LlmResolvedModelInfo {
@@ -337,7 +416,7 @@ impl LlmAdapter for DeepSeekAdapter {
             },
             context_window: Some(context_window),
             default_max_tokens: Some(max_tokens),
-            reasoning: Some(Self::reasoning_info(&section)),
+            reasoning,
         })
     }
 

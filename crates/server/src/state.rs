@@ -9,11 +9,7 @@ use std::sync::atomic::AtomicBool;
 use dshrs_agent_loop::SessionDriver;
 use dshrs_core::config::ModelSelection;
 use dshrs_credentials::{CredentialEvent, CredentialStore};
-use dshrs_llm::{
-    DEEPSEEK_PROVIDER, DEEPSEEK_SETTINGS_NS, DeepSeekAdapter, DeepSeekSection, LlmRegistry,
-    OPENAI_SETTINGS_NS, OpenAiCompatAdapter, OpenAiSection, ReasoningEffort, RetryPolicy,
-    ThinkingMode,
-};
+use dshrs_llm::{RetryPolicy, OPENAI_SETTINGS_NS, OpenAiCompatAdapter, OpenAiSection, LlmRegistry};
 use dshrs_session::{Session, SessionError, SessionStore};
 use dshrs_settings::{Applies, NamespaceSpec, SettingsEvent, SettingsStore};
 use serde::{Deserialize, Serialize};
@@ -193,17 +189,6 @@ pub fn build_state(home: &Path, bound_remote: bool) -> Result<AppState, Box<dyn 
 
     register_namespaces(&settings)?;
 
-    // DeepSeek route is always live.
-    let deepseek = Arc::new(DeepSeekAdapter::new(
-        settings.clone(),
-        credentials.clone(),
-    ));
-    registry.register(
-        &[DEEPSEEK_PROVIDER.to_string()],
-        deepseek.clone(),
-        RetryPolicy::default(),
-    )?;
-
     // OpenAI-compatible routes follow their settings section.
     let openai = Arc::new(OpenAiCompatAdapter::new(
         settings.clone(),
@@ -273,27 +258,9 @@ fn register_namespaces(settings: &SettingsStore) -> Result<(), Box<dyn std::erro
             applies: Applies::Live,
         },
         json!({
-            "provider": DEEPSEEK_PROVIDER,
-            "model": "deepseek-v4-flash",
+            "provider": "",
+            "model": "",
         }),
-    )?;
-    settings.register(
-        DEEPSEEK_SETTINGS_NS,
-        NamespaceSpec {
-            defaults: serde_json::to_value(DeepSeekSection {
-                api_key_env: "DEEPSEEK_API_KEY".to_string(),
-                base_url: None,
-                thinking: ThinkingMode::Enabled,
-                reasoning_effort: ReasoningEffort::High,
-                max_tokens: Some(256_000),
-                default_context_window: Some(1_000_000),
-                models: None,
-            })?,
-            validate: validate_with::<DeepSeekSection>,
-            secrets: &[],
-            applies: Applies::Live,
-        },
-        json!({}),
     )?;
     settings.register(
         CONSOLE_NS,
@@ -327,8 +294,8 @@ pub fn current_default_selection(settings: &SettingsStore) -> ModelSelection {
     match selection {
         Some(selection) => selection.into(),
         None => ModelSelection {
-            provider: DEEPSEEK_PROVIDER.to_string(),
-            model: "deepseek-v4-flash".to_string(),
+            provider: String::new(),
+            model: String::new(),
             reasoning_effort: None,
         },
     }
@@ -368,8 +335,6 @@ fn spawn_forwarders(
                         if before != after {
                             let _ = events.send(ServerEvent::LlmUpdated);
                         }
-                    } else if ns == DEEPSEEK_SETTINGS_NS {
-                        let _ = events.send(ServerEvent::LlmUpdated);
                     }
                 }
                 Ok(SettingsEvent::Updated { .. }) => {}

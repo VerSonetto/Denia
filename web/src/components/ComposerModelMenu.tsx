@@ -1,4 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
+import { resolveSessionReasoningEffort } from '../modelCatalog'
+import { reasoningEffortLabel } from '../reasoningEffort'
 import { t } from '../i18n'
 import type { ModelCatalog, ModelSelection } from '../types'
 import { IconChevron } from './icons'
@@ -23,8 +25,8 @@ export function ComposerModelMenu({
   const group = catalog.groups.find((g) => g.id === selection.provider)
   const model = group?.models.find((m) => m.id === selection.model)
   const efforts = model?.reasoning?.efforts ?? []
-  const effortName =
-    efforts.find((e) => e.id === selection.reasoningEffort)?.name ?? t('providerDefault')
+  const activeEffort = resolveSessionReasoningEffort(efforts, selection.reasoningEffort)
+  const effortName = activeEffort ? reasoningEffortLabel(activeEffort) : ''
 
   useEffect(() => {
     if (!open) return
@@ -40,11 +42,13 @@ export function ComposerModelMenu({
     const nextGroup = catalog.groups.find((g) => g.id === provider)
     const nextModel = nextGroup?.models.find((m) => m.id === modelId)
     const nextEfforts = nextModel?.reasoning?.efforts ?? []
-    const effort =
+    const effort = resolveSessionReasoningEffort(
+      nextEfforts,
       selection.reasoningEffort &&
-      nextEfforts.some((e) => e.id === selection.reasoningEffort)
+        nextEfforts.some((entry) => entry.id === selection.reasoningEffort)
         ? selection.reasoningEffort
-        : nextModel?.reasoning?.defaultEffort
+        : undefined,
+    )
     onChange({ provider, model: modelId, reasoningEffort: effort })
   }
 
@@ -99,26 +103,19 @@ export function ComposerModelMenu({
               <div className="model-menu-efforts">
                 <div className="model-menu-heading">{t('reasoningLabel')}</div>
                 <div className="effort-row">
-                  <button
-                    type="button"
-                    className={`effort-chip${!selection.reasoningEffort ? ' active' : ''}`}
-                    onClick={() => onChange({ ...selection, reasoningEffort: undefined })}
-                  >
-                    {t('providerDefault')}
-                  </button>
                   {efforts.map((effort) => (
                     <button
                       key={effort.id}
                       type="button"
                       className={`effort-chip${
-                        selection.reasoningEffort === effort.id ? ' active' : ''
+                        activeEffort === effort.id ? ' active' : ''
                       }`}
                       title={effort.description}
                       onClick={() =>
                         onChange({ ...selection, reasoningEffort: effort.id })
                       }
                     >
-                      {effort.name}
+                      {reasoningEffortLabel(effort.id)}
                     </button>
                   ))}
                 </div>

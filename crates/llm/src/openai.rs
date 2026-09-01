@@ -14,7 +14,7 @@ use dshrs_credentials::CredentialStore;
 use dshrs_settings::SettingsStore;
 use serde::{Deserialize, Serialize};
 
-use crate::catalog::{DiscoveredModel, LlmModelInfo, LlmResolvedModelInfo, ProviderInfo};
+use crate::catalog::{highest_reasoning_effort, DiscoveredModel, LlmModelInfo, LlmResolvedModelInfo, ProviderInfo, ReasoningEffortInfo, ReasoningInfo};
 use crate::http::http_error_failure;
 use crate::request::GenerateRequest;
 use crate::sse::sse_chunk_stream;
@@ -64,9 +64,68 @@ pub struct OpenAiCatalogModel {
     #[serde(default)]
     pub name: Option<String>,
     #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
     pub context_window: Option<u64>,
     #[serde(default)]
     pub max_tokens: Option<u64>,
+    #[serde(default)]
+    pub input_modalities: Option<Vec<String>>,
+    #[serde(default)]
+    pub thinking_supported: Option<bool>,
+    #[serde(default)]
+    pub reasoning_efforts: Option<Vec<String>>,
+}
+
+const OPENAI_KNOWN_EFFORTS: &[(&str, &str)] = &[
+    ("off", "Off"),
+    ("low", "Low"),
+    ("medium", "Medium"),
+    ("high", "High"),
+    ("xhigh", "XHigh"),
+    ("max", "Max"),
+];
+
+fn openai_reasoning_info(model: &OpenAiCatalogModel) -> Option<ReasoningInfo> {
+    if model.thinking_supported != Some(true) {
+        return None;
+    }
+    let effort_ids = model
+        .reasoning_efforts
+        .clone()
+        .filter(|efforts| !efforts.is_empty())
+        .unwrap_or_else(|| vec!["off".to_string()]);
+    let efforts: Vec<ReasoningEffortInfo> = effort_ids
+        .iter()
+        .filter_map(|id| {
+            OPENAI_KNOWN_EFFORTS
+                .iter()
+                .find(|(known_id, _)| known_id == id)
+                .map(|(_, name)| ReasoningEffortInfo {
+                    id: id.clone(),
+                    name: name.to_string(),
+                    description: None,
+                })
+        })
+        .collect();
+    if efforts.is_empty() {
+        return None;
+    }
+    let known_order: Vec<&str> = OPENAI_KNOWN_EFFORTS.iter().map(|(id, _)| *id).collect();
+    let default_effort = highest_reasoning_effort(efforts.iter().map(|effort| effort.id.as_str()), &known_order)
+        .or_else(|| efforts.first().map(|effort| effort.id.clone()));
+    Some(ReasoningInfo {
+        efforts,
+        default_effort,
+    })
+}
+
+fn openai_modalities(model: &OpenAiCatalogModel) -> Vec<String> {
+    model
+        .input_modalities
+        .clone()
+        .filter(|modalities| !modalities.is_empty())
+        .unwrap_or_else(|| vec!["text".to_string()])
 }
 
 impl OpenAiSection {
@@ -157,8 +216,8 @@ impl LlmAdapter for OpenAiCompatAdapter {
                     provider: provider.to_string(),
                     id: model.id.clone(),
                     name: model.name.clone().unwrap_or_else(|| model.id.clone()),
-                    description: None,
-                    input_modalities: vec!["text".to_string()],
+                    description: model.description.clone(),
+                    input_modalities: openai_modalities(model),
                 })
                 .collect());
         }
@@ -189,25 +248,35 @@ impl LlmAdapter for OpenAiCompatAdapter {
             .unwrap_or(DEFAULT_CONTEXT_WINDOW);
         let max_tokens_default = profile.default_max_tokens.unwrap_or(DEFAULT_MAX_TOKENS);
         let found = profile.models.iter().find(|m| m.id == model);
-        let (name, context_window, max_tokens) = match found {
+        let (name, description, modalities, context_window, max_tokens, reasoning) = match found {
             Some(entry) => (
                 entry.name.clone().unwrap_or_else(|| entry.id.clone()),
+                entry.description.clone(),
+                openai_modalities(entry),
                 entry.context_window.unwrap_or(context_default),
                 entry.max_tokens.unwrap_or(max_tokens_default),
+                openai_reasoning_info(entry),
             ),
-            None => (model.to_string(), context_default, max_tokens_default),
+            None => (
+                model.to_string(),
+                None,
+                vec!["text".to_string()],
+                context_default,
+                max_tokens_default,
+                None,
+            ),
         };
         Ok(LlmResolvedModelInfo {
             info: LlmModelInfo {
                 provider: provider.to_string(),
                 id: model.to_string(),
                 name,
-                description: None,
-                input_modalities: vec!["text".to_string()],
+                description,
+                input_modalities: modalities,
             },
             context_window: Some(context_window),
             default_max_tokens: Some(max_tokens),
-            reasoning: None,
+            reasoning,
         })
     }
 
@@ -247,6 +316,11 @@ impl LlmAdapter for OpenAiCompatAdapter {
 }
 
 /// The chat-completions request body for one OpenAI-compatible route.
+///
+/// OpenAI-family gateways accept `reasoning_effort` when they support thinking
+/// levels. The DeepSeek `thinking: { type }` switch is DeepSeek-direct wire
+/// vocabulary only (`build_deepseek_body`); sending it here breaks gateways
+/// such as MiniMax that reject unknown parameters.
 pub(crate) fn build_openai_body(request: &GenerateRequest) -> serde_json::Value {
     let mut body = serde_json::json!({
         "model": request.model,
@@ -254,13 +328,8 @@ pub(crate) fn build_openai_body(request: &GenerateRequest) -> serde_json::Value 
         "stream": true,
         "stream_options": { "include_usage": true },
     });
-    if let Some(effort) = &request.reasoning_effort {
-        if effort == "off" {
-            body["thinking"] = serde_json::json!({ "type": "disabled" });
-        } else {
-            body["thinking"] = serde_json::json!({ "type": "enabled" });
-            body["reasoning_effort"] = serde_json::json!(effort);
-        }
+    if let Some(effort) = request.reasoning_effort.as_deref().filter(|effort| *effort != "off") {
+        body["reasoning_effort"] = serde_json::json!(effort);
     }
     if let Some(temperature) = request.temperature {
         body["temperature"] = serde_json::json!(temperature);

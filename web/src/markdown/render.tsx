@@ -325,7 +325,13 @@ function renderListItem(
   const entries = renderBlockEntries(item.children, context)
   const task = typeof item.checked === 'boolean'
   if (task) {
-    const checkbox = <input key="task-checkbox" type="checkbox" checked={item.checked === true} disabled />
+    const checkbox = (
+      <span
+        key="task-checkbox"
+        className={`ui-checkbox-mark${item.checked === true ? ' checked' : ''}`}
+        aria-hidden="true"
+      />
+    )
     const head = entries[0]
     if (head !== undefined && 'paragraph' in head) {
       head.paragraph = head.paragraph.length > 0 ? [checkbox, ' ', ...head.paragraph] : [checkbox]

@@ -1,5 +1,8 @@
+import { resolveSessionReasoningEffort } from '../modelCatalog'
+import { reasoningEffortLabel } from '../reasoningEffort'
 import { t } from '../i18n'
 import type { ModelCatalog, ModelSelection } from '../types'
+import { DropdownField, SegmentControl } from './ui/controls'
 
 /**
  * Provider / model / effort drill-down driven by the live catalog.
@@ -18,70 +21,67 @@ export function ModelPicker({
   const model = group?.models.find((m) => m.id === value.model)
   const efforts = model?.reasoning?.efforts ?? []
 
+  const providerOptions = catalog.groups.map((g) => ({
+    id: g.id,
+    label: g.name,
+  }))
+
+  const modelOptions = (group?.models ?? []).map((m) => ({
+    id: m.id,
+    label: m.name,
+    hint: m.description,
+  }))
+
+  const activeEffort = resolveSessionReasoningEffort(efforts, value.reasoningEffort)
+
+  const effortOptions = efforts.map((effort) => ({
+    id: effort.id,
+    label: reasoningEffortLabel(effort.id),
+    hint: effort.description,
+  }))
+
   return (
     <div className="row">
-      <div className="field">
-        <label>{t('providerLabel')}</label>
-        <select
-          className="plain"
-          value={value.provider}
-          onChange={(event) => {
-            const provider = event.target.value
-            const nextGroup = catalog.groups.find((g) => g.id === provider)
-            const firstModel = nextGroup?.models[0]
-            onChange({
-              provider,
-              model: firstModel?.id ?? '',
-              reasoningEffort: firstModel?.reasoning?.defaultEffort,
-            })
-          }}
-        >
-          {catalog.groups.map((g) => (
-            <option key={g.id} value={g.id}>
-              {g.name}
-            </option>
-          ))}
-        </select>
-      </div>
-      <div className="field">
-        <label>{t('modelLabel')}</label>
-        <select
-          className="plain"
-          value={value.model}
-          onChange={(event) => {
-            const nextModel = group?.models.find((m) => m.id === event.target.value)
-            onChange({
-              ...value,
-              model: event.target.value,
-              reasoningEffort: nextModel?.reasoning?.defaultEffort ?? value.reasoningEffort,
-            })
-          }}
-        >
-          {(group?.models ?? []).map((m) => (
-            <option key={m.id} value={m.id}>
-              {m.name}
-            </option>
-          ))}
-        </select>
-      </div>
+      <DropdownField
+        label={t('providerLabel')}
+        value={value.provider}
+        options={providerOptions}
+        placeholder={t('noModels')}
+        onChange={(provider) => {
+          const nextGroup = catalog.groups.find((g) => g.id === provider)
+          const firstModel = nextGroup?.models[0]
+          onChange({
+            provider,
+            model: firstModel?.id ?? '',
+            reasoningEffort: resolveSessionReasoningEffort(firstModel?.reasoning?.efforts ?? []),
+          })
+        }}
+      />
+      <DropdownField
+        label={t('modelLabel')}
+        value={value.model}
+        options={modelOptions}
+        placeholder={t('noModels')}
+        onChange={(modelId) => {
+          const nextModel = group?.models.find((m) => m.id === modelId)
+          onChange({
+            ...value,
+            model: modelId,
+            reasoningEffort: resolveSessionReasoningEffort(
+              nextModel?.reasoning?.efforts ?? [],
+              value.reasoningEffort,
+            ),
+          })
+        }}
+      />
       {efforts.length > 0 && (
         <div className="field narrow">
           <label>{t('reasoningLabel')}</label>
-          <select
-            className="plain"
-            value={value.reasoningEffort ?? ''}
-            onChange={(event) => {
-              const next = event.target.value
-              onChange({ ...value, reasoningEffort: next || undefined })
-            }}
-          >
-            <option value="">{t('providerDefault')}</option>
-            {efforts.map((effort) => (
-              <option key={effort.id} value={effort.id}>
-                {effort.name}
-              </option>
-            ))}
-          </select>
+          <SegmentControl
+            value={activeEffort ?? ''}
+            options={effortOptions}
+            onChange={(next) => onChange({ ...value, reasoningEffort: next })}
+          />
         </div>
       )}
     </div>

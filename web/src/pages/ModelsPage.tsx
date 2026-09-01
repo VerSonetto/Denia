@@ -1,28 +1,27 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import {
   describeCredentials,
   discoverModels,
-  getCatalog,
   getSettings,
   replaceNamespace,
   setCredential,
-  unsetCredential,
-  updateNamespace,
 } from '../api'
+import ModelListEditor from '../components/ModelListEditor'
+import { NumberField } from '../components/ui/controls'
 import { t } from '../i18n'
+import { type CatalogModelEntry, entryFromWire, entryToWire } from '../modelCatalog'
 import type { Notify } from '../App'
 import type {
   CredentialInfo,
   DiscoveredModel,
-  ModelCatalog,
   NamespaceView,
   OpenAiProfile,
   SettingsDescribe,
 } from '../types'
 
-const DEEPSEEK_NS = 'llm-deepseek'
 const OPENAI_NS = 'llm-openai'
 const ROUTE_ID_PATTERN = /^[a-z][a-z0-9-]*$/
+const MODEL_ID_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9._-]*$/
 
 function namespaceOf(settings: SettingsDescribe | null, ns: string): NamespaceView | undefined {
   return settings?.namespaces.find((view) => view.ns === ns)
@@ -34,8 +33,21 @@ function asRecord(value: unknown): Record<string, unknown> {
     : {}
 }
 
+function loadOpenAiModels(profile: OpenAiProfile | null): CatalogModelEntry[] {
+  return (profile?.models ?? []).map((entry) => entryFromWire(entry as unknown as Record<string, unknown>))
+}
+
+function validateModels(models: CatalogModelEntry[]): boolean {
+  const seen = new Set<string>()
+  for (const entry of models) {
+    const id = entry.id.trim()
+    if (!id || !MODEL_ID_PATTERN.test(id) || seen.has(id)) return false
+    seen.add(id)
+  }
+  return true
+}
+
 export default function ModelsPage({ notify }: { notify: Notify }) {
-  const [catalog, setCatalog] = useState<ModelCatalog | null>(null)
   const [settings, setSettings] = useState<SettingsDescribe | null>(null)
   const [credentials, setCredentials] = useState<Record<string, CredentialInfo>>({})
   const [error, setError] = useState<string | null>(null)
@@ -44,14 +56,10 @@ export default function ModelsPage({ notify }: { notify: Notify }) {
   const load = useCallback(async () => {
     try {
       setError(null)
-      const [nextCatalog, nextSettings] = await Promise.all([getCatalog(), getSettings()])
-      setCatalog(nextCatalog)
+      const nextSettings = await getSettings()
       setSettings(nextSettings)
 
       const refs = new Set<string>()
-      const deepseek = namespaceOf(nextSettings, DEEPSEEK_NS)
-      const deepseekKeyRef = (deepseek?.value?.apiKeyEnv as string) || 'DEEPSEEK_API_KEY'
-      refs.add(deepseekKeyRef)
       const openai = namespaceOf(nextSettings, OPENAI_NS)
       const providers = asRecord(openai?.value?.providers)
       for (const profile of Object.values(providers)) {
@@ -74,7 +82,7 @@ export default function ModelsPage({ notify }: { notify: Notify }) {
     return () => source.close()
   }, [])
 
-  if (error && !catalog) {
+  if (error && !settings) {
     return (
       <div className="page-inner">
         <div className="card">
@@ -88,7 +96,7 @@ export default function ModelsPage({ notify }: { notify: Notify }) {
     )
   }
 
-  if (!catalog || !settings) {
+  if (!settings) {
     return (
       <div className="page-inner">
         <div className="card">
@@ -101,13 +109,12 @@ export default function ModelsPage({ notify }: { notify: Notify }) {
   return (
     <div className="models-main">
       <div className="models-inner">
-      <DeepSeekCard settings={settings} credentials={credentials} notify={notify} />
-      <CustomProvidersSection
-        settings={settings}
-        credentials={credentials}
-        notify={notify}
-        onChanged={() => setReloadKey((key) => key + 1)}
-      />
+        <ProvidersSection
+          settings={settings}
+          credentials={credentials}
+          notify={notify}
+          onChanged={() => setReloadKey((key) => key + 1)}
+        />
       </div>
     </div>
   )
@@ -144,140 +151,7 @@ function credentialBadge(info: CredentialInfo | undefined) {
   )
 }
 
-function DeepSeekCard({
-  settings,
-  credentials,
-  notify,
-}: {
-  settings: SettingsDescribe
-  credentials: Record<string, CredentialInfo>
-  notify: Notify
-}) {
-  const view = namespaceOf(settings, DEEPSEEK_NS)
-  const value = asRecord(view?.value)
-  const keyRef = (value.apiKeyEnv as string) || 'DEEPSEEK_API_KEY'
-  const [baseURL, setBaseURL] = useState('')
-  const [thinking, setThinking] = useState<'enabled' | 'disabled'>('enabled')
-  const [keyValue, setKeyValue] = useState('')
-  const [busy, setBusy] = useState(false)
-  const loadedFrom = useRef<string>('')
-
-  // Seed the local form from the resolved section exactly once per server value.
-  const seedSignature = `${view?.revision ?? 0}:${JSON.stringify(value)}`
-  useEffect(() => {
-    if (loadedFrom.current === seedSignature) return
-    loadedFrom.current = seedSignature
-    setBaseURL((value.baseURL as string) ?? '')
-    setThinking((value.thinking as 'enabled' | 'disabled') ?? 'enabled')
-  }, [seedSignature, value])
-
-  const saveConfig = async () => {
-    if (!view) return
-    setBusy(true)
-    try {
-      const patch: Record<string, unknown> = { thinking }
-      if (baseURL.trim()) patch.baseURL = baseURL.trim()
-      await updateNamespace(DEEPSEEK_NS, patch, view.revision)
-      notify('ok', t('providerConfigSaved'))
-    } catch (err) {
-      notify('err', err instanceof Error ? err.message : String(err))
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  const saveKey = async () => {
-    if (!keyValue.trim()) return
-    setBusy(true)
-    try {
-      await setCredential(keyRef, keyValue.trim())
-      setKeyValue('')
-      notify('ok', t('keySaved'))
-    } catch (err) {
-      notify('err', err instanceof Error ? err.message : String(err))
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  const removeKey = async () => {
-    setBusy(true)
-    try {
-      await unsetCredential(keyRef)
-      notify('ok', t('keyRemoved'))
-    } catch (err) {
-      notify('err', err instanceof Error ? err.message : String(err))
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  const keyInfo = credentials[keyRef]
-
-  return (
-    <section className="card">
-      <h2>{t('deepseekTitle')}</h2>
-      <p className="hint">{t('deepseekDescription')}</p>
-
-      <div className="row">
-        <span className="code-ref">{keyRef}</span>
-        {credentialBadge(keyInfo)}
-      </div>
-
-      <div className="row">
-        <div className="field">
-          <label>{t('apiKeyLabel')}</label>
-          <input
-            type="password"
-            className="mono"
-            autoComplete="off"
-            placeholder={t('apiKeyPlaceholder')}
-            value={keyValue}
-            onChange={(event) => setKeyValue(event.target.value)}
-          />
-        </div>
-        <button className="btn small" disabled={busy || !keyValue.trim()} onClick={() => void saveKey()}>
-          {t('saveKey')}
-        </button>
-        {keyInfo?.configured && keyInfo.writable && (
-          <button className="btn small danger" disabled={busy} onClick={() => void removeKey()}>
-            {t('removeKey')}
-          </button>
-        )}
-      </div>
-
-      <div className="section-divider" />
-
-      <div className="row">
-        <div className="field">
-          <label>{t('baseURLLabel')}</label>
-          <input
-            type="text"
-            className="mono"
-            placeholder="https://api.deepseek.com"
-            value={baseURL}
-            onChange={(event) => setBaseURL(event.target.value)}
-          />
-        </div>
-        <div className="field narrow">
-          <label>{t('thinkingLabel')}</label>
-          <select
-            value={thinking}
-            onChange={(event) => setThinking(event.target.value as 'enabled' | 'disabled')}
-          >
-            <option value="enabled">{t('thinkingEnabled')}</option>
-            <option value="disabled">{t('thinkingDisabled')}</option>
-          </select>
-        </div>
-        <button className="btn" disabled={busy} onClick={() => void saveConfig()}>
-          {t('saveProviderConfig')}
-        </button>
-      </div>
-    </section>
-  )
-}
-
-function CustomProvidersSection({
+function ProvidersSection({
   settings,
   credentials,
   notify,
@@ -321,7 +195,7 @@ function CustomProvidersSection({
 
       {routes.length === 0 && !adding && (
         <p className="hint" style={{ marginBottom: 8 }}>
-          —
+          {t('noProvidersConfigured')}
         </p>
       )}
 
@@ -403,9 +277,11 @@ function ProviderEditor({
   const [routeId, setRouteId] = useState(route ?? '')
   const [displayName, setDisplayName] = useState(initial?.displayName ?? '')
   const [baseURL, setBaseURL] = useState(initial?.baseURL ?? '')
-  const [keyRef, setKeyRef] = useState(initial?.apiKeyEnv ?? '')
   const [keyValue, setKeyValue] = useState('')
-  const [models, setModels] = useState<string[]>((initial?.models ?? []).map((m) => m.id))
+  const [defaultContextWindow, setDefaultContextWindow] = useState(
+    initial?.defaultContextWindow ? String(initial.defaultContextWindow) : '',
+  )
+  const [models, setModels] = useState<CatalogModelEntry[]>(() => loadOpenAiModels(initial))
   const [discovered, setDiscovered] = useState<DiscoveredModel[] | null>(null)
   const [discovering, setDiscovering] = useState(false)
   const [busy, setBusy] = useState(false)
@@ -413,7 +289,7 @@ function ProviderEditor({
   const deriveKeyRef = (id: string) =>
     id.toUpperCase().replace(/[^A-Z0-9]+/g, '_') + '_API_KEY'
 
-  const effectiveKeyRef = keyRef.trim() || (routeId.trim() ? deriveKeyRef(routeId.trim()) : '')
+  const effectiveKeyRef = routeId.trim() ? deriveKeyRef(routeId.trim()) : ''
 
   const discover = async () => {
     if (!baseURL.trim()) {
@@ -428,7 +304,6 @@ function ProviderEditor({
         keyValue.trim() ? undefined : effectiveKeyRef || undefined,
       )
       setDiscovered(found)
-      if (models.length === 0) setModels(found.map((m) => m.id))
     } catch (err) {
       notify('err', `${t('discoverFailed')}: ${err instanceof Error ? err.message : String(err)}`)
     } finally {
@@ -446,17 +321,23 @@ function ProviderEditor({
       notify('err', t('baseURLRequired'))
       return
     }
+    if (!validateModels(models)) {
+      notify('err', t('modelsInvalid'))
+      return
+    }
     setBusy(true)
     try {
       if (keyValue.trim()) {
         await setCredential(effectiveKeyRef, keyValue.trim())
       }
-      const profile: OpenAiProfile = {
+      const profile: Record<string, unknown> = {
         baseURL: baseURL.trim(),
         displayName: displayName.trim() || undefined,
         apiKeyEnv: effectiveKeyRef || undefined,
-        models: models.map((modelId) => ({ id: modelId })),
+        models: models.map((entry) => entryToWire(entry)),
       }
+      const ctx = defaultContextWindow.trim()
+      if (ctx) profile.defaultContextWindow = Number(ctx)
       const next = { ...providers, [id]: profile }
       if (route && route !== id) delete next[route]
       await replaceNamespace(OPENAI_NS, { providers: next }, revision)
@@ -469,6 +350,10 @@ function ProviderEditor({
       setBusy(false)
     }
   }
+
+  const parsedDefaultContext = defaultContextWindow.trim()
+    ? Number(defaultContextWindow.trim())
+    : undefined
 
   return (
     <div className="provider-card" style={{ marginTop: 10 }}>
@@ -505,17 +390,16 @@ function ProviderEditor({
           />
         </div>
         <div className="field narrow">
-          <label>{t('keyRefLabel')}</label>
-          <input
-            type="text"
-            className="mono"
-            placeholder={effectiveKeyRef || 'API_KEY_ENV'}
-            value={keyRef}
-            onChange={(event) => setKeyRef(event.target.value)}
+          <label>{t('defaultContextWindowLabel')}</label>
+          <NumberField
+            mono
+            placeholder="262144"
+            value={defaultContextWindow.trim() ? Number(defaultContextWindow) : undefined}
+            onChange={(value) => setDefaultContextWindow(value != null ? String(value) : '')}
           />
         </div>
       </div>
-      <div className="row">
+      <div className="row row-end">
         <div className="field">
           <label>{t('apiKeyLabel')}</label>
           <input
@@ -527,36 +411,26 @@ function ProviderEditor({
             onChange={(event) => setKeyValue(event.target.value)}
           />
         </div>
-        <button className="btn small secondary" disabled={discovering} onClick={() => void discover()}>
+        <button
+          className="btn small secondary form-action"
+          disabled={discovering}
+          onClick={() => void discover()}
+        >
           {discovering ? t('discovering') : t('discoverModels')}
         </button>
       </div>
 
-      {discovered && (
-        <>
-          <p className="hint" style={{ marginTop: 10, marginBottom: 0 }}>
-            {t('discoveredCount', { n: discovered.length })}
-          </p>
-          <div className="checklist">
-            {discovered.map((model) => (
-              <label key={model.id}>
-                <input
-                  type="checkbox"
-                  checked={models.includes(model.id)}
-                  onChange={(event) => {
-                    setModels((current) =>
-                      event.target.checked
-                        ? [...current, model.id]
-                        : current.filter((id) => id !== model.id),
-                    )
-                  }}
-                />
-                {model.id}
-              </label>
-            ))}
-          </div>
-        </>
-      )}
+      <div className="section-divider" />
+
+      <h3 className="subsection-title">{t('modelsSectionTitle')}</h3>
+      <p className="hint">{t('modelsSectionHint')}</p>
+      <ModelListEditor
+        models={models}
+        onChange={setModels}
+        discovered={discovered}
+        defaultContextWindow={parsedDefaultContext}
+        disabled={busy}
+      />
 
       <div className="row" style={{ marginTop: 12 }}>
         <button className="btn" disabled={busy} onClick={() => void save()}>
