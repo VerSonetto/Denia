@@ -76,7 +76,7 @@ const NodeView = memo(function NodeView({ node }: { node: TranscriptNode }) {
   switch (node.kind) {
     case 'user':
       return (
-        <div className="user-row">
+        <div className="user-row" data-user-anchor={node.anchor}>
           <div className="msg-user">{node.text}</div>
         </div>
       )

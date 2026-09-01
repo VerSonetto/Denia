@@ -10,7 +10,7 @@ export interface UiBlock {
 }
 
 export type TranscriptNode =
-  | { kind: 'user'; text: string }
+  | { kind: 'user'; text: string; anchor?: number }
   | { kind: 'context-injection'; text: string }
   | { kind: 'system-prompt'; text: string }
   | {
@@ -148,7 +148,7 @@ export function foldEvents(events: SessionEnvelope[]): TranscriptNode[] {
         if (event.injected) {
           nodes.push({ kind: 'context-injection', text: event.text })
         } else {
-          nodes.push({ kind: 'user', text: event.text })
+          nodes.push({ kind: 'user', text: event.text, anchor: event.seq })
         }
         break
       case 'system-prompt':
@@ -279,7 +279,7 @@ export function applyEnvelope(
       if (event.injected) {
         return [...nodes, { kind: 'context-injection', text: event.text }]
       }
-      return [...nodes, { kind: 'user', text: event.text }]
+      return [...nodes, { kind: 'user', text: event.text, anchor: event.seq }]
     case 'system-prompt':
       return [...nodes, { kind: 'system-prompt', text: event.text }]
     case 'step-start':

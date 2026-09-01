@@ -69,6 +69,7 @@ const zh = {
   todoDone: '{done} 已完成',
   todoActive: '{active} 进行中',
   todoPending: '{pending} 待开始',
+  axisLabel: '对话导航',
 
   statsTurns: '{turns} 轮 · {steps} 步',
   statsTurnsHint: '{turns} 轮对话 · {steps} 步推理 · {tools} 次工具调用',
@@ -272,6 +273,7 @@ const en: typeof zh = {
   todoDone: '{done} done',
   todoActive: '{active} active',
   todoPending: '{pending} pending',
+  axisLabel: 'Conversation navigation',
 
   statsTurns: '{turns} turns · {steps} steps',
   statsTurnsHint: '{turns} turns · {steps} steps · {tools} tool calls',

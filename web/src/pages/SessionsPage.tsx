@@ -18,6 +18,7 @@ import {
 } from '../components/icons'
 import { resolveSessionReasoningEffort } from '../modelCatalog'
 import { TodoPanel } from '../components/TodoPanel'
+import { ConversationAxis } from '../components/ConversationAxis'
 import type {
   ModelCatalog,
   ModelSelection,
@@ -495,6 +496,7 @@ export default function SessionsPage({
           </div>
         </div>
       </div>
+      {phase === 'active' && <ConversationAxis nodes={transcriptNodes} scrollRef={scrollRef} />}
       {phase === 'active' && !atBottom && (
         <button
           type="button"

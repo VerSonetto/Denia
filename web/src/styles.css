@@ -556,6 +556,9 @@ button {
   padding: 12px 20px 10px;
   border-bottom: 1px solid var(--border-l1);
   background: color-mix(in srgb, var(--bg-layer-1) 85%, transparent);
+  /* 盖住对话轴顶部,轴从 header 下沿起。 */
+  position: relative;
+  z-index: 2;
 }
 
 .session-title {
@@ -610,6 +613,81 @@ button {
   scrollbar-gutter: stable;
   display: flex;
   flex-direction: column;
+}
+
+/* ---- 对话轴:聊天区左侧的竖向导航 ---- */
+
+.conversation-axis {
+  position: absolute;
+  left: 8px;
+  /* 52 ≈ header 高(padding 12+10 + 标题行),轴从 header 下沿起、composer 之上止。 */
+  top: 52px;
+  bottom: 12px;
+  width: 20px;
+  z-index: 1;
+  pointer-events: none;
+}
+
+.axis-track {
+  position: relative;
+  height: 100%;
+  width: 100%;
+}
+
+.axis-dot {
+  position: absolute;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  pointer-events: auto;
+  display: grid;
+  place-items: center;
+}
+
+.axis-dot::before {
+  content: '';
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--label-caption);
+  transition: transform 0.15s var(--ease), background 0.15s var(--ease);
+}
+
+.axis-dot:hover::before {
+  transform: scale(1.5);
+  background: var(--label-primary);
+}
+
+.axis-tip {
+  position: absolute;
+  left: calc(100% + 8px);
+  top: 50%;
+  transform: translateY(-50%);
+  max-width: 260px;
+  padding: 6px 10px;
+  border: 1px solid var(--border-l2);
+  border-radius: var(--r-sm);
+  background: var(--bg-layer-2);
+  box-shadow: var(--shadow-lv2);
+  color: var(--label-primary);
+  font-size: 12px;
+  line-height: 18px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.12s var(--ease);
+}
+
+.axis-dot:hover .axis-tip,
+.axis-dot:focus-visible .axis-tip {
+  opacity: 1;
 }
 
 .session-layout[data-phase='hero'] .conversation-scroll {
