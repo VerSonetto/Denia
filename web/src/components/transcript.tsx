@@ -7,6 +7,7 @@ import type { MarkdownLabels } from '../markdown/MarkdownText'
 import { toolCallInput, toolCallSummary } from '../toolDisplay'
 import {
   IconChevron,
+  IconPrompt,
   IconRead,
   IconTerminal,
   IconThink,
@@ -76,9 +77,13 @@ const NodeView = memo(function NodeView({ node }: { node: TranscriptNode }) {
     case 'user':
       return (
         <div className="user-row">
-          <div className={`msg-user${node.injected ? ' injected' : ''}`}>{node.text}</div>
+          <div className="msg-user">{node.text}</div>
         </div>
       )
+    case 'context-injection':
+      return <ContextInjectionRow text={node.text} />
+    case 'system-prompt':
+      return <SystemPromptRow text={node.text} />
     case 'assistant':
       return <AssistantNode node={node} />
     case 'turn-start':
@@ -105,12 +110,6 @@ function AssistantNode({
     }),
     [localeRevision()],
   )
-  const lastTextIndex = (() => {
-    for (let i = node.blocks.length - 1; i >= 0; i--) {
-      if (node.blocks[i].kind === 'text') return i
-    }
-    return -1
-  })()
   const hasVisible =
     node.streaming ||
     node.interrupted ||
@@ -127,16 +126,61 @@ function AssistantNode({
           return null
         }
         return (
-          <div
-            key={index}
-            className={`prose${node.streaming && index === lastTextIndex ? ' streaming' : ''}`}
-          >
+          <div key={index} className="prose">
             <MarkdownText text={block.text} streaming={node.streaming} labels={labels} />
           </div>
         )
       })}
       {node.interrupted && <span className="badge warn">{t('interrupted')}</span>}
     </div>
+  )
+}
+
+function DisclosureRow({
+  title,
+  icon,
+  text,
+}: {
+  title: string
+  icon: ReactNode
+  text: string
+}) {
+  const [open, setOpen] = useState(false)
+  const summary = firstLine(text, 72)
+  return (
+    <div className={`disc-row inject-row${open ? ' open' : ''}`}>
+      <button className="disc-head" onClick={() => setOpen(!open)}>
+        <span className="glyph">{icon}</span>
+        <span className="title">{title}</span>
+        {!open && (
+          <>
+            <span className="sep" />
+            <span className="summary inject-summary">{summary}</span>
+          </>
+        )}
+      </button>
+      {open && (
+        <div className="disc-body">
+          <div className="code-card inject-card">
+            <pre>{text}</pre>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+function SystemPromptRow({ text }: { text: string }) {
+  return <DisclosureRow title={t('systemPromptTitle')} icon={<IconPrompt size={14} />} text={text} />
+}
+
+function ContextInjectionRow({ text }: { text: string }) {
+  return (
+    <DisclosureRow
+      title={t('contextInjectionTitle')}
+      icon={<IconTool size={14} />}
+      text={text}
+    />
   )
 }
 

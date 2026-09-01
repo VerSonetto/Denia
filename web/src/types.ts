@@ -144,6 +144,7 @@ export type SessionEnvelope =
   | { seq: number; time: number; type: 'step-start'; turn: number; step: number }
   | { seq: number; time: number; type: 'step-end'; turn: number; step: number }
   | { seq: number; time: number; type: 'user-message'; text: string; injected?: boolean }
+  | { seq: number; time: number; type: 'system-prompt'; turn: number; step: number; text: string }
   | {
       seq: number
       time: number

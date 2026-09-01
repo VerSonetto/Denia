@@ -10,7 +10,9 @@ export interface UiBlock {
 }
 
 export type TranscriptNode =
-  | { kind: 'user'; text: string; injected?: boolean }
+  | { kind: 'user'; text: string }
+  | { kind: 'context-injection'; text: string }
+  | { kind: 'system-prompt'; text: string }
   | {
       kind: 'assistant'
       turn: number
@@ -135,11 +137,15 @@ export function foldEvents(events: SessionEnvelope[]): TranscriptNode[] {
         break
       case 'user-message':
         closeOpen()
-        nodes.push({
-          kind: 'user',
-          text: event.text,
-          ...event.injected ? { injected: true } : {},
-        })
+        if (event.injected) {
+          nodes.push({ kind: 'context-injection', text: event.text })
+        } else {
+          nodes.push({ kind: 'user', text: event.text })
+        }
+        break
+      case 'system-prompt':
+        closeOpen()
+        nodes.push({ kind: 'system-prompt', text: event.text })
         break
       case 'assistant-chunk': {
         if (!open || open.turn !== event.turn || open.step !== event.step) {
@@ -249,7 +255,12 @@ export function applyEnvelope(
     case 'turn-start':
       return [...nodes, { kind: 'turn-start', turn: event.turn, time: event.time }]
     case 'user-message':
-      return [...nodes, { kind: 'user', text: event.text, injected: event.injected }]
+      if (event.injected) {
+        return [...nodes, { kind: 'context-injection', text: event.text }]
+      }
+      return [...nodes, { kind: 'user', text: event.text }]
+    case 'system-prompt':
+      return [...nodes, { kind: 'system-prompt', text: event.text }]
     case 'assistant-chunk': {
       const last = nodes[nodes.length - 1]
       if (
@@ -424,7 +435,7 @@ function closedTurnRows(
   // 可见部分只剩其后的最终回答。
   const foldEnd = lastTool + 1
   const prefix = span.slice(0, foldEnd)
-  const hidden = prefix.filter((node) => !(node.kind === 'user' && !node.injected))
+  const hidden = prefix.filter((node) => node.kind !== 'user')
   // The overview is inserted where the first folded row would sit; when there
   // is nothing expandable, no overview is shown at all.
   const overview: TranscriptRow | null = hidden.some(rendersContent)
@@ -438,7 +449,7 @@ function closedTurnRows(
   const rows: TranscriptRow[] = []
   let placed = false
   for (const node of prefix) {
-    const foldable = !(node.kind === 'user' && !node.injected)
+    const foldable = node.kind !== 'user'
     if (!foldable || overview === null) {
       rows.push({ kind: 'node', node })
       continue
@@ -455,7 +466,14 @@ function closedTurnRows(
 
 /** Whether a hidden node would paint anything when expanded. */
 function rendersContent(node: TranscriptNode): boolean {
-  if (node.kind === 'tool' || node.kind === 'user') return true
+  if (
+    node.kind === 'tool' ||
+    node.kind === 'user' ||
+    node.kind === 'context-injection' ||
+    node.kind === 'system-prompt'
+  ) {
+    return true
+  }
   if (node.kind === 'assistant') {
     return (
       node.streaming ||

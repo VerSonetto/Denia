@@ -675,11 +675,12 @@ button {
   color: var(--label-primary);
 }
 
-.msg-user.injected {
-  background: transparent;
-  border: 1px dashed var(--border-l2);
-  color: var(--label-tertiary);
-  font-size: 13px;
+.inject-row .inject-summary {
+  font-family: inherit;
+}
+
+.inject-card pre {
+  max-height: 141px;
 }
 
 .msg-assistant {
@@ -700,18 +701,6 @@ button {
   line-height: 24px;
   word-break: break-word;
   color: var(--label-primary);
-}
-
-.msg-assistant .prose.streaming::after {
-  content: '▍';
-  color: var(--label-primary);
-  animation: blink 1s steps(2) infinite;
-}
-
-@keyframes blink {
-  50% {
-    opacity: 0;
-  }
 }
 
 .disc-row {

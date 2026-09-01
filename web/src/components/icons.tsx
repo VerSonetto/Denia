@@ -157,6 +157,20 @@ export function IconFolder(props: IconProps) {
   )
 }
 
+export function IconPrompt(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <path
+        d="M4.5 3.5h7v9H8.5l-2.5 2v-2h-1.5v-9Z"
+        stroke="currentColor"
+        strokeWidth="1.3"
+        strokeLinejoin="round"
+      />
+      <path d="M6.5 6.5h5M6.5 9h3.5" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
+    </Svg>
+  )
+}
+
 /** 品牌标识:极简方块 + 横线,黑白体系。 */
 export function BrandMark({ size = 24 }: IconProps) {
   return (
