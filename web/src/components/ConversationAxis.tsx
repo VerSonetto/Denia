@@ -39,10 +39,14 @@ export function ConversationAxis({
     if (!scroller) return
     const target = scroller.querySelector<HTMLElement>(`[data-user-anchor="${anchor}"]`)
     if (!target) return
-    // 居中:目标顶 - (视口高 - 目标高)/2,相对 scroller 坐标换算。
+    // 垂直居中:以可视消息区(扣除底部 sticky composer 遮挡)为基准换算滚动量。
+    const composerHeight = parseFloat(
+      scroller.style.getPropertyValue('--composer-height'),
+    ) || 0
+    const visibleHeight = scroller.clientHeight - composerHeight
     const sRect = scroller.getBoundingClientRect()
     const tRect = target.getBoundingClientRect()
-    const delta = tRect.top - sRect.top - (scroller.clientHeight - tRect.height) / 2
+    const delta = tRect.top - sRect.top - (visibleHeight - tRect.height) / 2
     scroller.scrollTo({ top: scroller.scrollTop + delta, behavior: 'smooth' })
   }
 

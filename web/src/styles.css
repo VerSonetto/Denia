@@ -638,8 +638,8 @@ button {
   position: absolute;
   left: 50%;
   transform: translate(-50%, -50%);
-  width: 16px;
-  height: 16px;
+  width: 18px;
+  height: 14px;
   padding: 0;
   border: none;
   background: transparent;
@@ -649,17 +649,18 @@ button {
   place-items: center;
 }
 
+/* 短横线节点:密集成排时比圆点清爽。 */
 .axis-dot::before {
   content: '';
-  width: 5px;
-  height: 5px;
-  border-radius: 50%;
+  width: 11px;
+  height: 1.5px;
+  border-radius: 1px;
   background: var(--label-caption);
-  transition: transform 0.15s var(--ease), background 0.15s var(--ease);
+  transition: width 0.15s var(--ease), background 0.15s var(--ease);
 }
 
 .axis-dot:hover::before {
-  transform: scale(1.5);
+  width: 16px;
   background: var(--label-primary);
 }
 
