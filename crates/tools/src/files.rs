@@ -162,6 +162,7 @@ mod tests {
             cwd: dir.clone(),
             cancel: CancellationToken::new(),
             confined: true,
+            emit_event: None,
         };
         (tempfile_like::TempDir(dir), context)
     }

@@ -47,6 +47,28 @@ pub enum TurnEndReason {
     Error { failure: LlmFailure },
 }
 
+/// One entry in the session's todo list — the unit of the `todo-write`
+/// whole-list snapshot.
+///
+/// Deliberately minimal: a human-readable `content` line and a three-state
+/// `status`. No id, priority, or ordering field — the list is replaced
+/// wholesale on every write (last-write-wins), so entries need no identity.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TodoItem {
+    /// What the task is — a short imperative line shown in the UI.
+    pub content: String,
+    /// Lifecycle state; `in_progress` marks work being done right now.
+    pub status: TodoStatus,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TodoStatus {
+    Pending,
+    InProgress,
+    Completed,
+}
+
 /// The durable event vocabulary, internally tagged on `type`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "kebab-case")]
@@ -108,6 +130,9 @@ pub enum SessionEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         error: Option<String>,
     },
+    /// Whole-list todo snapshot; latest write wins on replay. Log-only UI
+    /// state — never part of the derived model history.
+    TodoWrite { todos: Vec<TodoItem> },
 }
 
 /// One log entry: monotonic coordinates plus the event payload.

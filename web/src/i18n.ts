@@ -65,6 +65,11 @@ const zh = {
   deleteSession: '删除',
   runningLabel: '运行中',
 
+  todoTitle: '任务清单',
+  todoDone: '{done} 已完成',
+  todoActive: '{active} 进行中',
+  todoPending: '{pending} 待开始',
+
   statsTurns: '{turns} 轮 · {steps} 步',
   statsTurnsHint: '{turns} 轮对话 · {steps} 步推理 · {tools} 次工具调用',
   statsDurationHint: '累计耗时 {duration}',
@@ -262,6 +267,11 @@ const en: typeof zh = {
   sessionRunningDelete: 'Stop the running session before deleting it',
   deleteSession: 'Delete',
   runningLabel: 'running',
+
+  todoTitle: 'Tasks',
+  todoDone: '{done} done',
+  todoActive: '{active} active',
+  todoPending: '{pending} pending',
 
   statsTurns: '{turns} turns · {steps} steps',
   statsTurnsHint: '{turns} turns · {steps} steps · {tools} tool calls',

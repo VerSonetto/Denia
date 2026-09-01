@@ -2443,6 +2443,129 @@ button.btn.form-action {
   padding: 6px 12px;
 }
 
+/* ---- todo panel (docked above the composer) ---- */
+
+.todo-panel {
+  box-sizing: border-box;
+  flex: none;
+  overflow: hidden;
+  width: 100%;
+  border: 1px solid var(--border-l1);
+  border-radius: var(--r-md);
+  background: var(--bg-layer-1);
+}
+
+.todo-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 8px 12px;
+  border: none;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+  font-family: var(--font-ui);
+}
+
+.todo-header:hover {
+  background: var(--hover-fill);
+}
+
+.todo-lead {
+  display: grid;
+  flex: none;
+  place-items: center;
+  color: var(--label-tertiary);
+}
+
+.todo-title {
+  flex: none;
+  font-size: 13px;
+  line-height: 20px;
+  font-weight: 500;
+  color: var(--label-primary);
+}
+
+.todo-progress {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  font-size: 13px;
+  line-height: 20px;
+  color: var(--label-tertiary);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.todo-chevron {
+  display: grid;
+  flex: none;
+  place-items: center;
+  color: var(--label-tertiary);
+}
+
+.todo-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 0;
+  padding: 2px 12px 10px;
+  list-style: none;
+  max-height: 180px;
+  overflow-y: auto;
+}
+
+.todo-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  font-size: 13px;
+  line-height: 20px;
+  color: var(--label-secondary);
+}
+
+.todo-glyph {
+  display: grid;
+  flex: none;
+  place-items: center;
+  width: 16px;
+  height: 16px;
+}
+
+.todo-glyph-completed {
+  color: var(--label-primary);
+}
+
+.todo-glyph-pending {
+  color: var(--label-caption);
+}
+
+.todo-glyph-progress {
+  color: var(--label-primary);
+  animation: todo-progress-spin 1s linear infinite;
+}
+
+@keyframes todo-progress-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.todo-item[data-status='completed'] .todo-content {
+  color: var(--label-tertiary);
+  text-decoration: line-through;
+  text-decoration-color: var(--label-caption);
+}
+
+.todo-content {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,

@@ -48,6 +48,15 @@ pub fn register_shipped_prompt(prompt: &mut SystemPrompt, tools: &ToolRegistry) 
         ),
         complete: false,
     })?;
+    prompt.section(PromptSection {
+        name: "tool:todo".to_string(),
+        order: SectionOrder::ToolWrite.value() + 1,
+        text: PromptText::Static(
+            "多步任务开工前先用 todo_write 拆步骤;每完成一步立即把对应项标 completed 并把下一步标 in_progress,不要攒到最后一起更新;全部做完才允许没有 in_progress 项。"
+                .to_string(),
+        ),
+        complete: false,
+    })?;
 
     let schemas: Vec<ToolSchema> = tools.schemas();
     prompt.tools(move |_| ToolProviderResult {
@@ -121,7 +130,8 @@ mod tests {
         assert!(rendered.contains("denia"));
         assert!(rendered.contains("/tmp/ws"));
         assert!(assembly.sections.iter().any(|section| section.name == "tool:bash"));
+        assert!(assembly.sections.iter().any(|section| section.name == "tool:todo"));
         assert!(!render_context_snapshot(&assembly).is_empty());
-        assert_eq!(assembly.tools.len(), 3);
+        assert_eq!(assembly.tools.len(), 4);
     }
 }

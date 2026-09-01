@@ -1,8 +1,9 @@
 import http from 'node:http'
 
 // Stateful OpenAI-compatible mock gateway:
-// - no tool-role message in the request  -> answer with a bash tool call
-// - tool-role message present            -> answer with text + stop
+// - no tool-role message, no todo result  -> answer with a todo_write tool call
+// - todo result present, no bash result   -> answer with a bash tool call
+// - both results present                  -> answer with text + stop
 http
   .createServer((req, res) => {
     if (req.url?.startsWith('/v1/models')) {
@@ -20,11 +21,34 @@ http
         try {
           body = JSON.parse(raw)
         } catch {}
-        const sawToolResult = Array.isArray(body.messages) &&
-          body.messages.some((m) => m.role === 'tool')
+        const toolMessages = Array.isArray(body.messages)
+          ? body.messages.filter((m) => m.role === 'tool')
+          : []
+        const sawTodo = toolMessages.some((m) => typeof m.content === 'string' && m.content.includes('todo list'))
+        const sawBash = toolMessages.some((m) => typeof m.content === 'string' && m.content.includes('hi from mock'))
 
         const write = (obj) => res.write(`data: ${JSON.stringify(obj)}\n\n`)
-        if (!sawToolResult) {
+        if (!sawTodo) {
+          write({ choices: [{ delta: { role: 'assistant' } }] })
+          write({
+            choices: [{
+              delta: { tool_calls: [{ index: 0, id: 'call_todo_1', function: { name: 'todo_write', arguments: '' } }] },
+            }],
+          })
+          write({
+            choices: [{
+              delta: {
+                tool_calls: [{
+                  index: 0,
+                  function: {
+                    arguments: '{"todos":[{"content":"摸清项目结构","status":"completed"},{"content":"实现核心功能","status":"in_progress"},{"content":"写测试并验证","status":"pending"}]}',
+                  },
+                }],
+              },
+            }],
+          })
+          write({ choices: [{ delta: {}, finish_reason: 'tool_calls' }], usage: { prompt_tokens: 20, completion_tokens: 9 } })
+        } else if (!sawBash) {
           write({ choices: [{ delta: { role: 'assistant' } }] })
           write({
             choices: [{

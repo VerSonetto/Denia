@@ -148,6 +148,7 @@ mod tests {
             cwd: dir.to_path_buf(),
             cancel: CancellationToken::new(),
             confined: true,
+            emit_event: None,
         }
     }
 
@@ -219,6 +220,7 @@ mod tests {
             cwd: dir.clone(),
             cancel: cancel.clone(),
             confined: true,
+            emit_event: None,
         };
         let command = if cfg!(windows) {
             r#"{"command":"ping -n 10 127.0.0.1 >nul"}"#

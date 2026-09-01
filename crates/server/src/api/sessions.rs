@@ -229,9 +229,9 @@ async fn prompt_session(
                 &selection,
                 &prompt,
                 token,
-                &move |envelope: &SessionEnvelope| {
+                Arc::new(move |envelope: &SessionEnvelope| {
                     let _ = followers_for_turn.send(envelope.clone());
-                },
+                }),
             )
             .await;
         live.running.store(false, Ordering::SeqCst);

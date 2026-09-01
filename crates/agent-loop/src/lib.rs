@@ -72,13 +72,16 @@ impl SessionDriver {
     }
 
     /// Runs one user turn to completion and returns the reason it ended.
+    ///
+    /// `session` is shared (`Arc`) because tools like `todo_write` append
+    /// log-only events through a `'static` sink wired back to the same log.
     pub async fn run_turn(
         &self,
-        session: &Session,
+        session: &Arc<Session>,
         selection: &ModelSelection,
         prompt: &str,
         cancel: CancellationToken,
-        emit: &(dyn Fn(&SessionEnvelope) + Send + Sync),
+        emit: Arc<dyn Fn(&SessionEnvelope) + Send + Sync>,
     ) -> TurnEndReason {
         match self
             .run_turn_inner(session, selection, prompt, cancel, emit)
@@ -93,22 +96,22 @@ impl SessionDriver {
 
     async fn run_turn_inner(
         &self,
-        session: &Session,
+        session: &Arc<Session>,
         selection: &ModelSelection,
         prompt: &str,
         cancel: CancellationToken,
-        emit: &(dyn Fn(&SessionEnvelope) + Send + Sync),
+        emit: Arc<dyn Fn(&SessionEnvelope) + Send + Sync>,
     ) -> Result<TurnEndReason, LlmFailure> {
         let turn = next_turn_number(session);
-        append(session, emit, SessionEvent::UserMessage { text: prompt.to_string(), injected: false })?;
-        append(session, emit, SessionEvent::TurnStart { turn })?;
+        append(session, &emit, SessionEvent::UserMessage { text: prompt.to_string(), injected: false })?;
+        append(session, &emit, SessionEvent::TurnStart { turn })?;
 
         let mut step: u32 = 0;
         let mut feedback: u32 = 0;
         let mut runtime_projection = RuntimeContextProjection::restore(session);
         loop {
             step += 1;
-            append(session, emit, SessionEvent::StepStart { turn, step })?;
+            append(session, &emit, SessionEvent::StepStart { turn, step })?;
 
             let cwd = session.header().cwd.clone();
             let assembly = self
@@ -123,7 +126,7 @@ impl SessionDriver {
             if let Some(snapshot) = runtime_projection.project(&assembly) {
                 append(
                     session,
-                    emit,
+                    &emit,
                     SessionEvent::UserMessage {
                         text: snapshot,
                         injected: true,
@@ -135,7 +138,7 @@ impl SessionDriver {
             if should_log_system_prompt(session, step, &prompt_body) {
                 append(
                     session,
-                    emit,
+                    &emit,
                     SessionEvent::SystemPrompt {
                         turn,
                         step,
@@ -158,12 +161,12 @@ impl SessionDriver {
                 Ok(stream) => stream,
                 Err(error) => {
                     let failure = error.failure.clone();
-                    append(session, emit, SessionEvent::StepEnd { turn, step })?;
+                    append(session, &emit, SessionEvent::StepEnd { turn, step })?;
                     if feedback < MAX_FEEDBACK {
                         feedback += 1;
                         append(
                             session,
-                            emit,
+                            &emit,
                             SessionEvent::UserMessage {
                                 text: feedback_text(&failure),
                                 injected: true,
@@ -172,7 +175,7 @@ impl SessionDriver {
                         continue;
                     }
                     let reason = TurnEndReason::Error { failure };
-                    append(session, emit, SessionEvent::TurnEnd { turn, reason: reason.clone() })?;
+                    append(session, &emit, SessionEvent::TurnEnd { turn, reason: reason.clone() })?;
                     return Ok(reason);
                 }
             };
@@ -195,7 +198,7 @@ impl SessionDriver {
                     Some(Ok(chunk)) => {
                         append(
                             session,
-                            emit,
+                            &emit,
                             SessionEvent::AssistantChunk {
                                 turn,
                                 step,
@@ -220,7 +223,7 @@ impl SessionDriver {
             if interrupted {
                 append(
                     session,
-                    emit,
+                    &emit,
                     SessionEvent::AssistantMessage {
                         turn,
                         step,
@@ -229,15 +232,15 @@ impl SessionDriver {
                         interrupted: true,
                     },
                 )?;
-                append(session, emit, SessionEvent::StepEnd { turn, step })?;
+                append(session, &emit, SessionEvent::StepEnd { turn, step })?;
                 let reason = TurnEndReason::Aborted;
-                append(session, emit, SessionEvent::TurnEnd { turn, reason })?;
+                append(session, &emit, SessionEvent::TurnEnd { turn, reason })?;
                 return Ok(TurnEndReason::Aborted);
             }
             if let Some(failure) = stream_error {
                 append(
                     session,
-                    emit,
+                    &emit,
                     SessionEvent::AssistantMessage {
                         turn,
                         step,
@@ -246,12 +249,12 @@ impl SessionDriver {
                         interrupted: true,
                     },
                 )?;
-                append(session, emit, SessionEvent::StepEnd { turn, step })?;
+                append(session, &emit, SessionEvent::StepEnd { turn, step })?;
                 if feedback < MAX_FEEDBACK {
                     feedback += 1;
                     append(
                         session,
-                        emit,
+                        &emit,
                         SessionEvent::UserMessage {
                             text: feedback_text(&failure),
                             injected: true,
@@ -260,13 +263,13 @@ impl SessionDriver {
                     continue;
                 }
                 let reason = TurnEndReason::Error { failure };
-                append(session, emit, SessionEvent::TurnEnd { turn, reason: reason.clone() })?;
+                append(session, &emit, SessionEvent::TurnEnd { turn, reason: reason.clone() })?;
                 return Ok(reason);
             }
 
             append(
                 session,
-                emit,
+                &emit,
                 SessionEvent::AssistantMessage {
                     turn,
                     step,
@@ -294,13 +297,13 @@ impl SessionDriver {
             let hit_max_tokens = matches!(finish, Some(FinishReason::MaxTokens));
 
             if calls.is_empty() || hit_max_tokens {
-                append(session, emit, SessionEvent::StepEnd { turn, step })?;
+                append(session, &emit, SessionEvent::StepEnd { turn, step })?;
                 let reason = if hit_max_tokens {
                     TurnEndReason::MaxTokens
                 } else {
                     TurnEndReason::Completed
                 };
-                append(session, emit, SessionEvent::TurnEnd { turn, reason: reason.clone() })?;
+                append(session, &emit, SessionEvent::TurnEnd { turn, reason: reason.clone() })?;
                 return Ok(reason);
             }
 
@@ -310,7 +313,7 @@ impl SessionDriver {
             for call in &calls {
                 append(
                     session,
-                    emit,
+                    &emit,
                     SessionEvent::ToolCall {
                         turn,
                         step,
@@ -325,10 +328,19 @@ impl SessionDriver {
                         is_error: true,
                     }
                 } else if let Some(tool) = self.tools.get(&call.name) {
+                    // Log-only event sink for tools like todo_write: appends
+                    // through the same session and echoes to SSE followers.
+                    let sink_session = session.clone();
+                    let sink_emit = emit.clone();
                     let context = ToolContext {
                         cwd: cwd.clone(),
                         cancel: cancel.child_token(),
                         confined: session.header().sandbox,
+                        emit_event: Some(Arc::new(move |event: SessionEvent| {
+                            if let Ok(envelope) = sink_session.append(event) {
+                                sink_emit(&envelope);
+                            }
+                        })),
                     };
                     tool.execute(&call.arguments, &context).await
                 } else {
@@ -339,7 +351,7 @@ impl SessionDriver {
                 };
                 append(
                     session,
-                    emit,
+                    &emit,
                     SessionEvent::ToolResult {
                         turn,
                         step,
@@ -350,7 +362,7 @@ impl SessionDriver {
                     },
                 )?;
             }
-            append(session, emit, SessionEvent::StepEnd { turn, step })?;
+            append(session, &emit, SessionEvent::StepEnd { turn, step })?;
         }
     }
 }
@@ -369,7 +381,7 @@ fn next_turn_number(session: &Session) -> u32 {
 
 fn append(
     session: &Session,
-    emit: &(dyn Fn(&SessionEnvelope) + Send + Sync),
+    emit: &Arc<dyn Fn(&SessionEnvelope) + Send + Sync>,
     event: SessionEvent,
 ) -> Result<(), LlmFailure> {
     let envelope = session
@@ -588,7 +600,7 @@ mod tests {
         )
     }
 
-    fn temp_session() -> Session {
+    fn temp_session() -> Arc<Session> {
         let dir = std::env::temp_dir().join(format!(
             "denia-loop-{}",
             std::time::SystemTime::now()
@@ -596,7 +608,7 @@ mod tests {
                 .unwrap()
                 .as_nanos()
         ));
-        Session::create(&dir, uuid::Uuid::new_v4().to_string(), &dir, true).unwrap()
+        Arc::new(Session::create(&dir, uuid::Uuid::new_v4().to_string(), &dir, true).unwrap())
     }
 
     fn selection() -> ModelSelection {
@@ -607,8 +619,8 @@ mod tests {
         }
     }
 
-    fn noop_emit() -> Box<dyn Fn(&SessionEnvelope) + Send + Sync> {
-        Box::new(|_| {})
+    fn noop_emit() -> Arc<dyn Fn(&SessionEnvelope) + Send + Sync> {
+        Arc::new(|_| {})
     }
 
     #[tokio::test]
@@ -616,7 +628,7 @@ mod tests {
         let (driver, _registry) = driver(vec![MockScript::Chunks(text_script("done!"))]);
         let session = temp_session();
         let reason = driver
-            .run_turn(&session, &selection(), "hello", CancellationToken::new(), &noop_emit())
+            .run_turn(&session, &selection(), "hello", CancellationToken::new(), noop_emit())
             .await;
         assert_eq!(reason, TurnEndReason::Completed);
 
@@ -657,7 +669,7 @@ mod tests {
         let (driver, _registry) = driver(vec![MockScript::Chunks(tool_script()), MockScript::Chunks(text_script("after tool"))]);
         let session = temp_session();
         let reason = driver
-            .run_turn(&session, &selection(), "use the tool", CancellationToken::new(), &noop_emit())
+            .run_turn(&session, &selection(), "use the tool", CancellationToken::new(), noop_emit())
             .await;
         assert_eq!(reason, TurnEndReason::Completed);
 
@@ -694,7 +706,7 @@ mod tests {
         let (driver, _registry) = driver(vec![MockScript::Chunks(unknown), MockScript::Chunks(text_script("ok"))]);
         let session = temp_session();
         let reason = driver
-            .run_turn(&session, &selection(), "go", CancellationToken::new(), &noop_emit())
+            .run_turn(&session, &selection(), "go", CancellationToken::new(), noop_emit())
             .await;
         assert_eq!(reason, TurnEndReason::Completed);
         let result = session.events().iter().find_map(|envelope| match &envelope.event {
@@ -764,7 +776,7 @@ mod tests {
             cancel_clone.cancel();
         });
         let reason = driver
-            .run_turn(&session, &selection(), "go", cancel, &noop_emit())
+            .run_turn(&session, &selection(), "go", cancel, noop_emit())
             .await;
         assert_eq!(reason, TurnEndReason::Aborted);
         let has_interrupted = session.events().iter().any(|envelope| {
@@ -784,7 +796,7 @@ mod tests {
         ]);
         let session = temp_session();
         let reason = driver
-            .run_turn(&session, &selection(), "go", CancellationToken::new(), &noop_emit())
+            .run_turn(&session, &selection(), "go", CancellationToken::new(), noop_emit())
             .await;
         assert_eq!(reason, TurnEndReason::Completed);
         // 纠错提示以 injected 用户消息落日志,模型看得见。

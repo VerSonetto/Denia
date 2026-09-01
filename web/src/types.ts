@@ -151,6 +151,12 @@ export type TurnEndReason =
   | { kind: 'max-tokens' }
   | { kind: 'error'; failure: LlmFailure }
 
+/** One entry in the session's todo list (mirrors the Rust `TodoItem`). */
+export interface TodoItem {
+  content: string
+  status: 'pending' | 'in_progress' | 'completed'
+}
+
 export type SessionEnvelope =
   | { seq: number; time: number; type: 'turn-start'; turn: number }
   | { seq: number; time: number; type: 'turn-end'; turn: number; reason: TurnEndReason }
@@ -196,6 +202,12 @@ export type SessionEnvelope =
       content: string
       is_error: boolean
       error?: string
+    }
+  | {
+      seq: number
+      time: number
+      type: 'todo-write'
+      todos: TodoItem[]
     }
 
 export interface SessionHeader {

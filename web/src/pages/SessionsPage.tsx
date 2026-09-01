@@ -17,10 +17,12 @@ import {
   IconStop,
 } from '../components/icons'
 import { resolveSessionReasoningEffort } from '../modelCatalog'
+import { TodoPanel } from '../components/TodoPanel'
 import type {
   ModelCatalog,
   ModelSelection,
   SessionSummary,
+  TodoItem,
   WorkspaceRecord,
 } from '../types'
 
@@ -83,6 +85,7 @@ export default function SessionsPage({
   const [atBottom, setAtBottom] = useState(true)
   // 当前会话的 transcript 节点,供状态栏统计。
   const [transcriptNodes, setTranscriptNodes] = useState<TranscriptNode[]>([])
+  const [todos, setTodos] = useState<TodoItem[]>([])
   const lockTimer = useRef<number | undefined>(undefined)
   const promptRef = useRef<HTMLTextAreaElement | null>(null)
   const scrollRef = useRef<HTMLDivElement | null>(null)
@@ -100,6 +103,7 @@ export default function SessionsPage({
     setPrompt('')
     setSending(false)
     setTranscriptNodes([])
+    setTodos([])
     window.clearTimeout(lockTimer.current)
     atBottomRef.current = true
     setAtBottom(true)
@@ -463,6 +467,7 @@ export default function SessionsPage({
                 setTranscriptNodes(nodes)
                 followIfPinned()
               }}
+              onTodosChange={setTodos}
             />
           ) : (
             <div className="session-hero">
@@ -478,6 +483,7 @@ export default function SessionsPage({
         <div className="composer-seat" ref={seatRef} data-composer-seat="">
           <div className={`composer-stack${phase === 'hero' ? ' composer-hero' : ''}`}>
             {phase === 'hero' && workspaceRow}
+            {phase === 'active' && <TodoPanel todos={todos} />}
             {composerCard}
             {phase === 'active' && (
               <StatsBar

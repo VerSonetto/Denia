@@ -14,12 +14,21 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use denia_core::session::SessionEvent;
 use denia_core::tool::ToolSchema;
 use tokio_util::sync::CancellationToken;
 
 pub use bash::BashTool;
 pub use files::{ReadFileTool, WriteFileTool};
 pub use prompt::{default_shipped, register_shipped_prompt};
+pub use todo::TodoWriteTool;
+
+mod todo;
+
+/// Session-event sink handed to tools that emit log-only state (todo_write).
+/// The agent loop wires it to the session append + broadcast; tools never
+/// touch the session handle directly.
+pub type SessionEventSink = Arc<dyn Fn(SessionEvent) + Send + Sync>;
 
 /// Execution context handed to every tool call.
 pub struct ToolContext {
@@ -30,6 +39,8 @@ pub struct ToolContext {
     /// Sandbox: confine file access to `cwd`. Off allows absolute paths
     /// outside the workspace.
     pub confined: bool,
+    /// Log-only event sink; `None` for callers with no owning session.
+    pub emit_event: Option<SessionEventSink>,
 }
 
 /// One model-facing tool outcome.
@@ -72,12 +83,13 @@ impl ToolRegistry {
     }
 }
 
-/// The shipped tool set: bash + read_file + write_file.
+/// The shipped tool set: bash + read_file + write_file + todo_write.
 pub fn default_registry() -> ToolRegistry {
     let mut registry = ToolRegistry::default();
     registry.register(Arc::new(BashTool::default()));
     registry.register(Arc::new(ReadFileTool::default()));
     registry.register(Arc::new(WriteFileTool::default()));
+    registry.register(Arc::new(TodoWriteTool::default()));
     registry
 }
 
