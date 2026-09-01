@@ -1,4 +1,4 @@
-# dsh-rs
+# denia
 
 A Rust agent harness inspired by DeepSeek Harness (dsh): backend core in Rust,
 web console in React.
@@ -25,14 +25,14 @@ crates/
   tools/        bash / read_file / write_file
   session/      JSONL session storage
   agent-loop/   the session driver (turn/step loop)
-  server/       axum HTTP API + SSE push + embedded console (bin: dsh-rs)
+  server/       axum HTTP API + SSE push + embedded console (bin: denia)
 web/            React + Vite + TypeScript console (sessions + models)
 scripts/        mock-gateway.mjs (stateful OpenAI-compatible test gateway)
 ```
 
 ## Run
 
-One-shot build (kills any running `dsh-rs`, builds the console, release-builds
+One-shot build (kills any running `denia`, builds the console, release-builds
 and installs the global command):
 
 ```sh
@@ -43,22 +43,22 @@ scripts/build.sh --run    # build + install + start
 Then, from anywhere:
 
 ```sh
-dsh-rs                 # API + console on http://127.0.0.1:3600
-dsh-rs --port 4000     # custom port
-dsh-rs --web web/dist  # serve a console directory instead of the embedded one
+denia                 # API + console on http://127.0.0.1:3600
+denia --port 4000     # custom port
+denia --web web/dist  # serve a console directory instead of the embedded one
 ```
 
 Development with hot reload:
 
 ```sh
-cargo run -p dshrs-server        # debug builds read web/dist from disk
+cargo run -p denia-server        # debug builds read web/dist from disk
 cd web && pnpm dev               # vite dev server on :5173 proxying /api
 ```
 
 ## Sessions
 
-Sessions are append-only JSONL event logs under `$DSH_RS_HOME/sessions/<id>/`.
-By default a session works inside the sandbox (`$DSH_RS_HOME/workspace`);
+Sessions are append-only JSONL event logs under `$DENIA_HOME/sessions/<id>/`.
+By default a session works inside the sandbox (`$DENIA_HOME/workspace`);
 creating one with `sandbox: false` + a `cwd` opts into a real directory.
 Tools (`bash`, `read_file`, `write_file`) auto-execute this phase.
 
@@ -83,7 +83,7 @@ result get text. Register it as a provider (`llm-openai` section,
 
 ## Home
 
-State lives in `$DSH_RS_HOME` (default `~/.dsh-rs`):
+State lives in `$DENIA_HOME` (default `~/.denia`):
 
 - `settings.yaml` — namespaced configuration (agent-default-model, llm-openai)
 - `.credentials.yaml` — stored API keys (0600), resolved after process env

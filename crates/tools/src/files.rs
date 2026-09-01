@@ -1,7 +1,7 @@
 //! The `read_file` and `write_file` tools.
 
 use async_trait::async_trait;
-use dshrs_core::tool::ToolSchema;
+use denia_core::tool::ToolSchema;
 use serde::Deserialize;
 
 use crate::{Tool, ToolContext, ToolOutput, parse_args_lenient, resolve_within, truncate};
@@ -156,7 +156,7 @@ mod tests {
     use tokio_util::sync::CancellationToken;
 
     fn workspace() -> (tempfile_like::TempDir, ToolContext) {
-        let dir = std::env::temp_dir().join(format!("dshrs-tools-{}", uuid_like()));
+        let dir = std::env::temp_dir().join(format!("denia-tools-{}", uuid_like()));
         std::fs::create_dir_all(&dir).unwrap();
         let context = ToolContext {
             cwd: dir.clone(),

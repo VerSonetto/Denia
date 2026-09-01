@@ -1,16 +1,16 @@
 [package]
-name = "dshrs-agent-loop"
+name = "denia-agent-loop"
 description = "The session driver: turn/step loop over the llm registry and tools"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
 [dependencies]
-dshrs-core = { workspace = true }
-dshrs-llm = { workspace = true }
-dshrs-session = { workspace = true }
-dshrs-system-prompt = { workspace = true }
-dshrs-tools = { workspace = true }
+denia-core = { workspace = true }
+denia-llm = { workspace = true }
+denia-session = { workspace = true }
+denia-system-prompt = { workspace = true }
+denia-tools = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
 futures = { workspace = true }

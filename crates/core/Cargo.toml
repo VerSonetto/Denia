@@ -1,6 +1,6 @@
 [package]
-name = "dshrs-core"
-description = "Shared domain types for the dsh-rs harness"
+name = "denia-core"
+description = "Shared domain types for the denia harness"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

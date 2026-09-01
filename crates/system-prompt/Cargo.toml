@@ -1,12 +1,12 @@
 [package]
-name = "dshrs-system-prompt"
+name = "denia-system-prompt"
 description = "System-prompt assembly: ordered sections, runtime context, tool schemas, and variables"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
 [dependencies]
-dshrs-core = { workspace = true }
+denia-core = { workspace = true }
 serde_json = { workspace = true }
 
 [dev-dependencies]

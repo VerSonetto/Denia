@@ -96,7 +96,7 @@ struct MkdirBody {
 async fn pick_dir() -> Result<impl IntoResponse, ApiError> {
     let picked = tokio::task::spawn_blocking(|| {
         rfd::FileDialog::new()
-            .set_title("dsh-rs: choose a workspace directory")
+            .set_title("denia: choose a workspace directory")
             .pick_folder()
     })
     .await

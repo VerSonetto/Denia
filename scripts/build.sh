@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# dsh-rs one-shot build: kill running instances, build the web console,
-# release-build the server, and install the global `dsh-rs` command.
+# denia one-shot build: kill running instances, build the web console,
+# release-build the server, and install the global `denia` command.
 #
 #   scripts/build.sh          build + install
 #   scripts/build.sh --run    build + install, then start the server (foreground)
@@ -10,13 +10,13 @@ cd "$(dirname "$0")/.."
 
 log() { printf '\n==> %s\n' "$*"; }
 
-log "killing running dsh-rs processes (exe is locked while running)"
+log "killing running denia processes (exe is locked while running)"
 case "${OSTYPE:-}" in
   msys* | cygwin* | win32*)
-    taskkill //IM dsh-rs.exe //F >/dev/null 2>&1 || true
+    taskkill //IM denia.exe //F >/dev/null 2>&1 || true
     ;;
   *)
-    pkill -x dsh-rs 2>/dev/null || true
+    pkill -x denia 2>/dev/null || true
     ;;
 esac
 sleep 1
@@ -31,17 +31,17 @@ log "release build + global install"
 cargo install --path crates/server --force
 
 log "done"
-echo "start with: dsh-rs        (console on http://127.0.0.1:3600)"
+echo "start with: denia        (console on http://127.0.0.1:3600)"
 if [[ "${1:-}" == "--run" ]]; then
-  exec dsh-rs
+  exec denia
 fi
 if [[ "${1:-}" == "--run-bg" ]]; then
   case "${OSTYPE:-}" in
     msys* | cygwin* | win32*)
-      powershell.exe -NoProfile -Command "Start-Process dsh-rs -WindowStyle Hidden"
+      powershell.exe -NoProfile -Command "Start-Process denia -WindowStyle Hidden"
       ;;
     *)
-      nohup dsh-rs >/dev/null 2>&1 &
+      nohup denia >/dev/null 2>&1 &
       ;;
   esac
   echo "server started in background — http://127.0.0.1:3600/"

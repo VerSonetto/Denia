@@ -4,8 +4,8 @@
 use std::collections::VecDeque;
 use std::time::Duration;
 
-use dshrs_core::error::{LlmFailure, codes};
-use dshrs_core::stream::StreamChunk;
+use denia_core::error::{LlmFailure, codes};
+use denia_core::stream::StreamChunk;
 use eventsource_stream::Eventsource;
 use futures::StreamExt;
 

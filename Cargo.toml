@@ -16,17 +16,17 @@ members = [
 version = "0.1.0"
 edition = "2024"
 license = "MIT"
-repository = "https://github.com/local/dsh-rs"
+repository = "https://github.com/local/denia"
 
 [workspace.dependencies]
-dshrs-core = { path = "crates/core" }
-dshrs-settings = { path = "crates/settings" }
-dshrs-credentials = { path = "crates/credentials" }
-dshrs-llm = { path = "crates/llm" }
-dshrs-tools = { path = "crates/tools" }
-dshrs-session = { path = "crates/session" }
-dshrs-agent-loop = { path = "crates/agent-loop" }
-dshrs-system-prompt = { path = "crates/system-prompt" }
+denia-core = { path = "crates/core" }
+denia-settings = { path = "crates/settings" }
+denia-credentials = { path = "crates/credentials" }
+denia-llm = { path = "crates/llm" }
+denia-tools = { path = "crates/tools" }
+denia-session = { path = "crates/session" }
+denia-agent-loop = { path = "crates/agent-loop" }
+denia-system-prompt = { path = "crates/system-prompt" }
 
 tokio = { version = "1", features = ["full"] }
 tokio-stream = { version = "0.1", features = ["sync"] }

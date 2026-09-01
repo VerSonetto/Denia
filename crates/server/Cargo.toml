@@ -1,22 +1,22 @@
 [package]
-name = "dshrs-server"
-description = "axum HTTP API + SSE push + console hosting (bin: dsh-rs)"
+name = "denia-server"
+description = "axum HTTP API + SSE push + console hosting (bin: denia)"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
 [[bin]]
-name = "dsh-rs"
+name = "denia"
 path = "src/main.rs"
 
 [dependencies]
-dshrs-core = { workspace = true }
-dshrs-settings = { workspace = true }
-dshrs-credentials = { workspace = true }
-dshrs-llm = { workspace = true }
-dshrs-tools = { workspace = true }
-dshrs-session = { workspace = true }
-dshrs-agent-loop = { workspace = true }
+denia-core = { workspace = true }
+denia-settings = { workspace = true }
+denia-credentials = { workspace = true }
+denia-llm = { workspace = true }
+denia-tools = { workspace = true }
+denia-session = { workspace = true }
+denia-agent-loop = { workspace = true }
 
 tokio = { workspace = true }
 tokio-stream = { workspace = true }

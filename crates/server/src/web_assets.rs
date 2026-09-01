@@ -1,5 +1,5 @@
 //! Console hosting: release builds embed `web/dist` into the binary so the
-//! global `dsh-rs` command serves the console from any directory; debug
+//! global `denia` command serves the console from any directory; debug
 //! builds read the same folder from disk. `--web <dir>` overrides both with
 //! an explicit filesystem directory.
 

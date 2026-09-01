@@ -35,6 +35,7 @@ function normalizeSelection(catalog: ModelCatalog, selection: ModelSelection): M
 }
 
 const LAST_MODEL_KEY = 'denia.last-model'
+// 品牌改名前的旧 key 字面量,故意保留 dsh-rs:只用于读取并搬运老用户的选择。
 const LAST_MODEL_KEY_LEGACY = 'dsh-rs.last-model'
 const TURN_LOCK_TIMEOUT = 5000
 /** dsh ChatView FOLLOW_THRESHOLD */
@@ -127,7 +128,7 @@ export default function SessionsPage({
     try {
       let raw = window.localStorage.getItem(LAST_MODEL_KEY)
       if (!raw) {
-        // 改名 dsh-rs → Denia 前的旧 key:搬一次后清掉,用户选择不丢。
+        // 改名 denia → Denia 前的旧 key:搬一次后清掉,用户选择不丢。
         raw = window.localStorage.getItem(LAST_MODEL_KEY_LEGACY)
         if (raw) {
           window.localStorage.setItem(LAST_MODEL_KEY, raw)

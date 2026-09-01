@@ -6,9 +6,9 @@
 
 use std::collections::BTreeMap;
 
-use dshrs_core::error::{LlmFailure, codes};
-use dshrs_core::message::ChatRole;
-use dshrs_core::stream::{BlockType, ContentBlock, FinishReason, StreamChunk, TokenUsage};
+use denia_core::error::{LlmFailure, codes};
+use denia_core::message::ChatRole;
+use denia_core::stream::{BlockType, ContentBlock, FinishReason, StreamChunk, TokenUsage};
 use serde::{Deserialize, Serialize};
 
 use crate::GenerateRequest;
@@ -243,7 +243,7 @@ pub fn build_wire_messages(request: &GenerateRequest) -> Vec<WireMessage> {
 }
 
 /// The OpenAI-family `tools` array; both adapters share the shape.
-pub fn build_wire_tools(tools: &[dshrs_core::tool::ToolSchema]) -> Vec<serde_json::Value> {
+pub fn build_wire_tools(tools: &[denia_core::tool::ToolSchema]) -> Vec<serde_json::Value> {
     tools
         .iter()
         .map(|tool| {
@@ -480,12 +480,12 @@ mod tests {
         let kinds: Vec<&str> = all
             .iter()
             .map(|c| match c {
-                dshrs_core::stream::StreamChunk::BlockStart { .. } => "block-start",
-                dshrs_core::stream::StreamChunk::ReasoningDelta { .. } => "reasoning-delta",
-                dshrs_core::stream::StreamChunk::TextDelta { .. } => "text-delta",
-                dshrs_core::stream::StreamChunk::BlockEnd { .. } => "block-end",
-                dshrs_core::stream::StreamChunk::Usage { .. } => "usage",
-                dshrs_core::stream::StreamChunk::Finish { .. } => "finish",
+                denia_core::stream::StreamChunk::BlockStart { .. } => "block-start",
+                denia_core::stream::StreamChunk::ReasoningDelta { .. } => "reasoning-delta",
+                denia_core::stream::StreamChunk::TextDelta { .. } => "text-delta",
+                denia_core::stream::StreamChunk::BlockEnd { .. } => "block-end",
+                denia_core::stream::StreamChunk::Usage { .. } => "usage",
+                denia_core::stream::StreamChunk::Finish { .. } => "finish",
                 _ => "other",
             })
             .collect();
@@ -504,7 +504,7 @@ mod tests {
         );
         // Cache hits are subtracted from DeepSeek prompt tokens.
         let usage = all.iter().find_map(|c| match c {
-            dshrs_core::stream::StreamChunk::Usage { usage } => Some(*usage),
+            denia_core::stream::StreamChunk::Usage { usage } => Some(*usage),
             _ => None,
         }).unwrap();
         assert_eq!(usage.input_tokens, 10);
@@ -518,11 +518,11 @@ mod tests {
         let final_chunks = translator.finalize();
         let finish = final_chunks.last().unwrap();
         match finish {
-            dshrs_core::stream::StreamChunk::Finish { reason } => {
-                let dshrs_core::stream::FinishReason::Error { failure } = reason else {
+            denia_core::stream::StreamChunk::Finish { reason } => {
+                let denia_core::stream::FinishReason::Error { failure } = reason else {
                     panic!("expected error finish, got {reason:?}")
                 };
-                assert_eq!(failure.code, dshrs_core::error::codes::EMPTY_RESPONSE);
+                assert_eq!(failure.code, denia_core::error::codes::EMPTY_RESPONSE);
             }
             other => panic!("expected finish, got {other:?}"),
         }
@@ -540,8 +540,8 @@ mod tests {
     #[test]
     fn assistant_tool_calls_and_tool_role_serialize() {
         use crate::request::GenerateRequest;
-        use dshrs_core::message::{ChatMessage, ToolCallRef};
-        use dshrs_core::tool::ToolSchema;
+        use denia_core::message::{ChatMessage, ToolCallRef};
+        use denia_core::tool::ToolSchema;
 
         let request = GenerateRequest {
             model: "m".to_string(),
@@ -599,7 +599,7 @@ mod tests {
         let request = GenerateRequest {
             model: "MiniMax-M3".to_string(),
             reasoning_effort: Some("off".to_string()),
-            messages: vec![dshrs_core::message::ChatMessage::user("title")],
+            messages: vec![denia_core::message::ChatMessage::user("title")],
             system: Some("system".to_string()),
             tools: Vec::new(),
             temperature: None,
@@ -619,7 +619,7 @@ mod tests {
         let request = GenerateRequest {
             model: "gpt-5".to_string(),
             reasoning_effort: Some("high".to_string()),
-            messages: vec![dshrs_core::message::ChatMessage::user("hello")],
+            messages: vec![denia_core::message::ChatMessage::user("hello")],
             system: None,
             tools: Vec::new(),
             temperature: None,

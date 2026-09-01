@@ -9,9 +9,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use dshrs_core::error::{LlmError, codes};
-use dshrs_credentials::CredentialStore;
-use dshrs_settings::SettingsStore;
+use denia_core::error::{LlmError, codes};
+use denia_credentials::CredentialStore;
+use denia_settings::SettingsStore;
 use serde::{Deserialize, Serialize};
 
 use crate::catalog::{highest_reasoning_effort, DiscoveredModel, LlmModelInfo, LlmResolvedModelInfo, ProviderInfo, ReasoningEffortInfo, ReasoningInfo};
@@ -27,7 +27,7 @@ const DEFAULT_CONTEXT_WINDOW: u64 = 262_144;
 const DEFAULT_MAX_TOKENS: u64 = 32_768;
 const STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
 const DISCOVERY_RESPONSE_CAP: usize = 4 * 1024 * 1024;
-const USER_AGENT: &str = concat!("dsh-rs/", env!("CARGO_PKG_VERSION"));
+const USER_AGENT: &str = concat!("denia/", env!("CARGO_PKG_VERSION"));
 
 /// The `llm-openai` settings section shape.
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]

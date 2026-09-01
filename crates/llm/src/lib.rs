@@ -18,8 +18,8 @@ use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 
 use async_trait::async_trait;
-use dshrs_core::error::{LlmError, LlmFailure, codes};
-use dshrs_core::stream::StreamChunk;
+use denia_core::error::{LlmError, LlmFailure, codes};
+use denia_core::stream::StreamChunk;
 use futures::Stream;
 use std::pin::Pin;
 

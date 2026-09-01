@@ -326,7 +326,7 @@ mod tests {
 
     #[test]
     fn dotenv_parsing() {
-        let dir = std::env::temp_dir().join(format!("dshrs-dotenv-{}", uuid_like()));
+        let dir = std::env::temp_dir().join(format!("denia-dotenv-{}", uuid_like()));
         std::fs::create_dir_all(&dir).unwrap();
         let env_path = dir.join(".env");
         let mut file = std::fs::File::create(&env_path).unwrap();

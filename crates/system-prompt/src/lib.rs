@@ -9,7 +9,7 @@ mod render;
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use dshrs_core::tool::ToolSchema;
+use denia_core::tool::ToolSchema;
 
 pub use render::{
     frame_system_prompt_for_model, is_runtime_context_snapshot, join_context_sections,
@@ -175,7 +175,7 @@ impl SystemPrompt {
                 name: "harness:identity".to_string(),
                 order: SectionOrder::HarnessIdentity.value(),
                 text: PromptText::Static(
-                    "你是由 dsh-rs 驱动的 AI 编码 agent。".to_string(),
+                    "你是由 denia 驱动的 AI 编码 agent。".to_string(),
                 ),
                 complete: false,
             });
@@ -338,7 +338,7 @@ impl SystemPrompt {
 }
 
 fn default_persona_template() -> &'static str {
-    "你是运行在 dsh-rs 里的编码 agent。工作目录是 {{cwd}}（相对路径以它为根）。\
+    "你是运行在 denia 里的编码 agent。工作目录是 {{cwd}}（相对路径以它为根）。\
      规矩：不要猜文件路径；读取失败时先用 bash 列目录再重试；每步聚焦一件事；能回答时就停止调用工具。\
      始终使用简体中文回复，除非用户明确要求其他语言。"
 }

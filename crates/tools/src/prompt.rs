@@ -2,8 +2,8 @@
 
 use std::sync::Arc;
 
-use dshrs_core::tool::ToolSchema;
-use dshrs_system_prompt::{
+use denia_core::tool::ToolSchema;
+use denia_system_prompt::{
     AssembleContext, PromptContext, PromptSection, PromptText, SectionOrder, SystemPrompt,
     ToolProviderResult,
 };
@@ -60,8 +60,8 @@ pub fn register_shipped_prompt(prompt: &mut SystemPrompt, tools: &ToolRegistry) 
 /// Shipped registry pair: prompt assembly plus executable tools.
 pub fn default_shipped() -> (SystemPrompt, ToolRegistry) {
     let tools = crate::default_registry();
-    let mut prompt = dshrs_system_prompt::SystemPrompt::new(
-        dshrs_system_prompt::SystemPromptConfig::default(),
+    let mut prompt = denia_system_prompt::SystemPrompt::new(
+        denia_system_prompt::SystemPromptConfig::default(),
     );
     register_shipped_prompt(&mut prompt, &tools).expect("shipped prompt registrations are valid");
     (prompt, tools)
@@ -103,7 +103,7 @@ fn today_string() -> String {
 
 #[cfg(test)]
 mod tests {
-    use dshrs_system_prompt::{render_context_snapshot, render_prompt};
+    use denia_system_prompt::{render_context_snapshot, render_prompt};
 
     use super::*;
 
@@ -118,7 +118,7 @@ mod tests {
             })
             .unwrap();
         let rendered = render_prompt(&assembly);
-        assert!(rendered.contains("dsh-rs"));
+        assert!(rendered.contains("denia"));
         assert!(rendered.contains("/tmp/ws"));
         assert!(assembly.sections.iter().any(|section| section.name == "tool:bash"));
         assert!(!render_context_snapshot(&assembly).is_empty());

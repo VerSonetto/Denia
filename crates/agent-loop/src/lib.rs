@@ -12,17 +12,17 @@ mod runtime_context;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use dshrs_core::config::ModelSelection;
-use dshrs_core::error::{LlmFailure, codes};
-use dshrs_core::message::ToolCallRef;
-use dshrs_core::session::{SessionEnvelope, SessionEvent, TurnEndReason};
-use dshrs_core::stream::{ContentBlock, FinishReason, StreamChunk, TokenUsage};
-use dshrs_llm::{GenerateRequest, LlmRegistry};
-use dshrs_session::Session;
-use dshrs_system_prompt::{
+use denia_core::config::ModelSelection;
+use denia_core::error::{LlmFailure, codes};
+use denia_core::message::ToolCallRef;
+use denia_core::session::{SessionEnvelope, SessionEvent, TurnEndReason};
+use denia_core::stream::{ContentBlock, FinishReason, StreamChunk, TokenUsage};
+use denia_llm::{GenerateRequest, LlmRegistry};
+use denia_session::Session;
+use denia_system_prompt::{
     AssembleContext, SystemPrompt, frame_system_prompt_for_model, render_prompt,
 };
-use dshrs_tools::{ToolContext, ToolRegistry};
+use denia_tools::{ToolContext, ToolRegistry};
 use futures::StreamExt;
 use runtime_context::RuntimeContextProjection;
 use tokio_util::sync::CancellationToken;
@@ -320,7 +320,7 @@ impl SessionDriver {
                     },
                 )?;
                 let output = if cancel.is_cancelled() {
-                    dshrs_tools::ToolOutput {
+                    denia_tools::ToolOutput {
                         content: "aborted before dispatch".to_string(),
                         is_error: true,
                     }
@@ -332,7 +332,7 @@ impl SessionDriver {
                     };
                     tool.execute(&call.arguments, &context).await
                 } else {
-                    dshrs_tools::ToolOutput {
+                    denia_tools::ToolOutput {
                         content: format!("unknown tool: {}", call.name),
                         is_error: true,
                     }
@@ -385,29 +385,29 @@ mod tests {
 
     #[test]
     fn system_prompt_frames_runtime_authority() {
-        let (prompt, _) = dshrs_tools::default_shipped();
+        let (prompt, _) = denia_tools::default_shipped();
         let assembly = prompt
-            .assemble(&dshrs_system_prompt::AssembleContext {
+            .assemble(&denia_system_prompt::AssembleContext {
                 cwd: Some("/tmp/ws".to_string()),
                 model: Some("mock".to_string()),
                 provider: Some("mock".to_string()),
             })
             .unwrap();
-        let body = dshrs_system_prompt::render_prompt(&assembly);
+        let body = denia_system_prompt::render_prompt(&assembly);
         assert!(!body.contains("最高优先级"));
         assert!(body.contains("/tmp/ws"));
 
-        let model = dshrs_system_prompt::frame_system_prompt_for_model(&body);
+        let model = denia_system_prompt::frame_system_prompt_for_model(&body);
         assert!(model.contains("最高优先级"));
         assert!(model.contains("再次确认"));
         assert!(model.contains("/tmp/ws"));
     }
 
     use async_trait::async_trait;
-    use dshrs_core::stream::{BlockType, FinishReason};
-    use dshrs_core::tool::ToolSchema;
-    use dshrs_core::error::LlmError;
-    use dshrs_llm::{ChunkStream, LlmAdapter, LlmModelInfo, LlmResolvedModelInfo, ProviderInfo};
+    use denia_core::stream::{BlockType, FinishReason};
+    use denia_core::tool::ToolSchema;
+    use denia_core::error::LlmError;
+    use denia_llm::{ChunkStream, LlmAdapter, LlmModelInfo, LlmResolvedModelInfo, ProviderInfo};
     use std::collections::VecDeque;
     use std::sync::Mutex;
 
@@ -466,7 +466,7 @@ mod tests {
         ) -> Result<ChunkStream, LlmError> {
             match self.scripts.lock().unwrap().pop_front() {
                 Some(MockScript::Fail(failure)) => {
-                    Err(dshrs_core::error::LlmError::from_failure(failure))
+                    Err(denia_core::error::LlmError::from_failure(failure))
                 }
                 Some(MockScript::Chunks(chunks)) => Ok(Box::pin(
                     futures::stream::iter(chunks.into_iter().map(Ok)),
@@ -479,7 +479,7 @@ mod tests {
     struct EchoTool;
 
     #[async_trait]
-    impl dshrs_tools::Tool for EchoTool {
+    impl denia_tools::Tool for EchoTool {
         fn schema(&self) -> &ToolSchema {
             // Leaked once for the &'static contract of the test trait object.
             Box::leak(Box::new(ToolSchema {
@@ -489,8 +489,8 @@ mod tests {
             }))
         }
 
-        async fn execute(&self, arguments: &str, _ctx: &ToolContext) -> dshrs_tools::ToolOutput {
-            dshrs_tools::ToolOutput {
+        async fn execute(&self, arguments: &str, _ctx: &ToolContext) -> denia_tools::ToolOutput {
+            denia_tools::ToolOutput {
                 content: format!("echo:{arguments}"),
                 is_error: false,
             }
@@ -561,17 +561,17 @@ mod tests {
                 Arc::new(MockAdapter {
                     scripts: Mutex::new(VecDeque::from(scripts)),
                 }),
-                dshrs_llm::RetryPolicy::default(),
+                denia_llm::RetryPolicy::default(),
             )
             .unwrap();
         let mut tools = ToolRegistry::default();
         tools.register(Arc::new(EchoTool));
-        let mut prompt = SystemPrompt::new(dshrs_system_prompt::SystemPromptConfig {
+        let mut prompt = SystemPrompt::new(denia_system_prompt::SystemPromptConfig {
             include_runtime_context: false,
             ..Default::default()
         });
         let schemas = tools.schemas();
-        prompt.tools(move |_| dshrs_system_prompt::ToolProviderResult {
+        prompt.tools(move |_| denia_system_prompt::ToolProviderResult {
             schemas: schemas.clone(),
             known_names: None,
         });
@@ -590,7 +590,7 @@ mod tests {
 
     fn temp_session() -> Session {
         let dir = std::env::temp_dir().join(format!(
-            "dshrs-loop-{}",
+            "denia-loop-{}",
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
@@ -678,7 +678,7 @@ mod tests {
 
         // The second request saw the tool result in derived history.
         let messages = session.derive_messages();
-        assert!(messages.iter().any(|m| m.role == dshrs_core::message::ChatRole::Tool));
+        assert!(messages.iter().any(|m| m.role == denia_core::message::ChatRole::Tool));
     }
 
     #[tokio::test]
@@ -742,9 +742,9 @@ mod tests {
         }
         let registry = Arc::new(LlmRegistry::new());
         registry
-            .register(&["mock".to_string()], Arc::new(PendingAdapter), dshrs_llm::RetryPolicy::default())
+            .register(&["mock".to_string()], Arc::new(PendingAdapter), denia_llm::RetryPolicy::default())
             .unwrap();
-        let mut prompt = SystemPrompt::new(dshrs_system_prompt::SystemPromptConfig {
+        let mut prompt = SystemPrompt::new(denia_system_prompt::SystemPromptConfig {
             include_runtime_context: false,
             ..Default::default()
         });

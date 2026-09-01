@@ -3,7 +3,7 @@
 use std::future::Future;
 use std::time::Duration;
 
-use dshrs_core::error::{LlmError, codes};
+use denia_core::error::{LlmError, codes};
 use rand::Rng;
 
 /// Per-route retry behavior. Setup failures with retryable codes re-run the

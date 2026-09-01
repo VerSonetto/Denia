@@ -11,8 +11,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use dshrs_core::message::ChatMessage;
-use dshrs_core::session::{
+use denia_core::message::ChatMessage;
+use denia_core::session::{
     SessionEnvelope, SessionEvent, SessionHeader, SessionHeaderKind, TurnEndReason,
     SESSION_FORMAT_VERSION, derive_messages,
 };
@@ -364,7 +364,7 @@ mod tests {
 
     fn temp_root() -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
-            "dshrs-session-{}",
+            "denia-session-{}",
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap()

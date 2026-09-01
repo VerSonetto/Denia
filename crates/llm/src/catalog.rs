@@ -1,6 +1,6 @@
 //! Model catalog vocabulary and the browser-facing catalog projection.
 
-use dshrs_core::config::ModelSelection;
+use denia_core::config::ModelSelection;
 use serde::{Deserialize, Serialize};
 
 use crate::LlmRegistry;

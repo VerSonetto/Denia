@@ -7,9 +7,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use dshrs_core::error::{LlmError, codes};
-use dshrs_credentials::CredentialStore;
-use dshrs_settings::SettingsStore;
+use denia_core::error::{LlmError, codes};
+use denia_credentials::CredentialStore;
+use denia_settings::SettingsStore;
 use serde::{Deserialize, Serialize};
 
 use crate::catalog::{highest_reasoning_effort, LlmModelInfo, LlmResolvedModelInfo, ProviderInfo, ReasoningEffortInfo, ReasoningInfo};
@@ -26,7 +26,7 @@ const DEFAULT_BASE_URL: &str = "https://api.deepseek.com";
 const DEFAULT_CONTEXT_WINDOW: u64 = 1_000_000;
 const DEFAULT_MAX_TOKENS: u64 = 256_000;
 const STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
-const USER_AGENT: &str = concat!("dsh-rs/", env!("CARGO_PKG_VERSION"));
+const USER_AGENT: &str = concat!("denia/", env!("CARGO_PKG_VERSION"));
 
 /// The `llm-deepseek` settings section shape.
 #[derive(Debug, Clone, Deserialize, Serialize)]

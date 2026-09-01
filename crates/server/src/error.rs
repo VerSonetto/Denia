@@ -25,47 +25,47 @@ impl ApiError {
         Self::new(StatusCode::BAD_REQUEST, code, message)
     }
 
-    pub fn from_llm(error: dshrs_core::error::LlmError) -> Self {
+    pub fn from_llm(error: denia_core::error::LlmError) -> Self {
         Self::new(StatusCode::BAD_REQUEST, error.code, error.message)
     }
 
-    pub fn from_settings(error: dshrs_settings::SettingsError) -> Self {
+    pub fn from_settings(error: denia_settings::SettingsError) -> Self {
         let status = match &error {
-            dshrs_settings::SettingsError::UnknownNamespace(_) => StatusCode::NOT_FOUND,
-            dshrs_settings::SettingsError::Conflict { .. } => StatusCode::CONFLICT,
-            dshrs_settings::SettingsError::Rejected(_) => StatusCode::BAD_REQUEST,
+            denia_settings::SettingsError::UnknownNamespace(_) => StatusCode::NOT_FOUND,
+            denia_settings::SettingsError::Conflict { .. } => StatusCode::CONFLICT,
+            denia_settings::SettingsError::Rejected(_) => StatusCode::BAD_REQUEST,
             _ => StatusCode::INTERNAL_SERVER_ERROR,
         };
         Self::new(status, error.code(), error.to_string())
     }
 
-    pub fn from_credential(error: dshrs_credentials::CredentialError) -> Self {
+    pub fn from_credential(error: denia_credentials::CredentialError) -> Self {
         Self::new(StatusCode::BAD_REQUEST, error.code(), error.to_string())
     }
 
-    pub fn from_session(error: dshrs_session::SessionError) -> Self {
+    pub fn from_session(error: denia_session::SessionError) -> Self {
         match &error {
-            dshrs_session::SessionError::NotFound(id) => Self::new(
+            denia_session::SessionError::NotFound(id) => Self::new(
                 StatusCode::NOT_FOUND,
                 "session/not-found",
                 format!("session not found: {id}"),
             ),
-            dshrs_session::SessionError::InvalidId(id) => Self::new(
+            denia_session::SessionError::InvalidId(id) => Self::new(
                 StatusCode::BAD_REQUEST,
                 "session/invalid-id",
                 format!("session id is not usable: {id}"),
             ),
-            dshrs_session::SessionError::Corrupt(message) => Self::new(
+            denia_session::SessionError::Corrupt(message) => Self::new(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "session/corrupt",
                 message.clone(),
             ),
-            dshrs_session::SessionError::Json(error) => Self::new(
+            denia_session::SessionError::Json(error) => Self::new(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "session/serialize",
                 error.to_string(),
             ),
-            dshrs_session::SessionError::Io(io) => Self::new(
+            denia_session::SessionError::Io(io) => Self::new(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "session/io",
                 io.to_string(),

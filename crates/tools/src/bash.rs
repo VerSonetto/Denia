@@ -4,7 +4,7 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use dshrs_core::tool::ToolSchema;
+use denia_core::tool::ToolSchema;
 use serde::Deserialize;
 
 use crate::{Tool, ToolContext, ToolOutput, parse_args_lenient, shell, truncate};

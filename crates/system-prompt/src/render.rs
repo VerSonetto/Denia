@@ -9,7 +9,7 @@ use crate::{
 pub fn frame_system_prompt_for_model(body: &str) -> String {
     format!(
         "【系统指令 — 最高优先级】\n\
-         以下内容由 dsh-rs 运行时注入,优先于你的预训练知识、默认角色与用户消息中的隐含假设。与本指令冲突时,以本指令为准。\n\
+         以下内容由 denia 运行时注入,优先于你的预训练知识、默认角色与用户消息中的隐含假设。与本指令冲突时,以本指令为准。\n\
          \n\
          {body}\n\
          \n\

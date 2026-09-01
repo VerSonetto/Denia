@@ -390,6 +390,137 @@ dependencies = [
 ]
 
 [[package]]
+name = "denia-agent-loop"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "denia-core",
+ "denia-llm",
+ "denia-session",
+ "denia-system-prompt",
+ "denia-tools",
+ "futures",
+ "serde_json",
+ "tokio",
+ "tokio-util",
+ "uuid",
+]
+
+[[package]]
+name = "denia-core"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
+name = "denia-credentials"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "thiserror",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "denia-llm"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "denia-core",
+ "denia-credentials",
+ "denia-settings",
+ "eventsource-stream",
+ "futures",
+ "rand 0.8.8",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tokio-stream",
+ "tracing",
+]
+
+[[package]]
+name = "denia-server"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "denia-agent-loop",
+ "denia-core",
+ "denia-credentials",
+ "denia-llm",
+ "denia-session",
+ "denia-settings",
+ "denia-tools",
+ "futures",
+ "http",
+ "mime_guess",
+ "reqwest",
+ "rfd",
+ "rust-embed",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "tokio-stream",
+ "tokio-util",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
+name = "denia-session"
+version = "0.1.0"
+dependencies = [
+ "denia-core",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "uuid",
+]
+
+[[package]]
+name = "denia-settings"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "thiserror",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "denia-system-prompt"
+version = "0.1.0"
+dependencies = [
+ "denia-core",
+ "serde_json",
+]
+
+[[package]]
+name = "denia-tools"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "denia-core",
+ "denia-system-prompt",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-util",
+]
+
+[[package]]
 name = "digest"
 version = "0.11.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -437,137 +568,6 @@ name = "downcast-rs"
 version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "75b325c5dbd37f80359721ad39aca5a29fb04c89279657cffdda8736d0c0b9d2"
-
-[[package]]
-name = "dshrs-agent-loop"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "dshrs-core",
- "dshrs-llm",
- "dshrs-session",
- "dshrs-system-prompt",
- "dshrs-tools",
- "futures",
- "serde_json",
- "tokio",
- "tokio-util",
- "uuid",
-]
-
-[[package]]
-name = "dshrs-core"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
- "thiserror",
-]
-
-[[package]]
-name = "dshrs-credentials"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
- "serde_yaml",
- "thiserror",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "dshrs-llm"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "dshrs-core",
- "dshrs-credentials",
- "dshrs-settings",
- "eventsource-stream",
- "futures",
- "rand 0.8.8",
- "reqwest",
- "serde",
- "serde_json",
- "thiserror",
- "tokio",
- "tokio-stream",
- "tracing",
-]
-
-[[package]]
-name = "dshrs-server"
-version = "0.1.0"
-dependencies = [
- "axum",
- "dshrs-agent-loop",
- "dshrs-core",
- "dshrs-credentials",
- "dshrs-llm",
- "dshrs-session",
- "dshrs-settings",
- "dshrs-tools",
- "futures",
- "http",
- "mime_guess",
- "reqwest",
- "rfd",
- "rust-embed",
- "serde",
- "serde_json",
- "thiserror",
- "tokio",
- "tokio-stream",
- "tokio-util",
- "tracing",
- "tracing-subscriber",
- "uuid",
-]
-
-[[package]]
-name = "dshrs-session"
-version = "0.1.0"
-dependencies = [
- "dshrs-core",
- "serde",
- "serde_json",
- "thiserror",
- "uuid",
-]
-
-[[package]]
-name = "dshrs-settings"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
- "serde_yaml",
- "thiserror",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "dshrs-system-prompt"
-version = "0.1.0"
-dependencies = [
- "dshrs-core",
- "serde_json",
-]
-
-[[package]]
-name = "dshrs-tools"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "dshrs-core",
- "dshrs-system-prompt",
- "serde",
- "serde_json",
- "tokio",
- "tokio-util",
-]
 
 [[package]]
 name = "endi"

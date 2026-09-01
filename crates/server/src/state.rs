@@ -6,12 +6,12 @@ use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
-use dshrs_agent_loop::SessionDriver;
-use dshrs_core::config::ModelSelection;
-use dshrs_credentials::{CredentialEvent, CredentialStore};
-use dshrs_llm::{RetryPolicy, OPENAI_SETTINGS_NS, OpenAiCompatAdapter, OpenAiSection, LlmRegistry};
-use dshrs_session::{Session, SessionError, SessionStore};
-use dshrs_settings::{Applies, NamespaceSpec, SettingsEvent, SettingsStore};
+use denia_agent_loop::SessionDriver;
+use denia_core::config::ModelSelection;
+use denia_credentials::{CredentialEvent, CredentialStore};
+use denia_llm::{RetryPolicy, OPENAI_SETTINGS_NS, OpenAiCompatAdapter, OpenAiSection, LlmRegistry};
+use denia_session::{Session, SessionError, SessionStore};
+use denia_settings::{Applies, NamespaceSpec, SettingsEvent, SettingsStore};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::sync::broadcast;
@@ -107,7 +107,7 @@ pub enum ServerEvent {
 /// internally synchronized log, so readers never wait behind a running turn.
 pub struct LiveSession {
     pub session: Arc<Session>,
-    pub followers: broadcast::Sender<dshrs_core::session::SessionEnvelope>,
+    pub followers: broadcast::Sender<denia_core::session::SessionEnvelope>,
     pub running: AtomicBool,
     pub cancel: tokio::sync::Mutex<Option<CancellationToken>>,
 }
@@ -214,7 +214,7 @@ pub fn build_state(home: &Path, bound_remote: bool) -> Result<AppState, Box<dyn 
             .collect::<Vec<_>>(),
     );
     let live = Arc::new(LiveSessions::default());
-    let (prompt, tools) = dshrs_tools::default_shipped();
+    let (prompt, tools) = denia_tools::default_shipped();
     let driver = Arc::new(SessionDriver::new(
         registry.clone(),
         Arc::new(tools),

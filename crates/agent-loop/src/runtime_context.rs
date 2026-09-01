@@ -1,8 +1,8 @@
 //! Durable projection state for dynamic runtime context (DSH-compatible).
 
-use dshrs_core::session::SessionEvent;
-use dshrs_session::Session;
-use dshrs_system_prompt::{
+use denia_core::session::SessionEvent;
+use denia_session::Session;
+use denia_system_prompt::{
     is_runtime_context_snapshot, render_context_snapshot, PromptAssembly, RUNTIME_CONTEXT_CLEARED,
 };
 
@@ -49,9 +49,9 @@ impl RuntimeContextProjection {
 
 #[cfg(test)]
 mod tests {
-    use dshrs_core::session::SessionEvent;
-    use dshrs_session::Session;
-    use dshrs_system_prompt::{
+    use denia_core::session::SessionEvent;
+    use denia_session::Session;
+    use denia_system_prompt::{
         AssembledContext, PromptAssembly, RUNTIME_CONTEXT_HEADER,
     };
 
@@ -59,7 +59,7 @@ mod tests {
 
     fn temp_session() -> Session {
         let dir = std::env::temp_dir().join(format!(
-            "dshrs-runtime-{}",
+            "denia-runtime-{}",
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()

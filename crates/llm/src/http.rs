@@ -1,6 +1,6 @@
 //! Shared HTTP error mapping for chat-completions endpoints.
 
-use dshrs_core::error::{LlmFailure, codes};
+use denia_core::error::{LlmFailure, codes};
 use reqwest::header::{HeaderMap, RETRY_AFTER};
 use reqwest::StatusCode;
 use serde::Deserialize;
@@ -96,6 +96,6 @@ pub fn transport_failure(error: reqwest::Error) -> LlmFailure {
 }
 
 /// The [`transport_failure`] snapshot wrapped as the live error form.
-pub fn transport_error(error: reqwest::Error) -> dshrs_core::error::LlmError {
-    dshrs_core::error::LlmError::from_failure(transport_failure(error))
+pub fn transport_error(error: reqwest::Error) -> denia_core::error::LlmError {
+    denia_core::error::LlmError::from_failure(transport_failure(error))
 }

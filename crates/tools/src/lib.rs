@@ -14,7 +14,7 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use dshrs_core::tool::ToolSchema;
+use denia_core::tool::ToolSchema;
 use tokio_util::sync::CancellationToken;
 
 pub use bash::BashTool;

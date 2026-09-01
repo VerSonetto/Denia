@@ -7,7 +7,7 @@ http
   .createServer((req, res) => {
     if (req.url?.startsWith('/v1/models')) {
       res.setHeader('content-type', 'application/json')
-      res.end(JSON.stringify({ data: [{ id: 'mock-1', owned_by: 'dsh-rs-mock' }] }))
+      res.end(JSON.stringify({ data: [{ id: 'mock-1', owned_by: 'denia-mock' }] }))
       return
     }
     if (req.url?.startsWith('/v1/chat/completions')) {

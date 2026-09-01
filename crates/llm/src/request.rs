@@ -1,7 +1,7 @@
 //! Request vocabulary handed to adapters.
 
-use dshrs_core::message::ChatMessage;
-use dshrs_core::tool::ToolSchema;
+use denia_core::message::ChatMessage;
+use denia_core::tool::ToolSchema;
 
 /// One model call's inputs, provider-agnostic.
 #[derive(Debug, Clone)]

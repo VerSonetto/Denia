@@ -1,4 +1,4 @@
-//! Shared domain types for the dsh-rs harness.
+//! Shared domain types for the denia harness.
 //!
 //! Every cross-crate boundary speaks these vocabulary types: the streaming
 //! protocol ([`stream`]), the failure taxonomy ([`error`]), model invocation

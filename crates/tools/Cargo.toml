@@ -1,13 +1,13 @@
 [package]
-name = "dshrs-tools"
+name = "denia-tools"
 description = "Model-facing tools: bash, read_file, write_file"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
 [dependencies]
-dshrs-core = { workspace = true }
-dshrs-system-prompt = { workspace = true }
+denia-core = { workspace = true }
+denia-system-prompt = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
 async-trait = { workspace = true }

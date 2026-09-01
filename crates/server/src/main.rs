@@ -1,4 +1,4 @@
-//! axum HTTP API + SSE push + console hosting. Binary: `dsh-rs`.
+//! axum HTTP API + SSE push + console hosting. Binary: `denia`.
 
 mod api;
 mod error;
@@ -24,7 +24,7 @@ fn main() {
         Ok(args) => args,
         Err(message) => {
             eprintln!("{message}");
-            eprintln!("usage: dsh-rs [--home <dir>] [--host <addr>] [--port <port>] [--web <dist>]");
+            eprintln!("usage: denia [--home <dir>] [--host <addr>] [--port <port>] [--web <dist>]");
             std::process::exit(2);
         }
     };
@@ -63,9 +63,9 @@ fn main() {
         let addr: SocketAddr = format!("{}:{}", args.host, args.port)
             .parse()
             .unwrap_or_else(|_| panic!("valid bind address {}:{}", args.host, args.port));
-        tracing::info!(home = %home.display(), %addr, "dsh-rs starting");
+        tracing::info!(home = %home.display(), %addr, "denia starting");
         println!();
-        println!("  dsh-rs console:  http://{addr}");
+        println!("  denia console:  http://{addr}");
         println!("  home:            {}", home.display());
         println!();
 
@@ -120,14 +120,25 @@ fn resolve_home(explicit: Option<&std::path::Path>) -> PathBuf {
     if let Some(home) = explicit {
         return home.to_path_buf();
     }
+    if let Some(home) = std::env::var_os("DENIA_HOME").map(PathBuf::from) {
+        return home;
+    }
+    // 品牌改名前的旧环境变量:仍认,但提示迁移。
     if let Some(home) = std::env::var_os("DSH_RS_HOME").map(PathBuf::from) {
+        eprintln!("note: DSH_RS_HOME is deprecated, rename it to DENIA_HOME");
         return home;
     }
     let mut home = std::env::temp_dir();
     if let Some(dir) = dirs_home() {
         home = dir;
     }
-    home.join(".dsh-rs")
+    let next = home.join(".denia");
+    // 老用户的 ~/.dsh-rs:新目录还不存在时沿用,不丢已有会话与配置。
+    let legacy = home.join(".dsh-rs");
+    if !next.exists() && legacy.is_dir() {
+        return legacy;
+    }
+    next
 }
 
 fn dirs_home() -> Option<PathBuf> {

@@ -1,6 +1,6 @@
 # AGENTS.md
 
-dsh-rs 是 DeepSeek Harness(dsh)的 Rust 重写版:后端 Rust(axum + tokio),控制台 React + Vite + TS。本文件是仓库规范,在这个仓库干活的 agent 必须遵守。
+denia 是 DeepSeek Harness(dsh)的 Rust 重写版:后端 Rust(axum + tokio),控制台 React + Vite + TS。本文件是仓库规范,在这个仓库干活的 agent 必须遵守。
 
 ## 项目定位与参考源
 
