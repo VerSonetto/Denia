@@ -6,12 +6,6 @@ function bytesToTokens(bytes: number): number {
   return Math.max(1, Math.round(bytes / 3))
 }
 
-function formatBytes(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
-  return `${(bytes / (1024 * 1024)).toFixed(2)} MB`
-}
-
 /** 一段上下文的展示行:名称、占比条形、token 数与字节数。 */
 export interface ContextPart {
   key: string
@@ -49,7 +43,7 @@ export function ContextRing({
     ? Math.max(0, contextWindow - estimatedTokens)
     : null
 
-  const radius = 9
+  const radius = 6
   const circumference = 2 * Math.PI * radius
 
   // 点击外部关闭。
@@ -71,27 +65,27 @@ export function ContextRing({
         aria-expanded={open}
         onClick={() => setOpen(!open)}
       >
-        <svg width="22" height="22" viewBox="0 0 22 22" aria-hidden>
+        <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden>
           <circle
-            cx="11"
-            cy="11"
+            cx="8"
+            cy="8"
             r={radius}
             fill="none"
             stroke="currentColor"
-            strokeWidth="2"
+            strokeWidth="1.8"
             opacity="0.15"
           />
           {ratio !== null && (
             <circle
-              cx="11"
-              cy="11"
+              cx="8"
+              cy="8"
               r={radius}
               fill="none"
               stroke="currentColor"
-              strokeWidth="2"
+              strokeWidth="1.8"
               strokeLinecap="round"
               strokeDasharray={`${circumference * ratio} ${circumference}`}
-              transform="rotate(-90 11 11)"
+              transform="rotate(-90 8 8)"
             />
           )}
         </svg>
@@ -102,8 +96,8 @@ export function ContextRing({
             <span className="context-panel-title">{t('contextPanelTitle')}</span>
             <span className="context-panel-total">
               {contextWindow && contextWindow > 0
-                ? `${(ratio! * 100).toFixed(1)}% · ${formatBytes(totalBytes)}`
-                : formatBytes(totalBytes)}
+                ? `${(ratio! * 100).toFixed(1)}%`
+                : t('contextTokens', { n: estimatedTokens })}
             </span>
           </div>
           <div className="context-panel-rows">
@@ -126,7 +120,7 @@ export function ContextRing({
                     />
                   </span>
                   <span className="context-num">
-                    {t('contextTokens', { n: bytesToTokens(part.bytes) })} · {formatBytes(part.bytes)}
+                    {t('contextTokens', { n: bytesToTokens(part.bytes) })}
                   </span>
                 </div>
               )

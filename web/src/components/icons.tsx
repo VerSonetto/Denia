@@ -132,11 +132,17 @@ export function IconShield(props: IconProps) {
   )
 }
 
-export function IconUpload(props: IconProps) {
+/** 回形针:附件/上传文件的通用图标。 */
+export function IconPaperclip(props: IconProps) {
   return (
     <Svg {...props}>
-      <path d="M8 7.8V13M8 7.8 5.8 9.6M8 7.8 10.2 9.6" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" />
-      <path d="M2.8 12.8v.4a1 1 0 0 0 1 1h8.4a1 1 0 0 0 1-1v-.4" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
+      <path
+        d="M14.3 7.4l-6.1 6.1a4 4 0 0 1-5.7-5.7l6.1-6.1a2.7 2.7 0 0 1 3.8 3.8l-6.1 6.1a1.3 1.3 0 0 1-1.9-1.9l5.7-5.6"
+        stroke="currentColor"
+        strokeWidth="1.3"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
     </Svg>
   )
 }

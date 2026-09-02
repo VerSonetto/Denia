@@ -28,9 +28,9 @@ import {
   IconFolder,
   IconImage,
   IconPlus,
+  IconPaperclip,
   IconSend,
   IconStop,
-  IconUpload,
 } from '../components/icons'
 import { resolveSessionReasoningEffort } from '../modelCatalog'
 import { TodoPanel } from '../components/TodoPanel'
@@ -740,7 +740,7 @@ export default function SessionsPage({
             disabled={inert}
             onClick={() => fileInputRef.current?.click()}
           >
-            <IconUpload size={14} />
+            <IconPaperclip size={16} />
           </button>
           <ContextRing contextWindow={activeContextWindow} parts={contextParts} />
           {primaryStops ? (

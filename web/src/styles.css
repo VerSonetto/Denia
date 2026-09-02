@@ -3022,6 +3022,10 @@ button.btn.form-action {
 }
 
 .composer-upload-btn.icon-btn {
+  width: 28px;
+  height: 28px;
+  align-items: center;
+  justify-content: center;
   color: var(--label-secondary);
 }
 
