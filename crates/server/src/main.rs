@@ -3,6 +3,7 @@
 mod api;
 mod error;
 mod state;
+mod system_prompt_store;
 mod web_assets;
 mod workspace;
 

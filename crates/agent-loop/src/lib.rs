@@ -12,6 +12,7 @@ mod runtime_context;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use arc_swap::ArcSwap;
 use denia_core::config::ModelSelection;
 use denia_core::error::{LlmFailure, codes};
 use denia_core::message::ToolCallRef;
@@ -44,7 +45,7 @@ fn feedback_text(failure: &LlmFailure) -> String {
 pub struct SessionDriver {
     registry: Arc<LlmRegistry>,
     tools: Arc<ToolRegistry>,
-    system_prompt: Arc<SystemPrompt>,
+    system_prompt: Arc<ArcSwap<SystemPrompt>>,
 }
 
 fn should_log_system_prompt(session: &Session, step: u32, text: &str) -> bool {
@@ -65,13 +66,18 @@ impl SessionDriver {
     pub fn new(
         registry: Arc<LlmRegistry>,
         tools: Arc<ToolRegistry>,
-        system_prompt: Arc<SystemPrompt>,
+        system_prompt: Arc<ArcSwap<SystemPrompt>>,
     ) -> Self {
         Self {
             registry,
             tools,
             system_prompt,
         }
+    }
+
+    /// 供 server 端热加载写入同一 `ArcSwap`。
+    pub fn system_prompt_handle(&self) -> Arc<ArcSwap<SystemPrompt>> {
+        self.system_prompt.clone()
     }
 
     /// 估算当前提示词的组成部分大小(字节):系统提示词(含模型框架)与
@@ -83,6 +89,7 @@ impl SessionDriver {
     ) -> Result<(usize, usize), String> {
         let assembly = self
             .system_prompt
+            .load()
             .assemble(&AssembleContext {
                 cwd: Some(cwd.to_string()),
                 model: Some(selection.model.clone()),
@@ -174,6 +181,7 @@ impl SessionDriver {
             let cwd = session.header().cwd.clone();
             let assembly = self
                 .system_prompt
+                .load()
                 .assemble(&AssembleContext {
                     cwd: Some(cwd.clone()),
                     model: Some(selection.model.clone()),
@@ -644,7 +652,7 @@ mod tests {
             SessionDriver::new(
                 registry.clone(),
                 Arc::new(tools),
-                Arc::new(prompt),
+                Arc::new(ArcSwap::from_pointee(prompt)),
             ),
             registry,
         )
@@ -816,7 +824,7 @@ mod tests {
         let driver = SessionDriver::new(
             registry,
             Arc::new(ToolRegistry::default()),
-            Arc::new(prompt),
+            Arc::new(ArcSwap::from_pointee(prompt)),
         );
         let session = temp_session();
         let cancel = CancellationToken::new();

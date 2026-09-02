@@ -58,3 +58,4 @@ ignore = "0.4"
 base64 = "0.22"
 uuid = { version = "1", features = ["v4"] }
 rand = "0.8"
+arc-swap = "1"

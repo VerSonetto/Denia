@@ -7,6 +7,7 @@ mod fs;
 mod llm;
 mod sessions;
 mod settings;
+mod system_prompt;
 mod uploads;
 mod workspaces;
 
@@ -26,4 +27,5 @@ pub fn router() -> Router<Arc<AppState>> {
         .merge(uploads::router())
         .merge(fs::router())
         .merge(events::router())
+        .merge(system_prompt::router())
 }

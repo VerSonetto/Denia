@@ -33,13 +33,18 @@ export default function SettingsPage({ notify }: { notify: Notify }) {
   const [consoleRevision, setConsoleRevision] = useState(0)
   const [modelRevision, setModelRevision] = useState(0)
   const [saving, setSaving] = useState(false)
+  const [promptText, setPromptText] = useState('')
+  const [promptSource, setPromptSource] = useState<'file' | 'default'>('default')
 
   const load = useCallback(async () => {
     try {
-      const [nextDescribe, nextCatalog] = await Promise.all([
+      const [nextDescribe, nextCatalog, nextPrompt] = await Promise.all([
         api.getSettings(),
         api.getCatalog(),
+        api.getSystemPrompt(),
       ])
+      setPromptText(nextPrompt.text)
+      setPromptSource(nextPrompt.source)
       setCatalog(nextCatalog)
       const console = nextDescribe.namespaces.find((n) => n.ns === CONSOLE_NS)
       if (console) {
@@ -111,6 +116,36 @@ export default function SettingsPage({ notify }: { notify: Notify }) {
     }
   }
 
+  const savePrompt = async () => {
+    setSaving(true)
+    try {
+      const view = await api.saveSystemPrompt(promptText)
+      setPromptText(view.text)
+      setPromptSource(view.source)
+      notify('ok', t('settingsSaved'))
+    } catch (error) {
+      notify('err', error instanceof Error ? error.message : String(error))
+      void load()
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const resetPrompt = async () => {
+    setSaving(true)
+    try {
+      await api.resetSystemPrompt()
+      setPromptText('')
+      setPromptSource('default')
+      notify('ok', t('systemPromptResetDone'))
+    } catch (error) {
+      notify('err', error instanceof Error ? error.message : String(error))
+      void load()
+    } finally {
+      setSaving(false)
+    }
+  }
+
   const categories: { id: Category; label: string }[] = [
     { id: 'general', label: t('catGeneral') },
     { id: 'security', label: t('catSecurity') },
@@ -133,20 +168,44 @@ export default function SettingsPage({ notify }: { notify: Notify }) {
         </div>
         <div className="settings-content">
           {category === 'general' && (
-            <section className="card">
-              <h2>{t('defaultModelLabel')}</h2>
-              <p className="hint">{t('defaultModelHint')}</p>
-              {catalog && modelDraft && (
-                <>
-                  <ModelPicker catalog={catalog} value={modelDraft} onChange={setModelDraft} />
-                  <div className="row" style={{ marginTop: 12 }}>
-                    <button className="btn" disabled={saving} onClick={() => void saveModel()}>
-                      {t('save')}
-                    </button>
-                  </div>
-                </>
-              )}
-            </section>
+            <>
+              <section className="card">
+                <h2>{t('systemPromptTitle')}</h2>
+                <p className="hint">{t('systemPromptHint')}</p>
+                {promptSource === 'default' && !promptText && (
+                  <p className="hint">{t('systemPromptEmptyHint')}</p>
+                )}
+                <textarea
+                  className="plain"
+                  rows={14}
+                  value={promptText}
+                  onChange={(event) => setPromptText(event.target.value)}
+                  spellCheck={false}
+                />
+                <div className="row" style={{ marginTop: 12 }}>
+                  <button className="btn" disabled={saving} onClick={() => void savePrompt()}>
+                    {t('systemPromptSave')}
+                  </button>
+                  <button className="btn secondary" disabled={saving} onClick={() => void resetPrompt()}>
+                    {t('systemPromptReset')}
+                  </button>
+                </div>
+              </section>
+              <section className="card">
+                <h2>{t('defaultModelLabel')}</h2>
+                <p className="hint">{t('defaultModelHint')}</p>
+                {catalog && modelDraft && (
+                  <>
+                    <ModelPicker catalog={catalog} value={modelDraft} onChange={setModelDraft} />
+                    <div className="row" style={{ marginTop: 12 }}>
+                      <button className="btn" disabled={saving} onClick={() => void saveModel()}>
+                        {t('save')}
+                      </button>
+                    </div>
+                  </>
+                )}
+              </section>
+            </>
           )}
           {category === 'security' && (
             <section className="card">

@@ -311,6 +311,27 @@ export function contextBreakdown(id: string): Promise<ContextBreakdownResponse> 
   return http(`/api/sessions/${encodeURIComponent(id)}/context-breakdown`)
 }
 
+export interface SystemPromptView {
+  text: string
+  source: 'file' | 'default'
+  path: string
+}
+
+export function getSystemPrompt(): Promise<SystemPromptView> {
+  return http('/api/system-prompt')
+}
+
+export function saveSystemPrompt(text: string): Promise<SystemPromptView> {
+  return http('/api/system-prompt', {
+    method: 'PUT',
+    body: JSON.stringify({ text }),
+  })
+}
+
+export function resetSystemPrompt(): Promise<SystemPromptView> {
+  return http('/api/system-prompt', { method: 'DELETE' })
+}
+
 export function cancelSession(id: string): Promise<unknown> {
   return http(`/api/sessions/${encodeURIComponent(id)}/cancel`, { method: 'POST' })
 }

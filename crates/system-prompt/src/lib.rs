@@ -165,7 +165,8 @@ pub struct SystemPromptConfig {
 impl Default for SystemPromptConfig {
     fn default() -> Self {
         Self {
-            include_harness_identity: true,
+            // 身份句并入 deployment:persona,由用户整段替换,不再单独注入 harness:identity。
+            include_harness_identity: false,
             include_runtime_context: true,
             persona: default_persona_template().to_string(),
             tool_order: None,
@@ -223,6 +224,22 @@ impl SystemPrompt {
             prompt.suppress_runtime_context();
         }
         prompt
+    }
+
+    /// 用自定义文本整体替换 `deployment:persona` 段(发给模型的 User 段之一)。
+    pub fn with_persona_text(mut self, text: String) -> Self {
+        self.config.persona = text.clone();
+        if let Some(section) = self.sections.get_mut(PERSONA_SECTION) {
+            section.text = PromptText::Static(text);
+        }
+        self
+    }
+
+    /// 出厂配置 + 自定义 persona 文本,再注册其余 shipped 段由调用方完成。
+    pub fn new_with_persona(config: SystemPromptConfig, persona_text: String) -> Self {
+        let mut config = config;
+        config.persona = persona_text.clone();
+        Self::new(config).with_persona_text(persona_text)
     }
 
     /// Register an ordered prompt section. Duplicate names within one registry fail.
@@ -372,8 +389,10 @@ impl SystemPrompt {
     }
 }
 
-fn default_persona_template() -> &'static str {
-    "你是运行在 denia 里的编码 agent。工作目录是 {{cwd}}（相对路径以它为根）。\
+/// 出厂 persona 模板;`SYSTEM.md` 为空时沿用。含身份句,与自定义替换目标一致。
+pub fn default_persona_template() -> &'static str {
+    "你是由 denia 驱动的 AI 编码 agent。\n\n\
+     你是运行在 denia 里的编码 agent。工作目录是 {{cwd}}（相对路径以它为根）。\
      规矩：不要猜文件路径；读取失败时先用 bash 列目录再重试；每步聚焦一件事；能回答时就停止调用工具。\
      始终使用简体中文回复，除非用户明确要求其他语言。"
 }
@@ -467,7 +486,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn assembles_identity_persona_and_tools() {
+    fn assembles_persona_and_tools() {
         let mut prompt = SystemPrompt::new(SystemPromptConfig::default());
         prompt
             .variable("cwd", |_| Some("/tmp/ws".to_string()))
@@ -488,10 +507,38 @@ mod tests {
             .unwrap();
         assert_eq!(
             assembly.sections.first().map(|section| section.name.as_str()),
-            Some("harness:identity")
+            Some(PERSONA_SECTION)
         );
+        assert!(!assembly.sections.iter().any(|section| section.name == "harness:identity"));
+        assert!(render_prompt(&assembly).contains("denia 驱动的"));
         assert!(render_prompt(&assembly).contains("/tmp/ws"));
         assert_eq!(assembly.tools.len(), 1);
+    }
+
+    #[test]
+    fn with_persona_text_replaces_deployment_persona() {
+        let custom = "你是自定义 agent,工作目录 {{cwd}}。".to_string();
+        let mut prompt = SystemPrompt::new_with_persona(SystemPromptConfig::default(), custom.clone());
+        prompt
+            .variable("cwd", |_| Some("/tmp/custom".to_string()))
+            .unwrap();
+        let assembly = prompt
+            .assemble(&AssembleContext {
+                cwd: Some("/tmp/custom".to_string()),
+                ..Default::default()
+            })
+            .unwrap();
+        assert!(!assembly.sections.iter().any(|section| section.name == "harness:identity"));
+        let persona = assembly
+            .sections
+            .iter()
+            .find(|section| section.name == PERSONA_SECTION)
+            .expect("persona section");
+        assert!(persona.text.contains("{{cwd}}"));
+        assert!(!persona.text.contains("denia 里的编码 agent"));
+        let rendered = render_prompt(&assembly);
+        assert!(rendered.contains("/tmp/custom"));
+        assert!(rendered.contains("自定义 agent"));
     }
 
     #[test]

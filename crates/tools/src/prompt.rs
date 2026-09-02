@@ -110,6 +110,20 @@ pub fn default_shipped() -> (SystemPrompt, ToolRegistry) {
     (prompt, tools)
 }
 
+/// 自定义系统提示词正文 + 同一套 shipped 工具与工具纪律段(不含单独的 harness:identity)。
+pub fn shipped_with_persona(persona_text: String) -> (SystemPrompt, ToolRegistry) {
+    let tools = crate::default_registry();
+    let mut prompt = denia_system_prompt::SystemPrompt::new_with_persona(
+        denia_system_prompt::SystemPromptConfig {
+            include_harness_identity: false,
+            ..Default::default()
+        },
+        persona_text,
+    );
+    register_shipped_prompt(&mut prompt, &tools).expect("shipped prompt registrations are valid");
+    (prompt, tools)
+}
+
 fn runtime_context_text(context: &AssembleContext) -> String {
     let runtime = shell::shell_runtime();
     let cwd = context.cwd.as_deref().unwrap_or("(unknown)");
@@ -146,9 +160,38 @@ fn today_string() -> String {
 
 #[cfg(test)]
 mod tests {
-    use denia_system_prompt::{render_context_snapshot, render_prompt};
+    use denia_system_prompt::{render_context_snapshot, render_prompt, render_prompt_for_user};
 
     use super::*;
+
+    #[test]
+    fn shipped_with_persona_omits_harness_identity() {
+        let (prompt, _tools) = shipped_with_persona("仅自定义正文".to_string());
+        let assembly = prompt
+            .assemble(&AssembleContext {
+                cwd: Some("/work".to_string()),
+                ..Default::default()
+            })
+            .unwrap();
+        assert!(!assembly.sections.iter().any(|section| section.name == "harness:identity"));
+        let user = render_prompt_for_user(&assembly);
+        assert!(user.contains("仅自定义正文"));
+        assert!(!user.contains("denia 驱动的"));
+    }
+
+    #[test]
+    fn shipped_with_persona_overrides_default_persona() {
+        let (prompt, _tools) = shipped_with_persona("自定义 persona {{cwd}}".to_string());
+        let assembly = prompt
+            .assemble(&AssembleContext {
+                cwd: Some("/work".to_string()),
+                ..Default::default()
+            })
+            .unwrap();
+        let rendered = render_prompt(&assembly);
+        assert!(rendered.contains("自定义 persona /work"));
+        assert!(assembly.sections.iter().any(|section| section.name == "tool:bash"));
+    }
 
     #[test]
     fn shipped_prompt_includes_tool_sections_and_runtime_context() {

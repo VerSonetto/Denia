@@ -90,6 +90,7 @@ pub struct AppState {
     pub live: Arc<LiveSessions>,
     pub driver: Arc<SessionDriver>,
     pub workspaces: Arc<crate::workspace::WorkspaceRegistry>,
+    pub system_prompt: Arc<crate::system_prompt_store::SystemPromptState>,
     /// 绑定地址非回环 ⇒ 远程浏览器 ⇒ 目录选择器走 browse。
     pub bound_remote: bool,
 }
@@ -105,6 +106,8 @@ pub enum ServerEvent {
     /// 会话运行状态变化(发消息/轮次结束/删除);前端据此维护 running 集合,
     /// 无需为后台会话各维持一条 SSE 长连接。
     RunningChanged { id: String, running: bool },
+    /// 自定义系统提示词文件变更后广播(前端可选订阅)。
+    SystemPromptChanged,
 }
 
 /// One materialized session: durable log plus live fan-out. `session` is an
@@ -320,11 +323,12 @@ pub fn build_state(home: &Path, bound_remote: bool) -> Result<AppState, Box<dyn 
     let live = Arc::new(LiveSessions::default());
     // 空闲会话淘汰:30s 一轮,10 分钟未使用的会话卸载(运行中/被订阅的不动)。
     spawn_live_evictor(live.clone(), 30, 600);
-    let (prompt, tools) = denia_tools::default_shipped();
+    let system_prompt = Arc::new(crate::system_prompt_store::SystemPromptState::load(home));
+    let (_prompt_default, tools) = denia_tools::default_shipped();
     let driver = Arc::new(SessionDriver::new(
         registry.clone(),
         Arc::new(tools),
-        Arc::new(prompt),
+        system_prompt.handle(),
     ));
 
     spawn_forwarders(
@@ -335,6 +339,7 @@ pub fn build_state(home: &Path, bound_remote: bool) -> Result<AppState, Box<dyn 
         registry.clone(),
         openai.clone(),
     );
+    system_prompt.spawn_watcher(events.clone());
 
     let state = AppState {
         home: home.to_path_buf(),
@@ -349,6 +354,7 @@ pub fn build_state(home: &Path, bound_remote: bool) -> Result<AppState, Box<dyn 
         live,
         driver,
         workspaces,
+        system_prompt,
         bound_remote,
     };
 

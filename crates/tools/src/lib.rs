@@ -26,7 +26,7 @@ pub use edit::EditTool;
 pub use files::{ReadFileTool, WriteFileTool};
 pub use glob::GlobTool;
 pub use grep::GrepTool;
-pub use prompt::{default_shipped, register_shipped_prompt};
+pub use prompt::{default_shipped, register_shipped_prompt, shipped_with_persona};
 pub use todo::TodoWriteTool;
 
 mod todo;
