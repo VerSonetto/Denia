@@ -21,6 +21,7 @@ use denia_llm::{GenerateRequest, LlmRegistry};
 use denia_session::Session;
 use denia_system_prompt::{
     AssembleContext, SystemPrompt, frame_system_prompt_for_model, render_prompt,
+    render_prompt_for_user,
 };
 use denia_tools::{ToolContext, ToolRegistry};
 use futures::StreamExt;
@@ -51,7 +52,13 @@ fn should_log_system_prompt(session: &Session, step: u32, text: &str) -> bool {
         return true;
     }
     // O(1):Session 在 append 时维护最近一次系统提示词,不再遍历日志。
+    // fold 留 UI 副本(无框架);meter 由 driver 单独喂 framed 版本。
     session.last_system_prompt().as_deref() != Some(text)
+}
+
+/// 与 dsh `estimate_system_tokens` 同口径:系统提示词的 token 估算。
+fn estimate_system_tokens(text: &str) -> u64 {
+    4 + (text.len() as u64).div_ceil(4)
 }
 
 impl SessionDriver {
@@ -174,6 +181,12 @@ impl SessionDriver {
                 })
                 .map_err(|error| LlmFailure::new(codes::UNKNOWN, error))?;
 
+            // 更新 token-meter 的工具声明 token(与 provider 请求同口径的估算)。
+            let tools_tokens = serde_json::to_string(&assembly.tools)
+                .map(|json| (json.len() as u64).div_ceil(4).saturating_add(4))
+                .unwrap_or(0);
+            session.set_tools_tokens(tools_tokens);
+
             if let Some(snapshot) = runtime_projection.project(&assembly) {
                 append(
                     session,
@@ -182,7 +195,9 @@ impl SessionDriver {
                 )?;
             }
 
-            let prompt_body = render_prompt(&assembly);
+            // UI 副本只展示 User audience 的 sections(身份 + persona),
+            // 工具纪律/工具使用说明等 Model audience 段不入日志副本。
+            let prompt_body = render_prompt_for_user(&assembly);
             if should_log_system_prompt(session, step, &prompt_body) {
                 append(
                     session,
@@ -194,12 +209,16 @@ impl SessionDriver {
                     },
                 )?;
             }
+            // model 实际收到的是完整 prompt(全部 audience) + 框架。
+            let model_prompt = render_prompt(&assembly);
+            let framed_system = frame_system_prompt_for_model(&model_prompt);
+            session.set_system_tokens(estimate_system_tokens(&framed_system));
 
             let request = GenerateRequest {
                 model: selection.model.clone(),
                 reasoning_effort: selection.reasoning_effort.clone(),
                 messages: session.derive_messages(),
-                system: Some(frame_system_prompt_for_model(&prompt_body)),
+                system: Some(framed_system.clone()),
                 tools: assembly.tools,
                 temperature: None,
                 max_tokens: None,

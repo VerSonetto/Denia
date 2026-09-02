@@ -31,6 +31,7 @@ use denia_core::session::{
     SessionEnvelope, SessionEvent, SessionHeader, SessionHeaderKind, TurnEndReason,
     SESSION_FORMAT_VERSION, derive_messages,
 };
+use denia_token_meter::{ContextBreakdown, ContextMeter, ContextPressure, TurnTokenUsage};
 use thiserror::Error;
 
 /// 摘要重读上限:防止异常的超长行拖垮列表。
@@ -86,6 +87,11 @@ struct SessionInner {
     last_turn: u32,
     /// 最近一次落日志的系统提示词;should_log_system_prompt 的 O(1) 依据。
     last_system_prompt: Option<String>,
+    /// token-meter 增量 fold:上下文 token 组成的 O(1) 投影。
+    meter: ContextMeter,
+    /// 当前正在进行的 turn 的 envelope 缓冲;`turn-end` 到来时交给
+    /// `meter.fold_turn`,fold 成功则并入精确 usage 累计并更新 anchor。
+    pending_turn: Vec<SessionEnvelope>,
 }
 
 /// One live session: header, in-memory log, and its append handle. The log is
@@ -126,6 +132,8 @@ impl Session {
                 writer,
                 last_turn: 0,
                 last_system_prompt: None,
+                meter: ContextMeter::new(),
+                pending_turn: Vec::new(),
             }),
         })
     }
@@ -152,6 +160,7 @@ impl Session {
         let mut torn_at: Option<usize> = None;
         let mut last_turn = 0u32;
         let mut last_system_prompt: Option<String> = None;
+        let mut meter = ContextMeter::new();
         for line in lines {
             let with_newline = line.len() + 1;
             if line.trim().is_empty() {
@@ -167,6 +176,7 @@ impl Session {
                         }
                         _ => {}
                     }
+                    meter.apply_one(&envelope);
                     events.push(envelope)
                 }
                 Err(_) => {
@@ -197,9 +207,12 @@ impl Session {
                 writer: open_append_writer(file)?,
                 last_turn,
                 last_system_prompt,
+                meter,
+                pending_turn: Vec::new(),
             }),
         };
         session.close_orphaned_turn()?;
+        session.refresh_meter_from_log()?;
         Ok(session)
     }
 
@@ -248,13 +261,30 @@ impl Session {
             time: now_millis(),
             event,
         };
+        // 维护 last_turn / last_system_prompt 的 O(1) 投影。
         match &envelope.event {
-            SessionEvent::TurnStart { turn } => inner.last_turn = inner.last_turn.max(*turn),
+            SessionEvent::TurnStart { turn } => {
+                inner.last_turn = inner.last_turn.max(*turn);
+            }
             SessionEvent::SystemPrompt { text, .. } => {
-                inner.last_system_prompt = Some(text.clone())
+                inner.last_system_prompt = Some(text.clone());
             }
             _ => {}
         }
+        // 维护 token-meter:
+        // 1) 每个事件都贡献 message/system 启发式 fold(apply_one 内部按角色累计)。
+        // 2) `TurnStart` 重置本轮 envelope 缓冲;`TurnEnd` 闭合时把整段
+        //    喂给 `meter.fold_turn`,成功则并入精确 usage 与 anchor。
+        if matches!(&envelope.event, SessionEvent::TurnStart { .. }) {
+            inner.pending_turn.clear();
+        }
+        inner.pending_turn.push(envelope.clone());
+        if matches!(&envelope.event, SessionEvent::TurnEnd { .. }) {
+            let slice: Vec<SessionEnvelope> = inner.pending_turn.drain(..).collect();
+            inner.meter.fold_turn(&slice);
+        }
+        inner.meter.apply_one(&envelope);
+
         let line = serde_json::to_string(&envelope)?;
         writeln!(inner.writer, "{line}")?;
         // 落盘策略:步骤边界/工具结果/todo 快照立即 flush(耐久性边界),
@@ -292,6 +322,71 @@ impl Session {
             .unwrap_or_else(|poison| poison.into_inner())
             .last_system_prompt
             .clone()
+    }
+
+    /// 从内存事件重建 token-meter(load 后调用一次;之后由 `append`
+    /// 增量维护)。
+    fn refresh_meter_from_log(&self) -> Result<(), SessionError> {
+        let mut inner = self.inner.lock().unwrap_or_else(|poison| poison.into_inner());
+        let events = inner.events.clone();
+        let mut pending: Vec<SessionEnvelope> = Vec::new();
+        for envelope in &events {
+            if matches!(&envelope.event, SessionEvent::TurnStart { .. }) {
+                pending.clear();
+            }
+            pending.push(envelope.clone());
+            if matches!(&envelope.event, SessionEvent::TurnEnd { .. }) {
+                let slice: Vec<SessionEnvelope> = pending.drain(..).collect();
+                inner.meter.fold_turn(&slice);
+            }
+            inner.meter.apply_one(envelope);
+        }
+        Ok(())
+    }
+
+    /// 更新工具声明 token(供 token-meter;server 在请求启动后通知 fold)。
+    pub fn set_tools_tokens(&self, tokens: u64) {
+        self.inner
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .meter
+            .set_tools_tokens(tokens);
+    }
+
+    /// 更新系统提示词 token(driver 喂 framed 版;同 provider 所见)。
+    pub fn set_system_tokens(&self, tokens: u64) {
+        self.inner
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .meter
+            .set_system_tokens(tokens);
+    }
+
+    /// 当前上下文 token 拆分快照(纯启发式)。
+    pub fn context_breakdown(&self) -> ContextBreakdown {
+        self.inner
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .meter
+            .breakdown()
+    }
+
+    /// 当前 provider 精确 usage 累计。
+    pub fn turn_token_usage(&self) -> TurnTokenUsage {
+        self.inner
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .meter
+            .turn_usage()
+    }
+
+    /// 当前上下文压力(锚点 + 启发式;圆环面板用此值除以窗口得到百分比)。
+    pub fn context_pressure(&self) -> ContextPressure {
+        self.inner
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .meter
+            .context_pressure()
     }
 
     /// The model-facing history projected from the log.

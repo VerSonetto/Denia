@@ -511,6 +511,7 @@ name = "denia-session"
 version = "0.1.0"
 dependencies = [
  "denia-core",
+ "denia-token-meter",
  "serde",
  "serde_json",
  "thiserror",
@@ -534,6 +535,15 @@ name = "denia-system-prompt"
 version = "0.1.0"
 dependencies = [
  "denia-core",
+ "serde_json",
+]
+
+[[package]]
+name = "denia-token-meter"
+version = "0.1.0"
+dependencies = [
+ "denia-core",
+ "serde",
  "serde_json",
 ]
 

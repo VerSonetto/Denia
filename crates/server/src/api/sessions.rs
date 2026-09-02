@@ -40,7 +40,7 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/api/sessions/{id}/prompt", post(prompt_session))
         .route("/api/sessions/{id}/cancel", post(cancel_session))
         .route("/api/sessions/{id}/follow", get(follow_session))
-        .route("/api/sessions/{id}/prompt-parts", get(prompt_parts))
+        .route("/api/sessions/{id}/context-breakdown", get(context_breakdown))
 }
 
 async fn list_sessions(State(state): State<Arc<AppState>>) -> Result<impl IntoResponse, ApiError> {
@@ -357,40 +357,23 @@ struct FollowQuery {
     after: u64,
 }
 
-/// 当前提示词组成部分的字节大小:系统提示词 + 工具声明。
-/// 供前端上下文占用圆环面板展示(各段与总窗口的占比)。
-#[derive(Debug, Deserialize)]
-struct PromptPartsQuery {
-    #[serde(default)]
-    provider: Option<String>,
-    #[serde(default)]
-    model: Option<String>,
-    #[serde(default)]
-    reasoning_effort: Option<String>,
-}
-
-async fn prompt_parts(
+/// 当前上下文 token 拆分(provider 精确 + 启发式)。
+/// 供前端上下文占用圆环面板展示(总占比 = pressure / window;拆分 = breakdown)。
+async fn context_breakdown(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
-    Query(query): Query<PromptPartsQuery>,
 ) -> Result<impl IntoResponse, ApiError> {
     let live = state
         .live
         .get_or_load(&state.sessions, &id)
         .map_err(ApiError::from_session)?;
-    let default = current_default_selection(&state.settings);
-    let selection = ModelSelection {
-        provider: query.provider.unwrap_or(default.provider),
-        model: query.model.unwrap_or(default.model),
-        reasoning_effort: query.reasoning_effort.or(default.reasoning_effort),
-    };
-    let (system_bytes, tools_bytes) = state
-        .driver
-        .prompt_parts(live.session.header().cwd.as_str(), &selection)
-        .map_err(|message| ApiError::bad_request("prompt-parts/failed", message))?;
+    let breakdown = live.session.context_breakdown();
+    let pressure = live.session.context_pressure();
+    let usage = live.session.turn_token_usage();
     Ok(Json(json!({
-        "systemBytes": system_bytes,
-        "toolsBytes": tools_bytes,
+        "breakdown": breakdown,
+        "pressure": pressure,
+        "usage": usage,
     })))
 }
 

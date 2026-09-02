@@ -1,14 +1,11 @@
 [package]
-name = "denia-session"
-description = "Event-sourced session storage (JSONL)"
+name = "denia-token-meter"
+description = "replay-aware token and context-pressure measurement (from dsh-token-meter)"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
 [dependencies]
 denia-core = { workspace = true }
-denia-token-meter = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-thiserror = { workspace = true }
-uuid = { workspace = true }
