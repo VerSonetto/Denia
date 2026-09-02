@@ -12,8 +12,6 @@ import { dropSession } from './sessionStreams'
  *   不在 store 里放重复副本。
  */
 
-export type Page = 'sessions' | 'models' | 'settings'
-
 export interface Toast {
   kind: 'ok' | 'err'
   message: string
@@ -24,7 +22,6 @@ interface AppSnapshot {
   workspaces: WorkspaceRecord[]
   activeId: string | null
   pendingWsId: string | null
-  page: Page
   toast: Toast | null
   connLost: boolean
   catalogTick: number
@@ -39,7 +36,6 @@ let state: AppSnapshot = {
   workspaces: [],
   activeId: null,
   pendingWsId: null,
-  page: 'sessions',
   toast: null,
   connLost: false,
   catalogTick: 0,
@@ -70,7 +66,6 @@ export const useSessions = () => useApp((s) => s.sessions)
 export const useWorkspaces = () => useApp((s) => s.workspaces)
 export const useActiveId = () => useApp((s) => s.activeId)
 export const usePendingWsId = () => useApp((s) => s.pendingWsId)
-export const usePage = () => useApp((s) => s.page)
 export const useToast = () => useApp((s) => s.toast)
 export const useConnLost = () => useApp((s) => s.connLost)
 export const useCatalogTick = () => useApp((s) => s.catalogTick)
@@ -114,10 +109,6 @@ export function notify(kind: Toast['kind'], message: string) {
   setState({ toast: { kind, message } })
   window.clearTimeout(toastTimer)
   toastTimer = window.setTimeout(() => setState({ toast: null }), 3500)
-}
-
-export function setPage(page: Page) {
-  setState({ page })
 }
 
 export function setActiveId(id: string | null, pendingWsId?: string | null) {

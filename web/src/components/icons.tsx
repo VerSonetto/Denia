@@ -210,13 +210,14 @@ export function IconSliders(props: IconProps) {
 export function IconGear(props: IconProps) {
   return (
     <Svg {...props}>
-      <circle cx="8" cy="8" r="2.2" stroke="currentColor" strokeWidth="1.3" />
+      {/* 经典六齿齿轮:外轮廓 + 中心孔 */}
       <path
-        d="M8 2.2v1.6M8 12.2v1.6M2.2 8h1.6M12.2 8h1.6M3.9 3.9l1.1 1.1M11 11l1.1 1.1M12.1 3.9 11 5M5 11l-1.1 1.1"
+        d="M6.4 1.75h3.2l.28 1.42c.48.13.92.35 1.31.64l1.38-.52 2.26 2.26-.52 1.38c.29.39.51.83.64 1.31L15.25 6.4v3.2l-1.42.28c-.13.48-.35.92-.64 1.31l.52 1.38-2.26 2.26-1.38-.52c-.39.29-.83.51-1.31.64L9.6 15.25H6.4l-.28-1.42a5.1 5.1 0 0 1-1.31-.64l-1.38.52-2.26-2.26.52-1.38a5.1 5.1 0 0 1-.64-1.31L.75 9.6V6.4l1.42-.28c.13-.48.35-.92.64-1.31l-.52-1.38L4.55 1.17l1.38.52c.39-.29.83-.51 1.31-.64L6.4 1.75Z"
         stroke="currentColor"
-        strokeWidth="1.3"
-        strokeLinecap="round"
+        strokeWidth="1.15"
+        strokeLinejoin="round"
       />
+      <circle cx="8" cy="8" r="2.2" stroke="currentColor" strokeWidth="1.2" />
     </Svg>
   )
 }
@@ -224,7 +225,51 @@ export function IconGear(props: IconProps) {
 export function IconFolder(props: IconProps) {
   return (
     <Svg {...props}>
-      <path d="M2.5 4h4l1.2 1.5h5.8V12h-11V4Z" stroke="currentColor" strokeWidth="1.3" strokeLinejoin="round" />
+      <path
+        d="M2.2 5.2c0-.77.62-1.4 1.4-1.4h2.55c.3 0 .58.12.78.34l.72.78c.2.22.48.34.78.34h4.95c.77 0 1.4.63 1.4 1.4v5.74c0 .77-.63 1.4-1.4 1.4H3.6c-.78 0-1.4-.63-1.4-1.4V5.2Z"
+        fill="currentColor"
+        fillOpacity="0.14"
+        stroke="currentColor"
+        strokeWidth="1.15"
+        strokeLinejoin="round"
+      />
+      <path
+        d="M2.35 7.1h11.3"
+        stroke="currentColor"
+        strokeWidth="1.1"
+        strokeLinecap="round"
+        opacity="0.45"
+      />
+    </Svg>
+  )
+}
+
+/** 展开全部工作区(多层折线张开)。 */
+export function IconExpandAll(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <path
+        d="M3.5 6.2 8 2.8l4.5 3.4M3.5 9.8 8 13.2l4.5-3.4"
+        stroke="currentColor"
+        strokeWidth="1.35"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </Svg>
+  )
+}
+
+/** 收起全部工作区(多层折线合拢)。 */
+export function IconCollapseAll(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <path
+        d="M3.5 3.8 8 7.2l4.5-3.4M3.5 12.2 8 8.8l4.5 3.4"
+        stroke="currentColor"
+        strokeWidth="1.35"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
     </Svg>
   )
 }

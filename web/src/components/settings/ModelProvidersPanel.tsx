@@ -1,30 +1,29 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useMemo, useState } from 'react'
 import {
   describeCredentials,
   discoverModels,
-  getSettings,
   replaceNamespace,
   setCredential,
-} from '../api'
-import ModelListEditor from '../components/ModelListEditor'
-import { NumberField } from '../components/ui/controls'
-import { t } from '../i18n'
-import { type CatalogModelEntry, entryFromWire, entryToWire } from '../modelCatalog'
-import type { Notify } from '../App'
+} from '../../api'
+import ModelListEditor from '../ModelListEditor'
+import { NumberField } from '../ui/controls'
+import { t } from '../../i18n'
+import { type CatalogModelEntry, entryFromWire, entryToWire } from '../../modelCatalog'
+import type { Notify } from '../../App'
 import type {
   CredentialInfo,
   DiscoveredModel,
   NamespaceView,
   OpenAiProfile,
   SettingsDescribe,
-} from '../types'
+} from '../../types'
 
 const OPENAI_NS = 'llm-openai'
 const ROUTE_ID_PATTERN = /^[a-z][a-z0-9-]*$/
 const MODEL_ID_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9._-]*$/
 
-function namespaceOf(settings: SettingsDescribe | null, ns: string): NamespaceView | undefined {
-  return settings?.namespaces.find((view) => view.ns === ns)
+function namespaceOf(settings: SettingsDescribe, ns: string): NamespaceView | undefined {
+  return settings.namespaces.find((view) => view.ns === ns)
 }
 
 function asRecord(value: unknown): Record<string, unknown> {
@@ -47,92 +46,19 @@ function validateModels(models: CatalogModelEntry[]): boolean {
   return true
 }
 
-export default function ModelsPage({ notify }: { notify: Notify }) {
-  const [settings, setSettings] = useState<SettingsDescribe | null>(null)
-  const [credentials, setCredentials] = useState<Record<string, CredentialInfo>>({})
-  const [error, setError] = useState<string | null>(null)
-  const [reloadKey, setReloadKey] = useState(0)
-
-  const load = useCallback(async () => {
-    try {
-      setError(null)
-      const nextSettings = await getSettings()
-      setSettings(nextSettings)
-
-      const refs = new Set<string>()
-      const openai = namespaceOf(nextSettings, OPENAI_NS)
-      const providers = asRecord(openai?.value?.providers)
-      for (const profile of Object.values(providers)) {
-        const ref = asRecord(profile).apiKeyEnv
-        if (typeof ref === 'string' && ref) refs.add(ref)
-      }
-      setCredentials(await describeCredentials([...refs]))
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err))
-    }
-  }, [])
-
-  useEffect(() => {
-    void load()
-  }, [load, reloadKey])
-
-  useEffect(() => {
-    const source = new EventSource('/api/events')
-    source.onmessage = () => setReloadKey((key) => key + 1)
-    return () => source.close()
-  }, [])
-
-  if (error && !settings) {
-    return (
-      <div className="page-inner">
-        <div className="card">
-          <h2>{t('error')}</h2>
-          <p className="hint">{error}</p>
-          <button className="btn" onClick={() => void load()}>
-            {t('retry')}
-          </button>
-        </div>
-      </div>
-    )
-  }
-
-  if (!settings) {
-    return (
-      <div className="page-inner">
-        <div className="card">
-          <p className="hint">{t('loading')}</p>
-        </div>
-      </div>
-    )
-  }
-
-  return (
-    <div className="models-main">
-      <div className="models-inner">
-        <ProvidersSection
-          settings={settings}
-          credentials={credentials}
-          notify={notify}
-          onChanged={() => setReloadKey((key) => key + 1)}
-        />
-      </div>
-    </div>
-  )
-}
-
 function credentialBadge(info: CredentialInfo | undefined) {
   if (!info || !info.configured) {
     return (
-      <span className="badge err">
-        <span className="dot" />
+      <span className="setm-badge err">
+        <span className="setm-badge-dot" />
         {t('apiKeyMissing')}
       </span>
     )
   }
   if (info.source === 'env') {
     return (
-      <span className="badge ok">
-        <span className="dot" />
+      <span className="setm-badge ok">
+        <span className="setm-badge-dot" />
         {t('apiKeyEnvShadowed')} ({t('apiKeyFromEnv')})
       </span>
     )
@@ -144,14 +70,14 @@ function credentialBadge(info: CredentialInfo | undefined) {
         ? t('apiKeyFromProjectEnv')
         : t('apiKeyFromUserEnv')
   return (
-    <span className="badge ok">
-      <span className="dot" />
+    <span className="setm-badge ok">
+      <span className="setm-badge-dot" />
       {t('apiKeySet')} ({sourceLabel})
     </span>
   )
 }
 
-function ProvidersSection({
+export function ModelProvidersPanel({
   settings,
   credentials,
   notify,
@@ -189,52 +115,55 @@ function ProvidersSection({
   }
 
   return (
-    <section className="card">
-      <h2>{t('customTitle')}</h2>
-      <p className="hint">{t('customDescription')}</p>
+    <section className="setm-section setm-section-divider">
+      <div className="setm-section-label">{t('customTitle')}</div>
+      <p className="setm-section-hint">{t('customDescription')}</p>
 
       {routes.length === 0 && !adding && (
-        <p className="hint" style={{ marginBottom: 8 }}>
-          {t('noProvidersConfigured')}
-        </p>
+        <p className="setm-empty">{t('noProvidersConfigured')}</p>
       )}
 
-      {routes.map(({ route, profile }) =>
-        editing === route ? (
-          <ProviderEditor
-            key={route}
-            route={route}
-            initial={profile}
-            revision={view?.revision ?? 0}
-            providers={providers}
-            notify={notify}
-            onChanged={onChanged}
-            onDone={() => setEditing(null)}
-          />
-        ) : (
-          <div className="provider-card" key={route}>
-            <div className="head">
-              <span className="name">{profile.displayName || route}</span>
-              <span className="id">{route}</span>
-              {credentialBadge(profile.apiKeyEnv ? credentials[profile.apiKeyEnv] : undefined)}
-              <span className="spacer" />
-              <button className="btn small secondary" onClick={() => setEditing(route)}>
-                {t('editProvider')}
-              </button>
-              <button className="btn small danger" onClick={() => void removeProvider(route)}>
-                {t('removeProvider')}
-              </button>
-            </div>
-            <div className="row" style={{ marginTop: 8 }}>
-              <span className="code-ref">{profile.baseURL}</span>
-              {profile.apiKeyEnv && <span className="code-ref">key: {profile.apiKeyEnv}</span>}
-              <span className="code-ref">
-                {t('modelsLabel')}: {(profile.models ?? []).length || '—'}
-              </span>
-            </div>
-          </div>
-        ),
-      )}
+      <div className="setm-provider-list">
+        {routes.map(({ route, profile }) =>
+          editing === route ? (
+            <ProviderEditor
+              key={route}
+              route={route}
+              initial={profile}
+              revision={view?.revision ?? 0}
+              providers={providers}
+              notify={notify}
+              onChanged={onChanged}
+              onDone={() => setEditing(null)}
+            />
+          ) : (
+            <article className="setm-provider-card" key={route}>
+              <div className="setm-provider-head">
+                <div>
+                  <div className="setm-provider-name">{profile.displayName || route}</div>
+                  <div className="setm-provider-id">{route}</div>
+                </div>
+                {credentialBadge(profile.apiKeyEnv ? credentials[profile.apiKeyEnv] : undefined)}
+              </div>
+              <div className="setm-provider-meta">
+                <span>{profile.baseURL}</span>
+                {profile.apiKeyEnv && <span>key: {profile.apiKeyEnv}</span>}
+                <span>
+                  {t('modelsLabel')}: {(profile.models ?? []).length || '—'}
+                </span>
+              </div>
+              <div className="setm-provider-actions">
+                <button className="setm-btn ghost small" type="button" onClick={() => setEditing(route)}>
+                  {t('editProvider')}
+                </button>
+                <button className="setm-btn danger small" type="button" onClick={() => void removeProvider(route)}>
+                  {t('removeProvider')}
+                </button>
+              </div>
+            </article>
+          ),
+        )}
+      </div>
 
       {adding ? (
         <ProviderEditor
@@ -247,14 +176,24 @@ function ProvidersSection({
           onDone={() => setAdding(false)}
         />
       ) : (
-        <div className="row" style={{ marginTop: 12 }}>
-          <button className="btn secondary" onClick={() => setAdding(true)}>
-            + {t('addProvider')}
-          </button>
-        </div>
+        <button className="setm-btn ghost setm-add-provider" type="button" onClick={() => setAdding(true)}>
+          + {t('addProvider')}
+        </button>
       )}
     </section>
   )
+}
+
+export async function loadProviderCredentials(settings: SettingsDescribe): Promise<Record<string, CredentialInfo>> {
+  const openai = namespaceOf(settings, OPENAI_NS)
+  const providers = asRecord(openai?.value?.providers)
+  const refs = new Set<string>()
+  for (const profile of Object.values(providers)) {
+    const ref = asRecord(profile).apiKeyEnv
+    if (typeof ref === 'string' && ref) refs.add(ref)
+  }
+  if (refs.size === 0) return {}
+  return describeCredentials([...refs])
 }
 
 function ProviderEditor({
@@ -356,87 +295,84 @@ function ProviderEditor({
     : undefined
 
   return (
-    <div className="provider-card" style={{ marginTop: 10 }}>
-      <div className="row">
-        <div className="field narrow">
-          <label>{t('routeIdLabel')}</label>
+    <div className="setm-provider-editor">
+      <div className="setm-form-grid two">
+        <label className="setm-field">
+          <span className="setm-field-label">{t('routeIdLabel')}</span>
           <input
             type="text"
-            className="mono"
+            className="setm-input mono"
             placeholder={t('routeIdPlaceholder')}
             value={routeId}
             disabled={route !== null}
             onChange={(event) => setRouteId(event.target.value)}
           />
-        </div>
-        <div className="field">
-          <label>{t('displayNameLabel')}</label>
+        </label>
+        <label className="setm-field">
+          <span className="setm-field-label">{t('displayNameLabel')}</span>
           <input
             type="text"
+            className="setm-input"
             value={displayName}
             onChange={(event) => setDisplayName(event.target.value)}
           />
-        </div>
+        </label>
       </div>
-      <div className="row">
-        <div className="field">
-          <label>{t('baseURLLabel')}</label>
+      <div className="setm-form-grid two">
+        <label className="setm-field">
+          <span className="setm-field-label">{t('baseURLLabel')}</span>
           <input
             type="text"
-            className="mono"
+            className="setm-input mono"
             placeholder="https://gateway.example.com/v1"
             value={baseURL}
             onChange={(event) => setBaseURL(event.target.value)}
           />
-        </div>
-        <div className="field narrow">
-          <label>{t('defaultContextWindowLabel')}</label>
+        </label>
+        <label className="setm-field">
+          <span className="setm-field-label">{t('defaultContextWindowLabel')}</span>
           <NumberField
             mono
             placeholder="262144"
             value={defaultContextWindow.trim() ? Number(defaultContextWindow) : undefined}
             onChange={(value) => setDefaultContextWindow(value != null ? String(value) : '')}
           />
-        </div>
+        </label>
       </div>
-      <div className="row row-end">
-        <div className="field">
-          <label>{t('apiKeyLabel')}</label>
+      <div className="setm-form-grid key">
+        <label className="setm-field">
+          <span className="setm-field-label">{t('apiKeyLabel')}</span>
           <input
             type="password"
-            className="mono"
+            className="setm-input mono"
             autoComplete="off"
             placeholder={t('apiKeyPlaceholder')}
             value={keyValue}
             onChange={(event) => setKeyValue(event.target.value)}
           />
-        </div>
-        <button
-          className="btn small secondary form-action"
-          disabled={discovering}
-          onClick={() => void discover()}
-        >
+        </label>
+        <button className="setm-btn ghost" type="button" disabled={discovering} onClick={() => void discover()}>
           {discovering ? t('discovering') : t('discoverModels')}
         </button>
       </div>
 
-      <div className="section-divider" />
+      <div className="setm-editor-block">
+        <div className="setm-section-label">{t('modelsSectionTitle')}</div>
+        <p className="setm-section-hint">{t('modelsSectionHint')}</p>
+        <ModelListEditor
+          models={models}
+          onChange={setModels}
+          discovered={discovered}
+          defaultContextWindow={parsedDefaultContext}
+          disabled={busy}
+        />
+      </div>
 
-      <h3 className="subsection-title">{t('modelsSectionTitle')}</h3>
-      <p className="hint">{t('modelsSectionHint')}</p>
-      <ModelListEditor
-        models={models}
-        onChange={setModels}
-        discovered={discovered}
-        defaultContextWindow={parsedDefaultContext}
-        disabled={busy}
-      />
-
-      <div className="row" style={{ marginTop: 12 }}>
-        <button className="btn" disabled={busy} onClick={() => void save()}>
+      <div className="setm-actions">
+        <button className="setm-btn primary" type="button" disabled={busy} onClick={() => void save()}>
           {t('save')}
         </button>
-        <button className="btn secondary" disabled={busy} onClick={onDone}>
+        <button className="setm-btn ghost" type="button" disabled={busy} onClick={onDone}>
           {t('cancel')}
         </button>
       </div>

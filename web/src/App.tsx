@@ -1,8 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { setLocale, t } from './i18n'
-import ModelsPage from './pages/ModelsPage'
 import SessionsPage from './pages/SessionsPage'
-import SettingsPage from './pages/SettingsPage'
 import * as api from './api'
 import {
   addSessionLocal,
@@ -15,12 +13,10 @@ import {
   refreshList,
   setActiveId,
   setConnLost,
-  setPage,
   setPendingWsId,
   setRunningStatus,
   useActiveId,
   useConnLost,
-  usePage,
   useRunningIds,
   useSessions,
   useSessionsLoaded,
@@ -30,16 +26,18 @@ import {
 } from './appStore'
 import {
   BrandMark,
-  IconChat,
-  IconChevron,
+  IconClose,
+  IconCollapseAll,
+  IconExpandAll,
   IconFolder,
   IconGear,
   IconPlus,
-  IconSliders,
+  IconSearch,
   IconTrash,
 } from './components/icons'
 import { DirPicker } from './components/DirPicker'
 import { ConfirmDialog } from './components/ConfirmDialog'
+import { SettingsModal } from './components/SettingsModal'
 import { sessionDisplayTitle } from './sessionDisplay'
 import type { SessionSummary, WorkspaceRecord } from './types'
 
@@ -49,10 +47,7 @@ import type { SessionSummary, WorkspaceRecord } from './types'
  */
 export type Notify = (kind: 'ok' | 'err', message: string) => void
 
-type Page = 'sessions' | 'models' | 'settings'
-
 export default function App() {
-  const page = usePage()
   const sessions = useSessions()
   const workspaces = useWorkspaces()
   const activeId = useActiveId()
@@ -64,7 +59,10 @@ export default function App() {
   // running 集合:服务端 SSE 推送驱动(侧栏圆点与状态栏同源)。
   const runningIds = useRunningIds()
 
-  const setPageSafe = useCallback((page: Page) => setPage(page), [])
+  const [settingsOpen, setSettingsOpen] = useState(false)
+  const [sidebarSearchOpen, setSidebarSearchOpen] = useState(false)
+  const [sidebarExpandAllTick, setSidebarExpandAllTick] = useState(0)
+  const [sidebarAllExpanded, setSidebarAllExpanded] = useState(false)
 
   // URL 会话状态:挂载时读 hash;列表加载完成后判定恢复或放弃。
   const [pendingHashId] = useState<string | null>(() => {
@@ -203,7 +201,6 @@ export default function App() {
 
   const focusSession = useCallback((sessionId: string, wsId?: string) => {
     setActiveId(sessionId, wsId ?? null)
-    setPage('sessions')
   }, [])
 
   /* ---- 启动自动导航(dsh watchNavigation) ---- */
@@ -284,7 +281,6 @@ export default function App() {
         }
         addSessionLocal(summary, target.id)
         setActiveId(summary.id, target.id)
-        setPage('sessions')
         void refreshList()
       } catch (error) {
         notify('err', error instanceof Error ? error.message : String(error))
@@ -395,7 +391,6 @@ export default function App() {
 
   const openSession = useCallback((id: string, wsId?: string) => {
     setActiveId(id, wsId ?? null)
-    setPage('sessions')
   }, [])
 
   return (
@@ -416,20 +411,46 @@ export default function App() {
         <div className="sidebar-region">
           <div className="sidebar-region-head">
             <span className="label">{t('workspacesTitle')}</span>
-            <button
-              type="button"
-              className="icon-btn"
-              title={t('addWorkspace')}
-              onClick={openDirectoryFlow}
-            >
-              <IconPlus size={14} />
-            </button>
+            <div className="sidebar-region-actions">
+              <button
+                type="button"
+                className={`icon-btn${sidebarSearchOpen ? ' active' : ''}`}
+                title={t('searchSessions')}
+                aria-label={t('searchSessions')}
+                aria-pressed={sidebarSearchOpen}
+                onClick={() => setSidebarSearchOpen((open) => !open)}
+              >
+                <IconSearch size={14} />
+              </button>
+              <button
+                type="button"
+                className="icon-btn"
+                title={sidebarAllExpanded ? t('collapseAllWorkspaces') : t('expandAllWorkspaces')}
+                aria-label={sidebarAllExpanded ? t('collapseAllWorkspaces') : t('expandAllWorkspaces')}
+                onClick={() => setSidebarExpandAllTick((tick) => tick + 1)}
+              >
+                {sidebarAllExpanded ? <IconCollapseAll size={14} /> : <IconExpandAll size={14} />}
+              </button>
+              <button
+                type="button"
+                className="icon-btn"
+                title={t('addWorkspace')}
+                aria-label={t('addWorkspace')}
+                onClick={openDirectoryFlow}
+              >
+                <IconPlus size={14} />
+              </button>
+            </div>
           </div>
           <SidebarWorkspaces
             sessions={sessions}
             workspaces={workspaces}
             activeId={activeId}
             runningIds={runningIds}
+            searchOpen={sidebarSearchOpen}
+            onSearchOpenChange={setSidebarSearchOpen}
+            expandAllTick={sidebarExpandAllTick}
+            onAllExpandedChange={setSidebarAllExpanded}
             onOpenSession={openSession}
             onNewSession={(wsId) => void startSession(wsId)}
             onDeleteWorkspace={(ws) => void deleteWorkspace(ws)}
@@ -440,24 +461,8 @@ export default function App() {
         <nav className="sidebar-foot" aria-label={t('navSettings')}>
           <button
             type="button"
-            className={`sidebar-nav${page === 'sessions' ? ' active' : ''}`}
-            onClick={() => setPageSafe('sessions')}
-          >
-            <IconChat size={16} />
-            <span>{t('navSessions')}</span>
-          </button>
-          <button
-            type="button"
-            className={`sidebar-nav${page === 'models' ? ' active' : ''}`}
-            onClick={() => setPageSafe('models')}
-          >
-            <IconSliders size={16} />
-            <span>{t('navModels')}</span>
-          </button>
-          <button
-            type="button"
-            className={`sidebar-nav${page === 'settings' ? ' active' : ''}`}
-            onClick={() => setPageSafe('settings')}
+            className="sidebar-nav"
+            onClick={() => setSettingsOpen(true)}
           >
             <IconGear size={16} />
             <span>{t('navSettings')}</span>
@@ -465,7 +470,7 @@ export default function App() {
         </nav>
       </aside>
       <main className="main">
-        <div className="page-pane" hidden={page !== 'sessions'}>
+        <div className="page-pane">
           <SessionsPage
             key={activeId ?? 'draft'}
             activeId={activeId}
@@ -486,13 +491,16 @@ export default function App() {
             onAddWorkspace={openDirectoryFlow}
           />
         </div>
-        <div className="page-pane" hidden={page !== 'models'}>
-          <ModelsPage notify={notify} />
-        </div>
-        <div className="page-pane" hidden={page !== 'settings'}>
-          <SettingsPage notify={notify} />
-        </div>
       </main>
+      {settingsOpen && (
+        <SettingsModal
+          notify={notify}
+          onClose={() => {
+            setSettingsOpen(false)
+            applyConsoleSettings()
+          }}
+        />
+      )}
       {pickerOpen && (
         <DirPicker
           onPick={adoptFromBrowse}
@@ -519,11 +527,18 @@ export default function App() {
 
 /* ---- 侧栏工作区树(抄 dsh WorkspaceBrowser 交互形态) ---- */
 
+const UNGROUPED_KEY = 'ungrouped'
+const COLLAPSED_LIMIT = 5
+
 function SidebarWorkspaces({
   sessions,
   workspaces,
   activeId,
   runningIds,
+  searchOpen,
+  onSearchOpenChange,
+  expandAllTick,
+  onAllExpandedChange,
   onOpenSession,
   onNewSession,
   onDeleteWorkspace,
@@ -534,6 +549,10 @@ function SidebarWorkspaces({
   workspaces: WorkspaceRecord[]
   activeId: string | null
   runningIds: Record<string, boolean>
+  searchOpen: boolean
+  onSearchOpenChange: (open: boolean) => void
+  expandAllTick: number
+  onAllExpandedChange: (allExpanded: boolean) => void
   onOpenSession: (id: string, wsId?: string) => void
   onNewSession: (wsId?: string) => void
   onDeleteWorkspace: (ws: WorkspaceRecord) => void
@@ -542,61 +561,182 @@ function SidebarWorkspaces({
 }) {
   const [expanded, setExpanded] = useState<Record<string, boolean>>({})
   const [showAll, setShowAll] = useState<Record<string, boolean>>({})
-  const COLLAPSED_LIMIT = 5
+  const [query, setQuery] = useState('')
+  const searchInputRef = useRef<HTMLInputElement>(null)
+  const lastExpandTickRef = useRef(0)
+
+  const membersOf = useCallback(
+    (ws: WorkspaceRecord) =>
+      ws.sessionIds
+        .map((id) => sessions.find((s) => s.id === id))
+        .filter((s): s is SessionSummary => !!s && s.cwd === ws.path),
+    [sessions],
+  )
+
+  const ungrouped = sessions.filter((s) => !workspaces.some((w) => w.path === s.cwd))
+
+  const groupKeys = useCallback(() => {
+    const keys = workspaces.map((ws) => ws.id)
+    if (ungrouped.length > 0) keys.push(UNGROUPED_KEY)
+    return keys
+  }, [workspaces, ungrouped.length])
+
+  const isGroupOpen = useCallback(
+    (key: string, fallback: boolean) => expanded[key] ?? fallback,
+    [expanded],
+  )
 
   useEffect(() => {
     if (!activeId) return
     const ws = workspaces.find((item) => item.sessionIds.includes(activeId))
-    if (!ws) return
-    setExpanded((previous) => (previous[ws.id] ? previous : { ...previous, [ws.id]: true }))
-  }, [activeId, workspaces])
+    if (ws) {
+      setExpanded((previous) => (previous[ws.id] ? previous : { ...previous, [ws.id]: true }))
+      return
+    }
+    const activeSession = sessions.find((s) => s.id === activeId)
+    if (activeSession && !workspaces.some((w) => w.path === activeSession.cwd)) {
+      setExpanded((previous) =>
+        previous[UNGROUPED_KEY] === false ? { ...previous, [UNGROUPED_KEY]: true } : previous,
+      )
+    }
+  }, [activeId, workspaces, sessions])
 
-  const membersOf = (ws: WorkspaceRecord) =>
-    ws.sessionIds
-      .map((id) => sessions.find((s) => s.id === id))
-      .filter((s): s is SessionSummary => !!s && s.cwd === ws.path)
+  useEffect(() => {
+    const keys = groupKeys()
+    if (keys.length === 0) {
+      onAllExpandedChange(false)
+      return
+    }
+    const allOpen = keys.every((key) => {
+      if (key === UNGROUPED_KEY) return isGroupOpen(key, true)
+      const members = membersOf(workspaces.find((w) => w.id === key)!)
+      return isGroupOpen(key, members.some((s) => s.id === activeId))
+    })
+    onAllExpandedChange(allOpen)
+  }, [expanded, groupKeys, isGroupOpen, membersOf, workspaces, activeId, onAllExpandedChange])
 
-  const ungrouped = sessions.filter(
-    (s) => !workspaces.some((w) => w.path === s.cwd),
+  useEffect(() => {
+    if (expandAllTick === 0 || expandAllTick === lastExpandTickRef.current) return
+    lastExpandTickRef.current = expandAllTick
+    const keys = groupKeys()
+    const nextExpanded = keys.every((key) => {
+      if (key === UNGROUPED_KEY) return isGroupOpen(key, true)
+      const members = membersOf(workspaces.find((w) => w.id === key)!)
+      return isGroupOpen(key, members.some((s) => s.id === activeId))
+    })
+    const wantExpand = !nextExpanded
+    const next: Record<string, boolean> = {}
+    for (const key of keys) next[key] = wantExpand
+    setExpanded((prev) => ({ ...prev, ...next }))
+  }, [expandAllTick, groupKeys, isGroupOpen, membersOf, workspaces, activeId])
+
+  useEffect(() => {
+    if (!searchOpen) {
+      setQuery('')
+      return
+    }
+    const id = requestAnimationFrame(() => searchInputRef.current?.focus())
+    return () => cancelAnimationFrame(id)
+  }, [searchOpen])
+
+  const normalizedQuery = query.trim().toLowerCase()
+  const matchesQuery = useCallback(
+    (session: SessionSummary) => {
+      if (!normalizedQuery) return true
+      return sessionDisplayTitle(session).toLowerCase().includes(normalizedQuery)
+    },
+    [normalizedQuery],
   )
+
+  const filteredGroups = workspaces
+    .map((ws) => {
+      const members = membersOf(ws).filter(matchesQuery)
+      return { ws, members }
+    })
+    .filter((group) => (normalizedQuery ? group.members.length > 0 : true))
+
+  const filteredUngrouped = ungrouped.filter(matchesQuery)
+  const searching = normalizedQuery.length > 0
+  const empty =
+    filteredGroups.length === 0 &&
+    filteredUngrouped.length === 0 &&
+    (searching || (workspaces.length === 0 && ungrouped.length === 0))
 
   return (
     <div className="sidebar-section">
+      {searchOpen && (
+        <div className="sidebar-search">
+          <IconSearch size={13} />
+          <input
+            ref={searchInputRef}
+            type="search"
+            className="sidebar-search-input"
+            value={query}
+            placeholder={t('searchSessionsPlaceholder')}
+            aria-label={t('searchSessions')}
+            onChange={(event) => setQuery(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key !== 'Escape') return
+              setQuery('')
+              onSearchOpenChange(false)
+            }}
+          />
+          {query && (
+            <button
+              type="button"
+              className="icon-btn sidebar-search-clear"
+              title={t('searchSessionsClear')}
+              aria-label={t('searchSessionsClear')}
+              onClick={() => setQuery('')}
+            >
+              <IconClose size={12} />
+            </button>
+          )}
+        </div>
+      )}
       <div className="session-list">
-        {workspaces.length === 0 && ungrouped.length === 0 && (
-          <div className="empty-hint">{t('emptySessions')}</div>
+        {empty && (
+          <div className="empty-hint">
+            {searching ? t('searchSessionsEmpty') : t('emptySessions')}
+          </div>
         )}
-        {workspaces.map((ws) => {
-          const members = membersOf(ws)
-          const open = expanded[ws.id] ?? members.some((s) => s.id === activeId)
-          const visible = showAll[ws.id] ? members : members.slice(0, COLLAPSED_LIMIT)
+        {filteredGroups.map(({ ws, members }) => {
+          const open = searching || isGroupOpen(ws.id, members.some((s) => s.id === activeId))
+          const visible = searching || showAll[ws.id] ? members : members.slice(0, COLLAPSED_LIMIT)
           return (
-            <div className="ws-group" key={ws.id}>
+            <div className={`ws-group${open ? ' open' : ''}`} key={ws.id}>
               <div className="ws-group-head-row">
                 <button
+                  type="button"
                   className={`ws-group-head${members.some((s) => s.id === activeId) ? ' active' : ''}`}
                   title={ws.path}
-                  onClick={() =>
-                    setExpanded((prev) => ({ ...prev, [ws.id]: !open }))
-                  }
+                  aria-expanded={open}
+                  onClick={() => {
+                    const fallback = members.some((s) => s.id === activeId)
+                    setExpanded((prev) => ({
+                      ...prev,
+                      [ws.id]: !(prev[ws.id] ?? fallback),
+                    }))
+                  }}
                 >
-                  <span className={`chev${open ? ' open' : ''}`}>
-                    <IconChevron size={11} />
+                  <span className="ws-folder">
+                    <IconFolder size={14} />
                   </span>
-                  <IconFolder size={13} />
                   <span className="name">{ws.title}</span>
                   <span className="count">{members.length}</span>
                 </button>
                 <span className="row-actions">
                   <button
-                    className="icon-btn"
+                    type="button"
+                    className="row-action-btn"
                     title={t('newSessionIn', { name: ws.title })}
                     onClick={() => onNewSession(ws.id)}
                   >
                     <IconPlus size={12} />
                   </button>
                   <button
-                    className="icon-btn"
+                    type="button"
+                    className="row-action-btn danger"
                     title={t('deleteWorkspace')}
                     onClick={() => onDeleteWorkspace(ws)}
                   >
@@ -604,8 +744,8 @@ function SidebarWorkspaces({
                   </button>
                 </span>
               </div>
-              {open && (
-                <>
+              <div className={`ws-group-body${open ? ' open' : ''}`}>
+                <div className="ws-group-body-inner">
                   {visible.map((session) => (
                     <SessionRow
                       key={session.id}
@@ -616,8 +756,9 @@ function SidebarWorkspaces({
                       onDelete={() => onDeleteSession(session)}
                     />
                   ))}
-                  {members.length > COLLAPSED_LIMIT && (
+                  {!searching && members.length > COLLAPSED_LIMIT && (
                     <button
+                      type="button"
                       className="expand-rest"
                       onClick={() =>
                         setShowAll((prev) => ({ ...prev, [ws.id]: !showAll[ws.id] }))
@@ -628,49 +769,60 @@ function SidebarWorkspaces({
                         : t('expandRest', { n: members.length - COLLAPSED_LIMIT })}
                     </button>
                   )}
-                </>
-              )}
+                </div>
+              </div>
             </div>
           )
         })}
-        {ungrouped.length > 0 && (
-          <div className="ws-group">
+        {filteredUngrouped.length > 0 && (
+          <div
+            className={`ws-group${searching || isGroupOpen(UNGROUPED_KEY, true) ? ' open' : ''}`}
+          >
             <div className="ws-group-head-row">
               <button
-                className={`ws-group-head${ungrouped.some((s) => s.id === activeId) ? ' active' : ''}`}
+                type="button"
+                className={`ws-group-head${filteredUngrouped.some((s) => s.id === activeId) ? ' active' : ''}`}
+                aria-expanded={searching || isGroupOpen(UNGROUPED_KEY, true)}
                 onClick={() =>
-                  setExpanded((prev) => ({ ...prev, ungrouped: !(expanded.ungrouped ?? true) }))
+                  setExpanded((prev) => ({
+                    ...prev,
+                    [UNGROUPED_KEY]: !(prev[UNGROUPED_KEY] ?? true),
+                  }))
                 }
               >
-                <span className={`chev${expanded.ungrouped ?? true ? ' open' : ''}`}>
-                  <IconChevron size={11} />
+                <span className="ws-folder muted">
+                  <IconFolder size={14} />
                 </span>
-                <IconFolder size={13} />
                 <span className="name">{t('ungrouped')}</span>
-                <span className="count">{ungrouped.length}</span>
+                <span className="count">{filteredUngrouped.length}</span>
               </button>
               <span className="ungrouped-actions">
                 <button
                   type="button"
                   className="ungrouped-clear"
-                  title={t('deleteUngroupedDesc', { n: ungrouped.length })}
-                  onClick={() => onDeleteUngrouped(ungrouped)}
+                  title={t('deleteUngroupedDesc', { n: filteredUngrouped.length })}
+                  onClick={() => onDeleteUngrouped(filteredUngrouped)}
                 >
                   {t('deleteUngrouped')}
                 </button>
               </span>
             </div>
-            {(expanded.ungrouped ?? true) &&
-              ungrouped.map((session) => (
-                <SessionRow
-                  key={session.id}
-                  session={session}
-                  active={session.id === activeId}
-                  running={!!runningIds[session.id]}
-                  onOpen={() => onOpenSession(session.id)}
-                  onDelete={() => onDeleteSession(session)}
-                />
-              ))}
+            <div
+              className={`ws-group-body${searching || isGroupOpen(UNGROUPED_KEY, true) ? ' open' : ''}`}
+            >
+              <div className="ws-group-body-inner">
+                {filteredUngrouped.map((session) => (
+                  <SessionRow
+                    key={session.id}
+                    session={session}
+                    active={session.id === activeId}
+                    running={!!runningIds[session.id]}
+                    onOpen={() => onOpenSession(session.id)}
+                    onDelete={() => onDeleteSession(session)}
+                  />
+                ))}
+              </div>
+            </div>
           </div>
         )}
       </div>
@@ -706,7 +858,7 @@ function SessionRow({
       <span className="row-actions">
         <button
           type="button"
-          className="icon-btn"
+          className="row-action-btn danger"
           title={t('deleteSession')}
           disabled={running}
           onClick={(event) => {
