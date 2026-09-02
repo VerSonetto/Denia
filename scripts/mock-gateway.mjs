@@ -25,9 +25,18 @@ http
           ? body.messages.filter((m) => m.role === 'tool')
           : []
         const sawTodo = toolMessages.some((m) => typeof m.content === 'string' && m.content.includes('todo list'))
-        const sawBash = toolMessages.some((m) => typeof m.content === 'string' && m.content.includes('hi from mock'))
+        const sawBash = toolMessages.some((m) => typeof m.content === 'string' && m.content.includes('hi-from-mock'))
 
         const write = (obj) => res.write(`data: ${JSON.stringify(obj)}\n\n`)
+        const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
+        const streamOut = async () => {
+          await sleep(2500)
+        // 统一先流一段 reasoning(验证思考块自动展开/折叠)。
+        write({ choices: [{ delta: { role: 'assistant' } }] })
+        write({ choices: [{ delta: { reasoning_content: '让我想想这个问题……需要先理解用户意图。' } }] })
+        write({ choices: [{ delta: { reasoning_content: '有一个关键点:模拟一个完整的工具调用流程才能验证链路。' } }] })
+        write({ choices: [{ delta: { reasoning_content: '好的,开始执行。第一步写 todo。' } }] })
+        write({ choices: [{ delta: { reasoning_content: '第二步运行 shell 命令验证工具结果回传。' } }] })
         if (!sawTodo) {
           write({ choices: [{ delta: { role: 'assistant' } }] })
           write({
@@ -57,7 +66,7 @@ http
           })
           write({
             choices: [{
-              delta: { tool_calls: [{ index: 0, function: { arguments: '{"command":"echo hi from mock"}' } }] },
+              delta: { tool_calls: [{ index: 0, function: { arguments: '{"command":"Write-Output hi-from-mock"}' } }] },
             }],
           })
           write({ choices: [{ delta: {}, finish_reason: 'tool_calls' }], usage: { prompt_tokens: 20, completion_tokens: 9 } })
@@ -69,6 +78,8 @@ http
         }
         res.write('data: [DONE]\n\n')
         res.end()
+        }
+        void streamOut()
       })
       return
     }
