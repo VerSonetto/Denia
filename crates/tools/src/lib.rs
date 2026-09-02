@@ -6,7 +6,10 @@
 //! result.
 
 mod bash;
+mod edit;
 mod files;
+pub mod glob;
+pub mod grep;
 pub mod prompt;
 pub mod shell;
 
@@ -19,7 +22,10 @@ use denia_core::tool::ToolSchema;
 use tokio_util::sync::CancellationToken;
 
 pub use bash::BashTool;
+pub use edit::EditTool;
 pub use files::{ReadFileTool, WriteFileTool};
+pub use glob::GlobTool;
+pub use grep::GrepTool;
 pub use prompt::{default_shipped, register_shipped_prompt};
 pub use todo::TodoWriteTool;
 
@@ -83,13 +89,16 @@ impl ToolRegistry {
     }
 }
 
-/// The shipped tool set: bash + read_file + write_file + todo_write.
+/// The shipped tool set: bash + read_file + write_file + todo_write + glob + grep + edit.
 pub fn default_registry() -> ToolRegistry {
     let mut registry = ToolRegistry::default();
     registry.register(Arc::new(BashTool::default()));
     registry.register(Arc::new(ReadFileTool::default()));
     registry.register(Arc::new(WriteFileTool::default()));
     registry.register(Arc::new(TodoWriteTool::default()));
+    registry.register(Arc::new(GlobTool::default()));
+    registry.register(Arc::new(GrepTool::default()));
+    registry.register(Arc::new(EditTool::default()));
     registry
 }
 

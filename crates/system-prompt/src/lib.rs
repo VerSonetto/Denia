@@ -38,6 +38,9 @@ pub enum SectionOrder {
     ToolBash,
     ToolRead,
     ToolWrite,
+    ToolGlob,
+    ToolGrep,
+    ToolEdit,
 }
 
 impl SectionOrder {
@@ -49,6 +52,9 @@ impl SectionOrder {
             Self::ToolBash => 1000,
             Self::ToolRead => 1100,
             Self::ToolWrite => 1200,
+            Self::ToolGlob => 1300,
+            Self::ToolGrep => 1400,
+            Self::ToolEdit => 1500,
         }
     }
 }

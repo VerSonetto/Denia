@@ -49,6 +49,33 @@ pub fn register_shipped_prompt(prompt: &mut SystemPrompt, tools: &ToolRegistry) 
         complete: false,
     })?;
     prompt.section(PromptSection {
+        name: "tool:glob".to_string(),
+        order: SectionOrder::ToolGlob.value(),
+        text: PromptText::Static(
+            "用 glob 工具——不要用 shell 的 find——按路径模式找文件。无 \"/\" 的模式在任意深度匹配 basename,所以 \"*.rs\" 搜整棵树;结果只含文件、按修改时间排序。"
+                .to_string(),
+        ),
+        complete: false,
+    })?;
+    prompt.section(PromptSection {
+        name: "tool:grep".to_string(),
+        order: SectionOrder::ToolGrep.value(),
+        text: PromptText::Static(
+            "用 grep 工具——不要用 shell 的 grep/rg——全文搜索;搜索大目录可加 include 收窄,命中上限后收窄 pattern 再看更多;命中的文件用 read_file 读上下文。"
+                .to_string(),
+        ),
+        complete: false,
+    })?;
+    prompt.section(PromptSection {
+        name: "tool:edit".to_string(),
+        order: SectionOrder::ToolEdit.value(),
+        text: PromptText::Static(
+            "精确小改动用 edit 工具(必须精确出现一次的字符串替换);大段改动用 write_file。改完用 read_file 或 grep 验证结果。"
+                .to_string(),
+        ),
+        complete: false,
+    })?;
+    prompt.section(PromptSection {
         name: "tool:todo".to_string(),
         order: SectionOrder::ToolWrite.value() + 1,
         text: PromptText::Static(
@@ -132,6 +159,6 @@ mod tests {
         assert!(assembly.sections.iter().any(|section| section.name == "tool:bash"));
         assert!(assembly.sections.iter().any(|section| section.name == "tool:todo"));
         assert!(!render_context_snapshot(&assembly).is_empty());
-        assert_eq!(assembly.tools.len(), 4);
+        assert_eq!(assembly.tools.len(), 7);
     }
 }
