@@ -332,6 +332,48 @@ export function resetSystemPrompt(): Promise<SystemPromptView> {
   return http('/api/system-prompt', { method: 'DELETE' })
 }
 
+/** 一个可回退的用户消息 checkpoint。 */
+export interface Checkpoint {
+  seq: number
+  time: number
+  text: string
+}
+
+export function getCheckpoints(id: string): Promise<{ checkpoints: Checkpoint[] }> {
+  return http(`/api/sessions/${encodeURIComponent(id)}/checkpoints`)
+}
+
+/** 回退确认框里的单条文件变化。 */
+export interface FileDiffEntry {
+  path: string
+  action: 'restore' | 'delete'
+}
+
+export function getCheckpointDiff(
+  id: string,
+  seq: number,
+): Promise<{ changes: FileDiffEntry[] }> {
+  return http(`/api/sessions/${encodeURIComponent(id)}/checkpoints/${seq}/diff`)
+}
+
+export interface RewindResult {
+  ok: boolean
+  toSeq: number
+  toMessage: string | null
+  removedEvents: number
+  changedFiles: string[]
+}
+
+export function rewindSession(
+  id: string,
+  toSeq: number,
+): Promise<RewindResult> {
+  return http(`/api/sessions/${encodeURIComponent(id)}/rewind`, {
+    method: 'POST',
+    body: JSON.stringify({ toSeq }),
+  })
+}
+
 export function cancelSession(id: string): Promise<unknown> {
   return http(`/api/sessions/${encodeURIComponent(id)}/cancel`, { method: 'POST' })
 }

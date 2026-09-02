@@ -34,6 +34,7 @@ export function SessionView({
   onNotFound,
   onPendingSettled,
   onNodesChange,
+  onRewind,
 }: {
   id: string
   /** 已发送未获服务端确认的用户消息(乐观行,渲染在 transcript 尾部)。 */
@@ -45,6 +46,8 @@ export function SessionView({
   onPendingSettled?: (message: { text: string; images?: UserMessageImage[] }) => void
   /** 内容变化时通知父级(对话轴/统计条/贴底跟随)。 */
   onNodesChange?: (nodes: TranscriptNode[]) => void
+  /** 用户消息回退按钮触发。 */
+  onRewind?: (seq: number) => void
 }) {
   const [nodes, setNodes] = useState<TranscriptNode[]>([])
   const [loading, setLoading] = useState(true)
@@ -121,7 +124,7 @@ export function SessionView({
 
   return (
     <div className="transcript-pane">
-      <Transcript nodes={nodes} pendingMessages={pendingMessages} />
+      <Transcript nodes={nodes} pendingMessages={pendingMessages} onRewind={onRewind} />
     </div>
   )
 }

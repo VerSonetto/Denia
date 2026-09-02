@@ -1092,8 +1092,15 @@ button {
   align-items: flex-end;
 }
 
-.copy-message-btn {
+.message-actions {
   display: none;
+  align-items: center;
+  gap: 2px;
+}
+
+.copy-message-btn,
+.rewind-message-btn {
+  display: inline-flex;
   align-items: center;
   justify-content: center;
   width: 32px;
@@ -1107,17 +1114,18 @@ button {
   transition: color 80ms ease, background 80ms ease, transform 80ms ease;
 }
 
-.msg-assistant .copy-message-btn {
+.msg-assistant .message-actions {
   align-self: flex-start;
   margin-left: -6px;
 }
 
-.msg-copy-anchor:hover .copy-message-btn,
-.msg-copy-anchor:focus-within .copy-message-btn {
-  display: inline-flex;
+.msg-copy-anchor:hover .message-actions,
+.msg-copy-anchor:focus-within .message-actions {
+  display: flex;
 }
 
-.copy-message-btn:hover {
+.copy-message-btn:hover,
+.rewind-message-btn:hover {
   background: var(--hover-fill);
   color: var(--label-secondary);
   transform: scale(1.06);
@@ -2992,6 +3000,55 @@ button.btn.form-action {
   color: var(--label-secondary);
   white-space: pre-wrap;
   word-break: break-word;
+}
+
+.rewind-file-list {
+  margin-top: 12px;
+  max-height: 220px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  border: 1px solid var(--border-l1);
+  border-radius: 10px;
+  padding: 8px;
+  background: var(--bg-layer-2);
+}
+
+.rewind-file-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.rewind-file-action {
+  flex: none;
+  font-size: 11px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  text-transform: uppercase;
+}
+
+.rewind-file-action.restore {
+  color: var(--success);
+  background: color-mix(in srgb, var(--success) 14%, transparent);
+}
+
+.rewind-file-action.delete {
+  color: var(--error);
+  background: color-mix(in srgb, var(--error) 14%, transparent);
+}
+
+.rewind-file-row code {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--label-primary);
+  font-family: var(--font-mono);
 }
 
 .confirm-actions {

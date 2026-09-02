@@ -20,6 +20,7 @@ import { StatsBar } from '../components/StatsBar'
 import { ComposerModelMenu } from '../components/ComposerModelMenu'
 import { PermissionSelector, loadPermission, type PermissionLevel } from '../components/PermissionSelector'
 import { ApprovalDialog, type ApprovalDecision, type ApprovalRequest } from '../components/ApprovalDialog'
+import { ConfirmDialog } from '../components/ConfirmDialog'
 import { ContextRing, type ContextPart } from '../components/ContextRing'
 import {
   BrandMark,
@@ -104,6 +105,17 @@ export default function SessionsPage({
   const [pendingMessages, setPendingMessages] = useState<
     { text: string; images?: UserMessageImage[] }[]
   >([])
+  // 回退确认框状态;changes 为空时只做简单确认。
+  const [rewindReq, setRewindReq] = useState<{
+    seq: number
+    text: string
+    images?: UserMessageImage[]
+    changes: api.FileDiffEntry[]
+    removedMessages: number
+  } | null>(null)
+  const [rewindBusy, setRewindBusy] = useState(false)
+  // 回退成功后递增,强制重挂载 SessionView 重新拉快照。
+  const [transcriptReloadTick, setTranscriptReloadTick] = useState(0)
   // 当前会话的 transcript 节点,供状态栏统计。
   const [transcriptNodes, setTranscriptNodes] = useState<TranscriptNode[]>([])
   const [todos, setTodos] = useState<TodoItem[]>([])
@@ -427,6 +439,70 @@ export default function SessionsPage({
       return next
     })
   }, [])
+
+  /* ---- 回退:预览文件变化 → 确认 → 物理截断 + 恢复文件 ---- */
+
+  const handleRewind = useCallback(async (seq: number) => {
+    if (!activeId || rewindBusy) return
+    const node = transcriptNodes.find(
+      (n): n is Extract<TranscriptNode, { kind: 'user' }> =>
+        n.kind === 'user' && n.anchor === seq,
+    )
+    try {
+      const [checkpointsRes, diffRes] = await Promise.all([
+        api.getCheckpoints(activeId),
+        api.getCheckpointDiff(activeId, seq),
+      ])
+      const index = checkpointsRes.checkpoints.findIndex((c) => c.seq === seq)
+      if (index < 0) {
+        notify('err', t('rewindNotFound'))
+        return
+      }
+      setRewindReq({
+        seq,
+        text: node?.text ?? checkpointsRes.checkpoints[index]?.text ?? '',
+        images: node?.images,
+        changes: diffRes.changes,
+        removedMessages: checkpointsRes.checkpoints.length - index,
+      })
+    } catch (error) {
+      notify('err', error instanceof Error ? error.message : String(error))
+    }
+  }, [activeId, transcriptNodes, rewindBusy])
+
+  const confirmRewind = useCallback(async () => {
+    if (!activeId || !rewindReq || rewindBusy) return
+    setRewindBusy(true)
+    try {
+      const result = await api.rewindSession(activeId, rewindReq.seq)
+      // 恢复目标消息文本/图片到输入框,方便修改后重发。
+      setPrompt(result.toMessage ?? rewindReq.text)
+      if (rewindReq.images && rewindReq.images.length > 0) {
+        setPastedImages(
+          rewindReq.images.map((image) => ({
+            name: 'pasted-image.png',
+            mime: image.mime,
+            data: image.data,
+            bytes: Math.ceil((image.data.length * 3) / 4),
+            preview: `data:${image.mime};base64,${image.data}`,
+          })),
+        )
+      } else {
+        setPastedImages([])
+      }
+      setAttachments([])
+      setPendingMessages([])
+      setTranscriptNodes([])
+      // 强制重挂载 SessionView,重新拉截断后的快照。
+      setTranscriptReloadTick((tick) => tick + 1)
+      notify('ok', t('rewindDone'))
+      setRewindReq(null)
+    } catch (error) {
+      notify('err', error instanceof Error ? error.message : String(error))
+    } finally {
+      setRewindBusy(false)
+    }
+  }, [activeId, rewindReq, rewindBusy])
 
   /* ---- 上下文窗口占用:全部由服务端 token-meter fold(锚点 + 启发式) ---- */
 
@@ -824,6 +900,7 @@ export default function SessionsPage({
         <div className="conversation-view">
           {showTranscript && activeId ? (
             <SessionView
+              key={`${activeId}-${transcriptReloadTick}`}
               id={activeId}
               pendingMessages={pendingMessages}
               onTodosChange={setTodos}
@@ -836,6 +913,7 @@ export default function SessionsPage({
                 setTranscriptNodes(nodes)
                 followIfPinned()
               }}
+              onRewind={(seq) => void handleRewind(seq)}
             />
           ) : (
             <div className="session-hero">
@@ -872,6 +950,37 @@ export default function SessionsPage({
         >
           <IconChevron size={14} />
         </button>
+      )}
+      {rewindReq && (
+        <ConfirmDialog
+          open
+          title={t('rewindConfirmTitle')}
+          desc={
+            rewindReq.changes.length > 0
+              ? t('rewindConfirmDesc', {
+                  removed: rewindReq.removedMessages,
+                  files: rewindReq.changes.length,
+                })
+              : t('rewindConfirmSimple', { removed: rewindReq.removedMessages })
+          }
+          danger
+          confirmLabel={t('rewind')}
+          onConfirm={() => void confirmRewind()}
+          onCancel={() => setRewindReq(null)}
+        >
+          {rewindReq.changes.length > 0 && (
+            <div className="rewind-file-list">
+              {rewindReq.changes.map((change) => (
+                <div key={change.path} className="rewind-file-row">
+                  <span className={`rewind-file-action ${change.action}`}>
+                    {change.action === 'restore' ? t('rewindRestore') : t('rewindDelete')}
+                  </span>
+                  <code>{change.path}</code>
+                </div>
+              ))}
+            </div>
+          )}
+        </ConfirmDialog>
       )}
     </div>
   )

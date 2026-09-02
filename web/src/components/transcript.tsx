@@ -24,10 +24,13 @@ import {
 export function Transcript({
   nodes,
   pendingMessages = [],
+  onRewind,
 }: {
   nodes: TranscriptNode[]
   /** 已发送未获确认的用户消息:渲染为尾部"发送中"行。 */
   pendingMessages?: { text: string; images?: UserMessageImage[] }[]
+  /** 用户消息点击回退按钮时回调。 */
+  onRewind?: (seq: number) => void
 }) {
   if (nodes.length === 0 && pendingMessages.length === 0) {
     return <div className="empty-hint">{t('emptyTranscript')}</div>
@@ -37,7 +40,7 @@ export function Transcript({
     <>
       {rows.map((row, index) =>
         row.kind === 'node' ? (
-          <NodeView key={index} node={row.node} />
+          <NodeView key={index} node={row.node} onRewind={onRewind} />
         ) : (
           <TurnOverview key={index} row={row} />
         ),
@@ -90,12 +93,23 @@ function TurnOverview({ row }: { row: OverviewRow }) {
 }
 
 // 行组件 memo 化:流式帧只有引用变化的行重渲染,历史行全部跳过。
-const NodeView = memo(function NodeView({ node }: { node: TranscriptNode }) {
+const NodeView = memo(function NodeView({
+  node,
+  onRewind,
+}: {
+  node: TranscriptNode
+  onRewind?: (seq: number) => void
+}) {
   switch (node.kind) {
     case 'user':
       return (
         <div className="user-row" data-user-anchor={node.anchor}>
-          <UserMessageBubble text={node.text} images={node.images} />
+          <UserMessageBubble
+            text={node.text}
+            images={node.images}
+            seq={node.anchor}
+            onRewind={onRewind}
+          />
         </div>
       )
     case 'context-injection':
@@ -157,7 +171,11 @@ function AssistantNode({
         )
       })}
       {node.interrupted && <span className="badge warn">{t('interrupted')}</span>}
-      {copyText && <CopyMessageButton text={copyText} />}
+      {copyText && (
+        <div className="message-actions">
+          <CopyMessageButton text={copyText} />
+        </div>
+      )}
     </div>
   )
 }

@@ -1,4 +1,4 @@
-import { useEffect } from 'react'
+import { useEffect, type ReactNode } from 'react'
 import { t } from '../i18n'
 
 /**
@@ -9,6 +9,7 @@ export function ConfirmDialog({
   open,
   title,
   desc,
+  children,
   confirmLabel,
   danger,
   onConfirm,
@@ -17,6 +18,7 @@ export function ConfirmDialog({
   open: boolean
   title: string
   desc: string
+  children?: ReactNode
   confirmLabel?: string
   danger?: boolean
   onConfirm: () => void
@@ -43,6 +45,7 @@ export function ConfirmDialog({
       >
         <h2 className="confirm-title">{title}</h2>
         <p className="confirm-desc">{desc}</p>
+        {children}
         <div className="confirm-actions">
           <button type="button" className="btn-secondary" onClick={onCancel}>
             {t('cancel')}

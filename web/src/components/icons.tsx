@@ -182,6 +182,14 @@ export function IconCheck(props: IconProps) {
   )
 }
 
+export function IconRewind(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <path d="M3.5 8a4.5 4.5 0 1 0 1.3-3.2M3.5 4.5V8M3.5 8h4" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
+    </Svg>
+  )
+}
+
 export function IconChevron(props: IconProps) {
   return (
     <Svg {...props}>
