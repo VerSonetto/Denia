@@ -1,9 +1,19 @@
 import { useCallback, useEffect, useRef, useState, type KeyboardEvent, type WheelEvent } from 'react'
 import * as api from '../api'
+import {
+  ensureSession,
+  getActiveWorkspace,
+  markStarted,
+  notify,
+  setActiveId,
+  setRunningStatus,
+  useCatalogTick,
+  useRunningFor,
+  useSessions,
+  useWorkspaces,
+} from '../appStore'
 import { t } from '../i18n'
 import { sessionDisplayTitle } from '../sessionDisplay'
-import type { Notify } from '../App'
-import type { StreamListener } from '../hooks/useSessionStreams'
 import type { TranscriptNode } from '../fold'
 import { SessionView } from '../components/SessionView'
 import { StatsBar } from '../components/StatsBar'
@@ -40,43 +50,34 @@ function normalizeSelection(catalog: ModelCatalog, selection: ModelSelection): M
 const LAST_MODEL_KEY = 'denia.last-model'
 // 品牌改名前的旧 key 字面量,故意保留 dsh-rs:只用于读取并搬运老用户的选择。
 const LAST_MODEL_KEY_LEGACY = 'dsh-rs.last-model'
-const TURN_LOCK_TIMEOUT = 5000
 /** dsh ChatView FOLLOW_THRESHOLD */
 const FOLLOW_THRESHOLD = 24
 
 export default function SessionsPage({
   activeId,
-  activeSession,
-  activeWs,
-  workspaces,
-  running,
-  attach,
   locked,
   hasStarted,
-  catalogTick,
-  notify,
-  onStarted,
   onSelectWorkspace,
   onOpenPicker,
   onAddWorkspace,
-  onEnsureSession,
 }: {
   activeId: string | null
-  activeSession: SessionSummary | null
-  activeWs: WorkspaceRecord | null
-  workspaces: WorkspaceRecord[]
-  running: boolean
-  attach: (id: string, listener: StreamListener) => () => void
   locked: boolean
   hasStarted: boolean
-  catalogTick: number
-  notify: Notify
-  onStarted: (id: string) => void
   onSelectWorkspace: (ws: WorkspaceRecord) => void
   onOpenPicker: () => void
   onAddWorkspace: () => void
-  onEnsureSession: () => Promise<string | null>
 }) {
+  const sessions = useSessions()
+  const workspaces = useWorkspaces()
+  const catalogTick = useCatalogTick()
+  const activeSession: SessionSummary | null = activeId
+    ? (sessions.find((s) => s.id === activeId) ?? null)
+    : null
+
+  // 运行状态直接订阅引擎(侧栏/状态栏同源)。
+  const running = useRunningFor(activeId)
+
   const [catalog, setCatalog] = useState<ModelCatalog | null>(null)
   const [prompt, setPrompt] = useState('')
   const [selection, setSelection] = useState<ModelSelection | null>(null)
@@ -84,14 +85,18 @@ export default function SessionsPage({
   const [sending, setSending] = useState(false)
   const [scrollTick, setScrollTick] = useState(0)
   const [atBottom, setAtBottom] = useState(true)
+  // 已发送未获服务端确认的用户消息(乐观行)。
+  const [pendingTexts, setPendingTexts] = useState<string[]>([])
   // 当前会话的 transcript 节点,供状态栏统计。
   const [transcriptNodes, setTranscriptNodes] = useState<TranscriptNode[]>([])
   const [todos, setTodos] = useState<TodoItem[]>([])
-  const lockTimer = useRef<number | undefined>(undefined)
+  const sendingRef = useRef(false)
   const promptRef = useRef<HTMLTextAreaElement | null>(null)
   const scrollRef = useRef<HTMLDivElement | null>(null)
   const atBottomRef = useRef(true)
   const seatRef = useRef<HTMLDivElement | null>(null)
+
+  const activeWs: WorkspaceRecord | null = getActiveWorkspace()
 
   const syncPromptHeight = () => {
     const el = promptRef.current
@@ -103,9 +108,10 @@ export default function SessionsPage({
   useEffect(() => {
     setPrompt('')
     setSending(false)
+    setPendingTexts([])
+    sendingRef.current = false
     setTranscriptNodes([])
     setTodos([])
-    window.clearTimeout(lockTimer.current)
     atBottomRef.current = true
     setAtBottom(true)
     const el = scrollRef.current
@@ -127,7 +133,7 @@ export default function SessionsPage({
     return () => {
       cancelled = true
     }
-  }, [catalogTick, notify])
+  }, [catalogTick])
 
   const loadLastModel = (current: ModelCatalog): ModelSelection | null => {
     try {
@@ -177,15 +183,12 @@ export default function SessionsPage({
   useEffect(() => {
     if (running && sending) {
       setSending(false)
-      window.clearTimeout(lockTimer.current)
     }
   }, [running, sending])
 
-  useEffect(() => () => window.clearTimeout(lockTimer.current), [])
-
   const inert = !activeId && !activeWs
   const hasHistory = Boolean(activeSession?.excerpt)
-  const showTranscript = Boolean(activeId && (hasStarted || sending || hasHistory))
+  const showTranscript = Boolean(activeId && (hasStarted || sending || hasHistory || pendingTexts.length > 0))
   const phase = showTranscript ? 'active' : 'hero'
   const promptEmpty = !prompt.trim()
   const primaryStops = running && promptEmpty
@@ -247,36 +250,77 @@ export default function SessionsPage({
     observer.observe(seat)
     observer.observe(scroller)
     return () => observer.disconnect()
-  }, [followIfPinned])
+  }, [followIfPinned, phase])
 
+  /**
+   * 乐观行协调:
+   * - push:发送 202 后注入乐观行。
+   * - settle:流中已出现同文本 user-message(可能先于 push,
+   *   因为 202 返回前服务端已落库并推送)→ 从列表移除并计数确认。
+   * 确认计数保证竞态下不丢:settle 先到时,push 不再注入。
+   */
+  const confirmedRef = useRef(new Map<string, number>())
+
+  const settlePending = useCallback((text: string) => {
+    confirmedRef.current.set(text, (confirmedRef.current.get(text) ?? 0) + 1)
+    setPendingTexts((previous) => {
+      const index = previous.indexOf(text)
+      if (index < 0) return previous
+      const next = [...previous]
+      next.splice(index, 1)
+      return next
+    })
+  }, [])
+
+  const pushPending = useCallback((text: string) => {
+    const confirmed = confirmedRef.current.get(text) ?? 0
+    if (confirmed > 0) {
+      // 该条已被服务端流确认:无需乐观行。
+      confirmedRef.current.set(text, confirmed - 1)
+      return
+    }
+    setPendingTexts((previous) => [...previous, text])
+  }, [])
+
+  /**
+   * 发送流程(乐观):
+   * 1. 确保会话存在(复用/创建);
+   * 2. postPrompt 成功 → 立即注入乐观用户行 + running,界面零等待;
+   * 3. 服务端事件(同文本 user-message)到达 → 移除乐观行(由 Server 流确认);
+   * 4. 失败 → 移除乐观行、恢复输入框、报错。
+   */
   const send = async () => {
     const message = prompt.trim()
-    if (!message || sending) return
+    if (!message || sendingRef.current) return
     if (inert) {
       onOpenPicker()
       return
     }
+    sendingRef.current = true
     setSending(true)
     try {
-      const id = await onEnsureSession()
+      const id = await ensureSession(activeWs)
       if (!id) {
-        setSending(false)
         onOpenPicker()
         return
       }
-      onStarted(id)
+      markStarted(id)
       await api.postPrompt(id, {
         prompt: message,
         provider: selection?.provider,
         model: selection?.model,
         reasoningEffort: selection?.reasoningEffort,
       })
+      // 收到 202:服务端已接单,立即乐观反馈(running 也由服务端 SSE 推送)。
+      pushPending(message)
+      setRunningStatus(id, true)
       setPrompt('')
       setScrollTick((tick) => tick + 1)
-      window.clearTimeout(lockTimer.current)
-      lockTimer.current = window.setTimeout(() => setSending(false), TURN_LOCK_TIMEOUT)
     } catch (error) {
       notify('err', error instanceof Error ? error.message : String(error))
+      // 保留输入框内容;若会话侧已经创建但发送失败,等待用户重试。
+    } finally {
+      sendingRef.current = false
       setSending(false)
     }
   }
@@ -459,18 +503,24 @@ export default function SessionsPage({
         onScroll={handleScroll}
         data-conversation-scroll=""
       >
-        {phase === 'active' && <ConversationAxis nodes={transcriptNodes} scrollRef={scrollRef} />}
+        {phase === 'active' && (
+          <ConversationAxis nodes={transcriptNodes} scrollRef={scrollRef} />
+        )}
         <div className="conversation-view">
           {showTranscript && activeId ? (
             <SessionView
               id={activeId}
-              running={running}
-              attach={attach}
+              pendingTexts={pendingTexts}
+              onTodosChange={setTodos}
+              onPendingSettled={settlePending}
+              onNotFound={() => {
+                // 会话已被删除(其他窗口/流 404):清空视图。
+                setActiveId(null, null)
+              }}
               onNodesChange={(nodes) => {
                 setTranscriptNodes(nodes)
                 followIfPinned()
               }}
-              onTodosChange={setTodos}
             />
           ) : (
             <div className="session-hero">

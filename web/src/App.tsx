@@ -4,7 +4,30 @@ import ModelsPage from './pages/ModelsPage'
 import SessionsPage from './pages/SessionsPage'
 import SettingsPage from './pages/SettingsPage'
 import * as api from './api'
-import { useSessionStreams } from './hooks/useSessionStreams'
+import {
+  addSessionLocal,
+  bumpCatalogTick,
+  deleteSessionAction,
+  deleteWorkspaceAction,
+  findWorkspaceBlank,
+  getActiveWorkspace,
+  notify,
+  refreshList,
+  setActiveId,
+  setConnLost,
+  setPage,
+  setPendingWsId,
+  setRunningStatus,
+  useActiveId,
+  useConnLost,
+  usePage,
+  useRunningIds,
+  useSessions,
+  useSessionsLoaded,
+  useStartedIds,
+  useToast,
+  useWorkspaces,
+} from './appStore'
 import {
   BrandMark,
   IconChat,
@@ -19,39 +42,34 @@ import { DirPicker } from './components/DirPicker'
 import { sessionDisplayTitle } from './sessionDisplay'
 import type { SessionSummary, WorkspaceRecord } from './types'
 
-export interface Toast {
-  kind: 'ok' | 'err'
-  message: string
-}
-
-export type Notify = (kind: Toast['kind'], message: string) => void
+/**
+ * 应用外壳:布局 + 全局事件订阅(SSE 推送)+ URL 导航 + 启动引导。
+ * 业务状态与动作全部在 `appStore`,本组件只做编排,不持有会话数据。
+ */
+export type Notify = (kind: 'ok' | 'err', message: string) => void
 
 type Page = 'sessions' | 'models' | 'settings'
 
 export default function App() {
-  const [page, setPage] = useState<Page>('sessions')
-  const [toast, setToast] = useState<Toast | null>(null)
-  const [connLost, setConnLost] = useState(false)
+  const page = usePage()
+  const sessions = useSessions()
+  const workspaces = useWorkspaces()
+  const activeId = useActiveId()
+  const startedIds = useStartedIds()
+  const sessionsLoaded = useSessionsLoaded()
+  const connLost = useConnLost()
+  const toast = useToast()
 
-  const [sessions, setSessions] = useState<SessionSummary[]>([])
-  const [workspaces, setWorkspaces] = useState<WorkspaceRecord[]>([])
-  const [activeId, setActiveId] = useState<string | null>(null)
-  // 首条消息前可切换的目标工作区(dsh pendingWorkspace)。
-  const [pendingWsId, setPendingWsId] = useState<string | null>(null)
-  const [reloadKey, setReloadKey] = useState(0)
-  // 会话流总线:running 状态与事件流生命周期统一在 App 层。
-  const { attach, runningIds } = useSessionStreams()
-  // 本会话内已发出首条消息的会话(excerpt 异步刷新前的锁定依据)。
-  const [startedIds, setStartedIds] = useState<Record<string, true>>({})
-  // 设置页改动默认模型后驱动会话页重拉 catalog。
-  const [catalogTick, setCatalogTick] = useState(0)
-  // A2:URL 会话状态。挂载时读 hash;列表加载完成后判定恢复或放弃,
-  // 判定结束前启动导航不运行(避免覆盖恢复结果)。
+  // running 集合:服务端 SSE 推送驱动(侧栏圆点与状态栏同源)。
+  const runningIds = useRunningIds()
+
+  const setPageSafe = useCallback((page: Page) => setPage(page), [])
+
+  // URL 会话状态:挂载时读 hash;列表加载完成后判定恢复或放弃。
   const [pendingHashId] = useState<string | null>(() => {
     const match = window.location.hash.match(/^#s=([^#]+)$/)
     return match ? decodeURIComponent(match[1]) : null
   })
-  const [sessionsLoaded, setSessionsLoaded] = useState(false)
   const [hashSettled, setHashSettled] = useState(false)
   const hashRestoredRef = useRef(false)
   const firstRenderRef = useRef(true)
@@ -60,17 +78,6 @@ export default function App() {
   const [pickerOpen, setPickerOpen] = useState(false)
   const [, setPicking] = useState(false)
   const capabilityRef = useRef<'native' | 'browse'>('native')
-
-  const timer = useRef<number | undefined>(undefined)
-  const notify: Notify = useCallback((kind, message) => {
-    setToast({ kind, message })
-    window.clearTimeout(timer.current)
-    timer.current = window.setTimeout(() => setToast(null), 3500)
-  }, [])
-
-  const markStarted = useCallback((id: string) => {
-    setStartedIds((previous) => (previous[id] ? previous : { ...previous, [id]: true }))
-  }, [])
 
   const applyConsoleSettings = useCallback(() => {
     api
@@ -81,7 +88,7 @@ export default function App() {
         if (theme === 'system') delete document.documentElement.dataset.theme
         else document.documentElement.dataset.theme = theme
         setLocale((console?.value.locale as string) ?? 'zh')
-        setCatalogTick((tick) => tick + 1)
+        bumpCatalogTick()
       })
       .catch(() => {})
   }, [])
@@ -99,6 +106,8 @@ export default function App() {
     applyConsoleSettings()
   }, [applyConsoleSettings])
 
+  /* ---- 全局 SSE 推送:列表/设置失效通知 ---- */
+
   const sseOpenedRef = useRef(false)
   const sseWasLostRef = useRef(false)
 
@@ -109,10 +118,10 @@ export default function App() {
       // 仅首次连接与断线重连后重拉列表,避免 onopen 抖动造成无限刷新。
       if (!sseOpenedRef.current) {
         sseOpenedRef.current = true
-        setReloadKey((key) => key + 1)
+        void refreshList()
       } else if (sseWasLostRef.current) {
         sseWasLostRef.current = false
-        setReloadKey((key) => key + 1)
+        void refreshList()
       }
     }
     source.onerror = () => {
@@ -121,9 +130,12 @@ export default function App() {
     }
     source.onmessage = (event) => {
       try {
-        const parsed = JSON.parse(event.data) as { type?: string }
-        if (parsed.type === 'sessions-updated') setReloadKey((key) => key + 1)
+        const parsed = JSON.parse(event.data) as { type?: string; id?: string; running?: boolean }
+        if (parsed.type === 'sessions-updated') void refreshList()
         else if (parsed.type === 'settings-updated') applyConsoleSettings()
+        else if (parsed.type === 'running-changed' && parsed.id) {
+          setRunningStatus(parsed.id, parsed.running === true)
+        }
       } catch {
         /* ignore malformed frame */
       }
@@ -131,36 +143,13 @@ export default function App() {
     return () => source.close()
   }, [applyConsoleSettings])
 
+  // 首屏加载:一次全量列表(SSE onopen 也会触发,幂等)。
   useEffect(() => {
-    let cancelled = false
-    Promise.all([api.listSessions(), api.listWorkspaces()])
-      .then(([sess, ws]) => {
-        if (cancelled) return
-        setSessions(sess.sessions)
-        setWorkspaces(ws.workspaces)
-        setStartedIds((previous) => {
-          const next = { ...previous }
-          for (const session of sess.sessions) {
-            if (session.excerpt) next[session.id] = true
-          }
-          return next
-        })
-        setSessionsLoaded(true)
-      })
-      .catch((error) => {
-        if (cancelled) return
-        setSessionsLoaded(true)
-        notify('err', error instanceof Error ? error.message : String(error))
-      })
-    return () => {
-      cancelled = true
-    }
-  }, [reloadKey, notify])
+    void refreshList()
+  }, [])
 
-  /* ---- A2:URL 会话状态 ---- */
+  /* ---- URL 会话状态 ---- */
 
-  // 列表首次加载完成后判定 URL 里的会话:存在则恢复,不存在则放弃(交给 launch
-  // 导航)。只运行一次;后续 sessions-updated 重拉列表不得覆盖用户当前导航。
   useEffect(() => {
     if (!sessionsLoaded || hashRestoredRef.current) return
     hashRestoredRef.current = true
@@ -170,7 +159,6 @@ export default function App() {
     setHashSettled(true)
   }, [sessions, sessionsLoaded, pendingHashId])
 
-  // activeId 变化时同步 hash(replaceState 不触发 hashchange,无回环)。
   useEffect(() => {
     if (firstRenderRef.current) {
       firstRenderRef.current = false
@@ -182,7 +170,6 @@ export default function App() {
     }
   }, [activeId])
 
-  // 前进/后退恢复;目标会话不存在则不响应。
   useEffect(() => {
     const onHashChange = () => {
       const match = window.location.hash.match(/^#s=([^#]+)$/)
@@ -197,40 +184,28 @@ export default function App() {
     return () => window.removeEventListener('hashchange', onHashChange)
   }, [sessions])
 
-  const sessionHasStarted = useCallback(
-    (id: string) => {
-      const session = sessions.find((s) => s.id === id)
-      return !!startedIds[id] || !!session?.excerpt
-    },
-    [sessions, startedIds],
+  /* ---- 会话/工作区派生 ---- */
+
+  const activeSession = activeId
+    ? (sessions.find((s) => s.id === activeId) ?? null)
+    : null
+
+  const isBlank = useCallback(
+    (s: SessionSummary) => !s.excerpt && !startedIds[s.id],
+    [startedIds],
   )
 
-  const activeSession = sessions.find((s) => s.id === activeId) ?? null
-  const isBlank = (s: SessionSummary) =>
-    !s.excerpt && !startedIds[s.id]
-  const findWorkspaceBlank = useCallback(
-    (cwd: string): SessionSummary | undefined =>
-      sessions.find(
-        (s) => s.cwd === cwd && s.cwd_alive !== false && isBlank(s),
-      ),
-    [sessions, startedIds],
-  )
-  const focusSession = useCallback((sessionId: string, wsId: string) => {
-    setActiveId(sessionId)
-    setPendingWsId(wsId)
-    setPage('sessions')
-  }, [])
   // 首条消息后(或已有历史)会话与工作区绑定,不能换。
   const locked =
     activeSession !== null &&
     (!!startedIds[activeSession.id] || !isBlank(activeSession))
-  const wsOfSession = (s: SessionSummary) =>
-    workspaces.find((w) => w.path === s.cwd) ?? null
-  const activeWs = activeSession
-    ? wsOfSession(activeSession)
-    : (workspaces.find((w) => w.id === pendingWsId) ?? null)
 
-  /* ---- dsh navigation.ts 的抄写 ---- */
+  const focusSession = useCallback((sessionId: string, wsId?: string) => {
+    setActiveId(sessionId, wsId ?? null)
+    setPage('sessions')
+  }, [])
+
+  /* ---- 启动自动导航(dsh watchNavigation) ---- */
 
   const recentWorkspace = useCallback((): WorkspaceRecord | null => {
     let best: WorkspaceRecord | null = null
@@ -250,10 +225,8 @@ export default function App() {
     return best
   }, [workspaces, sessions])
 
-  // 复用该工作区的 blank 会话;没有则只落目标工作区(首条消息时才创建,
-  // 切换工作区与启动导航都不静默建会话实体)。
   const connectWorkspace = useCallback(
-    async (ws: WorkspaceRecord) => {
+    (ws: WorkspaceRecord) => {
       if (activeSession && activeSession.cwd === ws.path) {
         setPendingWsId(ws.id)
         return
@@ -263,14 +236,11 @@ export default function App() {
         focusSession(blank.id, ws.id)
         return
       }
-      setActiveId(null)
-      setPendingWsId(ws.id)
+      setActiveId(null, ws.id)
     },
-    [sessions, activeSession, findWorkspaceBlank, focusSession],
+    [activeSession, focusSession],
   )
 
-  // 启动自动导航:有工作区且无当前会话 → 落最近工作区(dsh watchNavigation)。
-  // hashSettled 前不运行:URL 恢复与自动导航共用同一会话槽,避免旧闭包覆盖。
   const bootedRef = useRef(false)
   useEffect(() => {
     if (bootedRef.current || activeId) return
@@ -278,19 +248,22 @@ export default function App() {
     if (workspaces.length === 0) return
     bootedRef.current = true
     const recent = recentWorkspace()
-    if (recent) void connectWorkspace(recent)
+    if (recent) connectWorkspace(recent)
   }, [workspaces, activeId, hashSettled, recentWorkspace, connectWorkspace])
 
-  // 显式"新建会话":目标工作区已有空白会话则复用,否则创建。
+  /* ---- 显式"新建会话" ---- */
+
   const startSession = useCallback(
     async (targetWsId?: string) => {
+      const activeWs = getActiveWorkspace()
       const target =
         workspaces.find((w) => w.id === targetWsId) ??
-        (activeSession ? wsOfSession(activeSession) : null) ??
+        (activeSession
+          ? workspaces.find((w) => w.path === activeSession.cwd) ?? null
+          : activeWs) ??
         recentWorkspace()
       if (!target) {
-        setActiveId(null)
-        setPendingWsId(null)
+        setActiveId(null, null)
         return
       }
       const blank = findWorkspaceBlank(target.path)
@@ -308,26 +281,19 @@ export default function App() {
           sandbox: session.sandbox,
           cwd_alive: true,
         }
-        setSessions((previous) => [summary, ...previous.filter((s) => s.id !== summary.id)])
-        setWorkspaces((previous) =>
-          previous.map((ws) =>
-            ws.id === target.id
-              ? { ...ws, sessionIds: [summary.id, ...ws.sessionIds.filter((id) => id !== summary.id)] }
-              : ws,
-          ),
-        )
-        setActiveId(summary.id)
-        setPendingWsId(target.id)
+        addSessionLocal(summary, target.id)
+        setActiveId(summary.id, target.id)
         setPage('sessions')
-        setReloadKey((key) => key + 1)
+        void refreshList()
       } catch (error) {
         notify('err', error instanceof Error ? error.message : String(error))
       }
     },
-    [workspaces, activeSession, recentWorkspace, wsOfSession, notify, findWorkspaceBlank, focusSession],
+    [workspaces, activeSession, recentWorkspace, focusSession],
   )
 
-  // 目录流入口:capability 分流 native/browse;失败进"无法打开文件夹"。
+  /* ---- 目录流入口 ---- */
+
   const openDirectoryFlow = useCallback(() => {
     if (capabilityRef.current === 'native') {
       setPicking(true)
@@ -338,8 +304,8 @@ export default function App() {
           if (!path) return
           try {
             const { workspace } = await api.createWorkspace(path)
-            setWorkspaces((prev) => [workspace, ...prev.filter((w) => w.id !== workspace.id)])
-            await connectWorkspace(workspace)
+            void refreshList()
+            connectWorkspace(workspace)
             notify('ok', t('workspaceAdded'))
           } catch (error) {
             notify('err', `${t('folderError')}:${error instanceof Error ? error.message : error}`)
@@ -352,65 +318,44 @@ export default function App() {
     } else {
       setPickerOpen(true)
     }
-  }, [connectWorkspace, notify])
+  }, [connectWorkspace])
 
   const adoptFromBrowse = useCallback(
     async (path: string) => {
       const { workspace } = await api.createWorkspace(path)
-      setWorkspaces((prev) => [workspace, ...prev.filter((w) => w.id !== workspace.id)])
-      await connectWorkspace(workspace)
+      void refreshList()
+      connectWorkspace(workspace)
       notify('ok', t('workspaceAdded'))
     },
-    [connectWorkspace, notify],
+    [connectWorkspace],
   )
+
+  /* ---- 删除 ---- */
 
   const deleteWorkspace = useCallback(
     async (ws: WorkspaceRecord) => {
       if (!window.confirm(t('deleteWorkspaceDesc', { name: ws.title }))) return
       try {
-        await api.deleteWorkspace(ws.id)
-        if (activeId && sessions.some((s) => s.id === activeId && s.cwd === ws.path)) {
-          setActiveId(null)
-          window.location.hash = ''
-        }
-        setReloadKey((key) => key + 1)
+        await deleteWorkspaceAction(ws.id)
         notify('ok', t('workspaceDeleted'))
       } catch (error) {
         notify('err', error instanceof Error ? error.message : String(error))
       }
     },
-    [activeId, notify, sessions],
+    [],
   )
 
-  const removeSessionFromState = useCallback((sessionId: string) => {
-    setSessions((previous) => previous.filter((session) => session.id !== sessionId))
-    setWorkspaces((previous) =>
-      previous.map((workspace) => ({
-        ...workspace,
-        sessionIds: workspace.sessionIds.filter((id) => id !== sessionId),
-      })),
-    )
-    if (activeId === sessionId) {
-      setActiveId(null)
-      window.location.hash = ''
+  const deleteSession = useCallback(async (session: SessionSummary) => {
+    if (!window.confirm(t('deleteSessionDesc', { title: sessionDisplayTitle(session) }))) {
+      return
     }
-  }, [activeId])
-
-  const deleteSession = useCallback(
-    async (session: SessionSummary) => {
-      if (!window.confirm(t('deleteSessionDesc', { title: sessionDisplayTitle(session) }))) {
-        return
-      }
-      try {
-        await api.deleteSession(session.id)
-        removeSessionFromState(session.id)
-        notify('ok', t('sessionDeleted'))
-      } catch (error) {
-        notify('err', error instanceof Error ? error.message : String(error))
-      }
-    },
-    [notify, removeSessionFromState],
-  )
+    try {
+      await deleteSessionAction(session.id)
+      notify('ok', t('sessionDeleted'))
+    } catch (error) {
+      notify('err', error instanceof Error ? error.message : String(error))
+    }
+  }, [])
 
   const deleteUngrouped = useCallback(
     async (items: SessionSummary[]) => {
@@ -421,48 +366,20 @@ export default function App() {
           if (runningIds[session.id]) {
             throw new Error(t('sessionRunningDelete'))
           }
-          await api.deleteSession(session.id)
-          removeSessionFromState(session.id)
+          await deleteSessionAction(session.id)
         }
         notify('ok', t('sessionDeleted'))
       } catch (error) {
         notify('err', error instanceof Error ? error.message : String(error))
       }
     },
-    [notify, removeSessionFromState, runningIds],
+    [runningIds],
   )
 
-  // 发送时确保会话存在:复用 active 或该工作区的空白会话,否则创建。
-  const ensureSession = useCallback(async (): Promise<string | null> => {
-    if (activeId) return activeId
-    const ws = activeWs
-    if (!ws) return null
-    const blank = findWorkspaceBlank(ws.path)
-    if (blank) {
-      setActiveId(blank.id)
-      return blank.id
-    }
-    const { session } = await api.createSession({ workspaceId: ws.id })
-    const summary: SessionSummary = {
-      id: session.id,
-      created_at: session.created_at,
-      excerpt: null,
-      cwd: session.cwd,
-      sandbox: session.sandbox,
-      cwd_alive: true,
-    }
-    setSessions((previous) => [summary, ...previous.filter((s) => s.id !== summary.id)])
-    setWorkspaces((previous) =>
-      previous.map((item) =>
-        item.id === ws.id
-          ? { ...item, sessionIds: [summary.id, ...item.sessionIds.filter((id) => id !== summary.id)] }
-          : item,
-      ),
-    )
-    setActiveId(summary.id)
-    setReloadKey((key) => key + 1)
-    return summary.id
-  }, [activeId, activeWs, findWorkspaceBlank])
+  const openSession = useCallback((id: string, wsId?: string) => {
+    setActiveId(id, wsId ?? null)
+    setPage('sessions')
+  }, [])
 
   return (
     <div className="shell">
@@ -496,11 +413,7 @@ export default function App() {
             workspaces={workspaces}
             activeId={activeId}
             runningIds={runningIds}
-            onOpenSession={(id, wsId) => {
-              setPage('sessions')
-              setActiveId(id)
-              setPendingWsId(wsId ?? null)
-            }}
+            onOpenSession={openSession}
             onNewSession={(wsId) => void startSession(wsId)}
             onDeleteWorkspace={(ws) => void deleteWorkspace(ws)}
             onDeleteSession={(session) => void deleteSession(session)}
@@ -511,7 +424,7 @@ export default function App() {
           <button
             type="button"
             className={`sidebar-nav${page === 'sessions' ? ' active' : ''}`}
-            onClick={() => setPage('sessions')}
+            onClick={() => setPageSafe('sessions')}
           >
             <IconChat size={16} />
             <span>{t('navSessions')}</span>
@@ -519,7 +432,7 @@ export default function App() {
           <button
             type="button"
             className={`sidebar-nav${page === 'models' ? ' active' : ''}`}
-            onClick={() => setPage('models')}
+            onClick={() => setPageSafe('models')}
           >
             <IconSliders size={16} />
             <span>{t('navModels')}</span>
@@ -527,7 +440,7 @@ export default function App() {
           <button
             type="button"
             className={`sidebar-nav${page === 'settings' ? ' active' : ''}`}
-            onClick={() => setPage('settings')}
+            onClick={() => setPageSafe('settings')}
           >
             <IconGear size={16} />
             <span>{t('navSettings')}</span>
@@ -539,30 +452,21 @@ export default function App() {
           <SessionsPage
             key={activeId ?? 'draft'}
             activeId={activeId}
-            activeSession={activeSession}
-            activeWs={activeWs}
-            workspaces={workspaces}
-            running={activeId ? !!runningIds[activeId] : false}
-            attach={attach}
             locked={locked}
-            hasStarted={activeId ? sessionHasStarted(activeId) : false}
-            catalogTick={catalogTick}
-            notify={notify}
-            onStarted={markStarted}
+            hasStarted={activeId ? !!startedIds[activeId] : false}
             onSelectWorkspace={(ws) => {
               // 首条消息前可切换;已发消息则锁死(dsh 交互)。
               if (locked) {
                 notify('err', t('lockedWorkspace'))
                 return
               }
-              void connectWorkspace(ws)
+              connectWorkspace(ws)
             }}
             onOpenPicker={() => {
               if (workspaces.length === 0) openDirectoryFlow()
               else setPickerOpen(true)
             }}
             onAddWorkspace={openDirectoryFlow}
-            onEnsureSession={ensureSession}
           />
         </div>
         <div className="page-pane" hidden={page !== 'models'}>

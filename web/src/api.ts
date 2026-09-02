@@ -21,26 +21,36 @@ export class ApiError extends Error {
   }
 }
 
+/** 非 follow 型请求的默认超时:15s(挂死的请求不能卡住 UI)。 */
+const DEFAULT_TIMEOUT_MS = 15_000
+
 async function http<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(path, {
-    headers: { 'content-type': 'application/json' },
-    ...init,
-  })
-  if (!response.ok) {
-    let code = `http-${response.status}`
-    let message = response.statusText
-    try {
-      const body = await response.json()
-      if (body?.error) {
-        code = body.error.code ?? code
-        message = body.error.message ?? message
+  const timeout = new AbortController()
+  const timer = window.setTimeout(() => timeout.abort(), DEFAULT_TIMEOUT_MS)
+  try {
+    const response = await fetch(path, {
+      headers: { 'content-type': 'application/json' },
+      ...init,
+      signal: init?.signal ?? timeout.signal,
+    })
+    if (!response.ok) {
+      let code = `http-${response.status}`
+      let message = response.statusText
+      try {
+        const body = await response.json()
+        if (body?.error) {
+          code = body.error.code ?? code
+          message = body.error.message ?? message
+        }
+      } catch {
+        /* body was not JSON */
       }
-    } catch {
-      /* body was not JSON */
+      throw new ApiError(code, message, response.status)
     }
-    throw new ApiError(code, message, response.status)
+    return response.json() as Promise<T>
+  } finally {
+    window.clearTimeout(timer)
   }
-  return response.json() as Promise<T>
 }
 
 export function getSettings(): Promise<SettingsDescribe> {
@@ -219,11 +229,11 @@ export function pickDirectory(): Promise<{ path: string | null }> {
   return http('/api/fs/pick', { method: 'POST' })
 }
 
-export function getSession(id: string): Promise<{
+export function getSession(id: string, signal?: AbortSignal): Promise<{
   header: SessionHeader
   events: SessionEnvelope[]
 }> {
-  return http(`/api/sessions/${encodeURIComponent(id)}`)
+  return http(`/api/sessions/${encodeURIComponent(id)}`, { signal })
 }
 
 export function deleteSession(id: string): Promise<unknown> {
