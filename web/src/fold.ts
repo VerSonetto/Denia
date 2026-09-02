@@ -1,4 +1,4 @@
-import type { ContentBlock, SessionEnvelope, StreamChunk, TokenUsage, TurnEndReason } from './types'
+import type { ContentBlock, SessionEnvelope, StreamChunk, TokenUsage, TurnEndReason, UserMessageImage } from './types'
 
 /** One rendered block inside an assistant message. */
 export interface UiBlock {
@@ -10,7 +10,7 @@ export interface UiBlock {
 }
 
 export type TranscriptNode =
-  | { kind: 'user'; text: string; anchor?: number }
+  | { kind: 'user'; text: string; anchor?: number; images?: UserMessageImage[] }
   | { kind: 'context-injection'; text: string }
   | { kind: 'system-prompt'; text: string }
   | {
@@ -148,7 +148,12 @@ export function foldEvents(events: SessionEnvelope[]): TranscriptNode[] {
         if (event.injected) {
           nodes.push({ kind: 'context-injection', text: event.text })
         } else {
-          nodes.push({ kind: 'user', text: event.text, anchor: event.seq })
+          nodes.push({
+            kind: 'user',
+            text: event.text,
+            anchor: event.seq,
+            images: event.images?.length ? event.images : undefined,
+          })
         }
         break
       case 'system-prompt':
@@ -279,7 +284,15 @@ export function applyEnvelope(
       if (event.injected) {
         return [...nodes, { kind: 'context-injection', text: event.text }]
       }
-      return [...nodes, { kind: 'user', text: event.text, anchor: event.seq }]
+      return [
+        ...nodes,
+        {
+          kind: 'user',
+          text: event.text,
+          anchor: event.seq,
+          images: event.images?.length ? event.images : undefined,
+        },
+      ]
     case 'system-prompt':
       return [...nodes, { kind: 'system-prompt', text: event.text }]
     case 'step-start':

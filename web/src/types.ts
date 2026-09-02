@@ -157,12 +157,25 @@ export interface TodoItem {
   status: 'pending' | 'in_progress' | 'completed'
 }
 
+/** One inline image attached to a user message (mirrors Rust `ImageData`). */
+export interface UserMessageImage {
+  mime: string
+  data: string
+}
+
 export type SessionEnvelope =
   | { seq: number; time: number; type: 'turn-start'; turn: number }
   | { seq: number; time: number; type: 'turn-end'; turn: number; reason: TurnEndReason }
   | { seq: number; time: number; type: 'step-start'; turn: number; step: number }
   | { seq: number; time: number; type: 'step-end'; turn: number; step: number }
-  | { seq: number; time: number; type: 'user-message'; text: string; injected?: boolean }
+  | {
+      seq: number
+      time: number
+      type: 'user-message'
+      text: string
+      injected?: boolean
+      images?: UserMessageImage[]
+    }
   | { seq: number; time: number; type: 'system-prompt'; turn: number; step: number; text: string }
   | {
       seq: number

@@ -41,8 +41,10 @@ import type {
   ModelSelection,
   SessionSummary,
   TodoItem,
+  UserMessageImage,
   WorkspaceRecord,
 } from '../types'
+import { isGenericImageName } from '../userImages'
 
 function normalizeSelection(catalog: ModelCatalog, selection: ModelSelection): ModelSelection {
   const group = catalog.groups.find((entry) => entry.id === selection.provider)
@@ -59,6 +61,12 @@ const LAST_MODEL_KEY = 'denia.last-model'
 const LAST_MODEL_KEY_LEGACY = 'dsh-rs.last-model'
 /** dsh ChatView FOLLOW_THRESHOLD */
 const FOLLOW_THRESHOLD = 24
+
+/** 乐观行内容指纹:文本 + 内联图片都参与匹配,避免多条纯图片消息("图片")互相误删。 */
+function pendingMessageKey(message: { text: string; images?: UserMessageImage[] }): string {
+  const images = message.images ?? []
+  return `${message.text}\u0000${images.map((image) => `${image.mime}\u0000${image.data}`).join('\u0001')}`
+}
 
 export default function SessionsPage({
   activeId,
@@ -93,7 +101,9 @@ export default function SessionsPage({
   const [scrollTick, setScrollTick] = useState(0)
   const [atBottom, setAtBottom] = useState(true)
   // 已发送未获服务端确认的用户消息(乐观行)。
-  const [pendingTexts, setPendingTexts] = useState<string[]>([])
+  const [pendingMessages, setPendingMessages] = useState<
+    { text: string; images?: UserMessageImage[] }[]
+  >([])
   // 当前会话的 transcript 节点,供状态栏统计。
   const [transcriptNodes, setTranscriptNodes] = useState<TranscriptNode[]>([])
   const [todos, setTodos] = useState<TodoItem[]>([])
@@ -115,7 +125,7 @@ export default function SessionsPage({
   useEffect(() => {
     setPrompt('')
     setSending(false)
-    setPendingTexts([])
+    setPendingMessages([])
     sendingRef.current = false
     setTranscriptNodes([])
     setTodos([])
@@ -195,10 +205,10 @@ export default function SessionsPage({
 
   const inert = !activeId && !activeWs
   const hasHistory = Boolean(activeSession?.excerpt)
-  const showTranscript = Boolean(activeId && (hasStarted || sending || hasHistory || pendingTexts.length > 0))
+  const showTranscript = Boolean(
+    activeId && (hasStarted || sending || hasHistory || pendingMessages.length > 0),
+  )
   const phase = showTranscript ? 'active' : 'hero'
-  const promptEmpty = !prompt.trim()
-  const primaryStops = running && promptEmpty
 
   // 当前选中模型的上下文窗口,供状态栏显示占用环。
   const activeContextWindow = (() => {
@@ -218,6 +228,8 @@ export default function SessionsPage({
     preview: string
   }[]>([])
   const [attachments, setAttachments] = useState<{ name: string; mime: string; file: File }[]>([])
+  const promptEmpty = !prompt.trim() && pastedImages.length === 0
+  const primaryStops = running && promptEmpty
   const [permission, setPermission] = useState<PermissionLevel>(() => loadPermission())
   const fileInputRef = useRef<HTMLInputElement | null>(null)
 
@@ -404,10 +416,11 @@ export default function SessionsPage({
    */
   const confirmedRef = useRef(new Map<string, number>())
 
-  const settlePending = useCallback((text: string) => {
-    confirmedRef.current.set(text, (confirmedRef.current.get(text) ?? 0) + 1)
-    setPendingTexts((previous) => {
-      const index = previous.indexOf(text)
+  const settlePending = useCallback((message: { text: string; images?: UserMessageImage[] }) => {
+    const key = pendingMessageKey(message)
+    confirmedRef.current.set(key, (confirmedRef.current.get(key) ?? 0) + 1)
+    setPendingMessages((previous) => {
+      const index = previous.findIndex((candidate) => pendingMessageKey(candidate) === key)
       if (index < 0) return previous
       const next = [...previous]
       next.splice(index, 1)
@@ -474,14 +487,16 @@ export default function SessionsPage({
 
   const showAttachRow = pastedImages.length > 0 || attachments.length > 0
 
-  const pushPending = useCallback((text: string) => {
-    const confirmed = confirmedRef.current.get(text) ?? 0
+  const pushPending = useCallback((text: string, images?: UserMessageImage[]) => {
+    const message = { text, images }
+    const key = pendingMessageKey(message)
+    const confirmed = confirmedRef.current.get(key) ?? 0
     if (confirmed > 0) {
       // 该条已被服务端流确认:无需乐观行。
-      confirmedRef.current.set(text, confirmed - 1)
+      confirmedRef.current.set(key, confirmed - 1)
       return
     }
-    setPendingTexts((previous) => [...previous, text])
+    setPendingMessages((previous) => [...previous, message])
   }, [])
 
   /**
@@ -492,7 +507,9 @@ export default function SessionsPage({
    * 4. 失败 → 移除乐观行、恢复输入框、报错。
    */
   const send = async () => {
-    const message = prompt.trim()
+    const trimmed = prompt.trim()
+    const message =
+      trimmed || (pastedImages.length > 0 ? t('pastedImageLabel') : '')
     if (!message || sendingRef.current) return
     if (inert) {
       onOpenPicker()
@@ -533,8 +550,9 @@ export default function SessionsPage({
         images: pastedImages.map(({ name, mime, data }) => ({ name, mime, data })),
         files: uploadedPaths,
       })
+      const sentImages: UserMessageImage[] = pastedImages.map(({ mime, data }) => ({ mime, data }))
       // 收到 202:服务端已接单,立即乐观反馈(running 也由服务端 SSE 推送)。
-      pushPending(message)
+      pushPending(message, sentImages.length > 0 ? sentImages : undefined)
       setRunningStatus(id, true)
       setPrompt('')
       setPastedImages([])
@@ -651,12 +669,16 @@ export default function SessionsPage({
       {showAttachRow && (
         <div className="composer-attachments">
           {pastedImages.map((image, index) => (
-            <span className="att-chip image" key={`img-${index}`}>
-              <img src={image.preview} alt={image.name} />
-              <span className="att-name">{image.name}</span>
+            <div className="composer-image-thumb" key={`img-${index}`}>
+              <img src={image.preview} alt="" />
+              {!isGenericImageName(image.name) && (
+                <span className="composer-image-label" title={image.name}>
+                  {image.name}
+                </span>
+              )}
               <button
                 type="button"
-                className="att-remove"
+                className="composer-image-remove"
                 title={t('removeAttachment')}
                 onClick={(event) => {
                   event.stopPropagation()
@@ -665,7 +687,7 @@ export default function SessionsPage({
               >
                 <IconClose size={10} />
               </button>
-            </span>
+            </div>
           ))}
           {attachments.map((attachment, index) => (
             <span className="att-chip" key={`att-${index}`}>
@@ -803,7 +825,7 @@ export default function SessionsPage({
           {showTranscript && activeId ? (
             <SessionView
               id={activeId}
-              pendingTexts={pendingTexts}
+              pendingMessages={pendingMessages}
               onTodosChange={setTodos}
               onPendingSettled={settlePending}
               onNotFound={() => {

@@ -5,6 +5,8 @@ import { groupTranscript, type OverviewRow, type TranscriptNode } from '../fold'
 import { MarkdownText } from '../markdown/MarkdownText'
 import type { MarkdownLabels } from '../markdown/MarkdownText'
 import { toolCallInput, toolCallSummary } from '../toolDisplay'
+import type { UserMessageImage } from '../types'
+import { UserMessageBubble } from './UserMessageImages'
 import {
   IconChevron,
   IconEdit,
@@ -20,13 +22,13 @@ import {
 
 export function Transcript({
   nodes,
-  pendingTexts = [],
+  pendingMessages = [],
 }: {
   nodes: TranscriptNode[]
   /** 已发送未获确认的用户消息:渲染为尾部"发送中"行。 */
-  pendingTexts?: string[]
+  pendingMessages?: { text: string; images?: UserMessageImage[] }[]
 }) {
-  if (nodes.length === 0 && pendingTexts.length === 0) {
+  if (nodes.length === 0 && pendingMessages.length === 0) {
     return <div className="empty-hint">{t('emptyTranscript')}</div>
   }
   const rows = groupTranscript(nodes)
@@ -39,9 +41,9 @@ export function Transcript({
           <TurnOverview key={index} row={row} />
         ),
       )}
-      {pendingTexts.map((text, index) => (
+      {pendingMessages.map((message, index) => (
         <div className="user-row" key={`pending-${index}`} data-user-anchor="pending">
-          <div className="msg-user pending">{text}</div>
+          <UserMessageBubble text={message.text} images={message.images} pending />
         </div>
       ))}
     </>
@@ -92,7 +94,7 @@ const NodeView = memo(function NodeView({ node }: { node: TranscriptNode }) {
     case 'user':
       return (
         <div className="user-row" data-user-anchor={node.anchor}>
-          <div className="msg-user">{node.text}</div>
+          <UserMessageBubble text={node.text} images={node.images} />
         </div>
       )
     case 'context-injection':

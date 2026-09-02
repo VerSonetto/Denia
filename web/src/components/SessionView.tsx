@@ -3,7 +3,7 @@ import { applyEnvelope, foldEvents } from '../fold'
 import type { TranscriptNode } from '../fold'
 import { t } from '../i18n'
 import { attach } from '../sessionStreams'
-import type { SessionEnvelope, TodoItem } from '../types'
+import type { SessionEnvelope, TodoItem, UserMessageImage } from '../types'
 import { Transcript } from './transcript'
 
 /** Latest todo snapshot wins; both snapshot and live frames feed it. */
@@ -29,7 +29,7 @@ function latestTodos(events: { type: string; todos?: TodoItem[] }[]): TodoItem[]
  */
 export function SessionView({
   id,
-  pendingTexts,
+  pendingMessages,
   onTodosChange,
   onNotFound,
   onPendingSettled,
@@ -37,12 +37,12 @@ export function SessionView({
 }: {
   id: string
   /** 已发送未获服务端确认的用户消息(乐观行,渲染在 transcript 尾部)。 */
-  pendingTexts: string[]
+  pendingMessages: { text: string; images?: UserMessageImage[] }[]
   onTodosChange?: (todos: TodoItem[]) => void
   /** 会话已被删除:父级应清空 activeId。 */
   onNotFound?: () => void
   /** 某条乐观消息已被服务端事件确认(从 pending 列表移除)。 */
-  onPendingSettled?: (text: string) => void
+  onPendingSettled?: (message: { text: string; images?: UserMessageImage[] }) => void
   /** 内容变化时通知父级(对话轴/统计条/贴底跟随)。 */
   onNodesChange?: (nodes: TranscriptNode[]) => void
 }) {
@@ -72,7 +72,7 @@ export function SessionView({
     const settlePending = (events: SessionEnvelope[]) => {
       for (const event of events) {
         if (event.type === 'user-message' && !event.injected) {
-          settleRef.current?.(event.text)
+          settleRef.current?.({ text: event.text, images: event.images })
         }
       }
     }
@@ -121,7 +121,7 @@ export function SessionView({
 
   return (
     <div className="transcript-pane">
-      <Transcript nodes={nodes} pendingTexts={pendingTexts} />
+      <Transcript nodes={nodes} pendingMessages={pendingMessages} />
     </div>
   )
 }
