@@ -50,12 +50,8 @@ fn should_log_system_prompt(session: &Session, step: u32, text: &str) -> bool {
     if step == 1 {
         return true;
     }
-    let events = session.events();
-    let last = events.iter().rev().find_map(|envelope| match &envelope.event {
-        SessionEvent::SystemPrompt { text: previous, .. } => Some(previous.as_str()),
-        _ => None,
-    });
-    last != Some(text)
+    // O(1):Session 在 append 时维护最近一次系统提示词,不再遍历日志。
+    session.last_system_prompt().as_deref() != Some(text)
 }
 
 impl SessionDriver {
@@ -102,7 +98,7 @@ impl SessionDriver {
         cancel: CancellationToken,
         emit: Arc<dyn Fn(&SessionEnvelope) + Send + Sync>,
     ) -> Result<TurnEndReason, LlmFailure> {
-        let turn = next_turn_number(session);
+        let turn = session.next_turn_number();
         append(session, &emit, SessionEvent::UserMessage { text: prompt.to_string(), injected: false })?;
         append(session, &emit, SessionEvent::TurnStart { turn })?;
 
@@ -365,18 +361,6 @@ impl SessionDriver {
             append(session, &emit, SessionEvent::StepEnd { turn, step })?;
         }
     }
-}
-
-fn next_turn_number(session: &Session) -> u32 {
-    session
-        .events()
-        .iter()
-        .filter_map(|envelope| match &envelope.event {
-            SessionEvent::TurnStart { turn } => Some(*turn),
-            _ => None,
-        })
-        .max()
-        .map_or(1, |turn| turn + 1)
 }
 
 fn append(
