@@ -39,6 +39,7 @@ import {
   IconTrash,
 } from './components/icons'
 import { DirPicker } from './components/DirPicker'
+import { ConfirmDialog } from './components/ConfirmDialog'
 import { sessionDisplayTitle } from './sessionDisplay'
 import type { SessionSummary, WorkspaceRecord } from './types'
 
@@ -330,48 +331,64 @@ export default function App() {
     [connectWorkspace],
   )
 
-  /* ---- 删除 ---- */
+  /* ---- 删除(自定义确认框,替代 window.confirm) ---- */
+
+  const [confirmReq, setConfirmReq] = useState<{
+    title: string
+    desc: string
+    danger?: boolean
+    onConfirm: () => void
+  } | null>(null)
 
   const deleteWorkspace = useCallback(
-    async (ws: WorkspaceRecord) => {
-      if (!window.confirm(t('deleteWorkspaceDesc', { name: ws.title }))) return
-      try {
-        await deleteWorkspaceAction(ws.id)
-        notify('ok', t('workspaceDeleted'))
-      } catch (error) {
-        notify('err', error instanceof Error ? error.message : String(error))
-      }
+    (ws: WorkspaceRecord) => {
+      setConfirmReq({
+        title: t('confirmDeleteWorkspace'),
+        desc: t('confirmDeleteWorkspaceDesc', { name: ws.title }),
+        danger: true,
+        onConfirm: () => {
+          void deleteWorkspaceAction(ws.id)
+            .then(() => notify('ok', t('workspaceDeleted')))
+            .catch((error) => notify('err', error instanceof Error ? error.message : String(error)))
+        },
+      })
     },
     [],
   )
 
-  const deleteSession = useCallback(async (session: SessionSummary) => {
-    if (!window.confirm(t('deleteSessionDesc', { title: sessionDisplayTitle(session) }))) {
-      return
-    }
-    try {
-      await deleteSessionAction(session.id)
-      notify('ok', t('sessionDeleted'))
-    } catch (error) {
-      notify('err', error instanceof Error ? error.message : String(error))
-    }
+  const deleteSession = useCallback((session: SessionSummary) => {
+    setConfirmReq({
+      title: t('confirmDeleteSession'),
+      desc: t('confirmDeleteSessionDesc', { title: sessionDisplayTitle(session) }),
+      danger: true,
+      onConfirm: () => {
+        void deleteSessionAction(session.id)
+          .then(() => notify('ok', t('sessionDeleted')))
+          .catch((error) => notify('err', error instanceof Error ? error.message : String(error)))
+      },
+    })
   }, [])
 
   const deleteUngrouped = useCallback(
-    async (items: SessionSummary[]) => {
+    (items: SessionSummary[]) => {
       if (items.length === 0) return
-      if (!window.confirm(t('deleteUngroupedDesc', { n: items.length }))) return
-      try {
-        for (const session of items) {
-          if (runningIds[session.id]) {
-            throw new Error(t('sessionRunningDelete'))
-          }
-          await deleteSessionAction(session.id)
-        }
-        notify('ok', t('sessionDeleted'))
-      } catch (error) {
-        notify('err', error instanceof Error ? error.message : String(error))
-      }
+      setConfirmReq({
+        title: t('confirmDeleteUngrouped'),
+        desc: t('confirmDeleteUngroupedDesc', { n: items.length }),
+        danger: true,
+        onConfirm: () => {
+          void (async () => {
+            for (const session of items) {
+              if (runningIds[session.id]) {
+                throw new Error(t('sessionRunningDelete'))
+              }
+              await deleteSessionAction(session.id)
+            }
+          })()
+            .then(() => notify('ok', t('sessionDeleted')))
+            .catch((error) => notify('err', error instanceof Error ? error.message : String(error)))
+        },
+      })
     },
     [runningIds],
   )
@@ -485,6 +502,17 @@ export default function App() {
       )}
       {connLost && <div className="conn-lost">{t('connectionLost')}</div>}
       {toast && <div className={`toast ${toast.kind}`}>{toast.message}</div>}
+      <ConfirmDialog
+        open={confirmReq !== null}
+        title={confirmReq?.title ?? ''}
+        desc={confirmReq?.desc ?? ''}
+        danger={confirmReq?.danger}
+        onConfirm={() => {
+          confirmReq?.onConfirm()
+          setConfirmReq(null)
+        }}
+        onCancel={() => setConfirmReq(null)}
+      />
     </div>
   )
 }
