@@ -58,6 +58,17 @@ export function toolCallSummary(name: string, args: string): string {
         if (command) return command.length > 90 ? `${command.slice(0, 90)}…` : command
         break
       }
+      case 'glob':
+      case 'grep': {
+        const pattern = readString(parsed, 'pattern')
+        if (pattern) return pattern.length > 90 ? `${pattern.slice(0, 90)}…` : pattern
+        break
+      }
+      case 'edit': {
+        const path = readString(parsed, 'path')
+        if (path) return shortPath(path)
+        break
+      }
     }
   }
   const line = args.trim().split('\n')[0]?.trim() ?? ''

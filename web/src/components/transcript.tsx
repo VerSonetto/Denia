@@ -7,8 +7,11 @@ import type { MarkdownLabels } from '../markdown/MarkdownText'
 import { toolCallInput, toolCallSummary } from '../toolDisplay'
 import {
   IconChevron,
+  IconEdit,
+  IconGlob,
   IconPrompt,
   IconRead,
+  IconSearch,
   IconTerminal,
   IconThink,
   IconTool,
@@ -254,6 +257,12 @@ function toolMeta(name: string): { title: string; icon: ReactNode } {
       return { title: 'Read', icon: <IconRead size={14} /> }
     case 'write_file':
       return { title: 'Write', icon: <IconWrite size={14} /> }
+    case 'grep':
+      return { title: 'Grep', icon: <IconSearch size={14} /> }
+    case 'glob':
+      return { title: 'Glob', icon: <IconGlob size={14} /> }
+    case 'edit':
+      return { title: 'Edit', icon: <IconEdit size={14} /> }
     default:
       return { title: name, icon: <IconTool size={14} /> }
   }
