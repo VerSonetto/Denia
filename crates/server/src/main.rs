@@ -2,6 +2,7 @@
 
 mod api;
 mod error;
+mod file_history;
 mod state;
 mod system_prompt_store;
 mod web_assets;

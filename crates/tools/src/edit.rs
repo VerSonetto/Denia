@@ -112,6 +112,14 @@ impl Tool for EditTool {
             text.replacen(&args.old_string, &args.new_string, 1)
         };
 
+        if let Some(file_history) = &ctx.file_history {
+            if let Err(message) = file_history.track_before_write(&path).await {
+                return ToolOutput {
+                    content: format!("file history backup failed: {message}"),
+                    is_error: true,
+                };
+            }
+        }
         if let Err(error) = std::fs::write(&path, &updated) {
             return ToolOutput { content: format!("write failed: {error}"), is_error: true };
         }
@@ -165,6 +173,7 @@ mod tests {
             confined: true,
             vision_supported: true,
             emit_event: None,
+            file_history: None,
         }
     }
 

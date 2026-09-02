@@ -49,6 +49,16 @@ pub enum SessionError {
     Json(#[from] serde_json::Error),
     #[error("session I/O: {0}")]
     Io(#[from] std::io::Error),
+    #[error("seq {0} is not a rewindable user message")]
+    NotARewindPoint(u64),
+}
+
+/// 物理回退的结果。
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct RewindOutcome {
+    pub to_seq: u64,
+    pub to_message: Option<String>,
+    pub removed_events: usize,
 }
 
 fn now_millis() -> u64 {
@@ -83,6 +93,11 @@ fn file_stamp(path: &Path) -> Option<FileStamp> {
 struct SessionInner {
     events: Vec<SessionEnvelope>,
     writer: BufWriter<File>,
+    /// 每个事件行结束的字节偏移(含换行);物理回退截断文件用。
+    /// 与 `events` 一一对应。
+    offsets: Vec<u64>,
+    /// session.jsonl 首行(header)结束后的字节偏移。
+    base_offset: u64,
     /// 最新 turn 号(append 时维护),next_turn_number O(1)。
     last_turn: u32,
     /// 最近一次落日志的系统提示词;should_log_system_prompt 的 O(1) 依据。
@@ -120,22 +135,26 @@ impl Session {
         };
         {
             let mut handle = File::create(&file)?;
-            writeln!(handle, "{}", serde_json::to_string(&header)?)?;
+            let header_line = serde_json::to_string(&header)?;
+            writeln!(handle, "{}", header_line)?;
             handle.flush()?;
+            let base_offset = header_line.len() as u64 + 1;
+            let writer = open_append_writer(&file)?;
+            return Ok(Session {
+                header,
+                file,
+                inner: Mutex::new(SessionInner {
+                    events: Vec::new(),
+                    writer,
+                    offsets: Vec::new(),
+                    base_offset,
+                    last_turn: 0,
+                    last_system_prompt: None,
+                    meter: ContextMeter::new(),
+                    pending_turn: Vec::new(),
+                }),
+            });
         }
-        let writer = open_append_writer(&file)?;
-        Ok(Session {
-            header,
-            file,
-            inner: Mutex::new(SessionInner {
-                events: Vec::new(),
-                writer,
-                last_turn: 0,
-                last_system_prompt: None,
-                meter: ContextMeter::new(),
-                pending_turn: Vec::new(),
-            }),
-        })
     }
 
     /// Loads one session, repairing torn tails and orphaned turns.
@@ -155,7 +174,9 @@ impl Session {
         }
 
         // Byte offsets track the committed prefix for torn-tail truncation.
-        let mut consumed = header_line.len() + 1;
+        let consumed_base = header_line.len() + 1;
+        let mut consumed = consumed_base;
+        let mut offsets: Vec<u64> = Vec::new();
         let mut events: Vec<SessionEnvelope> = Vec::new();
         let mut torn_at: Option<usize> = None;
         let mut last_turn = 0u32;
@@ -169,6 +190,7 @@ impl Session {
             }
             match serde_json::from_str::<SessionEnvelope>(line) {
                 Ok(envelope) => {
+                    offsets.push(consumed as u64 + with_newline as u64);
                     match &envelope.event {
                         SessionEvent::TurnStart { turn } => last_turn = last_turn.max(*turn),
                         SessionEvent::SystemPrompt { text, .. } => {
@@ -205,6 +227,8 @@ impl Session {
             inner: Mutex::new(SessionInner {
                 events,
                 writer: open_append_writer(file)?,
+                offsets,
+                base_offset: consumed_base as u64,
                 last_turn,
                 last_system_prompt,
                 meter,
@@ -287,6 +311,8 @@ impl Session {
 
         let line = serde_json::to_string(&envelope)?;
         writeln!(inner.writer, "{line}")?;
+        let next_offset = inner.offsets.last().copied().unwrap_or(inner.base_offset) + line.len() as u64 + 1;
+        inner.offsets.push(next_offset);
         // 落盘策略:步骤边界/工具结果/todo 快照立即 flush(耐久性边界),
         // 流式 chunk 只进 buffer,超 16KB 自动落盘(高频帧零系统调用)。
         match &envelope.event {
@@ -304,6 +330,89 @@ impl Session {
         }
         inner.events.push(envelope.clone());
         Ok(envelope)
+    }
+
+    /// 物理回退:截断会话日志到目标用户消息**之前**,并把回退审计追加到
+    /// `rewinds.jsonl`。内存事件/token-meter/计数器同步重建。
+    ///
+    /// 这是破坏性操作:目标 seq 之后的事件从磁盘移除,不可恢复。
+    pub fn rewind(&self, to_seq: u64) -> Result<RewindOutcome, SessionError> {
+        let mut inner = self.inner.lock().unwrap_or_else(|poison| poison.into_inner());
+        if to_seq == 0 || to_seq as usize > inner.events.len() {
+            return Err(SessionError::NotARewindPoint(to_seq));
+        }
+        let target_idx = to_seq as usize - 1;
+        let target = &inner.events[target_idx];
+        let to_message = match &target.event {
+            SessionEvent::UserMessage {
+                text,
+                injected: false,
+                ..
+            } => Some(text.clone()),
+            _ => return Err(SessionError::NotARewindPoint(to_seq)),
+        };
+
+        let removed_events = inner.events.len() - target_idx;
+        // 先 flush,确保所有已写事件落盘;再按最后一个保留事件的字节偏移截断。
+        inner.writer.flush()?;
+        let truncate_offset = if target_idx == 0 {
+            inner.base_offset
+        } else {
+            *inner
+                .offsets
+                .get(target_idx - 1)
+                .ok_or(SessionError::NotARewindPoint(to_seq))?
+        };
+        {
+            let fh = OpenOptions::new().write(true).open(&self.file)?;
+            fh.set_len(truncate_offset)?;
+        }
+
+        // 内存与派生状态回退。
+        inner.events.truncate(target_idx);
+        inner.offsets.truncate(target_idx);
+        inner.last_turn = 0;
+        inner.last_system_prompt = None;
+        inner.meter = ContextMeter::new();
+        inner.pending_turn.clear();
+        let kept = inner.events.clone();
+        for envelope in &kept {
+            match &envelope.event {
+                SessionEvent::TurnStart { turn } => inner.last_turn = inner.last_turn.max(*turn),
+                SessionEvent::SystemPrompt { text, .. } => {
+                    inner.last_system_prompt = Some(text.clone())
+                }
+                _ => {}
+            }
+            if matches!(&envelope.event, SessionEvent::TurnStart { .. }) {
+                inner.pending_turn.clear();
+            }
+            inner.pending_turn.push(envelope.clone());
+            if matches!(&envelope.event, SessionEvent::TurnEnd { .. }) {
+                let slice: Vec<SessionEnvelope> = inner.pending_turn.drain(..).collect();
+                inner.meter.fold_turn(&slice);
+            }
+            inner.meter.apply_one(envelope);
+        }
+
+        // 回退审计:独立于 session.jsonl 追加,物理截断不会抹掉这段记录。
+        let rewind_file = self.file.with_file_name("rewinds.jsonl");
+        let record = serde_json::json!({
+            "time": now_millis(),
+            "to_seq": to_seq,
+            "to_message": to_message,
+            "removed_events": removed_events,
+        });
+        {
+            let mut fh = OpenOptions::new().create(true).append(true).open(rewind_file)?;
+            writeln!(fh, "{record}")?;
+        }
+
+        Ok(RewindOutcome {
+            to_seq,
+            to_message,
+            removed_events,
+        })
     }
 
     /// O(1):下一个 turn 号(维护的计数器,不再遍历日志)。
@@ -963,6 +1072,36 @@ mod tests {
         let after = session.events_after(1);
         assert_eq!(after.len(), 4, "seq > 1 应为 4 条,实际 {}", after.len());
         assert_eq!(after[0].seq, 2);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn rewind_truncates_log_and_writes_audit() {
+        let root = temp_root();
+        let dir = root.join("s");
+        let cwd = root.join("work");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let session = Session::create(&dir, "s".to_string(), &cwd, true).unwrap();
+        session
+            .append(SessionEvent::UserMessage { text: "first".into(), injected: false, images: Vec::new() })
+            .unwrap();
+        session.append(SessionEvent::TurnStart { turn: 1 }).unwrap();
+        session.append(SessionEvent::StepStart { turn: 1, step: 1 }).unwrap();
+        session
+            .append(SessionEvent::UserMessage { text: "second".into(), injected: false, images: Vec::new() })
+            .unwrap();
+        session.append(SessionEvent::TurnStart { turn: 2 }).unwrap();
+
+        let outcome = session.rewind(4).unwrap();
+        assert_eq!(outcome.removed_events, 2);
+        assert_eq!(outcome.to_message.as_deref(), Some("second"));
+        assert_eq!(session.events().len(), 3);
+        assert_eq!(session.events()[0].seq, 1);
+        assert_eq!(session.events()[2].seq, 3);
+        assert_eq!(session.next_turn_number(), 2);
+
+        let audit = std::fs::read_to_string(dir.join("rewinds.jsonl")).unwrap();
+        assert!(audit.contains("\"to_seq\":4"));
         std::fs::remove_dir_all(&root).unwrap();
     }
 }

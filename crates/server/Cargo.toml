@@ -33,6 +33,7 @@ mime_guess = { workspace = true }
 rfd = { workspace = true }
 uuid = { workspace = true }
 base64 = { workspace = true }
+async-trait = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }

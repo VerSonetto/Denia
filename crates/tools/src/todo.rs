@@ -219,6 +219,7 @@ mod tests {
             emit_event: Some(Arc::new(move |event| {
                 collected.lock().unwrap().push(event);
             })),
+            file_history: None,
         }
     }
 
@@ -229,6 +230,7 @@ mod tests {
             confined: true,
         vision_supported: true,
             emit_event: None,
+            file_history: None,
         }
     }
 

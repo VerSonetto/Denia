@@ -20,7 +20,7 @@ use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use denia_core::config::ModelSelection;
-use denia_core::session::SessionEnvelope;
+use denia_core::session::{SessionEnvelope, SessionEvent};
 use futures::StreamExt;
 use serde::Deserialize;
 use serde_json::json;
@@ -41,6 +41,12 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/api/sessions/{id}/cancel", post(cancel_session))
         .route("/api/sessions/{id}/follow", get(follow_session))
         .route("/api/sessions/{id}/context-breakdown", get(context_breakdown))
+        .route("/api/sessions/{id}/checkpoints", get(list_checkpoints))
+        .route(
+            "/api/sessions/{id}/checkpoints/{seq}/diff",
+            get(checkpoint_diff),
+        )
+        .route("/api/sessions/{id}/rewind", post(rewind_session))
 }
 
 async fn list_sessions(State(state): State<Arc<AppState>>) -> Result<impl IntoResponse, ApiError> {
@@ -349,6 +355,97 @@ async fn cancel_session(
         token.cancel();
     }
     Ok(Json(json!({ "ok": true })))
+}
+
+/// 列出该会话所有可回退的用户消息(checkpoint)。
+async fn list_checkpoints(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<impl IntoResponse, ApiError> {
+    let live = state
+        .live
+        .get_or_load(&state.sessions, &id)
+        .map_err(ApiError::from_session)?;
+    let checkpoints: Vec<serde_json::Value> = live
+        .session
+        .events()
+        .iter()
+        .filter_map(|envelope| match &envelope.event {
+            SessionEvent::UserMessage {
+                text,
+                injected: false,
+                ..
+            } => Some(json!({
+                "seq": envelope.seq,
+                "time": envelope.time,
+                "text": text,
+            })),
+            _ => None,
+        })
+        .collect();
+    Ok(Json(json!({ "checkpoints": checkpoints })))
+}
+
+/// 预览回退到某个 checkpoint 时会变化的文件。
+async fn checkpoint_diff(
+    State(state): State<Arc<AppState>>,
+    Path((id, seq)): Path<(String, u64)>,
+) -> Result<impl IntoResponse, ApiError> {
+    let live = state
+        .live
+        .get_or_load(&state.sessions, &id)
+        .map_err(ApiError::from_session)?;
+    let cwd = std::path::PathBuf::from(live.session.header().cwd.clone());
+    let changes = state
+        .file_history
+        .diff(&id, &cwd, seq)
+        .await
+        .map_err(|error| ApiError::bad_request("file-history/diff", error))?;
+    Ok(Json(json!({ "changes": changes })))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RewindBody {
+    to_seq: u64,
+}
+
+/// 回退到某个用户消息之前:先恢复文件,再物理截断会话。
+async fn rewind_session(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(body): Json<RewindBody>,
+) -> Result<impl IntoResponse, ApiError> {
+    let live = state
+        .live
+        .get_or_load(&state.sessions, &id)
+        .map_err(ApiError::from_session)?;
+    if live.running.load(Ordering::SeqCst) {
+        return Err(ApiError::new(
+            StatusCode::CONFLICT,
+            "session/running",
+            "cancel the running turn before rewinding",
+        ));
+    }
+    let cwd = std::path::PathBuf::from(live.session.header().cwd.clone());
+    // 先恢复文件;文件回退失败就不动会话,避免“对话已截断但文件没还原”。
+    let changed_files = state
+        .file_history
+        .rewind(&id, &cwd, body.to_seq)
+        .await
+        .map_err(|error| ApiError::bad_request("file-history/rewind", error))?;
+    let outcome = live
+        .session
+        .rewind(body.to_seq)
+        .map_err(ApiError::from_session)?;
+    let _ = state.events.send(ServerEvent::SessionsUpdated);
+    Ok(Json(json!({
+        "ok": true,
+        "toSeq": outcome.to_seq,
+        "toMessage": outcome.to_message,
+        "removedEvents": outcome.removed_events,
+        "changedFiles": changed_files,
+    })))
 }
 
 #[derive(Debug, Deserialize)]

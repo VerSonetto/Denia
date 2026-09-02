@@ -387,6 +387,7 @@ mod tests {
             confined: true,
             vision_supported: true,
             emit_event: None,
+            file_history: None,
         }
     }
 

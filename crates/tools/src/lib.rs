@@ -36,6 +36,13 @@ mod todo;
 /// touch the session handle directly.
 pub type SessionEventSink = Arc<dyn Fn(SessionEvent) + Send + Sync>;
 
+/// 文件历史后端:写文件类工具在真正落盘前调用,由宿主实现备份原文件。
+#[async_trait]
+pub trait FileHistoryBackend: Send + Sync {
+    /// 记录一次即将发生的写操作;实现应在文件被修改前备份原内容。
+    async fn track_before_write(&self, path: &std::path::Path) -> Result<(), String>;
+}
+
 /// Execution context handed to every tool call.
 pub struct ToolContext {
     /// The session's working directory; relative paths anchor here.
@@ -50,6 +57,8 @@ pub struct ToolContext {
     pub vision_supported: bool,
     /// Log-only event sink; `None` for callers with no owning session.
     pub emit_event: Option<SessionEventSink>,
+    /// 文件回退备份后端;`None` 表示当前调用不参与文件快照。
+    pub file_history: Option<Arc<dyn FileHistoryBackend>>,
 }
 
 /// One model-facing tool outcome.

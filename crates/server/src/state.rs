@@ -91,6 +91,7 @@ pub struct AppState {
     pub driver: Arc<SessionDriver>,
     pub workspaces: Arc<crate::workspace::WorkspaceRegistry>,
     pub system_prompt: Arc<crate::system_prompt_store::SystemPromptState>,
+    pub file_history: Arc<crate::file_history::FileHistoryStore>,
     /// 绑定地址非回环 ⇒ 远程浏览器 ⇒ 目录选择器走 browse。
     pub bound_remote: bool,
 }
@@ -324,12 +325,16 @@ pub fn build_state(home: &Path, bound_remote: bool) -> Result<AppState, Box<dyn 
     // 空闲会话淘汰:30s 一轮,10 分钟未使用的会话卸载(运行中/被订阅的不动)。
     spawn_live_evictor(live.clone(), 30, 600);
     let system_prompt = Arc::new(crate::system_prompt_store::SystemPromptState::load(home));
+    let file_history = Arc::new(crate::file_history::FileHistoryStore::new(home));
     let (_prompt_default, tools) = denia_tools::default_shipped();
-    let driver = Arc::new(SessionDriver::new(
-        registry.clone(),
-        Arc::new(tools),
-        system_prompt.handle(),
-    ));
+    let driver = Arc::new(
+        SessionDriver::new(
+            registry.clone(),
+            Arc::new(tools),
+            system_prompt.handle(),
+        )
+        .with_file_history(file_history.clone()),
+    );
 
     spawn_forwarders(
         settings_events.1,
@@ -355,6 +360,7 @@ pub fn build_state(home: &Path, bound_remote: bool) -> Result<AppState, Box<dyn 
         driver,
         workspaces,
         system_prompt,
+        file_history,
         bound_remote,
     };
 

@@ -457,6 +457,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "tokio-util",
+ "tracing",
  "uuid",
 ]
 
@@ -506,6 +507,7 @@ name = "denia-server"
 version = "0.1.0"
 dependencies = [
  "arc-swap",
+ "async-trait",
  "axum",
  "base64",
  "denia-agent-loop",

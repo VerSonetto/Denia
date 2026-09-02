@@ -13,6 +13,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use arc_swap::ArcSwap;
+use async_trait::async_trait;
 use denia_core::config::ModelSelection;
 use denia_core::error::{LlmFailure, codes};
 use denia_core::message::ToolCallRef;
@@ -24,10 +25,29 @@ use denia_system_prompt::{
     AssembleContext, SystemPrompt, frame_system_prompt_for_model, render_prompt,
     render_prompt_for_user,
 };
-use denia_tools::{ToolContext, ToolRegistry};
+use denia_tools::{FileHistoryBackend, ToolContext, ToolRegistry};
 use futures::StreamExt;
 use runtime_context::RuntimeContextProjection;
 use tokio_util::sync::CancellationToken;
+
+/// 文件历史提供者:server 侧实现,按会话提供备份句柄并在用户消息落库后
+/// 固化快照。`None` 表示该部署不启用文件回退。
+#[async_trait]
+pub trait FileHistoryProvider: Send + Sync {
+    /// 返回当前会话的工具备份句柄。
+    async fn backend(
+        &self,
+        session_id: &str,
+        cwd: &std::path::Path,
+    ) -> Option<Arc<dyn FileHistoryBackend>>;
+    /// 用户消息落库后调用,固化该消息对应的文件快照。
+    async fn snapshot(
+        &self,
+        session_id: &str,
+        cwd: &std::path::Path,
+        message_seq: u64,
+    ) -> Result<(), String>;
+}
 
 /// 请求失败时回注给模型的纠错提示(抄 dsh inject 上下文思路):
 /// 不中断,让模型看见拒绝原因自己纠正;每轮最多 MAX_FEEDBACK 次防死循环。
@@ -46,6 +66,7 @@ pub struct SessionDriver {
     registry: Arc<LlmRegistry>,
     tools: Arc<ToolRegistry>,
     system_prompt: Arc<ArcSwap<SystemPrompt>>,
+    file_history: Option<Arc<dyn FileHistoryProvider>>,
 }
 
 fn should_log_system_prompt(session: &Session, step: u32, text: &str) -> bool {
@@ -72,7 +93,14 @@ impl SessionDriver {
             registry,
             tools,
             system_prompt,
+            file_history: None,
         }
+    }
+
+    /// 启用文件历史:回退功能依赖此提供者。
+    pub fn with_file_history(mut self, provider: Arc<dyn FileHistoryProvider>) -> Self {
+        self.file_history = Some(provider);
+        self
     }
 
     /// 供 server 端热加载写入同一 `ArcSwap`。
@@ -144,6 +172,11 @@ impl SessionDriver {
         emit: Arc<dyn Fn(&SessionEnvelope) + Send + Sync>,
     ) -> Result<TurnEndReason, LlmFailure> {
         let turn = session.next_turn_number();
+        let cwd = PathBuf::from(session.header().cwd.clone());
+        let file_history = match &self.file_history {
+            Some(provider) => provider.backend(session.id(), &cwd).await,
+            None => None,
+        };
         if !files.is_empty() {
             let list = files
                 .iter()
@@ -160,7 +193,7 @@ impl SessionDriver {
                 },
             )?;
         }
-        append(
+        let user_envelope = append(
             session,
             &emit,
             SessionEvent::UserMessage {
@@ -169,6 +202,20 @@ impl SessionDriver {
                 images,
             },
         )?;
+        if let Some(provider) = &self.file_history {
+            if let Err(error) = provider
+                .snapshot(session.id(), &cwd, user_envelope.seq)
+                .await
+            {
+                // 快照失败不阻断本轮对话;但该回退点会缺失文件历史,记录日志便于排查。
+                tracing::warn!(
+                    session_id = session.id(),
+                    seq = user_envelope.seq,
+                    error = %error,
+                    "file history snapshot failed"
+                );
+            }
+        }
         append(session, &emit, SessionEvent::TurnStart { turn })?;
 
         let mut step: u32 = 0;
@@ -411,6 +458,7 @@ impl SessionDriver {
                                 sink_emit(&envelope);
                             }
                         })),
+                        file_history: file_history.clone(),
                     };
                     tool.execute(&call.arguments, &context).await
                 } else {
@@ -441,12 +489,12 @@ fn append(
     session: &Session,
     emit: &Arc<dyn Fn(&SessionEnvelope) + Send + Sync>,
     event: SessionEvent,
-) -> Result<(), LlmFailure> {
+) -> Result<SessionEnvelope, LlmFailure> {
     let envelope = session
         .append(event)
         .map_err(|error| LlmFailure::new(codes::UNKNOWN, error.to_string()))?;
     emit(&envelope);
-    Ok(())
+    Ok(envelope)
 }
 
 #[cfg(test)]

@@ -70,6 +70,11 @@ impl ApiError {
                 "session/io",
                 io.to_string(),
             ),
+            denia_session::SessionError::NotARewindPoint(seq) => Self::new(
+                StatusCode::BAD_REQUEST,
+                "session/not-rewind-point",
+                format!("seq {seq} is not a rewindable user message"),
+            ),
         }
     }
 }

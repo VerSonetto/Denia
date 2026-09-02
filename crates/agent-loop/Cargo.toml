@@ -18,3 +18,4 @@ serde_json = { workspace = true }
 async-trait = { workspace = true }
 uuid = { workspace = true }
 arc-swap = { workspace = true }
+tracing = { workspace = true }

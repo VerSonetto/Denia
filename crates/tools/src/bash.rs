@@ -150,6 +150,7 @@ mod tests {
             confined: true,
         vision_supported: true,
             emit_event: None,
+            file_history: None,
         }
     }
 
@@ -223,6 +224,7 @@ mod tests {
             confined: true,
         vision_supported: true,
             emit_event: None,
+            file_history: None,
         };
         let command = if cfg!(windows) {
             r#"{"command":"ping -n 10 127.0.0.1 >nul"}"#

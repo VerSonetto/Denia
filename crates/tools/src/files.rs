@@ -251,6 +251,14 @@ impl Tool for WriteFileTool {
                 };
             }
         }
+        if let Some(file_history) = &ctx.file_history {
+            if let Err(message) = file_history.track_before_write(&path).await {
+                return ToolOutput {
+                    content: format!("file history backup failed: {message}"),
+                    is_error: true,
+                };
+            }
+        }
         match std::fs::write(&path, &args.content) {
             Ok(()) => ToolOutput {
                 content: format!("wrote {} bytes to {}", args.content.len(), args.path),
@@ -279,6 +287,7 @@ mod tests {
             confined: true,
             vision_supported: true,
             emit_event: None,
+            file_history: None,
         };
         (tempfile_like::TempDir(dir), context)
     }
@@ -374,6 +383,7 @@ mod tests {
                 confined: true,
                 vision_supported: true,
                 emit_event: Some(Arc::new(move |event| emitted.lock().unwrap().push(event))),
+                file_history: None,
             };
             let reader = ReadFileTool::new();
             let out = reader.execute(r#"{"path":"pixel.png"}"#, &ctx).await;
@@ -399,6 +409,7 @@ mod tests {
             confined: true,
             vision_supported: false,
             emit_event: None,
+            file_history: None,
         };
         let reader = ReadFileTool::new();
         let out = reader.execute(r#"{"path":"pixel.png"}"#, &ctx).await;
