@@ -1,5 +1,6 @@
 import type { UserMessageImage } from '../types'
 import { userImageDataUrl } from '../userImages'
+import { CopyMessageButton } from './CopyMessageButton'
 
 /** 用户消息中的内联图片缩略图网格。 */
 export function UserMessageImages({
@@ -40,9 +41,10 @@ export function UserMessageBubble({
   const showText = text.trim().length > 0
   if (!showText && !hasImages) return null
   return (
-    <div className={`user-message-stack${pending ? ' pending' : ''}`}>
+    <div className={`user-message-stack${pending ? ' pending' : ' msg-copy-anchor'}`}>
       {hasImages && <UserMessageImages images={images} />}
       {showText && <div className="msg-user">{text}</div>}
+      {!pending && showText && <CopyMessageButton text={text} />}
     </div>
   )
 }

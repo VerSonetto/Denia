@@ -165,6 +165,23 @@ export function IconClose(props: IconProps) {
   )
 }
 
+export function IconCopy(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <rect x="5.5" y="5.5" width="7" height="7" rx="1.2" stroke="currentColor" strokeWidth="1.3" />
+      <path d="M10.5 3.5h-3.8A2.2 2.2 0 0 0 4.5 5.7v4.8" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" />
+    </Svg>
+  )
+}
+
+export function IconCheck(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <path d="m3.5 8.5 3 3 6-7" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
+    </Svg>
+  )
+}
+
 export function IconChevron(props: IconProps) {
   return (
     <Svg {...props}>

@@ -7,6 +7,7 @@ import type { MarkdownLabels } from '../markdown/MarkdownText'
 import { toolCallInput, toolCallSummary } from '../toolDisplay'
 import type { UserMessageImage } from '../types'
 import { UserMessageBubble } from './UserMessageImages'
+import { CopyMessageButton } from './CopyMessageButton'
 import {
   IconChevron,
   IconEdit,
@@ -132,8 +133,12 @@ function AssistantNode({
     node.interrupted ||
     node.blocks.some((b) => b.kind !== 'tool-call')
   if (!hasVisible) return null
+  const copyText = node.blocks
+    .filter((block) => block.kind === 'text')
+    .map((block) => (block.kind === 'text' ? block.text : ''))
+    .join('\n\n')
   return (
-    <div className="msg-assistant">
+    <div className="msg-assistant msg-copy-anchor">
       {node.blocks.map((block, index) => {
         if (block.kind === 'reasoning') {
           // 思考是否仍在输出:节点在流式,且该块是最后一块(正文块出现即视为
@@ -152,6 +157,7 @@ function AssistantNode({
         )
       })}
       {node.interrupted && <span className="badge warn">{t('interrupted')}</span>}
+      {copyText && <CopyMessageButton text={copyText} />}
     </div>
   )
 }

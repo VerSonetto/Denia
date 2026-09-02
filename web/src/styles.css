@@ -1092,6 +1092,45 @@ button {
   align-items: flex-end;
 }
 
+.copy-message-btn {
+  display: none;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--label-tertiary);
+  cursor: pointer;
+  transition: color 80ms ease, background 80ms ease, transform 80ms ease;
+}
+
+.msg-assistant .copy-message-btn {
+  align-self: flex-start;
+  margin-left: -6px;
+}
+
+.msg-copy-anchor:hover .copy-message-btn,
+.msg-copy-anchor:focus-within .copy-message-btn {
+  display: inline-flex;
+}
+
+.copy-message-btn:hover {
+  background: var(--hover-fill);
+  color: var(--label-secondary);
+  transform: scale(1.06);
+}
+
+.copy-message-btn.copied {
+  color: var(--success);
+}
+
+.copy-message-btn.failed {
+  color: var(--error);
+}
+
 .user-message-stack {
   display: flex;
   flex-direction: column;
