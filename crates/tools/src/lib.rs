@@ -45,6 +45,9 @@ pub struct ToolContext {
     /// Sandbox: confine file access to `cwd`. Off allows absolute paths
     /// outside the workspace.
     pub confined: bool,
+    /// Whether the current model is marked as vision-capable; `read_file`
+    /// injects images only when true.
+    pub vision_supported: bool,
     /// Log-only event sink; `None` for callers with no owning session.
     pub emit_event: Option<SessionEventSink>,
 }

@@ -163,6 +163,7 @@ mod tests {
             cwd,
             cancel: CancellationToken::new(),
             confined: true,
+            vision_supported: true,
             emit_event: None,
         }
     }

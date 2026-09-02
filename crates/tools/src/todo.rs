@@ -215,6 +215,7 @@ mod tests {
             cwd: std::env::temp_dir(),
             cancel: CancellationToken::new(),
             confined: true,
+        vision_supported: true,
             emit_event: Some(Arc::new(move |event| {
                 collected.lock().unwrap().push(event);
             })),
@@ -226,6 +227,7 @@ mod tests {
             cwd: std::env::temp_dir(),
             cancel: CancellationToken::new(),
             confined: true,
+        vision_supported: true,
             emit_event: None,
         }
     }

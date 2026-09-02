@@ -148,6 +148,7 @@ mod tests {
             cwd: dir.to_path_buf(),
             cancel: CancellationToken::new(),
             confined: true,
+        vision_supported: true,
             emit_event: None,
         }
     }
@@ -220,6 +221,7 @@ mod tests {
             cwd: dir.clone(),
             cancel: cancel.clone(),
             confined: true,
+        vision_supported: true,
             emit_event: None,
         };
         let command = if cfg!(windows) {
