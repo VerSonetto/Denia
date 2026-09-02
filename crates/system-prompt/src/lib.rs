@@ -13,7 +13,7 @@ use denia_core::tool::ToolSchema;
 
 pub use render::{
     frame_system_prompt_for_model, is_runtime_context_snapshot, join_context_sections,
-    render_context_sections, render_context_snapshot, render_prompt,
+    render_context_sections, render_context_snapshot, render_prompt, render_prompt_for_user,
 };
 
 /// Deployment persona section name; shadowing replaces the global persona.
@@ -67,6 +67,24 @@ pub struct AssembleContext {
     pub provider: Option<String>,
 }
 
+/// Audience for a system-prompt section.
+///
+/// `Model` —— 只发给模型(用户不应看到,如工具纪律/工具使用说明)。
+/// `User`  —— 既发给模型,也展示给用户(身份块/部署 persona 等)。
+/// `Context` —— 运行时上下文块,落日志但不在对话流渲染(用户只看到 metadata)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SectionAudience {
+    Model,
+    User,
+    Context,
+}
+
+impl Default for SectionAudience {
+    fn default() -> Self {
+        Self::Model
+    }
+}
+
 /// One contributed system-prompt section.
 #[derive(Clone)]
 pub struct PromptSection {
@@ -74,6 +92,9 @@ pub struct PromptSection {
     pub order: i32,
     pub text: PromptText,
     pub complete: bool,
+    /// Default [`SectionAudience::Model`]:这条 section 是给模型看的私货。
+    /// 身份/部署 persona 类应显式标 `User`,UI 才会展示。
+    pub audience: SectionAudience,
 }
 
 /// Static or per-assembly section/context text.
@@ -105,6 +126,8 @@ pub struct PromptContext {
 pub struct AssembledSection {
     pub name: String,
     pub text: String,
+    /// 该段受众,UI 渲染时只显示 `User` 类。
+    pub audience: SectionAudience,
 }
 
 /// One resolved runtime-context contribution.
@@ -184,6 +207,8 @@ impl SystemPrompt {
                     "你是由 denia 驱动的 AI 编码 agent。".to_string(),
                 ),
                 complete: false,
+                // 身份块对用户可见(展示"你被告知的身份")。
+                audience: SectionAudience::User,
             });
         }
         let _ = prompt.section(PromptSection {
@@ -191,6 +216,8 @@ impl SystemPrompt {
             order: SectionOrder::DeploymentPersona.value(),
             text: PromptText::Static(prompt.config.persona.clone()),
             complete: false,
+            // 部署 persona 同样展示给用户;它是 agent 当前行事身份。
+            audience: SectionAudience::User,
         });
         if !prompt.config.include_runtime_context {
             prompt.suppress_runtime_context();
@@ -284,6 +311,7 @@ impl SystemPrompt {
         let complete_section = complete_sections.first().map(|section| AssembledSection {
             name: section.name.clone(),
             text: section.text.resolve(context),
+            audience: section.audience,
         });
 
         let sections = section_definitions
@@ -291,6 +319,7 @@ impl SystemPrompt {
             .map(|section| AssembledSection {
                 name: section.name.clone(),
                 text: section.text.resolve(context),
+                audience: section.audience,
             })
             .collect::<Vec<_>>();
 

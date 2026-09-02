@@ -2,7 +2,7 @@
 
 use crate::{
     AssembledContext, AssembledSection, PromptAssembly, RUNTIME_CONTEXT_CLEARED,
-    RUNTIME_CONTEXT_HEADER,
+    RUNTIME_CONTEXT_HEADER, SectionAudience,
 };
 
 /// Wrap rendered system prose with model-only priority framing (not logged).
@@ -18,10 +18,24 @@ pub fn frame_system_prompt_for_model(body: &str) -> String {
 }
 
 /// Interpolate strict `{{variable}}` references and join non-empty sections.
+/// 输出完整的模型可见 system prompt(全部 audience,含 Model + User + Context)。
 pub fn render_prompt(assembly: &PromptAssembly) -> String {
     assembly
         .sections
         .iter()
+        .map(|section| interpolate(section, &assembly.variables, "section"))
+        .filter(|text| !text.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+/// 仅渲染 `User` audience 的 sections;UI SystemPromptRow 用此输出,不会
+/// 暴露工具纪律/工具使用说明等模型私货。
+pub fn render_prompt_for_user(assembly: &PromptAssembly) -> String {
+    assembly
+        .sections
+        .iter()
+        .filter(|section| matches!(section.audience, SectionAudience::User))
         .map(|section| interpolate(section, &assembly.variables, "section"))
         .filter(|text| !text.is_empty())
         .collect::<Vec<_>>()
@@ -73,6 +87,7 @@ fn interpolate_context(
         &AssembledSection {
             name: context.name.clone(),
             text: context.text.clone(),
+            audience: SectionAudience::User,
         },
         variables,
         "context",
@@ -157,6 +172,7 @@ mod tests {
             sections: vec![AssembledSection {
                 name: "persona".to_string(),
                 text: "cwd={{cwd}} model={{model}}".to_string(),
+                audience: SectionAudience::User,
             }],
             contexts: Vec::new(),
             tools: Vec::new(),
@@ -166,5 +182,28 @@ mod tests {
             ]),
         };
         assert_eq!(render_prompt(&assembly), "cwd=/work model=mock");
+    }
+
+    #[test]
+    fn user_only_render_excludes_model_audience() {
+        let assembly = PromptAssembly {
+            sections: vec![
+                AssembledSection {
+                    name: "identity".to_string(),
+                    text: "identity".to_string(),
+                    audience: SectionAudience::User,
+                },
+                AssembledSection {
+                    name: "tool:bash".to_string(),
+                    text: "do not use cat".to_string(),
+                    audience: SectionAudience::Model,
+                },
+            ],
+            contexts: Vec::new(),
+            tools: Vec::new(),
+            variables: BTreeMap::new(),
+        };
+        assert_eq!(render_prompt(&assembly), "identity\n\ndo not use cat");
+        assert_eq!(render_prompt_for_user(&assembly), "identity");
     }
 }

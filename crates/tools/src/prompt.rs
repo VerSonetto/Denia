@@ -4,8 +4,8 @@ use std::sync::Arc;
 
 use denia_core::tool::ToolSchema;
 use denia_system_prompt::{
-    AssembleContext, PromptContext, PromptSection, PromptText, SectionOrder, SystemPrompt,
-    ToolProviderResult,
+    AssembleContext, PromptContext, PromptSection, PromptText, SectionAudience, SectionOrder,
+    SystemPrompt, ToolProviderResult,
 };
 
 use crate::shell;
@@ -31,6 +31,7 @@ pub fn register_shipped_prompt(prompt: &mut SystemPrompt, tools: &ToolRegistry) 
                 .to_string(),
         ),
         complete: false,
+        audience: SectionAudience::Model,
     })?;
     prompt.section(PromptSection {
         name: "tool:read".to_string(),
@@ -39,6 +40,7 @@ pub fn register_shipped_prompt(prompt: &mut SystemPrompt, tools: &ToolRegistry) 
             "用 read_file 查看文本文件,不要用 bash 的 cat/type。大文件可分段读取。".to_string(),
         ),
         complete: false,
+        audience: SectionAudience::Model,
     })?;
     prompt.section(PromptSection {
         name: "tool:write".to_string(),
@@ -47,6 +49,7 @@ pub fn register_shipped_prompt(prompt: &mut SystemPrompt, tools: &ToolRegistry) 
             "用 write_file 创建或整文件覆盖;覆盖前先 read_file 确认现有内容。".to_string(),
         ),
         complete: false,
+        audience: SectionAudience::Model,
     })?;
     prompt.section(PromptSection {
         name: "tool:glob".to_string(),
@@ -56,6 +59,7 @@ pub fn register_shipped_prompt(prompt: &mut SystemPrompt, tools: &ToolRegistry) 
                 .to_string(),
         ),
         complete: false,
+        audience: SectionAudience::Model,
     })?;
     prompt.section(PromptSection {
         name: "tool:grep".to_string(),
@@ -65,6 +69,7 @@ pub fn register_shipped_prompt(prompt: &mut SystemPrompt, tools: &ToolRegistry) 
                 .to_string(),
         ),
         complete: false,
+        audience: SectionAudience::Model,
     })?;
     prompt.section(PromptSection {
         name: "tool:edit".to_string(),
@@ -74,6 +79,7 @@ pub fn register_shipped_prompt(prompt: &mut SystemPrompt, tools: &ToolRegistry) 
                 .to_string(),
         ),
         complete: false,
+        audience: SectionAudience::Model,
     })?;
     prompt.section(PromptSection {
         name: "tool:todo".to_string(),
@@ -83,6 +89,7 @@ pub fn register_shipped_prompt(prompt: &mut SystemPrompt, tools: &ToolRegistry) 
                 .to_string(),
         ),
         complete: false,
+        audience: SectionAudience::Model,
     })?;
 
     let schemas: Vec<ToolSchema> = tools.schemas();
