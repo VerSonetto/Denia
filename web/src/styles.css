@@ -1098,6 +1098,11 @@ button {
   gap: 2px;
 }
 
+/* 助手消息末尾的复制按钮始终可见,不依赖 hover。 */
+.message-actions.always-visible {
+  display: flex;
+}
+
 .copy-message-btn,
 .rewind-message-btn {
   display: inline-flex;

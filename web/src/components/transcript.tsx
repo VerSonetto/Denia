@@ -36,11 +36,27 @@ export function Transcript({
     return <div className="empty-hint">{t('emptyTranscript')}</div>
   }
   const rows = groupTranscript(nodes)
+  // 只给“已结束轮次的最后一条助手消息”挂复制按钮;运行中/中间 step 不显示。
+  const lastAssistantStep = new Map<number, number>()
+  const endedTurns = new Set<number>()
+  for (const node of nodes) {
+    if (node.kind === 'assistant') lastAssistantStep.set(node.turn, node.step)
+    else if (node.kind === 'turn-end') endedTurns.add(node.turn)
+  }
   return (
     <>
       {rows.map((row, index) =>
         row.kind === 'node' ? (
-          <NodeView key={index} node={row.node} onRewind={onRewind} />
+          <NodeView
+            key={index}
+            node={row.node}
+            onRewind={onRewind}
+            showCopy={
+              row.node.kind === 'assistant' &&
+              endedTurns.has(row.node.turn) &&
+              row.node.step === lastAssistantStep.get(row.node.turn)
+            }
+          />
         ) : (
           <TurnOverview key={index} row={row} />
         ),
@@ -96,9 +112,11 @@ function TurnOverview({ row }: { row: OverviewRow }) {
 const NodeView = memo(function NodeView({
   node,
   onRewind,
+  showCopy = false,
 }: {
   node: TranscriptNode
   onRewind?: (seq: number) => void
+  showCopy?: boolean
 }) {
   switch (node.kind) {
     case 'user':
@@ -117,7 +135,7 @@ const NodeView = memo(function NodeView({
     case 'system-prompt':
       return <SystemPromptRow text={node.text} />
     case 'assistant':
-      return <AssistantNode node={node} />
+      return <AssistantNode node={node} showCopy={showCopy} />
     case 'turn-start':
       // Boundary marker; only carries the turn's start time.
       return null
@@ -130,8 +148,11 @@ const NodeView = memo(function NodeView({
 
 function AssistantNode({
   node,
+  showCopy,
 }: {
   node: Extract<TranscriptNode, { kind: 'assistant' }>
+  /** 仅已结束轮次的最后一条助手消息显示复制按钮。 */
+  showCopy: boolean
 }) {
   // markdown chrome 文案:locale 变化时重建(引用变化让流式渲染缓存失效);
   // locale 稳定时保持同一引用,流式缓存在 chunk 间存活。
@@ -171,8 +192,8 @@ function AssistantNode({
         )
       })}
       {node.interrupted && <span className="badge warn">{t('interrupted')}</span>}
-      {copyText && (
-        <div className="message-actions">
+      {showCopy && copyText && (
+        <div className="message-actions always-visible">
           <CopyMessageButton text={copyText} />
         </div>
       )}
