@@ -931,6 +931,12 @@ button {
   color: var(--label-primary);
 }
 
+.msg-user.pending {
+  opacity: 0.55;
+  filter: saturate(0.6);
+  background: var(--bubble-fill);
+}
+
 .inject-row .inject-summary {
   font-family: inherit;
 }

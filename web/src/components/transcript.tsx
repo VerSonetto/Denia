@@ -1,4 +1,4 @@
-import { memo, useEffect, useMemo, useRef, useState } from 'react'
+import { memo, useEffect, useMemo, useState } from 'react'
 import type { ReactNode } from 'react'
 import { localeRevision, t } from '../i18n'
 import { groupTranscript, type OverviewRow, type TranscriptNode } from '../fold'
@@ -15,8 +15,15 @@ import {
   IconWrite,
 } from './icons'
 
-export function Transcript({ nodes }: { nodes: TranscriptNode[] }) {
-  if (nodes.length === 0) {
+export function Transcript({
+  nodes,
+  pendingTexts = [],
+}: {
+  nodes: TranscriptNode[]
+  /** 已发送未获确认的用户消息:渲染为尾部"发送中"行。 */
+  pendingTexts?: string[]
+}) {
+  if (nodes.length === 0 && pendingTexts.length === 0) {
     return <div className="empty-hint">{t('emptyTranscript')}</div>
   }
   const rows = groupTranscript(nodes)
@@ -29,6 +36,11 @@ export function Transcript({ nodes }: { nodes: TranscriptNode[] }) {
           <TurnOverview key={index} row={row} />
         ),
       )}
+      {pendingTexts.map((text, index) => (
+        <div className="user-row" key={`pending-${index}`} data-user-anchor="pending">
+          <div className="msg-user pending">{text}</div>
+        </div>
+      ))}
     </>
   )
 }
@@ -119,7 +131,10 @@ function AssistantNode({
     <div className="msg-assistant">
       {node.blocks.map((block, index) => {
         if (block.kind === 'reasoning') {
-          return <ThinkRow key={index} text={block.text} streaming={node.streaming} />
+          // 思考是否仍在输出:节点在流式,且该块是最后一块(正文块出现即视为
+          // 思考完毕,立刻自动折叠)。
+          const thinking = node.streaming && index === node.blocks.length - 1
+          return <ThinkRow key={index} text={block.text} streaming={thinking} />
         }
         if (block.kind === 'tool-call') {
           // Rendered by the correlated tool node below.
@@ -189,33 +204,33 @@ function ThinkRow({
   streaming = false,
 }: {
   text: string
-  /** 流式期间自动展开;输出结束后,自动展开的块收起,手动展开的保留。 */
+  /** 思考内容正在流式输出:强制展开;输出完毕自动折叠(手动点击随时可开合)。 */
   streaming?: boolean
 }) {
   const [open, setOpen] = useState(streaming)
-  // 用户手动点过开关后,输出结束不再强制收起。
-  const userToggled = useRef(false)
+  // 流式中强制展开,输出完毕自动折叠 —— 跟随 streaming 状态,不依赖用户手势。
   useEffect(() => {
-    if (open && !streaming && !userToggled.current) setOpen(false)
-  }, [streaming, open])
+    setOpen(streaming)
+  }, [streaming])
   const summary = firstLine(text, 80)
   return (
     <div className={`disc-row${open ? ' open' : ''}`}>
       <button
         className="disc-head"
-        onClick={() => {
-          userToggled.current = true
-          setOpen(!open)
-        }}
+        onClick={() => setOpen(!open)}
       >
         <span className="glyph">
           <IconThink size={14} />
         </span>
         <span className="title">{t('thinkTitle')}</span>
-        <span className="sep" />
-        <span className="summary" style={{ fontFamily: 'inherit' }}>
-          {summary}
-        </span>
+        {!open && (
+          <>
+            <span className="sep" />
+            <span className="summary" style={{ fontFamily: 'inherit' }}>
+              {summary}
+            </span>
+          </>
+        )}
         <span className="chev">
           <IconChevron size={12} />
         </span>
