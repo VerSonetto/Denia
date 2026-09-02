@@ -247,12 +247,47 @@ export function postPrompt(
     provider?: string
     model?: string
     reasoningEffort?: string
+    /** 粘贴的内联图片(base64);模型必须支持识图。 */
+    images?: { name?: string; mime: string; data: string }[]
+    /** 已上传文件的绝对路径(作为注入上下文随消息发送)。 */
+    files?: string[]
   },
 ): Promise<unknown> {
   return http(`/api/sessions/${encodeURIComponent(id)}/prompt`, {
     method: 'POST',
     body: JSON.stringify(body),
   })
+}
+
+/** 上传一个附件(不限格式),返回持久化后的绝对路径与字节数。 */
+export function uploadAttachment(params: {
+  sessionId: string
+  name: string
+  mime: string
+  data: string
+}): Promise<{ path: string; name: string; bytes: number }> {
+  return http('/api/attachments', {
+    method: 'POST',
+    body: JSON.stringify({
+      sessionId: params.sessionId,
+      name: params.name,
+      mime: params.mime,
+      data: params.data,
+    }),
+  })
+}
+
+/** 当前提示词各组成部分的字节大小(系统提示词/工具声明)。 */
+export function promptParts(
+  id: string,
+  selection: { provider?: string; model?: string; reasoningEffort?: string },
+): Promise<{ systemBytes: number; toolsBytes: number }> {
+  const query = new URLSearchParams()
+  if (selection.provider) query.set('provider', selection.provider)
+  if (selection.model) query.set('model', selection.model)
+  if (selection.reasoningEffort) query.set('reasoningEffort', selection.reasoningEffort)
+  const suffix = query.toString() ? `?${query.toString()}` : ''
+  return http(`/api/sessions/${encodeURIComponent(id)}/prompt-parts${suffix}`)
 }
 
 export function cancelSession(id: string): Promise<unknown> {

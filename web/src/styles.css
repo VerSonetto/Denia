@@ -1389,6 +1389,7 @@ button {
 }
 
 .prompt-panel {
+  position: relative;
   display: flex;
   flex-direction: column;
   gap: 12px;
@@ -2708,6 +2709,438 @@ button.btn.form-action {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* ---- 自定义确认对话框 ---- */
+
+.confirm-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgb(0 0 0 / 0.35);
+  backdrop-filter: blur(2px);
+}
+
+.confirm-dialog {
+  width: min(420px, calc(100vw - 48px));
+  padding: 20px 22px;
+  border: 1px solid var(--border-l2);
+  border-radius: 14px;
+  background: var(--bg-layer-1);
+  box-shadow: var(--shadow-lv2);
+}
+
+.confirm-title {
+  margin: 0 0 8px;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--label-primary);
+}
+
+.confirm-desc {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--label-secondary);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.confirm-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 18px;
+}
+
+.confirm-actions .btn-primary {
+  border: 1px solid var(--accent);
+  background: var(--accent);
+  color: var(--accent-on);
+  border-radius: 10px;
+  padding: 8px 18px;
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: opacity 120ms ease;
+}
+
+.confirm-actions .btn-primary:hover {
+  opacity: 0.88;
+}
+
+.confirm-actions .btn-primary.danger {
+  background: var(--error);
+  border-color: var(--error);
+  color: #fff;
+}
+
+.confirm-actions .btn-secondary {
+  border: 1px solid var(--border-l2);
+  background: transparent;
+  color: var(--label-primary);
+  border-radius: 10px;
+  padding: 8px 18px;
+  font-size: 13px;
+  cursor: pointer;
+  transition: background 120ms ease, border-color 120ms ease;
+}
+
+.confirm-actions .btn-secondary:hover {
+  background: var(--bg-hover);
+  border-color: var(--accent-tint);
+}
+
+/* ---- 审批弹窗:输入框上方弹出 ---- */
+
+.approval-pop {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: calc(100% + 10px);
+  z-index: 46;
+  padding: 14px 16px;
+  border: 1px solid var(--border-l2);
+  border-radius: 12px;
+  background: var(--bg-layer-1);
+  box-shadow: var(--shadow-lv2);
+}
+
+.approval-pop-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.approval-pop-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--label-primary);
+}
+
+.approval-pop-tool {
+  padding: 2px 8px;
+  border-radius: 6px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: 12px;
+  font-family: ui-monospace, monospace;
+}
+
+.approval-pop-desc {
+  margin: 0 0 4px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--label-secondary);
+}
+
+.approval-pop-note {
+  margin: 0 0 12px;
+  font-size: 11px;
+  color: var(--label-caption);
+}
+
+.approval-pop-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.approval-pop-actions .approval-btn {
+  border-radius: 9px;
+  padding: 6px 12px;
+  font-size: 12.5px;
+  cursor: pointer;
+  border: 1px solid var(--border-l2);
+  background: transparent;
+  color: var(--label-primary);
+  transition: background 120ms ease, border-color 120ms ease;
+}
+
+.approval-pop-actions .approval-btn:hover {
+  background: var(--bg-hover);
+  border-color: var(--accent-tint);
+}
+
+.approval-pop-actions .approval-btn.primary {
+  border-color: var(--accent);
+  background: var(--accent);
+  color: var(--accent-on);
+}
+
+.approval-pop-actions .approval-btn.primary:hover {
+  opacity: 0.88;
+  background: var(--accent);
+}
+
+/* ---- 权限选择器(占位) ---- */
+
+.permission-selector {
+  position: relative;
+  display: inline-flex;
+}
+
+.permission-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 8px;
+  border: 1px solid var(--border-l2);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--label-secondary);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.permission-chip:hover {
+  color: var(--label-primary);
+  border-color: var(--border-l3);
+}
+
+.permission-menu {
+  position: absolute;
+  left: 0;
+  bottom: calc(100% + 8px);
+  z-index: 40;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 260px;
+  padding: 8px;
+  border: 1px solid var(--border-l2);
+  border-radius: 12px;
+  background: var(--bg-layer-1);
+  box-shadow: var(--shadow-lv2);
+}
+
+.permission-menu-label {
+  padding: 4px 8px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--label-caption);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.permission-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 7px 8px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+}
+
+.permission-item:hover {
+  background: var(--bg-hover);
+}
+
+.permission-item.active {
+  background: var(--bg-active);
+}
+
+.permission-item-label {
+  font-size: 12.5px;
+  color: var(--label-primary);
+}
+
+.permission-item-desc {
+  font-size: 11.5px;
+  line-height: 1.4;
+  color: var(--label-tertiary);
+}
+
+.permission-menu-divider {
+  height: 1px;
+  margin: 6px 8px;
+  background: var(--border-l2);
+}
+
+/* ---- 输入框:附件行 ---- */
+
+.composer-attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 0 14px 8px;
+}
+
+.att-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 240px;
+  padding: 4px 10px;
+  border: 1px solid var(--border-l2);
+  border-radius: 999px;
+  background: var(--bg-layer-1);
+  color: var(--label-secondary);
+  font-size: 12px;
+}
+
+.att-chip.image img {
+  width: 22px;
+  height: 22px;
+  border-radius: 4px;
+  object-fit: cover;
+}
+
+.att-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 150px;
+}
+
+.att-remove {
+  display: inline-flex;
+  align-items: center;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--label-caption);
+  cursor: pointer;
+}
+
+.att-remove:hover {
+  color: var(--error);
+}
+
+/* ---- 输入框右区:上传 + 圆环 ---- */
+
+.composer-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.composer-upload-btn.icon-btn {
+  color: var(--label-secondary);
+}
+
+.composer-upload-btn.icon-btn:hover {
+  color: var(--label-primary);
+}
+
+.context-ring-wrap {
+  position: relative;
+  display: inline-flex;
+}
+
+.context-ring-btn {
+  display: inline-flex;
+  align-items: center;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--label-secondary);
+  cursor: pointer;
+}
+
+.context-ring-btn:hover,
+.context-ring-btn.open {
+  color: var(--label-primary);
+}
+
+.context-panel {
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 10px);
+  z-index: 45;
+  width: min(340px, calc(100vw - 40px));
+  padding: 12px 14px;
+  border: 1px solid var(--border-l2);
+  border-radius: 12px;
+  background: var(--bg-layer-1);
+  box-shadow: var(--shadow-lv2);
+}
+
+.context-panel-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  margin-bottom: 10px;
+}
+
+.context-panel-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--label-primary);
+}
+
+.context-panel-total {
+  font-size: 12px;
+  color: var(--label-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+.context-panel-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.context-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--label-secondary);
+}
+
+.context-row.free {
+  margin-top: 2px;
+  padding-top: 6px;
+  border-top: 1px dashed var(--border-l2);
+}
+
+.context-dot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+}
+
+.context-name {
+  flex: none;
+  min-width: 76px;
+}
+
+.context-bar {
+  flex: 1;
+  height: 6px;
+  border-radius: 3px;
+  background: var(--bg-hover);
+  overflow: hidden;
+}
+
+.context-bar-fill {
+  display: block;
+  height: 100%;
+  border-radius: 3px;
+  min-width: 2px;
+}
+
+.context-num {
+  flex: none;
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+  color: var(--label-tertiary);
+  white-space: nowrap;
+}
+
+.context-panel-hint {
+  margin-top: 8px;
+  font-size: 11px;
+  color: var(--label-caption);
 }
 
 @media (prefers-reduced-motion: reduce) {

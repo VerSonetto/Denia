@@ -49,6 +49,7 @@ export function ComposerModelMenu({
         ? selection.reasoningEffort
         : undefined,
     )
+    setOpen(false)
     onChange({ provider, model: modelId, reasoningEffort: effort })
   }
 

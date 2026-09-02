@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, type KeyboardEvent, type WheelEvent } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type ClipboardEvent, type KeyboardEvent, type WheelEvent } from 'react'
 import * as api from '../api'
 import {
   ensureSession,
@@ -18,18 +18,25 @@ import type { TranscriptNode } from '../fold'
 import { SessionView } from '../components/SessionView'
 import { StatsBar } from '../components/StatsBar'
 import { ComposerModelMenu } from '../components/ComposerModelMenu'
+import { PermissionSelector, loadPermission, type PermissionLevel } from '../components/PermissionSelector'
+import { ApprovalDialog, type ApprovalDecision, type ApprovalRequest } from '../components/ApprovalDialog'
+import { ContextRing, type ContextPart } from '../components/ContextRing'
 import {
   BrandMark,
   IconChevron,
+  IconClose,
   IconFolder,
+  IconImage,
   IconPlus,
   IconSend,
   IconStop,
+  IconUpload,
 } from '../components/icons'
 import { resolveSessionReasoningEffort } from '../modelCatalog'
 import { TodoPanel } from '../components/TodoPanel'
 import { ConversationAxis } from '../components/ConversationAxis'
 import type {
+  CatalogModel,
   ModelCatalog,
   ModelSelection,
   SessionSummary,
@@ -201,6 +208,142 @@ export default function SessionsPage({
     return model?.contextWindow ?? group?.models[0]?.contextWindow
   })()
 
+  /* ---- 粘贴图片 / 附件上传 / 权限占位 ---- */
+
+  const [pastedImages, setPastedImages] = useState<{
+    name: string
+    mime: string
+    data: string
+    bytes: number
+    preview: string
+  }[]>([])
+  const [attachments, setAttachments] = useState<{ name: string; mime: string; file: File }[]>([])
+  const [permission, setPermission] = useState<PermissionLevel>(() => loadPermission())
+  const fileInputRef = useRef<HTMLInputElement | null>(null)
+
+  /* ---- 审批弹窗(占位演示:权限非完整时,发送后在输入框上方弹出) ---- */
+  const [approvalReq, setApprovalReq] = useState<ApprovalRequest | null>(null)
+  // 本会话免审集合:同工具免审,换工具重新审批(占位语义)。
+  const approvedToolsRef = useRef(new Set<string>())
+  const demoIndexRef = useRef(0)
+  const DEMO_TOOLS = ['bash', 'edit', 'grep']
+
+  const handleApproval = useCallback((decision: ApprovalDecision) => {
+    if (!approvalReq) return
+    const tool = approvalReq.toolName
+    setApprovalReq(null)
+    if (decision === 'reject') {
+      notify('ok', t('approvalNoticeReject'))
+    } else if (decision === 'once') {
+      notify('ok', t('approvalNoticeAllow'))
+    } else {
+      approvedToolsRef.current.add(tool)
+      notify('ok', t('approvalNoticeSession', { tool }))
+    }
+  }, [approvalReq, notify])
+
+  /** 占位演示触发:按工具轮换,已被"本会话免审"的工具不再弹出。 */
+  const maybePreviewApproval = useCallback(() => {
+    if (permission === 'full') return
+    const tool = DEMO_TOOLS[demoIndexRef.current % DEMO_TOOLS.length]
+    demoIndexRef.current += 1
+    if (approvedToolsRef.current.has(tool)) return
+    setApprovalReq({
+      toolName: tool,
+      argsPreview: tool === 'bash' ? '{"command":"…"}' : '{"path":"…"}',
+    })
+  }, [permission])
+
+  const visionModelInfo = useCallback((): CatalogModel | null => {
+    if (!catalog || !selection) return null
+    const group = catalog.groups.find((g) => g.id === selection.provider)
+    return group?.models.find((m) => m.id === selection.model) ?? null
+  }, [catalog, selection])
+
+  const modelSupportsVision = useCallback((): boolean => {
+    const model = visionModelInfo()
+    return !!model?.inputModalities?.includes('image')
+  }, [visionModelInfo])
+
+  /** 检查模型能否识图;不能时提示并返回 false(拒绝粘贴/发送)。 */
+  const ensureVision = useCallback((): boolean => {
+    if (modelSupportsVision()) return true
+    notify('err', `${t('imageNotSupportedTitle')}:${t('imageNotSupportedDesc')}`)
+    return false
+  }, [modelSupportsVision, notify])
+
+  const readFileAsDataUrl = useCallback((file: File): Promise<string> => {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader()
+      reader.onload = () => resolve(String(reader.result))
+      reader.onerror = () => reject(reader.error)
+      reader.readAsDataURL(file)
+    })
+  }, [])
+
+  const handlePaste = useCallback(
+    async (event: ClipboardEvent<HTMLTextAreaElement>) => {
+      const items = event.clipboardData?.items
+      if (!items) return
+      const imageItems = Array.from(items).filter(
+        (item) => item.kind === 'file' && item.type.startsWith('image/'),
+      )
+      if (imageItems.length === 0) return
+      // 粘贴图片:模型必须标记为可识图,否则拒绝。
+      if (!ensureVision()) {
+        event.preventDefault()
+        return
+      }
+      event.preventDefault()
+      for (const item of imageItems) {
+        const file = item.getAsFile()
+        if (!file) continue
+        try {
+          const preview = await readFileAsDataUrl(file)
+          const comma = preview.indexOf(',')
+          setPastedImages((previous) => [
+            ...previous,
+            {
+              name: file.name || `pasted-${Date.now()}.png`,
+              mime: file.type || 'image/png',
+              data: comma >= 0 ? preview.slice(comma + 1) : preview,
+              bytes: file.size,
+              preview,
+            },
+          ])
+        } catch {
+          /* unreadable clipboard image: ignored */
+        }
+      }
+    },
+    [ensureVision, readFileAsDataUrl],
+  )
+
+  const onPickFiles = useCallback((event: React.ChangeEvent<HTMLInputElement>) => {
+    const files = event.target.files
+    if (!files) return
+    for (const file of Array.from(files)) {
+      setAttachments((previous) => [
+        ...previous,
+        { name: file.name, mime: file.type || 'application/octet-stream', file },
+      ])
+    }
+    event.target.value = ''
+  }, [])
+
+  const fileToBase64 = useCallback((file: File): Promise<string> => {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader()
+      reader.onload = () => {
+        const result = String(reader.result)
+        const comma = result.indexOf(',')
+        resolve(comma >= 0 ? result.slice(comma + 1) : result)
+      }
+      reader.onerror = () => reject(reader.error)
+      reader.readAsDataURL(file)
+    })
+  }, [])
+
   const snapToBottom = useCallback(() => {
     const el = scrollRef.current
     if (el === null) return
@@ -272,6 +415,62 @@ export default function SessionsPage({
     })
   }, [])
 
+  /* ---- 上下文窗口占用:系统提示词/工具声明来自服务端,其余本地估算 ---- */
+
+  const [promptPartBytes, setPromptPartBytes] = useState<{ system: number; tools: number } | null>(null)
+  useEffect(() => {
+    if (!activeId || !selection) return
+    let cancelled = false
+    api
+      .promptParts(activeId, {
+        provider: selection.provider,
+        model: selection.model,
+        reasoningEffort: selection.reasoningEffort,
+      })
+      .then((data) => {
+        if (!cancelled) setPromptPartBytes({ system: data.systemBytes, tools: data.toolsBytes })
+      })
+      .catch(() => {
+        /* 面板只显示本地部分,服务端取不到不报错 */
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [activeId, selection?.provider, selection?.model, selection?.reasoningEffort])
+
+  const contextParts = useMemo<ContextPart[]>(() => {
+    const encoder = new TextEncoder()
+    let userBytes = 0
+    let otherBytes = 0
+    for (const node of transcriptNodes) {
+      switch (node.kind) {
+        case 'user':
+          userBytes += encoder.encode(node.text).length
+          break
+        case 'assistant':
+          otherBytes += encoder.encode(node.blocks.map((block) => block.text).join('\n')).length
+          break
+        case 'tool':
+          otherBytes += encoder.encode(node.args).length
+          otherBytes += encoder.encode(node.result?.content ?? '').length
+          break
+        default:
+          break
+      }
+    }
+    const parts: ContextPart[] = []
+    if (promptPartBytes) {
+      parts.push({ key: 'system', label: t('contextSystem'), bytes: promptPartBytes.system, color: '#6187d8' })
+      parts.push({ key: 'tools', label: t('contextTools'), bytes: promptPartBytes.tools, color: '#7aa86f' })
+    }
+    parts.push({ key: 'user', label: t('contextUser'), bytes: userBytes, color: '#d8a35f' })
+    parts.push({ key: 'other', label: t('contextOther'), bytes: otherBytes, color: '#9d7bd8' })
+    return parts
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [transcriptNodes, promptPartBytes, activeId])
+
+  const showAttachRow = pastedImages.length > 0 || attachments.length > 0
+
   const pushPending = useCallback((text: string) => {
     const confirmed = confirmedRef.current.get(text) ?? 0
     if (confirmed > 0) {
@@ -296,6 +495,8 @@ export default function SessionsPage({
       onOpenPicker()
       return
     }
+    // 粘贴图片:模型必须标记为可识图,否则拒绝整条发送。
+    if (pastedImages.length > 0 && !ensureVision()) return
     sendingRef.current = true
     setSending(true)
     try {
@@ -305,17 +506,39 @@ export default function SessionsPage({
         return
       }
       markStarted(id)
+      // 附件上传(不限格式):先持久化,再随消息注入路径。
+      const uploadedPaths: string[] = []
+      for (const attachment of attachments) {
+        try {
+          const data = await fileToBase64(attachment.file)
+          const result = await api.uploadAttachment({
+            sessionId: id,
+            name: attachment.name,
+            mime: attachment.mime,
+            data,
+          })
+          uploadedPaths.push(result.path)
+        } catch (error) {
+          throw new Error(`${t('uploadFailed')}:${attachment.name}(${error instanceof Error ? error.message : String(error)})`)
+        }
+      }
       await api.postPrompt(id, {
         prompt: message,
         provider: selection?.provider,
         model: selection?.model,
         reasoningEffort: selection?.reasoningEffort,
+        images: pastedImages.map(({ name, mime, data }) => ({ name, mime, data })),
+        files: uploadedPaths,
       })
       // 收到 202:服务端已接单,立即乐观反馈(running 也由服务端 SSE 推送)。
       pushPending(message)
       setRunningStatus(id, true)
       setPrompt('')
+      setPastedImages([])
+      setAttachments([])
       setScrollTick((tick) => tick + 1)
+      // 占位:非完整权限下模拟审批请求(输入框上方弹出)。
+      maybePreviewApproval()
     } catch (error) {
       notify('err', error instanceof Error ? error.message : String(error))
       // 保留输入框内容;若会话侧已经创建但发送失败,等待用户重试。
@@ -421,6 +644,45 @@ export default function SessionsPage({
       className={`prompt-panel${inert ? ' pick-target' : ''}`}
       onClick={inert ? onOpenPicker : undefined}
     >
+      <ApprovalDialog request={approvalReq} onDecide={handleApproval} />
+      {showAttachRow && (
+        <div className="composer-attachments">
+          {pastedImages.map((image, index) => (
+            <span className="att-chip image" key={`img-${index}`}>
+              <img src={image.preview} alt={image.name} />
+              <span className="att-name">{image.name}</span>
+              <button
+                type="button"
+                className="att-remove"
+                title={t('removeAttachment')}
+                onClick={(event) => {
+                  event.stopPropagation()
+                  setPastedImages((previous) => previous.filter((_, i) => i !== index))
+                }}
+              >
+                <IconClose size={10} />
+              </button>
+            </span>
+          ))}
+          {attachments.map((attachment, index) => (
+            <span className="att-chip" key={`att-${index}`}>
+              <IconImage size={12} />
+              <span className="att-name">{attachment.name}</span>
+              <button
+                type="button"
+                className="att-remove"
+                title={t('removeAttachment')}
+                onClick={(event) => {
+                  event.stopPropagation()
+                  setAttachments((previous) => previous.filter((_, i) => i !== index))
+                }}
+              >
+                <IconClose size={10} />
+              </button>
+            </span>
+          ))}
+        </div>
+      )}
       <div className="prompt-scroll">
         <textarea
           ref={promptRef}
@@ -439,6 +701,7 @@ export default function SessionsPage({
             setPrompt(event.target.value)
             syncPromptHeight()
           }}
+          onPaste={(event) => void handlePaste(event)}
           onFocus={() => {
             if (inert) onOpenPicker()
           }}
@@ -448,6 +711,11 @@ export default function SessionsPage({
       </div>
       <div className="prompt-bar">
         <div className="composer-modes">
+          <PermissionSelector
+            value={permission}
+            onChange={setPermission}
+            disabled={inert}
+          />
           {catalog && selection && (
             <ComposerModelMenu
               catalog={catalog}
@@ -457,7 +725,24 @@ export default function SessionsPage({
             />
           )}
         </div>
-        <div>
+        <div className="composer-right">
+          <input
+            ref={fileInputRef}
+            type="file"
+            multiple
+            hidden
+            onChange={onPickFiles}
+          />
+          <button
+            type="button"
+            className="icon-btn composer-upload-btn"
+            title={t('uploadFile')}
+            disabled={inert}
+            onClick={() => fileInputRef.current?.click()}
+          >
+            <IconUpload size={14} />
+          </button>
+          <ContextRing contextWindow={activeContextWindow} parts={contextParts} />
           {primaryStops ? (
             <button
               type="button"

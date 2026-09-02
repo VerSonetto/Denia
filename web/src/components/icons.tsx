@@ -123,6 +123,42 @@ export function IconEdit(props: IconProps) {
   )
 }
 
+export function IconShield(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <path d="M8 2.5 12.8 4v3.4c0 2.9-2 5.2-4.8 6.1-2.8-.9-4.8-3.2-4.8-6.1V4L8 2.5Z" stroke="currentColor" strokeWidth="1.3" strokeLinejoin="round" />
+      <path d="M5.8 8.1 7.5 9.7l2.8-3" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" fill="none" />
+    </Svg>
+  )
+}
+
+export function IconUpload(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <path d="M8 7.8V13M8 7.8 5.8 9.6M8 7.8 10.2 9.6" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" />
+      <path d="M2.8 12.8v.4a1 1 0 0 0 1 1h8.4a1 1 0 0 0 1-1v-.4" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
+    </Svg>
+  )
+}
+
+export function IconImage(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <rect x="2.5" y="3.5" width="11" height="9" rx="1.2" stroke="currentColor" strokeWidth="1.3" />
+      <circle cx="5.6" cy="6.4" r="1" stroke="currentColor" strokeWidth="1" />
+      <path d="m3.5 11.5 3-3 2 2 1.8-1.8 2.2 2.2" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" fill="none" />
+    </Svg>
+  )
+}
+
+export function IconClose(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <path d="m5 5 6 6M11 5l-6 6" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
+    </Svg>
+  )
+}
+
 export function IconChevron(props: IconProps) {
   return (
     <Svg {...props}>
