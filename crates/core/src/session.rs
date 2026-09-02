@@ -93,6 +93,9 @@ pub enum SessionEvent {
         /// harness 注入的纠错/上下文消息,非用户手打;UI 弱化渲染。
         #[serde(default)]
         injected: bool,
+        /// 用户粘贴/上传的内联图片(仅 vision 模型;旧日志无此字段)。
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        images: Vec<crate::message::ImageData>,
     },
     /// 模型请求使用的系统提示词(用户可见副本,不含优先级框架)。
     SystemPrompt {
@@ -163,7 +166,13 @@ pub fn derive_messages(events: &[SessionEnvelope]) -> Vec<ChatMessage> {
 
     for envelope in events {
         match &envelope.event {
-            SessionEvent::UserMessage { text, .. } => messages.push(ChatMessage::user(text)),
+            SessionEvent::UserMessage { text, images, .. } => {
+                if images.is_empty() {
+                    messages.push(ChatMessage::user(text));
+                } else {
+                    messages.push(ChatMessage::user_with_images(text, images.clone()));
+                }
+            }
             SessionEvent::AssistantMessage { blocks, .. } => {
                 let text: String = blocks
                     .iter()
@@ -319,7 +328,7 @@ mod tests {
     fn derive_projects_user_assistant_and_tool() {
         let events = vec![
             envelope(1, SessionEvent::TurnStart { turn: 1 }),
-            envelope(2, SessionEvent::UserMessage { text: "hi".into(), injected: false }),
+            envelope(2, SessionEvent::UserMessage { text: "hi".into(), injected: false, images: Vec::new() }),
             envelope(3, SessionEvent::StepStart { turn: 1, step: 1 }),
             envelope(
                 4,
@@ -400,7 +409,7 @@ mod tests {
     #[test]
     fn derive_skips_empty_assistant_and_synthesizes_missing_results() {
         let events = vec![
-            envelope(1, SessionEvent::UserMessage { text: "go".into(), injected: false }),
+            envelope(1, SessionEvent::UserMessage { text: "go".into(), injected: false, images: Vec::new() }),
             envelope(
                 2,
                 SessionEvent::AssistantMessage {

@@ -23,15 +23,29 @@ pub struct ToolCallRef {
     pub arguments: String,
 }
 
+/// One inline image attached to a user message (base64 data URL payload).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImageData {
+    /// MIME type, e.g. `image/png`.
+    pub mime: String,
+    /// Base64-encoded image bytes (raw, no data-URL prefix).
+    pub data: String,
+}
+
 /// One wire-adjacent chat message.
 ///
 /// `tool_calls` is assistant-only and `tool_call_id` is tool-role-only; the
-/// wire builders and the projection both enforce those invariants.
+/// wire builders and the projection both enforce those invariants. `images`
+/// is user-role-only and converts to a multimodal content array on the wire.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChatMessage {
     pub role: ChatRole,
     pub content: String,
+    /// Inline images for vision-capable models (user-role only).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<ImageData>,
     /// Passes the model's chain-of-thought back on reasoning-capable routes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_content: Option<String>,
@@ -46,6 +60,18 @@ impl ChatMessage {
         Self {
             role: ChatRole::User,
             content: content.into(),
+            images: Vec::new(),
+            reasoning_content: None,
+            tool_calls: Vec::new(),
+            tool_call_id: None,
+        }
+    }
+
+    pub fn user_with_images(content: impl Into<String>, images: Vec<ImageData>) -> Self {
+        Self {
+            role: ChatRole::User,
+            content: content.into(),
+            images,
             reasoning_content: None,
             tool_calls: Vec::new(),
             tool_call_id: None,
@@ -60,6 +86,7 @@ impl ChatMessage {
         Self {
             role: ChatRole::Assistant,
             content: content.into(),
+            images: Vec::new(),
             reasoning_content,
             tool_calls,
             tool_call_id: None,
@@ -70,6 +97,7 @@ impl ChatMessage {
         Self {
             role: ChatRole::Tool,
             content: content.into(),
+            images: Vec::new(),
             reasoning_content: None,
             tool_calls: Vec::new(),
             tool_call_id: Some(call_id.into()),

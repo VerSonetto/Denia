@@ -712,7 +712,7 @@ mod tests {
             .append(SessionEvent::TurnStart { turn: 1 })
             .unwrap();
         session
-            .append(SessionEvent::UserMessage { text: "hello world, this is a prompt".into(), injected: false })
+            .append(SessionEvent::UserMessage { text: "hello world, this is a prompt".into(), injected: false, images: Vec::new() })
             .unwrap();
         session
             .append(SessionEvent::TurnEnd {
@@ -752,7 +752,7 @@ mod tests {
         assert!(store.list().unwrap()[0].excerpt.is_none());
 
         session
-            .append(SessionEvent::UserMessage { text: "fresh excerpt".into(), injected: false })
+            .append(SessionEvent::UserMessage { text: "fresh excerpt".into(), injected: false, images: Vec::new() })
             .unwrap();
         let summary = store.list().unwrap();
         assert!(
@@ -764,7 +764,7 @@ mod tests {
         // 未登记会话(值语义):落盘边界后走文件 stat 失效检测路径。
         let session2 = store.create(&root, false).unwrap();
         session2
-            .append(SessionEvent::UserMessage { text: "file-based excerpt".into(), injected: false })
+            .append(SessionEvent::UserMessage { text: "file-based excerpt".into(), injected: false, images: Vec::new() })
             .unwrap();
         // 强制落盘:TurnEnd 边界会 flush。
         session2
@@ -789,7 +789,7 @@ mod tests {
             .append(SessionEvent::TurnStart { turn: 1 })
             .unwrap();
         session
-            .append(SessionEvent::UserMessage { text: "hi".into(), injected: false })
+            .append(SessionEvent::UserMessage { text: "hi".into(), injected: false, images: Vec::new() })
             .unwrap();
         let file = session.file().to_path_buf();
         drop(session);
@@ -833,7 +833,7 @@ mod tests {
         let store = SessionStore::open(&root).unwrap();
         let session = store.create(&root, true).unwrap();
         session
-            .append(SessionEvent::UserMessage { text: "ping".into(), injected: false })
+            .append(SessionEvent::UserMessage { text: "ping".into(), injected: false, images: Vec::new() })
             .unwrap();
         let messages = session.derive_messages();
         assert_eq!(messages, vec![ChatMessage::user("ping")]);
@@ -860,10 +860,10 @@ mod tests {
         assert_eq!(session.last_system_prompt().as_deref(), Some("sys-b"));
 
         session
-            .append(SessionEvent::UserMessage { text: "uno".into(), injected: false })
+            .append(SessionEvent::UserMessage { text: "uno".into(), injected: false, images: Vec::new() })
             .unwrap();
         session
-            .append(SessionEvent::UserMessage { text: "dos".into(), injected: false })
+            .append(SessionEvent::UserMessage { text: "dos".into(), injected: false, images: Vec::new() })
             .unwrap();
         let after = session.events_after(1);
         assert_eq!(after.len(), 4, "seq > 1 应为 4 条,实际 {}", after.len());

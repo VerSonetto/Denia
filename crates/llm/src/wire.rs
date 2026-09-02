@@ -141,8 +141,9 @@ pub struct WireMessage {
     pub role: &'static str,
     /// Always present for system/user/assistant (empty string when the
     /// assistant turn is tool-call-only); tool messages carry their output.
+    /// 多模态:带图片时是 OpenAI content-parts 数组,否则是普通字符串。
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub content: Option<String>,
+    pub content: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning_content: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -184,7 +185,7 @@ fn wire_arguments(raw: &str) -> String {
 pub fn build_wire_messages(request: &GenerateRequest) -> Vec<WireMessage> {
     let plain = |role: &'static str, content: String| WireMessage {
         role,
-        content: Some(content),
+        content: Some(serde_json::Value::String(content)),
         reasoning_content: None,
         tool_calls: None,
         tool_call_id: None,
@@ -198,7 +199,32 @@ pub fn build_wire_messages(request: &GenerateRequest) -> Vec<WireMessage> {
     for message in &request.messages {
         match message.role {
             ChatRole::System => out.push(plain("system", message.content.clone())),
-            ChatRole::User => out.push(plain("user", message.content.clone())),
+            ChatRole::User => {
+                if message.images.is_empty() {
+                    out.push(plain("user", message.content.clone()));
+                } else {
+                    // 多模态 content-parts:文本 + image_url(data URL)。
+                    let mut parts = vec![serde_json::json!({
+                        "type": "text",
+                        "text": message.content,
+                    })];
+                    for image in &message.images {
+                        parts.push(serde_json::json!({
+                            "type": "image_url",
+                            "image_url": {
+                                "url": format!("data:{};base64,{}", image.mime, image.data),
+                            },
+                        }));
+                    }
+                    out.push(WireMessage {
+                        role: "user",
+                        content: Some(serde_json::Value::Array(parts)),
+                        reasoning_content: None,
+                        tool_calls: None,
+                        tool_call_id: None,
+                    });
+                }
+            }
             ChatRole::Assistant => {
                 let calls = (!message.tool_calls.is_empty()).then(|| {
                     message
@@ -216,7 +242,7 @@ pub fn build_wire_messages(request: &GenerateRequest) -> Vec<WireMessage> {
                 });
                 out.push(WireMessage {
                     role: "assistant",
-                    content: Some(message.content.clone()),
+                    content: Some(serde_json::Value::String(message.content.clone())),
                     reasoning_content: message.reasoning_content.clone(),
                     tool_calls: calls,
                     tool_call_id: None,
@@ -231,7 +257,7 @@ pub fn build_wire_messages(request: &GenerateRequest) -> Vec<WireMessage> {
                 };
                 out.push(WireMessage {
                     role: "tool",
-                    content: Some(message.content.clone()),
+                    content: Some(serde_json::Value::String(message.content.clone())),
                     reasoning_content: None,
                     tool_calls: None,
                     tool_call_id: Some(call_id.clone()),
@@ -634,7 +660,7 @@ mod tests {
 
 #[cfg(test)]
 mod wire_tests {
-    use super::wire_arguments;
+    use super::{build_wire_messages, wire_arguments};
 
     #[test]
     fn wire_arguments_salvages_malformed() {
@@ -644,5 +670,56 @@ mod wire_tests {
             r#"{"path":"x"}"#
         );
         assert_eq!(wire_arguments("complete garbage"), "{}");
+    }
+
+    #[test]
+    fn images_become_multimodal_content_parts() {
+        use crate::request::GenerateRequest;
+        use denia_core::message::{ChatMessage, ImageData};
+
+        let request = GenerateRequest {
+            model: "vision-model".to_string(),
+            reasoning_effort: None,
+            messages: vec![ChatMessage::user_with_images(
+                "看这张图",
+                vec![ImageData {
+                    mime: "image/png".to_string(),
+                    data: "QUJD".to_string(),
+                }],
+            )],
+            system: None,
+            tools: Vec::new(),
+            temperature: None,
+            max_tokens: None,
+            stop: Vec::new(),
+        };
+        let messages = build_wire_messages(&request);
+        assert_eq!(messages.len(), 1);
+        let content = messages[0].content.as_ref().unwrap();
+        let parts = content.as_array().expect("multimodal content is an array");
+        assert_eq!(parts[0]["type"], "text");
+        assert_eq!(parts[0]["text"], "看这张图");
+        assert_eq!(parts[1]["type"], "image_url");
+        assert_eq!(
+            parts[1]["image_url"]["url"],
+            "data:image/png;base64,QUJD"
+        );
+    }
+
+    #[test]
+    fn plain_user_stays_a_string() {
+        use crate::request::GenerateRequest;
+        let request = GenerateRequest {
+            model: "m".to_string(),
+            reasoning_effort: None,
+            messages: vec![denia_core::message::ChatMessage::user("plain")],
+            system: None,
+            tools: Vec::new(),
+            temperature: None,
+            max_tokens: None,
+            stop: Vec::new(),
+        };
+        let messages = build_wire_messages(&request);
+        assert_eq!(messages[0].content.as_ref().unwrap(), "plain");
     }
 }

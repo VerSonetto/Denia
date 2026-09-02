@@ -481,6 +481,7 @@ name = "denia-server"
 version = "0.1.0"
 dependencies = [
  "axum",
+ "base64",
  "denia-agent-loop",
  "denia-core",
  "denia-credentials",
@@ -541,6 +542,7 @@ name = "denia-tools"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "base64",
  "denia-core",
  "denia-system-prompt",
  "ignore",
