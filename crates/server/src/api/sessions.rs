@@ -40,6 +40,7 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/api/sessions/{id}/prompt", post(prompt_session))
         .route("/api/sessions/{id}/cancel", post(cancel_session))
         .route("/api/sessions/{id}/follow", get(follow_session))
+        .route("/api/sessions/{id}/prompt-parts", get(prompt_parts))
 }
 
 async fn list_sessions(State(state): State<Arc<AppState>>) -> Result<impl IntoResponse, ApiError> {
@@ -177,6 +178,30 @@ struct PromptBody {
     model: Option<String>,
     #[serde(default)]
     reasoning_effort: Option<String>,
+    /// 粘贴的内联图片(base64);模型必须标记为可识图。
+    #[serde(default)]
+    images: Vec<PromptImage>,
+    /// 已上传文件(绝对路径);作为注入上下文随消息发送。
+    #[serde(default)]
+    files: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PromptImage {
+    #[serde(default)]
+    name: Option<String>,
+    mime: String,
+    data: String,
+}
+
+/// 模型是否声明了图片输入能力(input_modalities 含 image)。
+fn model_vision_supported(resolved: &denia_llm::LlmResolvedModelInfo) -> bool {
+    resolved
+        .info
+        .input_modalities
+        .iter()
+        .any(|modality| modality.eq_ignore_ascii_case("image"))
 }
 
 async fn prompt_session(
@@ -229,7 +254,7 @@ async fn prompt_session(
         model: body.model.unwrap_or(default.model),
         reasoning_effort: body.reasoning_effort.or(default.reasoning_effort),
     };
-    if let Err(error) = state
+    let resolved = match state
         .registry
         .resolve_call(
             &selection.provider,
@@ -238,9 +263,52 @@ async fn prompt_session(
         )
         .await
     {
+        Ok(resolved) => resolved,
+        Err(error) => {
+            live.running.store(false, Ordering::SeqCst);
+            return Err(ApiError::from_llm(error));
+        }
+    };
+    let vision_supported = model_vision_supported(&resolved);
+    // 用户要求:图片只允许发给标记为可识图的模型。
+    if !body.images.is_empty() && !vision_supported {
         live.running.store(false, Ordering::SeqCst);
-        return Err(ApiError::from_llm(error));
+        let shown = if selection.model.is_empty() {
+            "当前模型".to_string()
+        } else {
+            format!("模型 '{}'", selection.model)
+        };
+        return Err(ApiError::bad_request(
+            "model/no-vision",
+            format!("{shown} 未标记为可识图,粘贴的图片不能发送;请切换到支持图片输入的模型。"),
+        ));
     }
+    // 上传文件校验:必须存在且位于会话工作区或本会话上传目录内。
+    let mut upload_files = Vec::new();
+    {
+        let cwd = live.session.header().cwd.clone();
+        let uploads_root = state.home.join("uploads").join(&id);
+        for file in &body.files {
+            let path = std::path::PathBuf::from(file);
+            let allowed = (path.starts_with(&cwd) || path.starts_with(&uploads_root)) && path.is_file();
+            if !allowed {
+                live.running.store(false, Ordering::SeqCst);
+                return Err(ApiError::bad_request(
+                    "session/bad-attachment",
+                    format!("文件 '{}' 不在会话工作区或上传目录内", file),
+                ));
+            }
+            upload_files.push(path.to_string_lossy().to_string());
+        }
+    }
+    let images: Vec<denia_core::message::ImageData> = body
+        .images
+        .into_iter()
+        .map(|image| denia_core::message::ImageData {
+            mime: image.mime,
+            data: image.data,
+        })
+        .collect();
 
     let token = CancellationToken::new();
     *live.cancel.lock().unwrap() = Some(token.clone());
@@ -258,6 +326,9 @@ async fn prompt_session(
                 &session,
                 &selection,
                 &prompt,
+                images,
+                upload_files,
+                vision_supported,
                 token,
                 Arc::new(move |envelope: &SessionEnvelope| {
                     let _ = followers_for_turn.send(envelope.clone());
@@ -284,6 +355,43 @@ async fn cancel_session(
 struct FollowQuery {
     #[serde(default)]
     after: u64,
+}
+
+/// 当前提示词组成部分的字节大小:系统提示词 + 工具声明。
+/// 供前端上下文占用圆环面板展示(各段与总窗口的占比)。
+#[derive(Debug, Deserialize)]
+struct PromptPartsQuery {
+    #[serde(default)]
+    provider: Option<String>,
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    reasoning_effort: Option<String>,
+}
+
+async fn prompt_parts(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Query(query): Query<PromptPartsQuery>,
+) -> Result<impl IntoResponse, ApiError> {
+    let live = state
+        .live
+        .get_or_load(&state.sessions, &id)
+        .map_err(ApiError::from_session)?;
+    let default = current_default_selection(&state.settings);
+    let selection = ModelSelection {
+        provider: query.provider.unwrap_or(default.provider),
+        model: query.model.unwrap_or(default.model),
+        reasoning_effort: query.reasoning_effort.or(default.reasoning_effort),
+    };
+    let (system_bytes, tools_bytes) = state
+        .driver
+        .prompt_parts(live.session.header().cwd.as_str(), &selection)
+        .map_err(|message| ApiError::bad_request("prompt-parts/failed", message))?;
+    Ok(Json(json!({
+        "systemBytes": system_bytes,
+        "toolsBytes": tools_bytes,
+    })))
 }
 
 /// SSE: replays persisted envelopes with `seq > after`, then live frames.

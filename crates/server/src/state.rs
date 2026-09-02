@@ -80,6 +80,7 @@ pub fn console_settings(settings: &SettingsStore) -> ConsoleSettings {
 
 /// Process-wide shared state handed to every handler.
 pub struct AppState {
+    pub home: std::path::PathBuf,
     pub settings: Arc<SettingsStore>,
     pub credentials: Arc<CredentialStore>,
     pub registry: Arc<LlmRegistry>,
@@ -336,6 +337,7 @@ pub fn build_state(home: &Path, bound_remote: bool) -> Result<AppState, Box<dyn 
     );
 
     let state = AppState {
+        home: home.to_path_buf(),
         settings,
         credentials,
         registry,

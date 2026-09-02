@@ -7,6 +7,7 @@ mod fs;
 mod llm;
 mod sessions;
 mod settings;
+mod uploads;
 mod workspaces;
 
 use std::sync::Arc;
@@ -22,6 +23,7 @@ pub fn router() -> Router<Arc<AppState>> {
         .merge(llm::router())
         .merge(sessions::router())
         .merge(workspaces::router())
+        .merge(uploads::router())
         .merge(fs::router())
         .merge(events::router())
 }

@@ -20,7 +20,7 @@ impl RuntimeContextProjection {
             .iter()
             .rev()
             .find_map(|envelope| match &envelope.event {
-                SessionEvent::UserMessage { text, injected: true } if is_runtime_context_snapshot(text) => {
+                SessionEvent::UserMessage { text, injected: true, .. } if is_runtime_context_snapshot(text) => {
                     Some(text.clone())
                 }
                 _ => None,
@@ -93,6 +93,7 @@ mod tests {
             .append(SessionEvent::UserMessage {
                 text: snapshot.clone(),
                 injected: true,
+                images: Vec::new(),
             })
             .unwrap();
         let projection = RuntimeContextProjection::restore(&session);

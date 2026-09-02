@@ -67,20 +67,48 @@ impl SessionDriver {
         }
     }
 
+    /// 估算当前提示词的组成部分大小(字节):系统提示词(含模型框架)与
+    /// 工具声明。供前端"上下文窗口占用"面板展示占比。
+    pub fn prompt_parts(
+        &self,
+        cwd: &str,
+        selection: &ModelSelection,
+    ) -> Result<(usize, usize), String> {
+        let assembly = self
+            .system_prompt
+            .assemble(&AssembleContext {
+                cwd: Some(cwd.to_string()),
+                model: Some(selection.model.clone()),
+                provider: Some(selection.provider.clone()),
+            })
+            .map_err(|error| error.to_string())?;
+        let system = render_prompt(&assembly);
+        let framed = frame_system_prompt_for_model(&system);
+        let tools = serde_json::to_string(&assembly.tools).map_err(|error| error.to_string())?;
+        Ok((system.len() + framed.len(), tools.len()))
+    }
+
     /// Runs one user turn to completion and returns the reason it ended.
     ///
     /// `session` is shared (`Arc`) because tools like `todo_write` append
     /// log-only events through a `'static` sink wired back to the same log.
+    /// `images` are inline pasted images (vision models); `files` are paths of
+    /// uploaded files, injected as a context message before the prompt.
+    #[allow(clippy::too_many_arguments)]
     pub async fn run_turn(
         &self,
         session: &Arc<Session>,
         selection: &ModelSelection,
         prompt: &str,
+        images: Vec<denia_core::message::ImageData>,
+        files: Vec<String>,
+        // 当前模型是否标记为可识图(read_file 图片注入与图片发送的依据)。
+        vision_supported: bool,
         cancel: CancellationToken,
         emit: Arc<dyn Fn(&SessionEnvelope) + Send + Sync>,
     ) -> TurnEndReason {
         match self
-            .run_turn_inner(session, selection, prompt, cancel, emit)
+            .run_turn_inner(session, selection, prompt, images, files, vision_supported, cancel, emit)
             .await
         {
             Ok(reason) => reason,
@@ -95,11 +123,38 @@ impl SessionDriver {
         session: &Arc<Session>,
         selection: &ModelSelection,
         prompt: &str,
+        images: Vec<denia_core::message::ImageData>,
+        files: Vec<String>,
+        vision_supported: bool,
         cancel: CancellationToken,
         emit: Arc<dyn Fn(&SessionEnvelope) + Send + Sync>,
     ) -> Result<TurnEndReason, LlmFailure> {
         let turn = session.next_turn_number();
-        append(session, &emit, SessionEvent::UserMessage { text: prompt.to_string(), injected: false })?;
+        if !files.is_empty() {
+            let list = files
+                .iter()
+                .map(|path| format!("- {path}"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            append(
+                session,
+                &emit,
+                SessionEvent::UserMessage {
+                    text: format!("[harness] 用户上传了文件:\n{list}\n这些文件已保存,可随时用工具读取。"),
+                    injected: true,
+                    images: Vec::new(),
+                },
+            )?;
+        }
+        append(
+            session,
+            &emit,
+            SessionEvent::UserMessage {
+                text: prompt.to_string(),
+                injected: false,
+                images,
+            },
+        )?;
         append(session, &emit, SessionEvent::TurnStart { turn })?;
 
         let mut step: u32 = 0;
@@ -123,10 +178,7 @@ impl SessionDriver {
                 append(
                     session,
                     &emit,
-                    SessionEvent::UserMessage {
-                        text: snapshot,
-                        injected: true,
-                    },
+                    SessionEvent::UserMessage { text: snapshot, injected: true, images: Vec::new() },
                 )?;
             }
 
@@ -163,10 +215,7 @@ impl SessionDriver {
                         append(
                             session,
                             &emit,
-                            SessionEvent::UserMessage {
-                                text: feedback_text(&failure),
-                                injected: true,
-                            },
+                            SessionEvent::UserMessage { text: feedback_text(&failure), injected: true, images: Vec::new() },
                         )?;
                         continue;
                     }
@@ -251,10 +300,7 @@ impl SessionDriver {
                     append(
                         session,
                         &emit,
-                        SessionEvent::UserMessage {
-                            text: feedback_text(&failure),
-                            injected: true,
-                        },
+                        SessionEvent::UserMessage { text: feedback_text(&failure), injected: true, images: Vec::new() },
                     )?;
                     continue;
                 }
@@ -332,6 +378,7 @@ impl SessionDriver {
                         cwd: cwd.clone(),
                         cancel: cancel.child_token(),
                         confined: session.header().sandbox,
+                        vision_supported,
                         emit_event: Some(Arc::new(move |event: SessionEvent| {
                             if let Ok(envelope) = sink_session.append(event) {
                                 sink_emit(&envelope);
@@ -612,7 +659,7 @@ mod tests {
         let (driver, _registry) = driver(vec![MockScript::Chunks(text_script("done!"))]);
         let session = temp_session();
         let reason = driver
-            .run_turn(&session, &selection(), "hello", CancellationToken::new(), noop_emit())
+            .run_turn(&session, &selection(), "hello", Vec::new(), Vec::new(), true, CancellationToken::new(), noop_emit())
             .await;
         assert_eq!(reason, TurnEndReason::Completed);
 
@@ -653,7 +700,7 @@ mod tests {
         let (driver, _registry) = driver(vec![MockScript::Chunks(tool_script()), MockScript::Chunks(text_script("after tool"))]);
         let session = temp_session();
         let reason = driver
-            .run_turn(&session, &selection(), "use the tool", CancellationToken::new(), noop_emit())
+            .run_turn(&session, &selection(), "use the tool", Vec::new(), Vec::new(), true, CancellationToken::new(), noop_emit())
             .await;
         assert_eq!(reason, TurnEndReason::Completed);
 
@@ -690,7 +737,7 @@ mod tests {
         let (driver, _registry) = driver(vec![MockScript::Chunks(unknown), MockScript::Chunks(text_script("ok"))]);
         let session = temp_session();
         let reason = driver
-            .run_turn(&session, &selection(), "go", CancellationToken::new(), noop_emit())
+            .run_turn(&session, &selection(), "go", Vec::new(), Vec::new(), true, CancellationToken::new(), noop_emit())
             .await;
         assert_eq!(reason, TurnEndReason::Completed);
         let result = session.events().iter().find_map(|envelope| match &envelope.event {
@@ -760,7 +807,7 @@ mod tests {
             cancel_clone.cancel();
         });
         let reason = driver
-            .run_turn(&session, &selection(), "go", cancel, noop_emit())
+            .run_turn(&session, &selection(), "go", Vec::new(), Vec::new(), true, cancel, noop_emit())
             .await;
         assert_eq!(reason, TurnEndReason::Aborted);
         let has_interrupted = session.events().iter().any(|envelope| {
@@ -780,12 +827,12 @@ mod tests {
         ]);
         let session = temp_session();
         let reason = driver
-            .run_turn(&session, &selection(), "go", CancellationToken::new(), noop_emit())
+            .run_turn(&session, &selection(), "go", Vec::new(), Vec::new(), true, CancellationToken::new(), noop_emit())
             .await;
         assert_eq!(reason, TurnEndReason::Completed);
         // 纠错提示以 injected 用户消息落日志,模型看得见。
         let injected = session.events().iter().filter_map(|e| match &e.event {
-            SessionEvent::UserMessage { text, injected } if *injected => Some(text.clone()),
+            SessionEvent::UserMessage { text, injected, .. } if *injected => Some(text.clone()),
             _ => None,
         }).collect::<Vec<_>>();
         assert_eq!(injected.len(), 1);
