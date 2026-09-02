@@ -246,6 +246,7 @@ const zh = {
   contextFree: '剩余窗口',
   contextTokens: '{n} tok',
   contextEstimate: '估算值,基于字符长度换算',
+  contextAnchored: '锚定(provider 上报)',
 }
 
 const en: typeof zh = {
@@ -491,6 +492,7 @@ const en: typeof zh = {
   contextFree: 'Remaining window',
   contextTokens: '{n} tok',
   contextEstimate: 'Estimated from byte length',
+  contextAnchored: 'Anchored (provider reported)',
 }
 
 type LocaleId = 'zh' | 'en'

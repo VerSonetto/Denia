@@ -277,17 +277,38 @@ export function uploadAttachment(params: {
   })
 }
 
-/** 当前提示词各组成部分的字节大小(系统提示词/工具声明)。 */
-export function promptParts(
-  id: string,
-  selection: { provider?: string; model?: string; reasoningEffort?: string },
-): Promise<{ systemBytes: number; toolsBytes: number }> {
-  const query = new URLSearchParams()
-  if (selection.provider) query.set('provider', selection.provider)
-  if (selection.model) query.set('model', selection.model)
-  if (selection.reasoningEffort) query.set('reasoningEffort', selection.reasoningEffort)
-  const suffix = query.toString() ? `?${query.toString()}` : ''
-  return http(`/api/sessions/${encodeURIComponent(id)}/prompt-parts${suffix}`)
+/** 当前上下文 token 拆分(token-meter 服务端 fold)。 */
+export interface ContextBreakdown {
+  systemTokens: number
+  toolsTokens: number
+  messageTokens: number
+}
+
+/** 上下文压力(provider 锚点 + 启发式)。 */
+export interface ContextPressure {
+  pressureTokens: number
+  /** 是否使用了 provider 精确锚点。 */
+  anchored: boolean
+  anchorTokens: number
+}
+
+/** 精确 usage 累计(对齐 dsh `TurnTokenUsage`)。 */
+export interface TurnTokenUsage {
+  uncachedInputTokens: number
+  outputTokens: number
+  cacheReadTokens: number
+  cacheWriteTokens: number
+  reasoningTokens: number
+}
+
+export interface ContextBreakdownResponse {
+  breakdown: ContextBreakdown
+  pressure: ContextPressure
+  usage: TurnTokenUsage
+}
+
+export function contextBreakdown(id: string): Promise<ContextBreakdownResponse> {
+  return http(`/api/sessions/${encodeURIComponent(id)}/context-breakdown`)
 }
 
 export function cancelSession(id: string): Promise<unknown> {

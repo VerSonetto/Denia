@@ -415,59 +415,62 @@ export default function SessionsPage({
     })
   }, [])
 
-  /* ---- 上下文窗口占用:系统提示词/工具声明来自服务端,其余本地估算 ---- */
+  /* ---- 上下文窗口占用:全部由服务端 token-meter fold(锚点 + 启发式) ---- */
 
-  const [promptPartBytes, setPromptPartBytes] = useState<{ system: number; tools: number } | null>(null)
+  const [context, setContext] = useState<api.ContextBreakdownResponse | null>(null)
+
+  const refreshContextBreakdown = () => {
+    if (!activeId) return
+    api.contextBreakdown(activeId).then(setContext).catch(() => {
+      /* 服务端取不到不报错,面板仍显示旧值 */
+    })
+  }
+
   useEffect(() => {
-    if (!activeId || !selection) return
-    let cancelled = false
-    api
-      .promptParts(activeId, {
-        provider: selection.provider,
-        model: selection.model,
-        reasoningEffort: selection.reasoningEffort,
-      })
-      .then((data) => {
-        if (!cancelled) setPromptPartBytes({ system: data.systemBytes, tools: data.toolsBytes })
-      })
-      .catch(() => {
-        /* 面板只显示本地部分,服务端取不到不报错 */
-      })
-    return () => {
-      cancelled = true
-    }
-  }, [activeId, selection?.provider, selection?.model, selection?.reasoningEffort])
+    refreshContextBreakdown()
+    // 会话流式追加后按节拍重拉(refetch-on-interval,与 dsh 后推语义一致),
+    // 比轮事件列表 O(新增) 更轻(schedule 短,值得)。
+    const id = setInterval(refreshContextBreakdown, 1500)
+    return () => clearInterval(id)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeId])
+
+  // 圆环面板占比 = pressure(锚点 + 启发式)/ window;无锚点时也用 breakdown 之和,
+  // 与 dsh `contextPressure` 一致(不要求 breakdown 之和等于 pressure)。
+  const displayTokens = context?.pressure.pressureTokens ?? 0
+  const displayAnchored = context?.pressure.anchored ?? false
 
   const contextParts = useMemo<ContextPart[]>(() => {
-    const encoder = new TextEncoder()
-    let userBytes = 0
-    let otherBytes = 0
-    for (const node of transcriptNodes) {
-      switch (node.kind) {
-        case 'user':
-          userBytes += encoder.encode(node.text).length
-          break
-        case 'assistant':
-          otherBytes += encoder.encode(node.blocks.map((block) => block.text).join('\n')).length
-          break
-        case 'tool':
-          otherBytes += encoder.encode(node.args).length
-          otherBytes += encoder.encode(node.result?.content ?? '').length
-          break
-        default:
-          break
-      }
-    }
+    if (!context) return []
+    const breakdown = context.breakdown
     const parts: ContextPart[] = []
-    if (promptPartBytes) {
-      parts.push({ key: 'system', label: t('contextSystem'), bytes: promptPartBytes.system, color: '#6187d8' })
-      parts.push({ key: 'tools', label: t('contextTools'), bytes: promptPartBytes.tools, color: '#7aa86f' })
+    if (breakdown.systemTokens > 0) {
+      parts.push({
+        key: 'system',
+        label: t('contextSystem'),
+        tokens: breakdown.systemTokens,
+        color: '#6187d8',
+      })
     }
-    parts.push({ key: 'user', label: t('contextUser'), bytes: userBytes, color: '#d8a35f' })
-    parts.push({ key: 'other', label: t('contextOther'), bytes: otherBytes, color: '#9d7bd8' })
+    if (breakdown.toolsTokens > 0) {
+      parts.push({
+        key: 'tools',
+        label: t('contextTools'),
+        tokens: breakdown.toolsTokens,
+        color: '#7aa86f',
+      })
+    }
+    if (breakdown.messageTokens > 0) {
+      parts.push({
+        key: 'messages',
+        label: t('contextOther'),
+        tokens: breakdown.messageTokens,
+        color: '#d8a35f',
+      })
+    }
     return parts
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [transcriptNodes, promptPartBytes, activeId])
+  }, [context, activeId])
 
   const showAttachRow = pastedImages.length > 0 || attachments.length > 0
 
@@ -742,7 +745,12 @@ export default function SessionsPage({
           >
             <IconPaperclip size={16} />
           </button>
-          <ContextRing contextWindow={activeContextWindow} parts={contextParts} />
+          <ContextRing
+            contextWindow={activeContextWindow}
+            parts={contextParts}
+            displayTokens={displayTokens}
+            displayAnchored={displayAnchored}
+          />
           {primaryStops ? (
             <button
               type="button"

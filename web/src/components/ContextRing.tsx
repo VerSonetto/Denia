@@ -1,16 +1,12 @@
 import { useEffect, useRef, useState } from 'react'
 import { t } from '../i18n'
 
-/** Intrinsic bytes → 估算 token(ASCII 4 char/token,CJK 3 字节/字,取折中)。 */
-function bytesToTokens(bytes: number): number {
-  return Math.max(1, Math.round(bytes / 3))
-}
-
-/** 一段上下文的展示行:名称、占比条形、token 数与字节数。 */
+/** 一段上下文的展示行:名称、占比条形与 token 数(服务端 fold 或 provider 精确值)。 */
 export interface ContextPart {
   key: string
   label: string
-  bytes: number
+  /** token 数。 */
+  tokens: number
   /** 条形颜色(用于面板)。 */
   color: string
 }
@@ -19,28 +15,33 @@ const PART_COLORS = ['#6187d8', '#7aa86f', '#d8a35f', '#9d7bd8', '#c66f6f']
 
 /**
  * 上下文窗口使用情况:圆环(总占用比例)+ 点击弹出的悬浮面板
- * (各组成部分占比与精确字节/token 数)。
+ * (各组成部分占比与 token 数)。
+ *
+ * `displayTokens` 与 `displayAnchored` 来自 `ContextPressure`(服务端 dsh 同
+ * 口径的 `contextPressure` 投影):有 provider 锚点时,`pressureTokens` =
+ * `anchorTokens` + 锚点后的启发式增量;无锚点时是 breakdown 之和。
  */
 export function ContextRing({
   contextWindow,
   parts,
+  displayTokens,
+  displayAnchored = false,
 }: {
   /** 当前模型的上下文窗口(token);为空时只显示估算值。 */
   contextWindow?: number
   parts: ContextPart[]
+  displayTokens: number
+  displayAnchored?: boolean
 }) {
   const [open, setOpen] = useState(false)
   const panelRef = useRef<HTMLDivElement | null>(null)
   const wrapRef = useRef<HTMLDivElement | null>(null)
 
-  const totalBytes = parts.reduce((sum, part) => sum + part.bytes, 0)
-  // token 估算:bytes/3;窗口是 token,用于算使用率(近似)。
-  const estimatedTokens = bytesToTokens(totalBytes)
   const ratio = contextWindow && contextWindow > 0
-    ? Math.min(1, estimatedTokens / contextWindow)
+    ? Math.min(1, displayTokens / contextWindow)
     : null
   const freeTokens = contextWindow && contextWindow > 0
-    ? Math.max(0, contextWindow - estimatedTokens)
+    ? Math.max(0, contextWindow - displayTokens)
     : null
 
   const radius = 6
@@ -61,7 +62,11 @@ export function ContextRing({
       <button
         type="button"
         className={`context-ring-btn${open ? ' open' : ''}`}
-        title={t('contextRingLabel')}
+        title={
+          displayAnchored
+            ? `${t('contextRingLabel')} · ${t('contextAnchored')}`
+            : t('contextRingLabel')
+        }
         aria-expanded={open}
         onClick={() => setOpen(!open)}
       >
@@ -97,12 +102,12 @@ export function ContextRing({
             <span className="context-panel-total">
               {contextWindow && contextWindow > 0
                 ? `${(ratio! * 100).toFixed(1)}%`
-                : t('contextTokens', { n: estimatedTokens })}
+                : t('contextTokens', { n: displayTokens })}
             </span>
           </div>
           <div className="context-panel-rows">
             {parts.map((part, index) => {
-              const partRatio = totalBytes > 0 ? part.bytes / totalBytes : 0
+              const partRatio = displayTokens > 0 ? part.tokens / displayTokens : 0
               return (
                 <div className="context-row" key={part.key}>
                   <span
@@ -120,7 +125,7 @@ export function ContextRing({
                     />
                   </span>
                   <span className="context-num">
-                    {t('contextTokens', { n: bytesToTokens(part.bytes) })}
+                    {t('contextTokens', { n: part.tokens })}
                   </span>
                 </div>
               )
@@ -134,7 +139,9 @@ export function ContextRing({
               </div>
             )}
           </div>
-          <div className="context-panel-hint">{t('contextEstimate')}</div>
+          <div className="context-panel-hint">
+            {displayAnchored ? t('contextAnchored') : t('contextEstimate')}
+          </div>
         </div>
       )}
     </div>
