@@ -4,7 +4,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use denia_agent_loop::SessionDriver;
 use denia_core::config::ModelSelection;
@@ -101,6 +101,9 @@ pub enum ServerEvent {
     CredentialsUpdated,
     LlmUpdated,
     SessionsUpdated,
+    /// 会话运行状态变化(发消息/轮次结束/删除);前端据此维护 running 集合,
+    /// 无需为后台会话各维持一条 SSE 长连接。
+    RunningChanged { id: String, running: bool },
 }
 
 /// One materialized session: durable log plus live fan-out. `session` is an
@@ -109,13 +112,29 @@ pub struct LiveSession {
     pub session: Arc<Session>,
     pub followers: broadcast::Sender<denia_core::session::SessionEnvelope>,
     pub running: AtomicBool,
-    pub cancel: tokio::sync::Mutex<Option<CancellationToken>>,
+    /// 最近一次被访问(挂载/发消息/follow)的 epoch ms;空闲淘汰依据。
+    pub last_touch: AtomicU64,
+    pub cancel: std::sync::Mutex<Option<CancellationToken>>,
 }
 
 /// Live sessions keyed by id; loads (and repairs) on first touch.
+///
+/// ## 生命周期(内存上限)
+///
+/// - 每次 `get_or_load` / `touch` 都会刷新 `last_touch`。
+/// - 后台淘汰任务(见 [`spawn_live_evictor`])周期清理:非运行中、
+///   无 SSE 订阅者、且超过 `idle_after` 未使用的会话被卸载,事件内存
+///   随之释放;下次访问按日志重新加载。运行中的会话永不淘汰。
 #[derive(Default)]
 pub struct LiveSessions {
     inner: std::sync::Mutex<HashMap<String, Arc<LiveSession>>>,
+}
+
+fn now_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 impl LiveSessions {
@@ -126,22 +145,106 @@ impl LiveSessions {
     ) -> Result<Arc<LiveSession>, SessionError> {
         let mut map = self.inner.lock().unwrap();
         if let Some(live) = map.get(id) {
+            live.last_touch.store(now_millis(), std::sync::atomic::Ordering::Relaxed);
             return Ok(live.clone());
         }
         let session = store.load(id)?;
+        let session = Arc::new(session);
+        store.track_session(&session);
         let live = Arc::new(LiveSession {
-            session: Arc::new(session),
+            session,
             followers: broadcast::channel(1024).0,
             running: AtomicBool::new(false),
-            cancel: tokio::sync::Mutex::new(None),
+            last_touch: AtomicU64::new(now_millis()),
+            cancel: std::sync::Mutex::new(None),
         });
         map.insert(id.to_string(), live.clone());
         Ok(live)
     }
 
+    /// 记录一次外部访问(follow 连接等),防止被空闲淘汰。
+    pub fn touch(&self, id: &str) {
+        if let Some(live) = self.inner.lock().unwrap().get(id) {
+            live.last_touch.store(now_millis(), std::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
+    /// 淘汰满足条件的空闲会话,返回被卸载的 id 列表。
+    pub fn evict_idle(&self, idle_after_secs: u64) -> Vec<String> {
+        let now = now_millis();
+        let idle_ms = idle_after_secs.saturating_mul(1000);
+        let mut to_remove = Vec::new();
+        {
+            let map = self.inner.lock().unwrap();
+            for (id, live) in map.iter() {
+                let running = live.running.load(std::sync::atomic::Ordering::SeqCst);
+                let subscribed = live.followers.receiver_count() > 0;
+                let idle = now.saturating_sub(
+                    live.last_touch.load(std::sync::atomic::Ordering::Relaxed),
+                ) >= idle_ms;
+                if !running && !subscribed && idle {
+                    to_remove.push(id.clone());
+                }
+            }
+        }
+        let mut map = self.inner.lock().unwrap();
+        for id in &to_remove {
+            // 双检:可能已被其他路径移除。
+            if let Some(live) = map.get(id) {
+                if !live.running.load(std::sync::atomic::Ordering::SeqCst)
+                    && live.followers.receiver_count() == 0
+                {
+                    map.remove(id);
+                }
+            }
+        }
+        to_remove
+    }
+
     pub fn remove(&self, id: &str) {
         self.inner.lock().unwrap().remove(id);
     }
+}
+
+/// RAII 运行保护:drop 时复位 running、清空 cancel token,并广播
+/// `RunningChanged { running: false }` 给控制台。即使任务 panic,
+/// 会话也不会永久锁死在 running 状态,前端圆点也不会卡死。
+pub struct RunningGuard {
+    live: Arc<LiveSession>,
+    events: broadcast::Sender<ServerEvent>,
+}
+
+impl RunningGuard {
+    pub fn new(live: Arc<LiveSession>, events: broadcast::Sender<ServerEvent>) -> Self {
+        Self { live, events }
+    }
+}
+
+impl Drop for RunningGuard {
+    fn drop(&mut self) {
+        self.live.running.store(false, Ordering::SeqCst);
+        let mut cancel = self.live.cancel.lock().unwrap();
+        *cancel = None;
+        let _ = self.events.send(ServerEvent::RunningChanged {
+            id: self.live.session.id().to_string(),
+            running: false,
+        });
+    }
+}
+
+/// 后台空闲淘汰:每 `interval` 扫描一次,卸载 idle 会话。运行中永不淘汰。
+pub fn spawn_live_evictor(live: Arc<LiveSessions>, interval_secs: u64, idle_after_secs: u64) {
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(std::time::Duration::from_secs(interval_secs));
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            ticker.tick().await;
+            let evicted = live.evict_idle(idle_after_secs);
+            if !evicted.is_empty() {
+                tracing::debug!(count = evicted.len(), "evicted idle live sessions");
+            }
+        }
+    });
 }
 
 /// The persisted `agent-default-model` section shape.
@@ -214,6 +317,8 @@ pub fn build_state(home: &Path, bound_remote: bool) -> Result<AppState, Box<dyn 
             .collect::<Vec<_>>(),
     );
     let live = Arc::new(LiveSessions::default());
+    // 空闲会话淘汰:30s 一轮,10 分钟未使用的会话卸载(运行中/被订阅的不动)。
+    spawn_live_evictor(live.clone(), 30, 600);
     let (prompt, tools) = denia_tools::default_shipped();
     let driver = Arc::new(SessionDriver::new(
         registry.clone(),

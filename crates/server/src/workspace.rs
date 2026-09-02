@@ -196,6 +196,24 @@ impl WorkspaceRegistry {
         true
     }
 
+    /// 从**所有**工作区账本中移除一个会话 id(会话被删除时的全局清理,
+    /// 保证注册表零残留)。返回是否有账本被改动。
+    pub fn detach_session(&self, session_id: &str) -> bool {
+        let mut state = self.state.write().unwrap();
+        let mut changed = false;
+        for record in state.workspaces.values_mut() {
+            let before = record.session_ids.len();
+            record.session_ids.retain(|id| id != session_id);
+            if record.session_ids.len() != before {
+                changed = true;
+            }
+        }
+        if changed {
+            let _ = self.save_locked(&state);
+        }
+        changed
+    }
+
     fn save_locked(&self, state: &RegistryDoc) -> Result<(), std::io::Error> {
         let raw = serde_json::to_string_pretty(state)?;
         let tmp = self.file.with_extension("json.tmp");

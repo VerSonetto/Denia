@@ -1,4 +1,13 @@
 //! Session endpoints: list/create/read/delete, prompt, cancel, follow.
+//!
+//! ## 生命周期保证
+//!
+//! - **prompt**:`running` 位由 [`RunningGuard`] 兜底复位——任务 panic 或
+//!   提前 drop 都不会把会话锁死在运行态。
+//! - **delete**:先阻止运行中删除,再删目录 + live 卸载 + **所有**工作区
+//!   账本去引用;任何路径都不留残留。
+//! - **create**:工作区账本 attach 失败会回滚会话(不产生孤儿记录)。
+//! - **follow**:重放只取 `seq > after` 的增量区间,不克隆全量日志。
 
 use std::convert::Infallible;
 use std::sync::Arc;
@@ -19,7 +28,7 @@ use tokio_stream::wrappers::BroadcastStream;
 use tokio_util::sync::CancellationToken;
 
 use crate::error::ApiError;
-use crate::state::{AppState, ServerEvent, current_default_selection};
+use crate::state::{AppState, RunningGuard, ServerEvent, current_default_selection};
 
 pub fn router() -> Router<Arc<AppState>> {
     Router::new()
@@ -34,6 +43,7 @@ pub fn router() -> Router<Arc<AppState>> {
 }
 
 async fn list_sessions(State(state): State<Arc<AppState>>) -> Result<impl IntoResponse, ApiError> {
+    // 内存索引:O(会话数) stat 校验,零全文读取。
     let sessions = state.sessions.list().map_err(ApiError::from_session)?;
     Ok(Json(json!({ "sessions": sessions })))
 }
@@ -102,8 +112,16 @@ async fn create_session(
         .create(&cwd, sandbox)
         .map_err(ApiError::from_session)?;
     if let Some(ws) = &workspace {
-        // 会话头 cwd == 工作区路径(构造保证);账本 prepend。
-        state.workspaces.attach(&ws.id, session.id());
+        // 会话头 cwd == 工作区路径(构造保证);账本 prepend。attach 失败
+        // (工作区刚被删)时回滚会话,不留孤儿记录。
+        if !state.workspaces.attach(&ws.id, session.id()) {
+            let _ = state.sessions.delete(session.id());
+            return Err(ApiError::new(
+                StatusCode::NOT_FOUND,
+                "workspace/not-found",
+                "workspace not found",
+            ));
+        }
     }
     let summary = json!({
         "id": session.id(),
@@ -143,6 +161,8 @@ async fn delete_session(
     }
     state.sessions.delete(&id).map_err(ApiError::from_session)?;
     state.live.remove(&id);
+    // 全局账本去引用:工作区列表里不残留已删会话。
+    state.workspaces.detach_session(&id);
     let _ = state.events.send(ServerEvent::SessionsUpdated);
     Ok(Json(json!({ "ok": true })))
 }
@@ -195,6 +215,13 @@ async fn prompt_session(
             "a turn is already running on this session",
         ));
     }
+    // 运行状态立即推给控制台(侧栏圆点/发送按钮,无需 follow 长连接)。
+    let _ = state.events.send(ServerEvent::RunningChanged {
+        id: id.clone(),
+        running: true,
+    });
+    // 消息落库后摘要变化:通知控制台刷新列表(excerpt 即时可见)。
+    let _ = state.events.send(ServerEvent::SessionsUpdated);
 
     let default = current_default_selection(&state.settings);
     let selection = ModelSelection {
@@ -216,13 +243,16 @@ async fn prompt_session(
     }
 
     let token = CancellationToken::new();
-    *live.cancel.lock().await = Some(token.clone());
+    *live.cancel.lock().unwrap() = Some(token.clone());
 
     let followers_for_turn = live.followers.clone();
+    let events_for_guard = state.events.clone();
     let driver = state.driver.clone();
     let session = live.session.clone();
     let live = live.clone();
     tokio::spawn(async move {
+        // RAII:任务结束(含 panic)自动复位 running + 清 cancel + 广播结束。
+        let _guard = RunningGuard::new(live.clone(), events_for_guard);
         let _reason = driver
             .run_turn(
                 &session,
@@ -234,8 +264,6 @@ async fn prompt_session(
                 }),
             )
             .await;
-        live.running.store(false, Ordering::SeqCst);
-        *live.cancel.lock().await = None;
     });
 
     Ok((StatusCode::ACCEPTED, Json(json!({ "accepted": true }))))
@@ -246,7 +274,7 @@ async fn cancel_session(
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, ApiError> {
     let live = state.live.get_or_load(&state.sessions, &id).map_err(ApiError::from_session)?;
-    if let Some(token) = live.cancel.lock().await.take() {
+    if let Some(token) = live.cancel.lock().unwrap().take() {
         token.cancel();
     }
     Ok(Json(json!({ "ok": true })))
@@ -275,6 +303,7 @@ async fn follow_session(
         .live
         .get_or_load(&state.sessions, &id)
         .map_err(ApiError::from_session)?;
+    state.live.touch(&id);
     let live_stream = BroadcastStream::new(live.followers.subscribe()).filter_map(
         |result| async move {
             match result {
@@ -284,12 +313,8 @@ async fn follow_session(
             }
         },
     );
-    let replay: Vec<SessionEnvelope> = live
-        .session
-        .events()
-        .into_iter()
-        .filter(|envelope| envelope.seq > query.after)
-        .collect();
+    // 只拉增量区间(after 到尾部),长会话断线重连不再克隆全量日志。
+    let replay: Vec<SessionEnvelope> = live.session.events_after(query.after);
     let stream = futures::stream::iter(replay)
         .chain(live_stream)
         .map(|envelope| {
