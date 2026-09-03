@@ -288,3 +288,53 @@ export interface WorkspaceRecord {
   createdAt: number
   sessionIds: string[]
 }
+
+/* ---- 内嵌浏览器(ZCode Browser Use 同款命令面) ---- */
+
+export interface BrowserTabInfo {
+  tabId: string
+  url: string
+  title: string
+  active: boolean
+}
+
+export interface BrowserState {
+  running: boolean
+  activeTabId?: string | null
+  tabs: BrowserTabInfo[]
+  dialogs?: unknown[]
+}
+
+export interface BrowserOutcome {
+  ok: boolean
+  error?: { code: string; message: string }
+  value?: unknown
+  state?: Record<string, unknown>
+  snapshot?: {
+    url?: string
+    title?: string
+    elements?: {
+      ref: string
+      tag: string
+      name?: string
+      rect?: { x: number; y: number; width: number; height: number }
+      inViewport?: boolean
+      editable?: boolean
+      href?: string
+    }[]
+    truncated?: boolean
+  }
+  image?: { base64: string; mimeType: string }
+  dialog?: { type?: string; message?: string } | null
+  tabs?: BrowserTabInfo[]
+  elapsedMs: number
+}
+
+/** /api/browser/stream 的一帧事件。 */
+export type BrowserEventFrame =
+  | { type: 'tabs-changed' }
+  | { type: 'frame'; tabId: string; data: string }
+  | { type: 'dialog-opened'; tabId: string; kind: string; message: string }
+  | { type: 'dialog-closed'; tabId: string }
+  | { type: 'navigated'; tabId: string; url: string; title: string }
+  | { type: 'exited' }

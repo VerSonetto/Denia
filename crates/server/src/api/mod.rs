@@ -1,6 +1,7 @@
 //! HTTP API surface: settings, credentials, model management, chat smoke
 //! test, and the SSE push channel.
 
+mod browser;
 mod credentials;
 mod events;
 mod fs;
@@ -20,6 +21,7 @@ use crate::state::AppState;
 pub fn router() -> Router<Arc<AppState>> {
     Router::new()
         .merge(settings::router())
+        .merge(browser::router())
         .merge(credentials::router())
         .merge(llm::router())
         .merge(sessions::router())

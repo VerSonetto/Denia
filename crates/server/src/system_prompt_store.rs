@@ -17,15 +17,17 @@ const FILE_NAME: &str = "SYSTEM.md";
 pub struct SystemPromptState {
     current: Arc<ArcSwap<SystemPrompt>>,
     home: PathBuf,
+    browser_hub: Option<denia_tools::BrowserHub>,
 }
 
 impl SystemPromptState {
     /// 启动时从磁盘加载;空或缺失则沿用出厂 persona。
-    pub fn load(home: &Path) -> Self {
-        let prompt = build_prompt(read_file_text(home));
+    pub fn load(home: &Path, browser_hub: Option<denia_tools::BrowserHub>) -> Self {
+        let prompt = build_prompt(read_file_text(home), browser_hub.clone());
         Self {
             current: Arc::new(ArcSwap::from_pointee(prompt)),
             home: home.to_path_buf(),
+            browser_hub,
         }
     }
 
@@ -68,7 +70,7 @@ impl SystemPromptState {
     }
 
     fn reload(&self) {
-        let prompt = build_prompt(read_file_text(&self.home));
+        let prompt = build_prompt(read_file_text(&self.home), self.browser_hub.clone());
         self.current.store(Arc::new(prompt));
     }
 
@@ -133,9 +135,11 @@ fn read_file_text(home: &Path) -> Option<String> {
     }
 }
 
-fn build_prompt(text: Option<String>) -> SystemPrompt {
-    match text {
-        Some(persona) => denia_tools::shipped_with_persona(persona).0,
-        None => denia_tools::default_shipped().0,
+fn build_prompt(text: Option<String>, browser_hub: Option<denia_tools::BrowserHub>) -> SystemPrompt {
+    match (text, browser_hub) {
+        (Some(persona), Some(hub)) => denia_tools::shipped_with_persona_and_browser(persona, hub).0,
+        (Some(persona), None) => denia_tools::shipped_with_persona(persona).0,
+        (None, Some(hub)) => denia_tools::default_shipped_with_browser(Some(hub)).0,
+        (None, None) => denia_tools::default_shipped().0,
     }
 }

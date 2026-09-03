@@ -10,6 +10,7 @@ members = [
     "crates/system-prompt",
     "crates/token-meter",
     "crates/agent-loop",
+    "crates/browser",
     "crates/server",
 ]
 
@@ -27,12 +28,14 @@ denia-llm = { path = "crates/llm" }
 denia-tools = { path = "crates/tools" }
 denia-session = { path = "crates/session" }
 denia-agent-loop = { path = "crates/agent-loop" }
+denia-browser = { path = "crates/browser" }
 denia-system-prompt = { path = "crates/system-prompt" }
 denia-token-meter = { path = "crates/token-meter" }
 
 tokio = { version = "1", features = ["full"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
 tokio-util = "0.7"
+tokio-tungstenite = { version = "0.24", features = ["native-tls"] }
 futures = "0.3"
 async-trait = "0.1"
 

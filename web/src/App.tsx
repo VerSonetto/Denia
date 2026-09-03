@@ -38,6 +38,7 @@ import {
 import { DirPicker } from './components/DirPicker'
 import { ConfirmDialog } from './components/ConfirmDialog'
 import { SettingsModal } from './components/SettingsModal'
+import BrowserPanel from './components/BrowserPanel'
 import { sessionDisplayTitle } from './sessionDisplay'
 import type { SessionSummary, WorkspaceRecord } from './types'
 
@@ -60,6 +61,7 @@ export default function App() {
   const runningIds = useRunningIds()
 
   const [settingsOpen, setSettingsOpen] = useState(false)
+  const [browserOpen, setBrowserOpen] = useState(false)
   const [sidebarSearchOpen, setSidebarSearchOpen] = useState(false)
   const [sidebarExpandAllTick, setSidebarExpandAllTick] = useState(0)
   const [sidebarAllExpanded, setSidebarAllExpanded] = useState(false)
@@ -458,7 +460,15 @@ export default function App() {
             onDeleteUngrouped={(items) => void deleteUngrouped(items)}
           />
         </div>
-        <nav className="sidebar-foot" aria-label={t('navSettings')}>
+        <nav className="sidebar-foot" aria-label={t('navBrowser')}>
+          <button
+            type="button"
+            className="sidebar-nav"
+            onClick={() => setBrowserOpen(true)}
+          >
+            <span className="browser-glyph">⌘</span>
+            <span>{t('navBrowser')}</span>
+          </button>
           <button
             type="button"
             className="sidebar-nav"
@@ -492,6 +502,21 @@ export default function App() {
           />
         </div>
       </main>
+      {browserOpen && (
+        <div className="brw-backdrop" onClick={() => setBrowserOpen(false)}>
+          <div className="brw-shell" onClick={(event) => event.stopPropagation()}>
+            <div className="brw-head">
+              <span>{t('navBrowser')}</span>
+              <button type="button" className="icon-btn" onClick={() => setBrowserOpen(false)}>
+                <IconClose size={16} />
+              </button>
+            </div>
+            <div className="brw-body">
+              <BrowserPanel />
+            </div>
+          </div>
+        </div>
+      )}
       {settingsOpen && (
         <SettingsModal
           notify={notify}

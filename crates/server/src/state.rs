@@ -1,4 +1,4 @@
-﻿//! Composition root: opens stores, registers namespaces and adapters, and
+//! Composition root: opens stores, registers namespaces and adapters, and
 //! keeps OpenAI-compatible routes in sync with settings.
 
 use std::collections::HashMap;
@@ -91,6 +91,8 @@ pub struct AppState {
     pub workspaces: Arc<crate::workspace::WorkspaceRegistry>,
     pub system_prompt: Arc<crate::system_prompt_store::SystemPromptState>,
     pub file_history: Arc<crate::file_history::FileHistoryStore>,
+    /// 内嵌浏览器中枢(工具与 REST API 共用)。
+    pub browser: Arc<denia_browser::BrowserManager>,
     /// 绑定地址非回环 ⇒ 远程浏览器 ⇒ 目录选择器走 browse。
     pub bound_remote: bool,
 }
@@ -376,11 +378,14 @@ pub fn build_state(home: &Path, bound_remote: bool) -> Result<AppState, Box<dyn 
             .collect::<Vec<_>>(),
     );
     let live = Arc::new(LiveSessions::default());
-    // 空闲会话淘汰:30s 一轮,10 分钟未使用的会话卸载(运行中/被订阅的不动)。
+    // 会话轮次淘汰:30s 一轮,10 分钟未使用的会话卸载(保内存/下盘的会话不受影响)。
     spawn_live_evictor(live.clone(), 30, 600);
-    let system_prompt = Arc::new(crate::system_prompt_store::SystemPromptState::load(home));
+    let browser = Arc::new(denia_browser::BrowserManager::new(home.to_path_buf()));
+    let browser_hub: denia_tools::BrowserHub = browser.clone();
+    let system_prompt =
+        Arc::new(crate::system_prompt_store::SystemPromptState::load(home, Some(browser_hub.clone())));
     let file_history = Arc::new(crate::file_history::FileHistoryStore::new(home));
-    let (_prompt_default, tools) = denia_tools::default_shipped();
+    let tools = denia_tools::default_registry_with_browser(Some(browser_hub));
     let approval = Arc::new(ServerApprovalBridge::new(live.clone()));
     let driver = Arc::new(
         SessionDriver::new(
@@ -417,6 +422,7 @@ pub fn build_state(home: &Path, bound_remote: bool) -> Result<AppState, Box<dyn 
         workspaces,
         system_prompt,
         file_history,
+        browser,
         bound_remote,
     };
 

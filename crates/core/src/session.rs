@@ -389,11 +389,21 @@ pub fn derive_messages(events: &[SessionEnvelope]) -> Vec<ChatMessage> {
 
     let mut surface: Vec<SurfaceItem> = Vec::new();
     let mut unanswered: Vec<String> = Vec::new();
+    // 在等 tool-result 期间注入的带图用户消息(如 browser 截图):不能插在
+    // tool-call 与 tool-result 中间——多数 provider 校验二者必须相邻
+    // (MiniMax: "tool call result does not follow tool call")。图片暂存,
+    // 合并进紧随的 tool-result(wire 层发多模态 content)。
+    let mut pending_tool_images: Vec<crate::message::ImageData> = Vec::new();
 
     for envelope in events {
         let seq = envelope.seq;
         match &envelope.event {
             SessionEvent::UserMessage { text, images, .. } => {
+                if !unanswered.is_empty() && !images.is_empty() {
+                    pending_tool_images.extend(images.clone());
+                    // 事件不进 surface:图片由下一条 tool-result 携带。
+                    continue;
+                }
                 let message = if images.is_empty() {
                     ChatMessage::user(text)
                 } else {
@@ -406,13 +416,6 @@ pub fn derive_messages(events: &[SessionEnvelope]) -> Vec<ChatMessage> {
                     .iter()
                     .filter_map(|block| match block {
                         ContentBlock::Text { text } => Some(text.as_str()),
-                        _ => None,
-                    })
-                    .collect();
-                let reasoning: String = blocks
-                    .iter()
-                    .filter_map(|block| match block {
-                        ContentBlock::Reasoning { text } => Some(text.as_str()),
                         _ => None,
                     })
                     .collect();
@@ -439,11 +442,9 @@ pub fn derive_messages(events: &[SessionEnvelope]) -> Vec<ChatMessage> {
                 }
                 surface.push(SurfaceItem {
                     seq,
-                    message: ChatMessage::assistant(
-                        text,
-                        (!reasoning.is_empty()).then_some(reasoning),
-                        calls,
-                    ),
+                    // 模型历史剥离 reasoning_content:思考过程不回传 provider,
+                    // 省 token 且不影响后续决策;UI/日志仍保留完整 blocks。
+                    message: ChatMessage::assistant(text, None, calls),
                 });
             }
             SessionEvent::ToolResult {
@@ -459,10 +460,21 @@ pub fn derive_messages(events: &[SessionEnvelope]) -> Vec<ChatMessage> {
                         continue;
                     }
                 }
-                surface.push(SurfaceItem {
-                    seq,
-                    message: ChatMessage::tool_result(call_id, content),
-                });
+                if pending_tool_images.is_empty() {
+                    surface.push(SurfaceItem {
+                        seq,
+                        message: ChatMessage::tool_result(call_id, content),
+                    });
+                } else {
+                    // 带图合并:截图等工具图片挂到本条 tool-result 上,
+                    // wire 层把 content 升级为 text+image_url 多模态数组。
+                    let images = std::mem::take(&mut pending_tool_images);
+                    let mut merged = content.clone();
+                    merged.push_str("\n[附:工具产生的截图已附在本条结果]");
+                    let mut message = ChatMessage::tool_result(call_id, merged);
+                    message.images = images;
+                    surface.push(SurfaceItem { seq, message });
+                }
             }
             _ => {}
         }
@@ -521,6 +533,67 @@ mod tests {
             serde_json::to_string(&env).unwrap(),
             r#"{"seq":3,"time":1700000000003,"type":"system-prompt","turn":1,"step":1,"text":"你是 agent"}"#
         );
+    }
+
+#[test]
+    fn derive_messages_merges_tool_time_images_into_tool_result() {
+        let events = vec![
+            envelope(
+                1,
+                SessionEvent::UserMessage {
+                    text: "去截图".into(),
+                    injected: false,
+                    images: Vec::new(),
+                },
+            ),
+            envelope(
+                2,
+                SessionEvent::AssistantMessage {
+                    turn: 1,
+                    step: 1,
+                    blocks: vec![ContentBlock::ToolCall {
+                        id: "c1".into(),
+                        name: "browser".into(),
+                        arguments: "{}".into(),
+                    }],
+                    usage: None,
+                    interrupted: false,
+                    source_event_seqs: Vec::new(),
+                },
+            ),
+            // 截图注入:插在 tool-call 与 tool-result 之间(原 MiniMax 2013 的时序)
+            envelope(
+                3,
+                SessionEvent::UserMessage {
+                    text: "[harness] 浏览器截图已注入".into(),
+                    injected: true,
+                    images: vec![crate::message::ImageData {
+                        mime: "image/png".into(),
+                        data: "AAAA".into(),
+                    }],
+                },
+            ),
+            envelope(
+                4,
+                SessionEvent::ToolResult {
+                    turn: 1,
+                    step: 1,
+                    call_id: "c1".into(),
+                    content: "ok".into(),
+                    is_error: false,
+                    error: None,
+                    error_identity: None,
+                    meta: None,
+                    replaces: None,
+                },
+            ),
+        ];
+        let messages = derive_messages(&events);
+        // 期望: user → assistant(tool_call) → tool(带图) — injected 消息不再插队
+        assert_eq!(messages.len(), 3, "{messages:?}");
+        assert_eq!(messages[2].role, crate::message::ChatRole::Tool);
+        assert_eq!(messages[2].images.len(), 1, "截图应并入 tool-result: {messages:?}");
+        assert!(messages[2].content.contains("截图"));
     }
 
     #[test]
@@ -647,7 +720,7 @@ mod tests {
         assert_eq!(messages[0], ChatMessage::user("hi"));
         let assistant = &messages[1];
         assert_eq!(assistant.content, "running");
-        assert_eq!(assistant.reasoning_content.as_deref(), Some("hmm"));
+        assert_eq!(assistant.reasoning_content.as_deref(), None);
         assert_eq!(assistant.tool_calls.len(), 1);
         assert_eq!(
             messages[2],

@@ -8,8 +8,9 @@ use denia_system_prompt::{
     SystemPrompt, ToolProviderResult,
 };
 
+use crate::browser::BrowserHub;
 use crate::shell;
-use crate::ToolRegistry;
+use crate::{Tool, ToolRegistry};
 
 /// Register tool schemas, tool guidance sections, runtime facts, and variables.
 pub fn register_shipped_prompt(prompt: &mut SystemPrompt, tools: &ToolRegistry) -> Result<(), String> {
@@ -126,6 +127,26 @@ pub fn default_shipped() -> (SystemPrompt, ToolRegistry) {
     (prompt, tools)
 }
 
+/// Shipped pair + browser tool(`hub` 提供时,registry 与 prompt schemas 同步带上 browser)。
+///
+/// `default_shipped()` 的 prompt 在 `register_shipped_prompt` 里固化了当时 registry
+/// 的 schemas;此处对同一 prompt 追加 browser schema,保证模型可见与可执行一致。
+pub fn default_shipped_with_browser(hub: Option<BrowserHub>) -> (SystemPrompt, ToolRegistry) {
+    let (mut prompt, tools) = default_shipped();
+    if let Some(hub) = hub {
+        let tool = Arc::new(crate::BrowserTool::new(hub));
+        let schema = tool.schema().clone();
+        prompt.tools(move |_| ToolProviderResult {
+            schemas: vec![schema.clone()],
+            known_names: None,
+        });
+        let mut registry = tools;
+        registry.register(tool);
+        return (prompt, registry);
+    }
+    (prompt, tools)
+}
+
 /// 自定义系统提示词正文 + 同一套 shipped 工具与工具纪律段(不含单独的 harness:identity)。
 pub fn shipped_with_persona(persona_text: String) -> (SystemPrompt, ToolRegistry) {
     let tools = crate::default_registry();
@@ -138,6 +159,23 @@ pub fn shipped_with_persona(persona_text: String) -> (SystemPrompt, ToolRegistry
     );
     register_shipped_prompt(&mut prompt, &tools).expect("shipped prompt registrations are valid");
     (prompt, tools)
+}
+
+/// `shipped_with_persona` + browser tool(schema 同步进 prompt,registry 同步注册)。
+pub fn shipped_with_persona_and_browser(
+    persona_text: String,
+    hub: BrowserHub,
+) -> (SystemPrompt, ToolRegistry) {
+    let (mut prompt, tools) = shipped_with_persona(persona_text);
+    let tool = Arc::new(crate::BrowserTool::new(hub));
+    let schema = tool.schema().clone();
+    prompt.tools(move |_| ToolProviderResult {
+        schemas: vec![schema.clone()],
+        known_names: None,
+    });
+    let mut registry = tools;
+    registry.register(tool);
+    (prompt, registry)
 }
 
 fn runtime_context_text(context: &AssembleContext) -> String {
@@ -227,5 +265,34 @@ mod tests {
         assert!(assembly.sections.iter().any(|section| section.name == "tool:todo"));
         assert!(!render_context_snapshot(&assembly).is_empty());
         assert_eq!(assembly.tools.len(), 7);
+    }
+}
+
+#[cfg(test)]
+mod browser_prompt_tests {
+    use super::*;
+
+    #[test]
+    fn default_shipped_with_browser_includes_schema() {
+        // hub 需要 trait 对象;用 BrowserTool 侧的桥接实现 — 这里只验证 schema 进 prompt。
+        // 构造一个假的 BrowserExecute 实现即可。
+        struct FakeHub;
+        #[async_trait::async_trait]
+        impl crate::browser::BrowserExecute for FakeHub {
+            async fn execute(
+                &self,
+                _command: denia_browser::BrowserCommand,
+            ) -> denia_browser::CommandOutcome {
+                denia_browser::CommandOutcome::ok_value(serde_json::Value::Null, 0)
+            }
+        }
+        let hub: crate::BrowserHub = std::sync::Arc::new(FakeHub);
+        let (prompt, registry) = default_shipped_with_browser(Some(hub));
+        let assembly = prompt
+            .assemble(&denia_system_prompt::AssembleContext::default())
+            .expect("assemble");
+        let names: Vec<&str> = assembly.tools.iter().map(|tool| tool.name.as_str()).collect();
+        assert!(names.contains(&"browser"), "browser schema missing from prompt tools: {names:?}");
+        assert!(registry.get("browser").is_some(), "browser not registered");
     }
 }

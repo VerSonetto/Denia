@@ -1,4 +1,4 @@
-﻿/**
+/**
  * Console copy. Chinese is the key-set source of truth; `en` is typed
  * against `zh`, so a missing or extra English key is a compile error.
  */
@@ -8,6 +8,14 @@ const zh = {
   navSessions: '会话',
   navModels: '模型配置',
   navSettings: '设置',
+  navBrowser: '浏览器',
+  browserStart: '启动浏览器',
+  browserNewTab: '新标签页',
+  browserAddressHint: '输入网址,回车打开',
+  browserReload: '刷新',
+  browserPickElement: '拾取元素(点击画面中的元素)',
+  browserDialog: '页面弹窗',
+  browserLoading: '加载中…',
   connectionLost: '与服务器的连接断开,正在重试…',
 
   newSession: '新建会话',
@@ -356,6 +364,14 @@ const en: typeof zh = {
   navSessions: 'Sessions',
   navModels: 'Models',
   navSettings: 'Settings',
+  navBrowser: 'Browser',
+  browserStart: 'Launch browser',
+  browserNewTab: 'New tab',
+  browserAddressHint: 'Type a URL and press Enter',
+  browserReload: 'Reload',
+  browserPickElement: 'Pick element (click one on the page)',
+  browserDialog: 'Page dialog',
+  browserLoading: 'Loading…',
   connectionLost: 'Lost connection to the server, retrying…',
 
   newSession: 'New session',

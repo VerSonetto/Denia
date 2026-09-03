@@ -255,9 +255,28 @@ pub fn build_wire_messages(request: &GenerateRequest) -> Vec<WireMessage> {
                     debug_assert!(false, "tool message without tool_call_id dropped");
                     continue;
                 };
+                // 带图工具结果(如 browser 截图):content 用多模态数组,
+                // 与 user 消息的图片编码同一格式;纯文本保持字符串(最大兼容)。
+                let content = if message.images.is_empty() {
+                    serde_json::Value::String(message.content.clone())
+                } else {
+                    let mut parts = vec![serde_json::json!({
+                        "type": "text",
+                        "text": message.content,
+                    })];
+                    for image in &message.images {
+                        parts.push(serde_json::json!({
+                            "type": "image_url",
+                            "image_url": {
+                                "url": format!("data:{};base64,{}", image.mime, image.data)
+                            },
+                        }));
+                    }
+                    serde_json::Value::Array(parts)
+                };
                 out.push(WireMessage {
                     role: "tool",
-                    content: Some(serde_json::Value::String(message.content.clone())),
+                    content: Some(content),
                     reasoning_content: None,
                     tool_calls: None,
                     tool_call_id: Some(call_id.clone()),

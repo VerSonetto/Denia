@@ -17,6 +17,7 @@ denia-llm = { workspace = true }
 denia-tools = { workspace = true }
 denia-session = { workspace = true }
 denia-agent-loop = { workspace = true }
+denia-browser = { workspace = true }
 denia-system-prompt = { workspace = true }
 
 tokio = { workspace = true }

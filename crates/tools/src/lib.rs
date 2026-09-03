@@ -6,6 +6,7 @@
 //! result.
 
 mod bash;
+mod browser;
 mod edit;
 mod files;
 pub mod glob;
@@ -22,11 +23,15 @@ use denia_core::tool::ToolSchema;
 use tokio_util::sync::CancellationToken;
 
 pub use bash::BashTool;
+pub use browser::{BrowserExecute, BrowserHub, BrowserTool};
 pub use edit::EditTool;
 pub use files::{ReadFileTool, WriteFileTool};
 pub use glob::GlobTool;
 pub use grep::GrepTool;
-pub use prompt::{default_shipped, register_shipped_prompt, shipped_with_persona};
+pub use prompt::{
+    default_shipped, default_shipped_with_browser, register_shipped_prompt,
+    shipped_with_persona, shipped_with_persona_and_browser,
+};
 pub use todo::TodoWriteTool;
 
 pub mod permission;
@@ -123,6 +128,15 @@ pub fn default_registry() -> ToolRegistry {
     registry.register(Arc::new(GlobTool::default()));
     registry.register(Arc::new(GrepTool::default()));
     registry.register(Arc::new(EditTool::default()));
+    registry
+}
+
+/// Shipped tool set + optional browser tool(`hub` 提供时注册 `browser`)。
+pub fn default_registry_with_browser(hub: Option<BrowserHub>) -> ToolRegistry {
+    let mut registry = default_registry();
+    if let Some(hub) = hub {
+        registry.register(Arc::new(BrowserTool::new(hub)));
+    }
     registry
 }
 
