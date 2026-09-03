@@ -10,3 +10,6 @@
 
 # 一次性 esbuild 调试打包产物(由 web/scripts/make-bundle.mjs 生成)
 /web/scripts/app-bundle.mjs
+
+# agent 本地工作约定(不入库)
+/AGENTS.md
