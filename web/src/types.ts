@@ -150,6 +150,8 @@ export type TurnEndReason =
   | { kind: 'aborted' }
   | { kind: 'max-tokens' }
   | { kind: 'error'; failure: LlmFailure }
+  // 崩溃孤儿轮次的合成闭合(服务端 close_orphaned_turn 生成)。
+  | { kind: 'interrupted' }
 
 /** One entry in the session's todo list (mirrors the Rust `TodoItem`). */
 export interface TodoItem {
