@@ -1,149 +1,177 @@
 import { useEffect, useRef, useState } from 'react'
+import type { ContextBreakdown, ContextPressure } from '../api'
 import { t } from '../i18n'
 
-/** 一段上下文的展示行:名称、占比条形与 token 数(服务端 fold 或 provider 精确值)。 */
-export interface ContextPart {
-  key: string
-  label: string
-  /** token 数。 */
-  tokens: number
-  /** 条形颜色(用于面板)。 */
-  color: string
+/** 从压力投影解析有界展示占用;分子或容量缺任一项即返回 null(不渲染)。
+ * 对齐 dsh `contextOccupancy`:分子取 `projectedTokens ?? pressureTokens`。 */
+export interface ContextOccupancy {
+  percent: number
+  usedTokens: number
+  contextWindow: number
 }
 
-const PART_COLORS = ['#6187d8', '#7aa86f', '#d8a35f', '#9d7bd8', '#c66f6f']
+export function contextOccupancy(
+  pressure: ContextPressure | undefined,
+): ContextOccupancy | null {
+  const usedTokens = pressure?.projectedTokens ?? pressure?.pressureTokens
+  if (usedTokens === undefined || pressure?.contextWindow === undefined) return null
+  return {
+    percent: Math.min(100, Math.round((usedTokens / pressure.contextWindow) * 100)),
+    usedTokens,
+    contextWindow: pressure.contextWindow,
+  }
+}
+
+/** 标记占用句子的拆分槽:面板标题保留语序,每个 locale 自有词序
+ * (`45% of context used` / `上下文已用 45%`)。 */
+const READING_SLOT = '\u0000'
+
+/** 图例行,按分段条顺序;颜色类同时承担色块与分段着色。 */
+const ROWS = [
+  { key: 'systemTokens', label: 'contextSystem', color: 'cm-color-system' },
+  { key: 'toolsTokens', label: 'contextTools', color: 'cm-color-tools' },
+  { key: 'messageTokens', label: 'contextMessages', color: 'cm-color-messages' },
+] as const
+
+/** 紧凑 token 数:不足 1K 原样,其后 K / M;<100 保留一位小数。 */
+function formatTokens(value: number): string {
+  const scaled = (candidate: number): string =>
+    candidate >= 100 ? String(Math.round(candidate)) : String(Math.round(candidate * 10) / 10)
+  if (value < 1_000) return String(value)
+  if (value < 1_000_000) return t('numberThousand', { value: scaled(value / 1_000) })
+  return t('numberMillion', { value: scaled(value / 1_000_000) })
+}
 
 /**
- * 上下文窗口使用情况:圆环(总占用比例)+ 点击弹出的悬浮面板
- * (各组成部分占比与 token 数)。
- *
- * `displayTokens` 与 `displayAnchored` 来自 `ContextPressure`(服务端 dsh 同
- * 口径的 `contextPressure` 投影):有 provider 锚点时,`pressureTokens` =
- * `anchorTokens` + 锚点后的启发式增量;无锚点时是 breakdown 之和。
+ * 输入框发送键旁的上下文占用圆环(dsh `ContextMeter` 同款交互):
+ * 14px 圆环显示 provider 口径占用百分比,点击弹出启发式拆分面板
+ * (系统提示词 / 工具 / 对话消息)。provider 未报数或无路由容量时不渲染。
  */
 export function ContextRing({
-  contextWindow,
-  parts,
-  displayTokens,
-  displayAnchored = false,
+  pressure,
+  breakdown,
 }: {
-  /** 当前模型的上下文窗口(token);为空时只显示估算值。 */
-  contextWindow?: number
-  parts: ContextPart[]
-  displayTokens: number
-  displayAnchored?: boolean
+  /** 服务端 `contextPressure` 投影(锚点 + 表面增量 + 路由容量)。 */
+  pressure?: ContextPressure
+  /** 服务端启发式拆分(系统提示词 / 工具 / 消息)。 */
+  breakdown?: ContextBreakdown
 }) {
   const [open, setOpen] = useState(false)
-  const panelRef = useRef<HTMLDivElement | null>(null)
-  const wrapRef = useRef<HTMLDivElement | null>(null)
+  const rootRef = useRef<HTMLSpanElement | null>(null)
+  const context = contextOccupancy(pressure)
+  const available = context !== null
 
-  const ratio = contextWindow && contextWindow > 0
-    ? Math.min(1, displayTokens / contextWindow)
-    : null
-  const freeTokens = contextWindow && contextWindow > 0
-    ? Math.max(0, contextWindow - displayTokens)
-    : null
+  // 模型切换可能暂时移除容量而本组件仍挂载:面板随之关闭,不留陈旧 UI。
+  useEffect(() => {
+    if (!available && open) setOpen(false)
+  }, [available, open])
 
-  const radius = 6
+  // 打开期间挂一个文档级监听:外点 / Escape 关闭。
+  useEffect(() => {
+    if (!open || !available) return
+    const onPointerDown = (event: PointerEvent): void => {
+      if (event.target instanceof Node && rootRef.current?.contains(event.target) === true) return
+      setOpen(false)
+    }
+    const onKeyDown = (event: KeyboardEvent): void => {
+      if (event.key === 'Escape') setOpen(false)
+    }
+    document.addEventListener('pointerdown', onPointerDown)
+    document.addEventListener('keydown', onKeyDown)
+    return () => {
+      document.removeEventListener('pointerdown', onPointerDown)
+      document.removeEventListener('keydown', onKeyDown)
+    }
+  }, [available, open])
+
+  if (context === null) return null
+  const percent = context.percent
+  const reading = `${percent}%`
+  const [headBefore = '', headAfter = ''] = t('contextAria', { percent: READING_SLOT })
+    .split(READING_SLOT)
+    .map((part) => part.trim())
+
+  // 分段条总长保持 provider 精确百分比;启发式拆分只决定彩色部分的配比。
+  // 零宽段直接丢弃:.segment 的 min-width 会让 0% 占用也画出满条。
+  const breakdownTotal =
+    breakdown === undefined
+      ? 0
+      : breakdown.systemTokens + breakdown.toolsTokens + breakdown.messageTokens
+  const parts =
+    breakdown === undefined || breakdownTotal === 0
+      ? [{ key: 'total', color: undefined, width: percent }]
+      : ROWS.map((row) => ({
+          key: row.key,
+          color: row.color,
+          width: (percent * breakdown[row.key]) / breakdownTotal,
+        }))
+  const segments = parts.filter((part) => part.width > 0)
+
+  // 圆环几何:14px viewBox,2px 描边。
+  const radius = 5.5
   const circumference = 2 * Math.PI * radius
 
-  // 点击外部关闭。
-  useEffect(() => {
-    if (!open) return
-    const onPointer = (event: PointerEvent) => {
-      if (!wrapRef.current?.contains(event.target as Node)) setOpen(false)
-    }
-    window.addEventListener('pointerdown', onPointer)
-    return () => window.removeEventListener('pointerdown', onPointer)
-  }, [open])
-
   return (
-    <div className="context-ring-wrap" ref={wrapRef}>
+    <span className="cm-root" ref={rootRef}>
       <button
         type="button"
-        className={`context-ring-btn${open ? ' open' : ''}`}
-        title={
-          displayAnchored
-            ? `${t('contextRingLabel')} · ${t('contextAnchored')}`
-            : t('contextRingLabel')
-        }
+        className="cm-trigger"
+        title={t('contextAria', { percent: reading })}
+        aria-label={t('contextAria', { percent: reading })}
+        aria-haspopup="dialog"
         aria-expanded={open}
-        onClick={() => setOpen(!open)}
+        onClick={() => {
+          setOpen(!open)
+        }}
       >
-        <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden>
+        <svg viewBox="0 0 14 14" width="14" height="14" aria-hidden>
+          <circle className="cm-track" cx="7" cy="7" r={radius} />
           <circle
-            cx="8"
-            cy="8"
+            className="cm-fill"
+            cx="7"
+            cy="7"
             r={radius}
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="1.8"
-            opacity="0.15"
+            strokeDasharray={`${(circumference * percent) / 100} ${circumference}`}
+            transform="rotate(-90 7 7)"
           />
-          {ratio !== null && (
-            <circle
-              cx="8"
-              cy="8"
-              r={radius}
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="1.8"
-              strokeLinecap="round"
-              strokeDasharray={`${circumference * ratio} ${circumference}`}
-              transform="rotate(-90 8 8)"
-            />
-          )}
         </svg>
       </button>
       {open && (
-        <div className="context-panel" ref={panelRef} role="dialog" aria-label={t('contextPanelTitle')}>
-          <div className="context-panel-head">
-            <span className="context-panel-title">{t('contextPanelTitle')}</span>
-            <span className="context-panel-total">
-              {contextWindow && contextWindow > 0
-                ? `${(ratio! * 100).toFixed(1)}%`
-                : t('contextTokens', { n: displayTokens })}
+        <div className="cm-panel" role="dialog" aria-label={t('contextUsed')}>
+          <div className="cm-header">
+            {/* 空侧经 `.cm-headline:empty` 塌陷,不需要先导(或后随)文字
+                的语序不占标题间隙。 */}
+            <span className="cm-headline">{headBefore}</span>
+            <span className="cm-percent">{reading}</span>
+            <span className="cm-headline">{headAfter}</span>
+            <span className="cm-figures">
+              {`~${formatTokens(context.usedTokens)} / ${formatTokens(context.contextWindow)}`}
             </span>
           </div>
-          <div className="context-panel-rows">
-            {parts.map((part, index) => {
-              const partRatio = displayTokens > 0 ? part.tokens / displayTokens : 0
-              return (
-                <div className="context-row" key={part.key}>
-                  <span
-                    className="context-dot"
-                    style={{ background: part.color ?? PART_COLORS[index % PART_COLORS.length] }}
-                  />
-                  <span className="context-name">{part.label}</span>
-                  <span className="context-bar">
-                    <span
-                      className="context-bar-fill"
-                      style={{
-                        width: `${(partRatio * 100).toFixed(1)}%`,
-                        background: part.color ?? PART_COLORS[index % PART_COLORS.length],
-                      }}
-                    />
-                  </span>
-                  <span className="context-num">
-                    {t('contextTokens', { n: part.tokens })}
-                  </span>
+          <div className="cm-bar">
+            {segments.map((segment) => (
+              <div
+                key={segment.key}
+                className={segment.color === undefined ? 'cm-segment' : `cm-segment ${segment.color}`}
+                style={{ width: `${segment.width}%` }}
+              />
+            ))}
+          </div>
+          {breakdown !== undefined && (
+            <dl className="cm-rows">
+              {ROWS.map((row) => (
+                <div key={row.key} className="cm-row">
+                  <dt>
+                    <span className={`cm-swatch ${row.color}`} aria-hidden />
+                    {t(row.label)}
+                  </dt>
+                  <dd>{`~${formatTokens(breakdown[row.key])}`}</dd>
                 </div>
-              )
-            })}
-            {freeTokens !== null && (
-              <div className="context-row free">
-                <span className="context-dot" style={{ background: 'var(--label-caption)' }} />
-                <span className="context-name">{t('contextFree')}</span>
-                <span className="context-bar" />
-                <span className="context-num">{t('contextTokens', { n: freeTokens })}</span>
-              </div>
-            )}
-          </div>
-          <div className="context-panel-hint">
-            {displayAnchored ? t('contextAnchored') : t('contextEstimate')}
-          </div>
+              ))}
+            </dl>
+          )}
         </div>
       )}
-    </div>
+    </span>
   )
 }

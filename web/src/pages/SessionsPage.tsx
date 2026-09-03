@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type ClipboardEvent, type KeyboardEvent, type WheelEvent } from 'react'
+import { useCallback, useEffect, useRef, useState, type ClipboardEvent, type KeyboardEvent, type WheelEvent } from 'react'
 import * as api from '../api'
 import { optimizePromptText } from '../promptOptimizer'
 import {
@@ -26,7 +26,7 @@ import { ComposerModelMenu } from '../components/ComposerModelMenu'
 import { PermissionSelector, loadPermission, type PermissionLevel } from '../components/PermissionSelector'
 import { ApprovalDialog, type ApprovalDecision, type ApprovalRequest } from '../components/ApprovalDialog'
 import { ConfirmDialog } from '../components/ConfirmDialog'
-import { ContextRing, type ContextPart } from '../components/ContextRing'
+import { ContextRing } from '../components/ContextRing'
 import {
   BrandMark,
   IconBranch,
@@ -292,14 +292,6 @@ export default function SessionsPage({
     activeId && (hasStarted || sending || hasHistory || pendingMessages.length > 0),
   )
   const phase = showTranscript ? 'active' : 'hero'
-
-  // 当前选中模型的上下文窗口,供状态栏显示占用环。
-  const activeContextWindow = (() => {
-    if (!catalog || !selection) return undefined
-    const group = catalog.groups.find((g) => g.id === selection.provider)
-    const model = group?.models.find((m) => m.id === selection.model)
-    return model?.contextWindow ?? group?.models[0]?.contextWindow
-  })()
 
   /* ---- 粘贴图片 / 附件上传 / 权限与审批 ---- */
 
@@ -754,7 +746,7 @@ export default function SessionsPage({
     }
   }, [activeId, rewindReq, rewindBusy])
 
-  /* ---- 上下文窗口占用:全部由服务端 token-meter fold(锚点 + 启发式) ---- */
+  /* ---- 上下文窗口占用:全部由服务端 token-meter fold(对齐 dsh contextPressure 投影) ---- */
 
   const [context, setContext] = useState<api.ContextBreakdownResponse | null>(null)
 
@@ -773,43 +765,6 @@ export default function SessionsPage({
     return () => clearInterval(id)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeId])
-
-  // 圆环面板占比 = pressure(锚点 + 启发式)/ window;无锚点时也用 breakdown 之和,
-  // 与 dsh `contextPressure` 一致(不要求 breakdown 之和等于 pressure)。
-  const displayTokens = context?.pressure.pressureTokens ?? 0
-  const displayAnchored = context?.pressure.anchored ?? false
-
-  const contextParts = useMemo<ContextPart[]>(() => {
-    if (!context) return []
-    const breakdown = context.breakdown
-    const parts: ContextPart[] = []
-    if (breakdown.systemTokens > 0) {
-      parts.push({
-        key: 'system',
-        label: t('contextSystem'),
-        tokens: breakdown.systemTokens,
-        color: '#6187d8',
-      })
-    }
-    if (breakdown.toolsTokens > 0) {
-      parts.push({
-        key: 'tools',
-        label: t('contextTools'),
-        tokens: breakdown.toolsTokens,
-        color: '#7aa86f',
-      })
-    }
-    if (breakdown.messageTokens > 0) {
-      parts.push({
-        key: 'messages',
-        label: t('contextOther'),
-        tokens: breakdown.messageTokens,
-        color: '#d8a35f',
-      })
-    }
-    return parts
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [context, activeId])
 
   const showAttachRow =
     pastedImages.length > 0 || attachments.length > 0 || trajQuotes.length > 0
@@ -1149,12 +1104,7 @@ export default function SessionsPage({
               <IconSparkles size={16} />
             )}
           </button>
-          <ContextRing
-            contextWindow={activeContextWindow}
-            parts={contextParts}
-            displayTokens={displayTokens}
-            displayAnchored={displayAnchored}
-          />
+          <ContextRing pressure={context?.pressure} breakdown={context?.breakdown} />
           {primaryStops ? (
             <button
               type="button"
@@ -1301,11 +1251,7 @@ export default function SessionsPage({
               {phase === 'active' && <TodoPanel todos={todos} />}
               {composerCard}
               {phase === 'active' && (
-                <StatsBar
-                  nodes={transcriptNodes}
-                  running={running}
-                  contextWindow={activeContextWindow}
-                />
+                <StatsBar nodes={transcriptNodes} running={running} />
               )}
             </div>
           </div>

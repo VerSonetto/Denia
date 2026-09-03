@@ -6,18 +6,16 @@ import { cacheHitPercent, deriveStats, formatCompactDuration, formatTokens } fro
 /**
  * 输入框下方的会话状态栏 —— Denia 自有设计:分段胶囊条。
  * 每个统计维度一个迷你胶囊(图标+数值),横向排列;
- * 运行中时长胶囊带呼吸灯实时跳秒;token 胶囊带微缩上下文占用环。
+ * 运行中时长胶囊带呼吸灯实时跳秒。
+ * 上下文占用只住在输入框的占用圆环(ContextRing),一处事实一处家。
  * 无数据的胶囊整组消失;全部无数据时不渲染。
  */
 export const StatsBar = memo(function StatsBar({
   nodes,
   running,
-  contextWindow,
 }: {
   nodes: TranscriptNode[]
   running: boolean
-  /** 当前模型的上下文窗口;有值时 token 胶囊显示占用环。 */
-  contextWindow?: number
 }) {
   const stats = useMemo(() => deriveStats(nodes), [nodes])
 
@@ -60,7 +58,6 @@ export const StatsBar = memo(function StatsBar({
           input={stats.inputTokens}
           output={stats.outputTokens}
           cacheRead={stats.cacheReadTokens}
-          contextWindow={contextWindow}
         />
       )}
       {(() => {
@@ -104,17 +101,15 @@ function Pill({ label, title, mono }: { label: string; title: string; mono?: boo
   )
 }
 
-/** token 胶囊:输入/输出 + 可选的上下文占用微缩环。 */
+/** token 胶囊:输入/输出 + 缓存命中部分。 */
 function TokenPill({
   input,
   output,
   cacheRead,
-  contextWindow,
 }: {
   input: number
   output: number
   cacheRead: number
-  contextWindow?: number
 }) {
   const label = `${formatTokens(input)}↑ ${formatTokens(output)}↓`
   const cachePart = cacheRead > 0 ? t('statsCachePart', { cache: formatTokens(cacheRead) }) : ''
@@ -123,46 +118,9 @@ function TokenPill({
     output: formatTokens(output),
     cache: cachePart,
   })
-
-  // 上下文占用环:输入 token 占窗口比例。
-  const ratio = contextWindow && contextWindow > 0 ? Math.min(1, input / contextWindow) : null
   return (
     <span className="stats-pill" title={hint}>
-      {ratio !== null && <MiniRing ratio={ratio} />}
       <span className="stats-mono">{label}</span>
     </span>
-  )
-}
-
-/** 微缩进度环:12px SVG,显示上下文占用比例。 */
-function MiniRing({ ratio }: { ratio: number }) {
-  const r = 5
-  const circumference = 2 * Math.PI * r
-  const filled = circumference * ratio
-  return (
-    <svg
-      width="12"
-      height="12"
-      viewBox="0 0 12 12"
-      aria-hidden
-      style={{ flex: 'none', display: 'block' }}
-    >
-      <circle
-        cx="6" cy="6" r={r}
-        fill="none"
-        stroke="currentColor"
-        strokeWidth="1.5"
-        opacity="0.15"
-      />
-      <circle
-        cx="6" cy="6" r={r}
-        fill="none"
-        stroke="currentColor"
-        strokeWidth="1.5"
-        strokeLinecap="round"
-        strokeDasharray={`${filled} ${circumference - filled}`}
-        transform="rotate(-90 6 6)"
-      />
-    </svg>
   )
 }

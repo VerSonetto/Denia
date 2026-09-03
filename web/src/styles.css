@@ -3586,118 +3586,162 @@ button.btn.form-action {
   }
 }
 
-.context-ring-wrap {
+/* ---------- context ring (cm) ---------- */
+
+.cm-root {
   position: relative;
   display: inline-flex;
+  flex: none;
 }
 
-.context-ring-btn {
+.cm-trigger {
   display: inline-flex;
   align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
   padding: 0;
   border: none;
-  border-radius: 50%;
+  border-radius: var(--r-sm);
   background: transparent;
-  color: var(--label-secondary);
   cursor: pointer;
+  transition: background 0.15s var(--ease);
 }
 
-.context-ring-btn:hover,
-.context-ring-btn.open {
-  color: var(--label-primary);
+.cm-trigger:hover {
+  background: var(--hover-fill);
 }
 
-.context-panel {
+.cm-trigger:active {
+  background: var(--active-fill);
+}
+
+.cm-trigger:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.cm-track {
+  fill: none;
+  stroke: var(--border-l3);
+  stroke-width: 2;
+}
+
+.cm-fill {
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 2;
+  stroke-linecap: round;
+  transition: stroke-dasharray 0.3s var(--ease);
+}
+
+.cm-panel {
   position: absolute;
   right: 0;
   bottom: calc(100% + 10px);
-  z-index: 45;
-  width: min(340px, calc(100vw - 40px));
-  padding: 12px 14px;
-  border: 1px solid var(--border-l2);
-  border-radius: 12px;
-  background: var(--bg-layer-1);
-  box-shadow: var(--shadow-lv2);
+  z-index: 50;
+  width: 264px;
+  padding: 12px 14px 10px;
+  background: var(--bg-layer-2);
+  border: 1px solid var(--border-l1);
+  border-radius: var(--r-md);
+  box-shadow: var(--shadow-float);
 }
 
-.context-panel-head {
+.cm-header {
   display: flex;
   align-items: baseline;
-  justify-content: space-between;
-  margin-bottom: 10px;
+  gap: 4px;
+  font-size: 12px;
 }
 
-.context-panel-title {
-  font-size: 13px;
-  font-weight: 600;
+.cm-headline {
+  color: var(--label-secondary);
+}
+
+.cm-headline:empty {
+  display: none;
+}
+
+.cm-percent {
+  font-size: 14px;
+  font-weight: 700;
   color: var(--label-primary);
-}
-
-.context-panel-total {
-  font-size: 12px;
-  color: var(--label-secondary);
   font-variant-numeric: tabular-nums;
 }
 
-.context-panel-rows {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-
-.context-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  font-size: 12px;
-  color: var(--label-secondary);
-}
-
-.context-row.free {
-  margin-top: 2px;
-  padding-top: 6px;
-  border-top: 1px dashed var(--border-l2);
-}
-
-.context-dot {
-  flex: none;
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-}
-
-.context-name {
-  flex: none;
-  min-width: 76px;
-}
-
-.context-bar {
-  flex: 1;
-  height: 6px;
-  border-radius: 3px;
-  background: var(--bg-hover);
-  overflow: hidden;
-}
-
-.context-bar-fill {
-  display: block;
-  height: 100%;
-  border-radius: 3px;
-  min-width: 2px;
-}
-
-.context-num {
-  flex: none;
-  font-size: 11.5px;
-  font-variant-numeric: tabular-nums;
+.cm-figures {
+  margin-left: auto;
+  font-family: var(--font-mono);
+  font-size: 11px;
   color: var(--label-tertiary);
+  font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
 
-.context-panel-hint {
-  margin-top: 8px;
+.cm-bar {
+  display: flex;
+  height: 5px;
+  margin-top: 10px;
+  overflow: hidden;
+  border-radius: var(--r-pill);
+  background: var(--accent-soft);
+}
+
+/* 无启发式拆分时整条走默认色;拆分段的配比由颜色类覆盖。 */
+.cm-segment {
+  height: 100%;
+  background: var(--accent);
+}
+
+.cm-color-system {
+  background: var(--label-primary);
+}
+
+.cm-color-tools {
+  background: var(--label-secondary);
+}
+
+.cm-color-messages {
+  background: var(--label-tertiary);
+}
+
+.cm-rows {
+  margin: 10px 0 0;
+  padding: 0;
+  border-top: 1px solid var(--border-l1);
+}
+
+.cm-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 5px 0 0;
+  font-size: 12px;
+}
+
+.cm-row dt {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  color: var(--label-secondary);
+}
+
+.cm-row dd {
+  margin: 0;
+  font-family: var(--font-mono);
   font-size: 11px;
-  color: var(--label-caption);
+  color: var(--label-tertiary);
+  font-variant-numeric: tabular-nums;
+}
+
+.cm-swatch {
+  width: 8px;
+  height: 8px;
+  flex: none;
+  border-radius: 2px;
 }
 
 /* ---------- settings modal (setm) ---------- */
