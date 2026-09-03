@@ -22,6 +22,22 @@ pub fn register_shipped_prompt(prompt: &mut SystemPrompt, tools: &ToolRegistry) 
         order: 10,
         text: PromptText::Dynamic(Arc::new(runtime_context_text)),
     })?;
+    prompt.context(PromptContext {
+        name: "harness:permission".to_string(),
+        order: 11,
+        text: PromptText::Dynamic(Arc::new(|context| {
+            let mode = context.permission_mode.as_deref().unwrap_or("workspace-write");
+            let approval = context.approval_policy.as_deref().unwrap_or("ask");
+            match approval {
+                "never" => format!(
+                    "当前文件策略:{mode}。审批提示已禁用:需要审批的操作会被自动拒绝——不要请求沙箱升权(不要设置 sandbox_permissions)。"
+                ),
+                _ => format!(
+                    "当前文件策略:{mode}。审批策略:ask。被策略拒绝的操作可以携带 sandbox_permissions 与 justification 重试一次;该重试会弹出用户审批。"
+                ),
+            }
+        })),
+    })?;
 
     prompt.section(PromptSection {
         name: "tool:bash".to_string(),
@@ -201,6 +217,7 @@ mod tests {
                 cwd: Some("/tmp/ws".to_string()),
                 model: Some("mock".to_string()),
                 provider: Some("mock".to_string()),
+                ..Default::default()
             })
             .unwrap();
         let rendered = render_prompt(&assembly);

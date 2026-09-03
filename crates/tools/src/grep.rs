@@ -363,6 +363,7 @@ fn memchr(needle: u8, haystack: &[u8]) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use denia_core::session::PermissionMode;
     use std::io::Write as _;
     use std::path::PathBuf;
     use std::time::Instant;
@@ -388,6 +389,8 @@ mod tests {
             vision_supported: true,
             emit_event: None,
             file_history: None,
+            permission_mode: PermissionMode::WorkspaceWrite,
+            permission_override: None,
         }
     }
 

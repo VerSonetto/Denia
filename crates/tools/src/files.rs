@@ -5,9 +5,11 @@
 //! 与 DSH 的"读图工具"一致 —— 只是这里复用 read_file 一个入口。
 
 use async_trait::async_trait;
+use denia_core::session::PermissionMode;
 use denia_core::tool::ToolSchema;
 use serde::Deserialize;
 
+use crate::permission::{denial_marker, escalation_hint};
 use crate::{Tool, ToolContext, ToolOutput, parse_args_lenient, resolve_within, truncate};
 
 const READ_CAP: usize = 256_000;
@@ -208,7 +210,16 @@ impl WriteFileTool {
                     "type": "object",
                     "properties": {
                         "path": { "type": "string" },
-                        "content": { "type": "string" }
+                        "content": { "type": "string" },
+                        "sandbox_permissions": {
+                            "type": "string",
+                            "enum": ["workspace-write", "danger-full-access"],
+                            "description": "The wider sandbox mode this file operation needs. Only valid as a one-shot retry of an operation the sandbox just denied; requires justification and user approval."
+                        },
+                        "justification": {
+                            "type": "string",
+                            "description": "Required with sandbox_permissions: one sentence for the user explaining why this exact file operation needs the wider access."
+                        }
                     },
                     "required": ["path", "content"]
                 }),
@@ -239,10 +250,31 @@ impl Tool for WriteFileTool {
                 };
             }
         };
-        let path = match resolve_within(&ctx.cwd, &args.path, ctx.confined) {
+        let effective = ctx.effective_permission();
+        if effective == PermissionMode::ReadOnly {
+            return ToolOutput {
+                content: format!(
+                    "{}\n{}",
+                    denial_marker(effective),
+                    escalation_hint("operation")
+                ),
+                is_error: true,
+            };
+        }
+        let path = match resolve_within(&ctx.cwd, &args.path, false) {
             Ok(path) => path,
             Err(message) => return ToolOutput { content: message, is_error: true },
         };
+        if effective == PermissionMode::WorkspaceWrite && !path.starts_with(&ctx.cwd) {
+            return ToolOutput {
+                content: format!(
+                    "{}\n{}",
+                    denial_marker(effective),
+                    escalation_hint("operation")
+                ),
+                is_error: true,
+            };
+        }
         if let Some(parent) = path.parent() {
             if let Err(error) = std::fs::create_dir_all(parent) {
                 return ToolOutput {
@@ -288,6 +320,8 @@ mod tests {
             vision_supported: true,
             emit_event: None,
             file_history: None,
+            permission_mode: PermissionMode::WorkspaceWrite,
+            permission_override: None,
         };
         (tempfile_like::TempDir(dir), context)
     }
@@ -327,6 +361,25 @@ mod tests {
             .await;
         assert!(!read.is_error);
         assert_eq!(read.content, "hello harness");
+    }
+
+    #[tokio::test]
+    async fn read_only_denies_write_until_override() {
+        let (_guard, mut ctx) = workspace();
+        ctx.permission_mode = PermissionMode::ReadOnly;
+        let writer = WriteFileTool::new();
+        let denied = writer
+            .execute(r#"{"path":"a.txt","content":"x"}"#, &ctx)
+            .await;
+        assert!(denied.is_error, "{}", denied.content);
+        assert!(denied.content.contains("[sandbox: file access denied under read-only mode]"), "{}", denied.content);
+
+        // 一次性升权为完整权限后同一次调用可写。
+        ctx.permission_override = Some(PermissionMode::DangerFullAccess);
+        let allowed = writer
+            .execute(r#"{"path":"a.txt","content":"x"}"#, &ctx)
+            .await;
+        assert!(!allowed.is_error, "{}", allowed.content);
     }
 
     #[tokio::test]
@@ -384,6 +437,8 @@ mod tests {
                 vision_supported: true,
                 emit_event: Some(Arc::new(move |event| emitted.lock().unwrap().push(event))),
                 file_history: None,
+                permission_mode: PermissionMode::WorkspaceWrite,
+                permission_override: None,
             };
             let reader = ReadFileTool::new();
             let out = reader.execute(r#"{"path":"pixel.png"}"#, &ctx).await;
@@ -410,6 +465,8 @@ mod tests {
             vision_supported: false,
             emit_event: None,
             file_history: None,
+            permission_mode: PermissionMode::WorkspaceWrite,
+            permission_override: None,
         };
         let reader = ReadFileTool::new();
         let out = reader.execute(r#"{"path":"pixel.png"}"#, &ctx).await;

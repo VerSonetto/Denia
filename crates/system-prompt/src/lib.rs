@@ -65,6 +65,10 @@ pub struct AssembleContext {
     pub cwd: Option<String>,
     pub model: Option<String>,
     pub provider: Option<String>,
+    /// 当前会话权限模式(抄 dsh sandbox policy context)。
+    pub permission_mode: Option<String>,
+    /// 当前会话审批策略(抄 dsh approval policy context)。
+    pub approval_policy: Option<String>,
 }
 
 /// Audience for a system-prompt section.

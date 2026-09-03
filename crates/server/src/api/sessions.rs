@@ -20,7 +20,8 @@ use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use denia_core::config::ModelSelection;
-use denia_core::session::{SessionEnvelope, SessionEvent};
+use denia_core::session::{ApprovalOutcome, PermissionMode, SessionEnvelope, SessionEvent};
+use denia_tools::permission::parse_permission_mode;
 use futures::StreamExt;
 use serde::Deserialize;
 use serde_json::json;
@@ -39,6 +40,8 @@ pub fn router() -> Router<Arc<AppState>> {
         )
         .route("/api/sessions/{id}/prompt", post(prompt_session))
         .route("/api/sessions/{id}/cancel", post(cancel_session))
+        .route("/api/sessions/{id}/permission", axum::routing::put(set_session_permission))
+        .route("/api/sessions/{id}/approvals/{request_id}", post(answer_approval))
         .route("/api/sessions/{id}/fork", post(fork_session))
         .route("/api/sessions/{id}/follow", get(follow_session))
         .route("/api/sessions/{id}/context-breakdown", get(context_breakdown))
@@ -118,6 +121,10 @@ async fn create_session(
     let session = state
         .sessions
         .create(&cwd, sandbox)
+        .map_err(ApiError::from_session)?;
+    // 新会话固定写入默认权限事件,让前端/回放都能读到当前档位。
+    session
+        .set_permission_mode(PermissionMode::WorkspaceWrite)
         .map_err(ApiError::from_session)?;
     if let Some(ws) = &workspace {
         // 会话头 cwd == 工作区路径(构造保证);账本 prepend。attach 失败
@@ -402,6 +409,96 @@ async fn cancel_session(
     if let Some(token) = live.cancel.lock().unwrap().take() {
         token.cancel();
     }
+    // 顺带结算挂起的审批,driver 的 select 也能通过 cancel token 退出。
+    {
+        let mut pending = live
+            .pending_approvals
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        for tx in pending.drain() {
+            let _ = tx.1.send(ApprovalOutcome::Cancelled);
+        }
+    }
+    Ok(Json(json!({ "ok": true })))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PermissionBody {
+    mode: String,
+}
+
+/// 切换当前会话的权限预设(抄 dsh `/permission <preset>` 的写路径)。
+/// 事件落日志并通过 SSE 广播;driver 在下一次工具调用时读取新模式。
+async fn set_session_permission(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(body): Json<PermissionBody>,
+) -> Result<impl IntoResponse, ApiError> {
+    let mode = parse_permission_mode(&body.mode).ok_or_else(|| {
+        ApiError::bad_request(
+            "permission/unknown-mode",
+            format!(
+                "unknown permission mode '{}' (expected read-only, workspace-write, or danger-full-access)",
+                body.mode
+            ),
+        )
+    })?;
+    let live = state
+        .live
+        .get_or_load(&state.sessions, &id)
+        .map_err(ApiError::from_session)?;
+    live.session
+        .set_permission_mode(mode)
+        .map_err(ApiError::from_session)?;
+    Ok(Json(json!({ "mode": mode.as_str() })))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ApprovalAnswerBody {
+    /// `allow-once` | `reject`
+    decision: String,
+}
+
+/// 应答一次挂起的审批(抄 dsh ui approval panel 的 allow-once/reject)。
+async fn answer_approval(
+    State(state): State<Arc<AppState>>,
+    Path((id, request_id)): Path<(String, String)>,
+    Json(body): Json<ApprovalAnswerBody>,
+) -> Result<impl IntoResponse, ApiError> {
+    let outcome = match body.decision.as_str() {
+        "allow-once" => ApprovalOutcome::AllowedOnce,
+        "reject" => ApprovalOutcome::Rejected,
+        _ => {
+            return Err(ApiError::bad_request(
+                "approval/bad-decision",
+                "decision must be 'allow-once' or 'reject'",
+            ));
+        }
+    };
+    let Some(live) = state.live.get(&id) else {
+        return Err(ApiError::new(
+            StatusCode::NOT_FOUND,
+            "approval/session-not-loaded",
+            "审批会话不在运行中或不存在",
+        ));
+    };
+    let sender = {
+        let mut pending = live
+            .pending_approvals
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        pending.remove(&request_id)
+    };
+    let Some(sender) = sender else {
+        return Err(ApiError::new(
+            StatusCode::NOT_FOUND,
+            "approval/not-found",
+            "该审批请求不存在或已结算",
+        ));
+    };
+    let _ = sender.send(outcome);
     Ok(Json(json!({ "ok": true })))
 }
 

@@ -4,9 +4,11 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use denia_core::session::PermissionMode;
 use denia_core::tool::ToolSchema;
 use serde::Deserialize;
 
+use crate::permission::{bash_may_write, denial_marker, escalation_hint};
 use crate::{Tool, ToolContext, ToolOutput, parse_args_lenient, shell, truncate};
 
 const DEFAULT_TIMEOUT_MS: u64 = 120_000;
@@ -40,7 +42,16 @@ impl BashTool {
                             "type": "string",
                             "description": command_description,
                         },
-                        "timeout_ms": { "type": "integer", "minimum": 1, "maximum": MAX_TIMEOUT_MS }
+                        "timeout_ms": { "type": "integer", "minimum": 1, "maximum": MAX_TIMEOUT_MS },
+                        "sandbox_permissions": {
+                            "type": "string",
+                            "enum": ["workspace-write", "danger-full-access"],
+                            "description": "The wider sandbox mode this command needs. Only valid as a one-shot retry of a command the sandbox just denied; requires justification and user approval."
+                        },
+                        "justification": {
+                            "type": "string",
+                            "description": "Required with sandbox_permissions: one sentence for the user explaining why this exact command needs the wider access."
+                        }
                     },
                     "required": ["command"]
                 }),
@@ -74,6 +85,14 @@ impl Tool for BashTool {
         let timeout = Duration::from_millis(
             args.timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS).min(MAX_TIMEOUT_MS),
         );
+
+        let effective = ctx.effective_permission();
+        if effective == PermissionMode::ReadOnly && bash_may_write(&args.command) {
+            return ToolOutput {
+                content: format!("{}\n{}", denial_marker(effective), escalation_hint("command")),
+                is_error: true,
+            };
+        }
 
         let mut command = shell::shell_command(&args.command);
         command
@@ -148,9 +167,11 @@ mod tests {
             cwd: dir.to_path_buf(),
             cancel: CancellationToken::new(),
             confined: true,
-        vision_supported: true,
+            vision_supported: true,
             emit_event: None,
             file_history: None,
+            permission_mode: PermissionMode::WorkspaceWrite,
+            permission_override: None,
         }
     }
 
@@ -168,6 +189,22 @@ mod tests {
             .and_then(|value| value.as_str())
             .expect("command description");
         assert!(command.contains(std::env::consts::OS));
+    }
+
+    #[tokio::test]
+    async fn read_only_denies_obvious_write_command() {
+        let dir = std::env::temp_dir();
+        let mut context = ctx(&dir);
+        context.permission_mode = PermissionMode::ReadOnly;
+        let tool = BashTool::new();
+        let denied = tool
+            .execute(r#"{"command":"echo hi > out.txt"}"#, &context)
+            .await;
+        assert!(denied.is_error, "{}", denied.content);
+        assert!(denied.content.contains("read-only"), "{}", denied.content);
+
+        let read_only = tool.execute(r#"{"command":"echo hi"}"#, &context).await;
+        assert!(!read_only.is_error, "{}", read_only.content);
     }
 
     #[tokio::test]
@@ -222,9 +259,11 @@ mod tests {
             cwd: dir.clone(),
             cancel: cancel.clone(),
             confined: true,
-        vision_supported: true,
+            vision_supported: true,
             emit_event: None,
             file_history: None,
+            permission_mode: PermissionMode::WorkspaceWrite,
+            permission_override: None,
         };
         let command = if cfg!(windows) {
             r#"{"command":"ping -n 10 127.0.0.1 >nul"}"#

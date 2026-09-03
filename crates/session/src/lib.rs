@@ -28,8 +28,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use denia_core::message::ChatMessage;
 use denia_core::session::{
-    SessionEnvelope, SessionEvent, SessionHeader, SessionHeaderKind, TurnEndReason,
-    SESSION_FORMAT_VERSION, derive_messages,
+    ApprovalPolicy, PermissionMode, SessionEnvelope, SessionEvent, SessionHeader,
+    SessionHeaderKind, TurnEndReason, SESSION_FORMAT_VERSION, approval_policy_for, derive_messages,
 };
 use denia_token_meter::{ContextBreakdown, ContextMeter, ContextPressure, TurnTokenUsage};
 use thiserror::Error;
@@ -107,6 +107,10 @@ struct SessionInner {
     /// 当前正在进行的 turn 的 envelope 缓冲;`turn-end` 到来时交给
     /// `meter.fold_turn`,fold 成功则并入精确 usage 累计并更新 anchor。
     pending_turn: Vec<SessionEnvelope>,
+    /// 当前权限模式(由 permission-mode 事件 fold;新会话默认 workspace-write)。
+    permission_mode: PermissionMode,
+    /// 当前审批策略(由 approval-policy 事件 fold;按权限模式默认)。
+    approval_policy: ApprovalPolicy,
 }
 
 /// One live session: header, in-memory log, and its append handle. The log is
@@ -160,6 +164,8 @@ impl Session {
                     last_system_prompt: None,
                     meter: ContextMeter::new(),
                     pending_turn: Vec::new(),
+                    permission_mode: PermissionMode::WorkspaceWrite,
+                    approval_policy: ApprovalPolicy::Ask,
                 }),
             });
         }
@@ -189,6 +195,8 @@ impl Session {
         let mut torn_at: Option<usize> = None;
         let mut last_turn = 0u32;
         let mut last_system_prompt: Option<String> = None;
+        let mut permission_mode = PermissionMode::WorkspaceWrite;
+        let mut approval_policy = ApprovalPolicy::Ask;
         let mut meter = ContextMeter::new();
         for line in lines {
             let with_newline = line.len() + 1;
@@ -204,6 +212,11 @@ impl Session {
                         SessionEvent::SystemPrompt { text, .. } => {
                             last_system_prompt = Some(text.clone())
                         }
+                        SessionEvent::PermissionMode { mode } => {
+                            permission_mode = *mode;
+                            approval_policy = approval_policy_for(*mode);
+                        }
+                        SessionEvent::ApprovalPolicy { policy } => approval_policy = *policy,
                         _ => {}
                     }
                     meter.apply_one(&envelope);
@@ -241,6 +254,8 @@ impl Session {
                 last_system_prompt,
                 meter,
                 pending_turn: Vec::new(),
+                permission_mode,
+                approval_policy,
             }),
         };
         session.close_orphaned_turn()?;
@@ -310,6 +325,17 @@ impl Session {
             }
             SessionEvent::SystemPrompt { text, .. } => {
                 inner.last_system_prompt = Some(text.clone());
+            }
+            SessionEvent::PermissionMode { mode } => {
+                inner.permission_mode = *mode;
+                // 权限模式变化时,同步审批策略(固定预设映射)。
+                let policy = approval_policy_for(*mode);
+                if inner.approval_policy != policy {
+                    inner.approval_policy = policy;
+                }
+            }
+            SessionEvent::ApprovalPolicy { policy } => {
+                inner.approval_policy = *policy;
             }
             _ => {}
         }
@@ -402,6 +428,8 @@ impl Session {
         inner.offsets.truncate(target_idx);
         inner.last_turn = 0;
         inner.last_system_prompt = None;
+        inner.permission_mode = PermissionMode::WorkspaceWrite;
+        inner.approval_policy = ApprovalPolicy::Ask;
         inner.meter = ContextMeter::new();
         inner.pending_turn.clear();
         let kept = inner.events.clone();
@@ -410,6 +438,13 @@ impl Session {
                 SessionEvent::TurnStart { turn } => inner.last_turn = inner.last_turn.max(*turn),
                 SessionEvent::SystemPrompt { text, .. } => {
                     inner.last_system_prompt = Some(text.clone())
+                }
+                SessionEvent::PermissionMode { mode } => {
+                    inner.permission_mode = *mode;
+                    inner.approval_policy = approval_policy_for(*mode);
+                }
+                SessionEvent::ApprovalPolicy { policy } => {
+                    inner.approval_policy = *policy;
                 }
                 _ => {}
             }
@@ -525,6 +560,34 @@ impl Session {
             .unwrap_or_else(|poison| poison.into_inner())
             .meter
             .context_pressure()
+    }
+
+    /// 当前权限模式(由事件 fold,O(1),不遍历日志)。
+    pub fn permission_mode(&self) -> PermissionMode {
+        self.inner
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .permission_mode
+    }
+
+    /// 当前审批策略(由事件 fold,默认按权限模式映射)。
+    pub fn approval_policy(&self) -> ApprovalPolicy {
+        self.inner
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .approval_policy
+    }
+
+    /// 切换会话权限模式:追加 permission-mode 事件,并随权限预设同步
+    /// 审批策略(仅在策略实际变化时追加 approval-policy 事件)。
+    pub fn set_permission_mode(&self, mode: PermissionMode) -> Result<SessionEnvelope, SessionError> {
+        let previous_policy = self.approval_policy();
+        let envelope = self.append(SessionEvent::PermissionMode { mode })?;
+        let target_policy = approval_policy_for(mode);
+        if previous_policy != target_policy {
+            self.append(SessionEvent::ApprovalPolicy { policy: target_policy })?;
+        }
+        Ok(envelope)
     }
 
     /// The model-facing history projected from the log.
@@ -1009,6 +1072,33 @@ mod tests {
             store.load(&id),
             Err(SessionError::NotFound(_))
         ));
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn permission_mode_folds_and_persists() {
+        let root = temp_root();
+        let store = SessionStore::open(&root).unwrap();
+        let cwd = root.join("work");
+        std::fs::create_dir_all(&cwd).unwrap();
+
+        let session = store.create(&cwd, true).unwrap();
+        assert_eq!(session.permission_mode(), PermissionMode::WorkspaceWrite);
+        assert_eq!(session.approval_policy(), ApprovalPolicy::Ask);
+
+        session.set_permission_mode(PermissionMode::ReadOnly).unwrap();
+        assert_eq!(session.permission_mode(), PermissionMode::ReadOnly);
+        assert_eq!(session.approval_policy(), ApprovalPolicy::Ask);
+        let id = session.id().to_string();
+        drop(session);
+
+        let loaded = store.load(&id).unwrap();
+        assert_eq!(loaded.permission_mode(), PermissionMode::ReadOnly);
+        assert_eq!(loaded.approval_policy(), ApprovalPolicy::Ask);
+
+        loaded.set_permission_mode(PermissionMode::DangerFullAccess).unwrap();
+        assert_eq!(loaded.permission_mode(), PermissionMode::DangerFullAccess);
+        assert_eq!(loaded.approval_policy(), ApprovalPolicy::Never);
         std::fs::remove_dir_all(&root).unwrap();
     }
 

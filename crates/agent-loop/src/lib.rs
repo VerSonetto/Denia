@@ -17,13 +17,18 @@ use async_trait::async_trait;
 use denia_core::config::ModelSelection;
 use denia_core::error::{LlmFailure, codes};
 use denia_core::message::ToolCallRef;
-use denia_core::session::{SessionEnvelope, SessionEvent, TurnEndReason};
+use denia_core::session::{
+    ApprovalOutcome, PermissionMode, SessionEnvelope, SessionEvent, TurnEndReason,
+};
 use denia_core::stream::{ContentBlock, FinishReason, StreamChunk, TokenUsage};
 use denia_llm::{GenerateRequest, LlmRegistry};
 use denia_session::Session;
 use denia_system_prompt::{
     AssembleContext, SystemPrompt, frame_system_prompt_for_model, render_prompt,
     render_prompt_for_user,
+};
+use denia_tools::permission::{
+    is_strictly_wider, parse_permission_mode, validate_escalation_args,
 };
 use denia_tools::{FileHistoryBackend, ToolContext, ToolRegistry};
 use futures::StreamExt;
@@ -49,6 +54,19 @@ pub trait FileHistoryProvider: Send + Sync {
     ) -> Result<(), String>;
 }
 
+/// 审批通道:driver 在遇到工具升权请求时,向宿主请求一次用户决策。
+/// 实现方负责把请求挂到 `LiveSession` 的 pending 表并等待 REST 应答;
+/// 取消 token 发生时实现方应返回 `Cancelled`。
+#[async_trait]
+pub trait ApprovalBridge: Send + Sync {
+    async fn request(
+        &self,
+        session_id: &str,
+        request_id: &str,
+        cancel: CancellationToken,
+    ) -> ApprovalOutcome;
+}
+
 /// 请求失败时回注给模型的纠错提示(抄 dsh inject 上下文思路):
 /// 不中断,让模型看见拒绝原因自己纠正;每轮最多 MAX_FEEDBACK 次防死循环。
 const MAX_FEEDBACK: u32 = 2;
@@ -67,6 +85,7 @@ pub struct SessionDriver {
     tools: Arc<ToolRegistry>,
     system_prompt: Arc<ArcSwap<SystemPrompt>>,
     file_history: Option<Arc<dyn FileHistoryProvider>>,
+    approval: Option<Arc<dyn ApprovalBridge>>,
 }
 
 fn should_log_system_prompt(session: &Session, step: u32, text: &str) -> bool {
@@ -94,12 +113,19 @@ impl SessionDriver {
             tools,
             system_prompt,
             file_history: None,
+            approval: None,
         }
     }
 
     /// 启用文件历史:回退功能依赖此提供者。
     pub fn with_file_history(mut self, provider: Arc<dyn FileHistoryProvider>) -> Self {
         self.file_history = Some(provider);
+        self
+    }
+
+    /// 启用审批通道(抄 dsh ctx.approval);无通道时升权请求 fail-closed。
+    pub fn with_approval(mut self, bridge: Arc<dyn ApprovalBridge>) -> Self {
+        self.approval = Some(bridge);
         self
     }
 
@@ -122,6 +148,7 @@ impl SessionDriver {
                 cwd: Some(cwd.to_string()),
                 model: Some(selection.model.clone()),
                 provider: Some(selection.provider.clone()),
+                ..Default::default()
             })
             .map_err(|error| error.to_string())?;
         let system = render_prompt(&assembly);
@@ -257,6 +284,8 @@ impl SessionDriver {
                     cwd: Some(cwd.clone()),
                     model: Some(selection.model.clone()),
                     provider: Some(selection.provider.clone()),
+                    permission_mode: Some(session.permission_mode().as_str().to_string()),
+                    approval_policy: Some(session.approval_policy().as_str().to_string()),
                 })
                 .map_err(|error| LlmFailure::new(codes::UNKNOWN, error))?;
 
@@ -468,23 +497,62 @@ impl SessionDriver {
                         is_error: true,
                     }
                 } else if let Some(tool) = self.tools.get(&call.name) {
-                    // Log-only event sink for tools like todo_write: appends
-                    // through the same session and echoes to SSE followers.
-                    let sink_session = session.clone();
-                    let sink_emit = emit.clone();
-                    let context = ToolContext {
-                        cwd: cwd.clone(),
-                        cancel: cancel.child_token(),
-                        confined: session.header().sandbox,
-                        vision_supported,
-                        emit_event: Some(Arc::new(move |event: SessionEvent| {
-                            if let Ok(envelope) = sink_session.append(event) {
-                                sink_emit(&envelope);
+                    let current_mode = session.permission_mode();
+                    let mut permission_override = None;
+                    let mut approval_failure = None;
+                    let can_escalate = matches!(
+                        call.name.as_str(),
+                        "bash" | "write_file" | "edit"
+                    );
+                    if can_escalate {
+                        if let Some((requested_raw, justification)) =
+                            escalation_fields(&call.arguments)
+                        {
+                            match resolve_escalation(
+                                self,
+                                session,
+                                &emit,
+                                call,
+                                current_mode,
+                                &requested_raw,
+                                &justification,
+                                escalation_subject(&call.name),
+                                cancel.clone(),
+                            )
+                            .await
+                            {
+                                Ok(mode) => permission_override = Some(mode),
+                                Err(message) => approval_failure = Some(message),
                             }
-                        })),
-                        file_history: file_history.clone(),
-                    };
-                    tool.execute(&call.arguments, &context).await
+                        }
+                    }
+                    if let Some(message) = approval_failure {
+                        denia_tools::ToolOutput {
+                            content: message,
+                            is_error: true,
+                        }
+                    } else {
+                        // Log-only event sink for tools like todo_write: appends
+                        // through the same session and echoes to SSE followers.
+                        let sink_session = session.clone();
+                        let sink_emit = emit.clone();
+                        let context = ToolContext {
+                            cwd: cwd.clone(),
+                            cancel: cancel.child_token(),
+                            // 完整权限关闭路径沙箱;其他档位沿用会话头 sandbox。
+                            confined: !current_mode.is_full() && session.header().sandbox,
+                            vision_supported,
+                            emit_event: Some(Arc::new(move |event: SessionEvent| {
+                                if let Ok(envelope) = sink_session.append(event) {
+                                    sink_emit(&envelope);
+                                }
+                            })),
+                            file_history: file_history.clone(),
+                            permission_mode: current_mode,
+                            permission_override,
+                        };
+                        tool.execute(&call.arguments, &context).await
+                    }
                 } else {
                     denia_tools::ToolOutput {
                         content: format!("unknown tool: {}", call.name),
@@ -506,6 +574,103 @@ impl SessionDriver {
             }
             append(session, &emit, SessionEvent::StepEnd { turn, step })?;
         }
+    }
+}
+
+/// 从工具原始参数里提取升权请求字段(宽松解析:取不到就视为无升权)。
+fn escalation_fields(raw: &str) -> Option<(String, String)> {
+    let value: serde_json::Value = serde_json::from_str(raw.trim()).ok()?;
+    let permissions = value.get("sandbox_permissions")?.as_str()?.to_string();
+    let justification = value.get("justification")?.as_str()?.to_string();
+    Some((permissions, justification))
+}
+
+/// 处理一次工具升权请求:校验 → 落 approval/asked → 等用户决策 →
+/// 落 approval/decided → 把结果映射为允许模式或错误文本。
+///
+/// 仅在模型显式携带 `sandbox_permissions` + `justification` 时调用;
+/// 普通被拒调用由工具自身返回 `[sandbox: …]` 标记,模型再据此重试。
+#[allow(clippy::too_many_arguments)]
+async fn resolve_escalation(
+    driver: &SessionDriver,
+    session: &Arc<Session>,
+    emit: &Arc<dyn Fn(&SessionEnvelope) + Send + Sync>,
+    call: &ToolCallRef,
+    current_mode: PermissionMode,
+    requested_raw: &str,
+    justification: &str,
+    subject: &str,
+    cancel: CancellationToken,
+) -> Result<PermissionMode, String> {
+    if let Err(message) = validate_escalation_args(Some(requested_raw), Some(justification)) {
+        return Err(message);
+    }
+    let requested = parse_permission_mode(requested_raw)
+        .ok_or_else(|| format!("unknown sandbox mode \"{requested_raw}\""))?;
+    if !is_strictly_wider(current_mode, requested) {
+        return Err(format!(
+            "sandbox escalation to \"{}\" is not strictly wider than this call's current \"{}\" mode",
+            requested.as_str(),
+            current_mode.as_str(),
+        ));
+    }
+    let Some(approval) = &driver.approval else {
+        return Err(format!(
+            "sandbox escalation to \"{}\" requires approval, but no approval channel is available",
+            requested.as_str()
+        ));
+    };
+    let request_id = uuid::Uuid::new_v4().to_string();
+    let reason = format!(
+        "escalate sandbox to {}: {}",
+        requested.as_str(),
+        justification.trim()
+    );
+    append(
+        session,
+        emit,
+        SessionEvent::ApprovalAsked {
+            request_id: request_id.clone(),
+            call_id: call.id.clone(),
+            tool: call.name.clone(),
+            args_preview: call.arguments.clone(),
+            reason: Some(reason.clone()),
+        },
+    )
+    .map_err(|error| format!("[{}] {}", error.code, error.message))?;
+    let outcome = approval.request(session.id(), &request_id, cancel).await;
+    append(
+        session,
+        emit,
+        SessionEvent::ApprovalDecided {
+            request_id: request_id.clone(),
+            outcome,
+        },
+    )
+    .map_err(|error| format!("[{}] {}", error.code, error.message))?;
+    match outcome {
+        ApprovalOutcome::AllowedOnce => Ok(requested),
+        ApprovalOutcome::Rejected => Err(format!(
+            "the user rejected escalating this {subject} to \"{}\"",
+            requested.as_str()
+        )),
+        ApprovalOutcome::Cancelled => Err(format!(
+            "approval for escalating to \"{}\" was cancelled",
+            requested.as_str()
+        )),
+        ApprovalOutcome::Unavailable => Err(format!(
+            "sandbox escalation to \"{}\" requires approval, but no approval channel is available",
+            requested.as_str()
+        )),
+    }
+}
+
+/// 工具升权审批的模型侧主题(与 dsh escalation hint 一致)。
+fn escalation_subject(tool_name: &str) -> &'static str {
+    match tool_name {
+        "bash" => "command",
+        "write_file" | "edit" => "operation",
+        _ => "operation",
     }
 }
 
@@ -533,6 +698,7 @@ mod tests {
                 cwd: Some("/tmp/ws".to_string()),
                 model: Some("mock".to_string()),
                 provider: Some("mock".to_string()),
+                ..Default::default()
             })
             .unwrap();
         let body = denia_system_prompt::render_prompt(&assembly);

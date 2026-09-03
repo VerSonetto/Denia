@@ -17,7 +17,7 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use denia_core::session::SessionEvent;
+use denia_core::session::{PermissionMode, SessionEvent};
 use denia_core::tool::ToolSchema;
 use tokio_util::sync::CancellationToken;
 
@@ -29,6 +29,7 @@ pub use grep::GrepTool;
 pub use prompt::{default_shipped, register_shipped_prompt, shipped_with_persona};
 pub use todo::TodoWriteTool;
 
+pub mod permission;
 mod todo;
 
 /// Session-event sink handed to tools that emit log-only state (todo_write).
@@ -59,6 +60,17 @@ pub struct ToolContext {
     pub emit_event: Option<SessionEventSink>,
     /// 文件回退备份后端;`None` 表示当前调用不参与文件快照。
     pub file_history: Option<Arc<dyn FileHistoryBackend>>,
+    /// 会话权限模式(抄 dsh sandbox-mode),写文件/命令工具据此判定拒绝。
+    pub permission_mode: PermissionMode,
+    /// 当前调用一次性升权后的模式;`None` 表示沿用会话权限。
+    pub permission_override: Option<PermissionMode>,
+}
+
+impl ToolContext {
+    /// 本调用实际生效的权限:一次性升权优先,否则会话权限。
+    pub fn effective_permission(&self) -> PermissionMode {
+        self.permission_override.unwrap_or(self.permission_mode)
+    }
 }
 
 /// One model-facing tool outcome.

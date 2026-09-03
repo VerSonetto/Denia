@@ -210,6 +210,7 @@ impl Tool for GlobTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use denia_core::session::PermissionMode;
     use std::io::Write as _;
     use std::path::Path;
     use tokio_util::sync::CancellationToken;
@@ -234,6 +235,8 @@ mod tests {
             vision_supported: true,
             emit_event: None,
             file_history: None,
+            permission_mode: PermissionMode::WorkspaceWrite,
+            permission_override: None,
         }
     }
 

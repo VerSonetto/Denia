@@ -205,6 +205,7 @@ impl Tool for TodoWriteTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use denia_core::session::PermissionMode;
     use std::sync::{Arc, Mutex};
     use tokio_util::sync::CancellationToken;
 
@@ -215,11 +216,13 @@ mod tests {
             cwd: std::env::temp_dir(),
             cancel: CancellationToken::new(),
             confined: true,
-        vision_supported: true,
+            vision_supported: true,
             emit_event: Some(Arc::new(move |event| {
                 collected.lock().unwrap().push(event);
             })),
             file_history: None,
+            permission_mode: PermissionMode::WorkspaceWrite,
+            permission_override: None,
         }
     }
 
@@ -228,9 +231,11 @@ mod tests {
             cwd: std::env::temp_dir(),
             cancel: CancellationToken::new(),
             confined: true,
-        vision_supported: true,
+            vision_supported: true,
             emit_event: None,
             file_history: None,
+            permission_mode: PermissionMode::WorkspaceWrite,
+            permission_override: None,
         }
     }
 

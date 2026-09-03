@@ -9,9 +9,11 @@
 //!   `old_string` 不存在而报错,不会重复写入。
 
 use async_trait::async_trait;
+use denia_core::session::PermissionMode;
 use denia_core::tool::ToolSchema;
 use serde::Deserialize;
 
+use crate::permission::{denial_marker, escalation_hint};
 use crate::{Tool, ToolContext, ToolOutput, parse_args_lenient, resolve_within};
 
 #[derive(Deserialize)]
@@ -46,7 +48,16 @@ impl EditTool {
                         "path": { "type": "string", "description": "File to edit; a relative path resolves in the session workspace." },
                         "old_string": { "type": "string", "description": "Exact existing text to replace (whitespace and newlines are significant)." },
                         "new_string": { "type": "string", "description": "Replacement text." },
-                        "replace_all": { "type": "boolean", "description": "Replace every occurrence instead of requiring exactly one (default false)." }
+                        "replace_all": { "type": "boolean", "description": "Replace every occurrence instead of requiring exactly one (default false)." },
+                        "sandbox_permissions": {
+                            "type": "string",
+                            "enum": ["workspace-write", "danger-full-access"],
+                            "description": "The wider sandbox mode this file operation needs. Only valid as a one-shot retry of an operation the sandbox just denied; requires justification and user approval."
+                        },
+                        "justification": {
+                            "type": "string",
+                            "description": "Required with sandbox_permissions: one sentence for the user explaining why this exact file operation needs the wider access."
+                        }
                     },
                     "required": ["path", "old_string", "new_string"]
                 }),
@@ -75,10 +86,23 @@ impl Tool for EditTool {
         if args.old_string.is_empty() {
             return ToolOutput { content: "old_string must not be empty".to_string(), is_error: true };
         }
-        let path = match resolve_within(&ctx.cwd, &args.path, ctx.confined) {
+        let effective = ctx.effective_permission();
+        if effective == PermissionMode::ReadOnly {
+            return ToolOutput {
+                content: format!("{}\n{}", denial_marker(effective), escalation_hint("operation")),
+                is_error: true,
+            };
+        }
+        let path = match resolve_within(&ctx.cwd, &args.path, false) {
             Ok(path) => path,
             Err(message) => return ToolOutput { content: message, is_error: true },
         };
+        if effective == PermissionMode::WorkspaceWrite && !path.starts_with(&ctx.cwd) {
+            return ToolOutput {
+                content: format!("{}\n{}", denial_marker(effective), escalation_hint("operation")),
+                is_error: true,
+            };
+        }
         let text = match std::fs::read_to_string(&path) {
             Ok(text) => text,
             Err(error) => return ToolOutput { content: format!("read failed: {error}"), is_error: true },
@@ -174,6 +198,8 @@ mod tests {
             vision_supported: true,
             emit_event: None,
             file_history: None,
+            permission_mode: PermissionMode::WorkspaceWrite,
+            permission_override: None,
         }
     }
 

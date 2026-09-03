@@ -6,8 +6,10 @@ use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-use denia_agent_loop::SessionDriver;
+use async_trait::async_trait;
+use denia_agent_loop::{ApprovalBridge, SessionDriver};
 use denia_core::config::ModelSelection;
+use denia_core::session::ApprovalOutcome;
 use denia_credentials::{CredentialEvent, CredentialStore};
 use denia_llm::{RetryPolicy, OPENAI_SETTINGS_NS, OpenAiCompatAdapter, OpenAiSection, LlmRegistry};
 use denia_session::{Session, SessionError, SessionStore};
@@ -120,6 +122,10 @@ pub struct LiveSession {
     /// 最近一次被访问(挂载/发消息/follow)的 epoch ms;空闲淘汰依据。
     pub last_touch: AtomicU64,
     pub cancel: std::sync::Mutex<Option<CancellationToken>>,
+    /// 等待用户决策的审批请求(request_id → oneshot)。
+    pub pending_approvals: std::sync::Mutex<
+        HashMap<String, tokio::sync::oneshot::Sender<ApprovalOutcome>>,
+    >,
 }
 
 /// Live sessions keyed by id; loads (and repairs) on first touch.
@@ -162,9 +168,15 @@ impl LiveSessions {
             running: AtomicBool::new(false),
             last_touch: AtomicU64::new(now_millis()),
             cancel: std::sync::Mutex::new(None),
+            pending_approvals: std::sync::Mutex::new(HashMap::new()),
         });
         map.insert(id.to_string(), live.clone());
         Ok(live)
+    }
+
+    /// 读取已加载的 live 会话(不触发磁盘加载)。
+    pub fn get(&self, id: &str) -> Option<Arc<LiveSession>> {
+        self.inner.lock().unwrap().get(id).cloned()
     }
 
     /// 记录一次外部访问(follow 连接等),防止被空闲淘汰。
@@ -211,6 +223,59 @@ impl LiveSessions {
     }
 }
 
+/// 服务端审批桥:把确认框挂到 LiveSession 的 pending 表,等待 REST 应答。
+pub struct ServerApprovalBridge {
+    live: Arc<LiveSessions>,
+}
+
+impl ServerApprovalBridge {
+    pub fn new(live: Arc<LiveSessions>) -> Self {
+        Self { live }
+    }
+}
+
+#[async_trait]
+impl ApprovalBridge for ServerApprovalBridge {
+    async fn request(
+        &self,
+        session_id: &str,
+        request_id: &str,
+        cancel: CancellationToken,
+    ) -> ApprovalOutcome {
+        let Some(live) = self.live.get(session_id) else {
+            return ApprovalOutcome::Unavailable;
+        };
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        {
+            let mut pending = live
+                .pending_approvals
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
+            pending.insert(request_id.to_string(), tx);
+        }
+        tokio::select! {
+            _ = cancel.cancelled() => {
+                let mut pending = live
+                    .pending_approvals
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner());
+                if let Some(tx) = pending.remove(request_id) {
+                    let _ = tx.send(ApprovalOutcome::Cancelled);
+                }
+                ApprovalOutcome::Cancelled
+            }
+            result = rx => {
+                let _ = live
+                    .pending_approvals
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .remove(request_id);
+                result.unwrap_or(ApprovalOutcome::Cancelled)
+            }
+        }
+    }
+}
+
 /// RAII 运行保护:drop 时复位 running、清空 cancel token,并广播
 /// `RunningChanged { running: false }` 给控制台。即使任务 panic,
 /// 会话也不会永久锁死在 running 状态,前端圆点也不会卡死。
@@ -228,6 +293,18 @@ impl RunningGuard {
 impl Drop for RunningGuard {
     fn drop(&mut self) {
         self.live.running.store(false, Ordering::SeqCst);
+        // 任务无论正常/panic 结束,未答审批一律按 cancelled 结算,
+        // 避免 pending oneshot 泄漏。
+        {
+            let mut pending = self
+                .live
+                .pending_approvals
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
+            for tx in pending.drain() {
+                let _ = tx.1.send(ApprovalOutcome::Cancelled);
+            }
+        }
         let mut cancel = self.live.cancel.lock().unwrap();
         *cancel = None;
         let _ = self.events.send(ServerEvent::RunningChanged {
@@ -327,13 +404,15 @@ pub fn build_state(home: &Path, bound_remote: bool) -> Result<AppState, Box<dyn 
     let system_prompt = Arc::new(crate::system_prompt_store::SystemPromptState::load(home));
     let file_history = Arc::new(crate::file_history::FileHistoryStore::new(home));
     let (_prompt_default, tools) = denia_tools::default_shipped();
+    let approval = Arc::new(ServerApprovalBridge::new(live.clone()));
     let driver = Arc::new(
         SessionDriver::new(
             registry.clone(),
             Arc::new(tools),
             system_prompt.handle(),
         )
-        .with_file_history(file_history.clone()),
+        .with_file_history(file_history.clone())
+        .with_approval(approval),
     );
 
     spawn_forwarders(

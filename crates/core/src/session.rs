@@ -51,6 +51,65 @@ pub enum TurnEndReason {
     Error { failure: LlmFailure },
 }
 
+/// 会话当前权限模式(抄 dsh sandbox-mode + permission-preset)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PermissionMode {
+    ReadOnly,
+    WorkspaceWrite,
+    DangerFullAccess,
+}
+
+impl PermissionMode {
+    /// 是否允许在任意路径写文件(权限最高档)。
+    pub fn is_full(self) -> bool {
+        matches!(self, Self::DangerFullAccess)
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ReadOnly => "read-only",
+            Self::WorkspaceWrite => "workspace-write",
+            Self::DangerFullAccess => "danger-full-access",
+        }
+    }
+}
+
+/// 会话审批策略:ask 遇到需要审批的操作时弹给用户;never 直接拒绝。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ApprovalPolicy {
+    Ask,
+    Never,
+}
+
+impl ApprovalPolicy {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Ask => "ask",
+            Self::Never => "never",
+        }
+    }
+}
+
+/// 一次审批请求的闭合结果(抄 dsh ApprovalOutcome)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ApprovalOutcome {
+    AllowedOnce,
+    Rejected,
+    Cancelled,
+    Unavailable,
+}
+
+/// 权限预设 → 审批策略的固定映射(抄 dsh base 预设表)。
+pub fn approval_policy_for(mode: PermissionMode) -> ApprovalPolicy {
+    match mode {
+        PermissionMode::DangerFullAccess => ApprovalPolicy::Never,
+        _ => ApprovalPolicy::Ask,
+    }
+}
+
 /// One entry in the session's todo list — the unit of the `todo-write`
 /// whole-list snapshot.
 ///
@@ -140,6 +199,26 @@ pub enum SessionEvent {
     /// Whole-list todo snapshot; latest write wins on replay. Log-only UI
     /// state — never part of the derived model history.
     TodoWrite { todos: Vec<TodoItem> },
+    /// 会话权限模式切换(抄 dsh sandbox/mode):日志持久、可回放,
+    /// 不进入模型历史;driver 读 fold 后的当前值做策略判断。
+    PermissionMode { mode: PermissionMode },
+    /// 会话审批策略切换(抄 dsh approval/policy);与权限模式一起由预设写。
+    ApprovalPolicy { policy: ApprovalPolicy },
+    /// 一次待审批的工具调用(抄 dsh approval/asked):driver 阻塞等待
+    /// 用户通过 REST 决策,审批期间 UI 依据该事件弹窗。
+    ApprovalAsked {
+        request_id: String,
+        call_id: String,
+        tool: String,
+        args_preview: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+    },
+    /// 一次审批请求的闭合结果(抄 dsh approval/decided)。
+    ApprovalDecided {
+        request_id: String,
+        outcome: ApprovalOutcome,
+    },
 }
 
 /// One log entry: monotonic coordinates plus the event payload.
