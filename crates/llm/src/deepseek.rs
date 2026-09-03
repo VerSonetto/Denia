@@ -470,6 +470,10 @@ impl LlmAdapter for DeepSeekAdapter {
             let body_text = response.text().await.unwrap_or_default();
             return Err(LlmError::from_failure(http_error_failure(status, &body_text, &headers)));
         }
-        Ok(sse_chunk_stream(response, UsageStyle::DeepSeek, STREAM_IDLE_TIMEOUT))
+        Ok(sse_chunk_stream(
+            response,
+            Box::new(crate::protocols::CompletionsStream::new(UsageStyle::DeepSeek)),
+            STREAM_IDLE_TIMEOUT,
+        ))
     }
 }

@@ -1,5 +1,8 @@
 //! Model management endpoints: provider listing, catalog, endpoint
-//! discovery, default-model selection, and the streaming chat smoke test.
+//! discovery, and the streaming chat smoke test.
+//!
+//! 模型选择不再有服务端默认:每个请求(会话 prompt / chat 冒烟)都必须
+//! 显式携带 provider/model,由前端记忆"上次使用的模型"负责初始值。
 
 use std::convert::Infallible;
 use std::sync::Arc;
@@ -9,25 +12,22 @@ use axum::response::IntoResponse;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use denia_core::config::ModelSelection;
 use denia_core::message::ChatMessage;
-use denia_llm::{GenerateRequest, build_model_catalog, discover_models};
+use denia_llm::{
+    GenerateRequest, WireProtocol, build_model_catalog, discover_models,
+};
 use futures::{Stream, StreamExt};
 use serde::Deserialize;
 use serde_json::json;
 
 use crate::error::ApiError;
-use crate::state::{AppState, DEFAULT_MODEL_NS, current_default_selection};
+use crate::state::AppState;
 
 pub fn router() -> Router<Arc<AppState>> {
     Router::new()
         .route("/api/llm/providers", get(list_providers))
         .route("/api/llm/catalog", get(model_catalog))
         .route("/api/llm/discover", post(discover))
-        .route(
-            "/api/llm/default-model",
-            get(default_model).put(save_default_model),
-        )
         .route("/api/llm/chat", post(chat))
 }
 
@@ -39,8 +39,7 @@ async fn list_providers(State(state): State<Arc<AppState>>) -> impl IntoResponse
 }
 
 async fn model_catalog(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let default = current_default_selection(&state.settings);
-    let catalog = build_model_catalog(&state.registry, default).await;
+    let catalog = build_model_catalog(&state.registry).await;
     Json(catalog)
 }
 
@@ -49,6 +48,9 @@ async fn model_catalog(State(state): State<Arc<AppState>>) -> impl IntoResponse 
 struct DiscoverBody {
     #[serde(rename = "baseURL")]
     base_url: String,
+    /// Wire protocol the endpoint speaks; defaults to chat-completions.
+    #[serde(default)]
+    protocol: Option<String>,
     /// One-shot key for the probe; never stored.
     #[serde(default)]
     api_key: Option<String>,
@@ -61,6 +63,15 @@ async fn discover(
     State(state): State<Arc<AppState>>,
     Json(body): Json<DiscoverBody>,
 ) -> Result<impl IntoResponse, ApiError> {
+    let protocol = match body.protocol.as_deref() {
+        None | Some("") => WireProtocol::default(),
+        Some(raw) => WireProtocol::parse(raw).ok_or_else(|| {
+            ApiError::bad_request(
+                "model/unknown-protocol",
+                format!("unknown wire protocol '{raw}'"),
+            )
+        })?,
+    };
     let api_key = match (&body.api_key, &body.api_key_env) {
         (Some(key), _) => Some(key.trim().to_string()),
         (None, Some(reference)) => state
@@ -70,56 +81,17 @@ async fn discover(
             .map(|resolved| resolved.value),
         (None, None) => None,
     };
-    let models = discover_models(&state.http, &body.base_url, api_key.as_deref())
+    let models = discover_models(&state.http, &body.base_url, protocol, api_key.as_deref())
         .await
         .map_err(ApiError::from_llm)?;
     Ok(Json(json!({ "models": models })))
 }
 
-async fn default_model(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    Json(current_default_selection(&state.settings))
-}
-
-async fn save_default_model(
-    State(state): State<Arc<AppState>>,
-    Json(selection): Json<ModelSelection>,
-) -> Result<impl IntoResponse, ApiError> {
-    if selection.provider.is_empty() || selection.model.is_empty() {
-        return Err(ApiError::bad_request(
-            "model/incomplete",
-            "provider and model are required",
-        ));
-    }
-    state
-        .registry
-        .resolve_call(
-            &selection.provider,
-            &selection.model,
-            selection.reasoning_effort.as_deref(),
-        )
-        .await
-        .map_err(ApiError::from_llm)?;
-    let mut section = json!({
-        "provider": selection.provider,
-        "model": selection.model,
-    });
-    if let Some(effort) = &selection.reasoning_effort {
-        section["reasoningEffort"] = json!(effort);
-    }
-    state
-        .settings
-        .replace(DEFAULT_MODEL_NS, section, None)
-        .map_err(ApiError::from_settings)?;
-    Ok(Json(selection))
-}
-
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ChatBody {
-    #[serde(default)]
-    provider: Option<String>,
-    #[serde(default)]
-    model: Option<String>,
+    provider: String,
+    model: String,
     #[serde(default)]
     reasoning_effort: Option<String>,
     /// Single user prompt convenience; `messages` wins when both are set.
@@ -144,10 +116,15 @@ async fn chat(
     State(state): State<Arc<AppState>>,
     Json(body): Json<ChatBody>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let default = current_default_selection(&state.settings);
-    let provider = body.provider.unwrap_or(default.provider);
-    let model = body.model.unwrap_or(default.model);
-    let reasoning_effort = body.reasoning_effort.or(default.reasoning_effort);
+    let provider = body.provider.trim().to_string();
+    let model = body.model.trim().to_string();
+    if provider.is_empty() || model.is_empty() {
+        return Err(ApiError::bad_request(
+            "chat/incomplete",
+            "provider and model are required",
+        ));
+    }
+    let reasoning_effort = body.reasoning_effort;
 
     let messages = if let Some(messages) = body.messages.filter(|messages| !messages.is_empty()) {
         messages

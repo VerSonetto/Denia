@@ -6,9 +6,15 @@ import {
   setCredential,
 } from '../../api'
 import ModelListEditor from '../ModelListEditor'
-import { NumberField } from '../ui/controls'
+import { NumberField, SegmentControl } from '../ui/controls'
 import { t } from '../../i18n'
-import { type CatalogModelEntry, entryFromWire, entryToWire } from '../../modelCatalog'
+import {
+  type CatalogModelEntry,
+  WIRE_PROTOCOLS,
+  entryFromWire,
+  entryToWire,
+  protocolLabel,
+} from '../../modelCatalog'
 import type { Notify } from '../../App'
 import type {
   CredentialInfo,
@@ -16,6 +22,7 @@ import type {
   NamespaceView,
   OpenAiProfile,
   SettingsDescribe,
+  WireProtocol,
 } from '../../types'
 
 const OPENAI_NS = 'llm-openai'
@@ -115,7 +122,7 @@ export function ModelProvidersPanel({
   }
 
   return (
-    <section className="setm-section setm-section-divider">
+    <section className="setm-section">
       <div className="setm-section-label">{t('customTitle')}</div>
       <p className="setm-section-hint">{t('customDescription')}</p>
 
@@ -147,6 +154,7 @@ export function ModelProvidersPanel({
               </div>
               <div className="setm-provider-meta">
                 <span>{profile.baseURL}</span>
+                <span className="setm-provider-protocol">{protocolLabel(profile.protocol)}</span>
                 {profile.apiKeyEnv && <span>key: {profile.apiKeyEnv}</span>}
                 <span>
                   {t('modelsLabel')}: {(profile.models ?? []).length || '—'}
@@ -216,6 +224,7 @@ function ProviderEditor({
   const [routeId, setRouteId] = useState(route ?? '')
   const [displayName, setDisplayName] = useState(initial?.displayName ?? '')
   const [baseURL, setBaseURL] = useState(initial?.baseURL ?? '')
+  const [protocol, setProtocol] = useState<WireProtocol>(initial?.protocol ?? 'openai-completions')
   const [keyValue, setKeyValue] = useState('')
   const [defaultContextWindow, setDefaultContextWindow] = useState(
     initial?.defaultContextWindow ? String(initial.defaultContextWindow) : '',
@@ -241,6 +250,7 @@ function ProviderEditor({
         baseURL.trim(),
         keyValue.trim() || undefined,
         keyValue.trim() ? undefined : effectiveKeyRef || undefined,
+        protocol,
       )
       setDiscovered(found)
     } catch (err) {
@@ -273,6 +283,7 @@ function ProviderEditor({
         baseURL: baseURL.trim(),
         displayName: displayName.trim() || undefined,
         apiKeyEnv: effectiveKeyRef || undefined,
+        protocol,
         models: models.map((entry) => entryToWire(entry)),
       }
       const ctx = defaultContextWindow.trim()
@@ -317,6 +328,19 @@ function ProviderEditor({
             onChange={(event) => setDisplayName(event.target.value)}
           />
         </label>
+      </div>
+      <div className="setm-field-block">
+        <div className="setm-field-label">{t('protocolLabel')}</div>
+        <p className="setm-field-hint">{t('protocolHint')}</p>
+        <SegmentControl
+          value={protocol}
+          options={WIRE_PROTOCOLS.map(({ id, label, hintKey }) => ({
+            id,
+            label,
+            hint: t(hintKey),
+          }))}
+          onChange={setProtocol}
+        />
       </div>
       <div className="setm-form-grid two">
         <label className="setm-field">

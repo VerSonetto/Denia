@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, type ClipboardEvent, type KeyboardEvent, type WheelEvent } from 'react'
+﻿import { useCallback, useEffect, useRef, useState, type ClipboardEvent, type KeyboardEvent, type WheelEvent } from 'react'
 import * as api from '../api'
 import { optimizePromptText } from '../promptOptimizer'
 import {
@@ -77,6 +77,21 @@ function normalizeSelection(catalog: ModelCatalog, selection: ModelSelection): M
 const LAST_MODEL_KEY = 'denia.last-model'
 // 品牌改名前的旧 key 字面量,故意保留 dsh-rs:只用于读取并搬运老用户的选择。
 const LAST_MODEL_KEY_LEGACY = 'dsh-rs.last-model'
+/**
+ * 初始模型选择(默认模型功能已删,交互改为本地记忆):
+ * 1. 上一次使用的模型(localStorage,跨进程持久)——从别的会话新建会话、
+ *    或完全重新进入界面时,都默认落在它上面;
+ * 2. 该模型已不在目录(网关删除/模型下架)时,回退目录里第一个可用模型;
+ * 3. 目录为空返回 null(选择器隐藏,发送前必须先配好模型)。
+ */
+function firstAvailableSelection(catalog: ModelCatalog): ModelSelection | null {
+  for (const group of catalog.groups) {
+    const model = group.models[0]
+    if (model) return { provider: group.id, model: model.id }
+  }
+  return null
+}
+
 /** dsh ChatView FOLLOW_THRESHOLD */
 const FOLLOW_THRESHOLD = 24
 
@@ -258,7 +273,8 @@ export default function SessionsPage({
 
   useEffect(() => {
     if (!catalog || selection) return
-    setSelection(normalizeSelection(catalog, loadLastModel(catalog) ?? catalog.default))
+    const initial = loadLastModel(catalog) ?? firstAvailableSelection(catalog)
+    if (initial) setSelection(normalizeSelection(catalog, initial))
   }, [catalog, selection])
 
   useEffect(() => {
@@ -266,7 +282,10 @@ export default function SessionsPage({
     const valid = catalog.groups.some(
       (g) => g.id === selection.provider && g.models.some((m) => m.id === selection.model),
     )
-    if (!valid) setSelection(normalizeSelection(catalog, loadLastModel(catalog) ?? catalog.default))
+    if (!valid) {
+      const next = loadLastModel(catalog) ?? firstAvailableSelection(catalog)
+      setSelection(next ? normalizeSelection(catalog, next) : null)
+    }
   }, [catalog, selection])
 
   const applySelection = (next: ModelSelection) => {

@@ -1,5 +1,36 @@
 /** Shared model-catalog entry shape for settings editors. */
 
+import type { WireProtocol } from './types'
+
+/** 可选网关协议(UI 顺序 = most-used first),标签即 dsh 的三协议叫法。 */
+export const WIRE_PROTOCOLS: readonly {
+  id: WireProtocol
+  label: string
+  /** i18n 键:解释该协议适配的网关形态。 */
+  hintKey: 'protocolCompletionsHint' | 'protocolResponsesHint' | 'protocolMessagesHint'
+}[] = [
+  {
+    id: 'openai-completions',
+    label: 'chat/completions',
+    hintKey: 'protocolCompletionsHint',
+  },
+  {
+    id: 'openai-responses',
+    label: 'responses',
+    hintKey: 'protocolResponsesHint',
+  },
+  {
+    id: 'anthropic-messages',
+    label: 'messages',
+    hintKey: 'protocolMessagesHint',
+  },
+] as const
+
+/** 协议展示标签;未知值按 chat/completions 兜底显示。 */
+export function protocolLabel(protocol: WireProtocol | undefined): string {
+  return WIRE_PROTOCOLS.find((entry) => entry.id === (protocol ?? 'openai-completions'))?.label ?? 'chat/completions'
+}
+
 export const REASONING_EFFORT_OFF = 'off' as const
 export const REASONING_INTENSITY_IDS = ['low', 'medium', 'high', 'xhigh', 'max'] as const
 export const REASONING_EFFORT_IDS = [REASONING_EFFORT_OFF, ...REASONING_INTENSITY_IDS] as const

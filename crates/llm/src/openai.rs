@@ -1,5 +1,6 @@
-//! OpenAI-compatible provider adapter: settings-declared routes speaking the
-//! chat-completions wire (any gateway: OpenAI, Azure-style, vLLM, etc.).
+//! Multi-protocol gateway adapter: settings-declared routes speaking one of
+//! three wire protocols — OpenAI chat-completions, OpenAI Responses, or
+//! Anthropic Messages (any gateway: OpenAI, Azure-style, vLLM, etc.).
 //!
 //! Routes live in the `llm-openai` settings section's `providers` map; the
 //! server syncs registry routes from it on every settings change.
@@ -16,9 +17,12 @@ use serde::{Deserialize, Serialize};
 
 use crate::catalog::{highest_reasoning_effort, DiscoveredModel, LlmModelInfo, LlmResolvedModelInfo, ProviderInfo, ReasoningEffortInfo, ReasoningInfo};
 use crate::http::http_error_failure;
+use crate::protocols::{
+    self, CompletionsStream, EventTranslator, ResponsesStream, AnthropicStream, WireProtocol,
+};
 use crate::request::GenerateRequest;
 use crate::sse::sse_chunk_stream;
-use crate::wire::{UsageStyle, build_wire_messages, build_wire_tools};
+use crate::wire::UsageStyle;
 use crate::{ChunkStream, LlmAdapter};
 
 pub const OPENAI_SETTINGS_NS: &str = "llm-openai";
@@ -48,6 +52,9 @@ pub struct OpenAiProfile {
     /// Credential reference holding the key; absent sends no authorization.
     #[serde(default)]
     pub api_key_env: Option<String>,
+    /// The wire protocol this route speaks; defaults to chat-completions.
+    #[serde(default)]
+    pub protocol: WireProtocol,
     /// Advisory catalog; empty routes fall back to endpoint discovery.
     #[serde(default)]
     pub models: Vec<OpenAiCatalogModel>,
@@ -224,7 +231,8 @@ impl LlmAdapter for OpenAiCompatAdapter {
         // No declared catalog: interrogate the endpoint itself.
         let api_key = self.resolve_api_key(&profile)?;
         let discovered =
-            discover_models(&self.http, &profile.base_url, api_key.as_deref()).await?;
+            discover_models(&self.http, &profile.base_url, profile.protocol, api_key.as_deref())
+                .await?;
         Ok(discovered
             .into_iter()
             .map(|model| LlmModelInfo {
@@ -288,20 +296,42 @@ impl LlmAdapter for OpenAiCompatAdapter {
         let profile = self.profile(provider)?;
         let api_key = self.resolve_api_key(&profile)?;
 
-        let body = build_openai_body(request);
+        let protocol = profile.protocol;
+        let max_tokens = request.max_tokens.or(profile.default_max_tokens);
+        let body = match protocol {
+            WireProtocol::ChatCompletions => protocols::build_openai_body(request),
+            WireProtocol::Responses => protocols::build_responses_body(request),
+            WireProtocol::AnthropicMessages => protocols::build_anthropic_body(
+                request,
+                max_tokens.unwrap_or(DEFAULT_MAX_TOKENS),
+            ),
+        };
 
-        let url = format!(
-            "{}/chat/completions",
-            profile.base_url.trim_end_matches('/')
-        );
+        let url = match protocol {
+            WireProtocol::ChatCompletions => protocols::chat_completions_url(&profile.base_url),
+            WireProtocol::Responses => protocols::responses_url(&profile.base_url),
+            WireProtocol::AnthropicMessages => {
+                protocols::anthropic_messages_url(&profile.base_url)
+            }
+        };
         let mut builder = self
             .http
             .post(&url)
             .header("content-type", "application/json")
             .header("accept", "text/event-stream")
             .header("user-agent", USER_AGENT);
-        if let Some(api_key) = &api_key {
-            builder = builder.header("authorization", format!("Bearer {api_key}"));
+        match protocol {
+            WireProtocol::AnthropicMessages => {
+                if let Some(api_key) = &api_key {
+                    builder = builder.header("x-api-key", api_key);
+                }
+                builder = builder.header("anthropic-version", protocols::ANTHROPIC_VERSION);
+            }
+            _ => {
+                if let Some(api_key) = &api_key {
+                    builder = builder.header("authorization", format!("Bearer {api_key}"));
+                }
+            }
         }
         // 超时合理化(优化项):连接阶段 30s;请求总超时按请求体规模放宽——
         // 大体量请求(xhigh 推理 + 长上下文)提供方处理慢,实测 200K 字符
@@ -318,40 +348,13 @@ impl LlmAdapter for OpenAiCompatAdapter {
             let body_text = response.text().await.unwrap_or_default();
             return Err(LlmError::from_failure(http_error_failure(status, &body_text, &headers)));
         }
-        Ok(sse_chunk_stream(response, UsageStyle::OpenAi, STREAM_IDLE_TIMEOUT))
+        let translator: Box<dyn EventTranslator> = match protocol {
+            WireProtocol::ChatCompletions => Box::new(CompletionsStream::new(UsageStyle::OpenAi)),
+            WireProtocol::Responses => Box::new(ResponsesStream::default()),
+            WireProtocol::AnthropicMessages => Box::new(AnthropicStream::default()),
+        };
+        Ok(sse_chunk_stream(response, translator, STREAM_IDLE_TIMEOUT))
     }
-}
-
-/// The chat-completions request body for one OpenAI-compatible route.
-///
-/// OpenAI-family gateways accept `reasoning_effort` when they support thinking
-/// levels. The DeepSeek `thinking: { type }` switch is DeepSeek-direct wire
-/// vocabulary only (`build_deepseek_body`); sending it here breaks gateways
-/// such as MiniMax that reject unknown parameters.
-pub(crate) fn build_openai_body(request: &GenerateRequest) -> serde_json::Value {
-    let mut body = serde_json::json!({
-        "model": request.model,
-        "messages": build_wire_messages(request),
-        "stream": true,
-        "stream_options": { "include_usage": true },
-    });
-    if let Some(effort) = request.reasoning_effort.as_deref().filter(|effort| *effort != "off") {
-        body["reasoning_effort"] = serde_json::json!(effort);
-    }
-    if let Some(temperature) = request.temperature {
-        body["temperature"] = serde_json::json!(temperature);
-    }
-    if let Some(max_tokens) = request.max_tokens {
-        body["max_tokens"] = serde_json::json!(max_tokens);
-    }
-    if !request.stop.is_empty() {
-        body["stop"] = serde_json::json!(request.stop);
-    }
-    let tools = build_wire_tools(&request.tools);
-    if !tools.is_empty() {
-        body["tools"] = serde_json::Value::Array(tools);
-    }
-    body
 }
 
 #[derive(Debug, Deserialize)]
@@ -367,11 +370,14 @@ struct ModelsEntry {
     owned_by: Option<String>,
 }
 
-/// Interrogates a gateway's `GET /models` endpoint. The key is one-shot and
-/// never stored.
+/// Interrogates a gateway's model-listing endpoint. The key is one-shot and
+/// never stored. OpenAI protocols authenticate with a bearer token at
+/// `{base}/models`; Anthropic Messages uses `x-api-key` + `anthropic-version`
+/// at `{root}/v1/models`.
 pub async fn discover_models(
     http: &reqwest::Client,
     base_url: &str,
+    protocol: WireProtocol,
     api_key: Option<&str>,
 ) -> Result<Vec<DiscoveredModel>, LlmError> {
     if base_url.trim().is_empty() {
@@ -380,12 +386,17 @@ pub async fn discover_models(
             "a base URL is required for model discovery",
         ));
     }
-    let url = format!("{}/models", base_url.trim_end_matches('/'));
+    let url = protocols::listing_url(protocol, base_url);
     let mut builder = http
         .get(&url)
         .header("accept", "application/json")
         .header("user-agent", USER_AGENT);
-    if let Some(api_key) = api_key.filter(|key| !key.trim().is_empty()) {
+    if protocols::listing_is_anthropic(protocol) {
+        builder = builder.header("anthropic-version", protocols::ANTHROPIC_VERSION);
+        if let Some(api_key) = api_key.filter(|key| !key.trim().is_empty()) {
+            builder = builder.header("x-api-key", api_key.trim());
+        }
+    } else if let Some(api_key) = api_key.filter(|key| !key.trim().is_empty()) {
         builder = builder.header("authorization", format!("Bearer {}", api_key.trim()));
     }
     let response = builder.send().await.map_err(crate::http::transport_error)?;

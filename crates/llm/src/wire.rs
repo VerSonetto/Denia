@@ -170,7 +170,7 @@ pub struct WireFunctionRef {
 
 /// 回传清洗:部分网关(如 MiniMax)会把 arguments 再解析成 dict,
 /// 畸形原始串会毒化下一轮请求。抢救第一个 JSON 值,否则 {}。
-fn wire_arguments(raw: &str) -> String {
+pub(crate) fn wire_arguments(raw: &str) -> String {
     if serde_json::from_str::<serde_json::Value>(raw).is_ok() {
         return raw.to_string();
     }
@@ -606,7 +606,7 @@ mod tests {
         assert_eq!(json[1]["content"], "exit code: 0");
         assert!(json[1].get("tool_calls").is_none());
 
-        let body = crate::openai::build_openai_body(&request);
+        let body = crate::protocols::build_openai_body(&request);
         assert_eq!(body["tools"][0]["type"], "function");
         assert_eq!(body["tools"][0]["function"]["name"], "bash");
 
@@ -614,7 +614,7 @@ mod tests {
             tools: Vec::new(),
             ..request
         };
-        let body = crate::openai::build_openai_body(&without_tools);
+        let body = crate::protocols::build_openai_body(&without_tools);
         assert!(body.get("tools").is_none());
     }
 
@@ -632,7 +632,7 @@ mod tests {
             max_tokens: Some(64),
             stop: Vec::new(),
         };
-        let body = crate::openai::build_openai_body(&request);
+        let body = crate::protocols::build_openai_body(&request);
         assert!(body.get("thinking").is_none());
         assert!(body.get("reasoning_effort").is_none());
         assert_eq!(body["max_tokens"], 64);
@@ -652,7 +652,7 @@ mod tests {
             max_tokens: None,
             stop: Vec::new(),
         };
-        let body = crate::openai::build_openai_body(&request);
+        let body = crate::protocols::build_openai_body(&request);
         assert!(body.get("thinking").is_none());
         assert_eq!(body["reasoning_effort"], "high");
     }

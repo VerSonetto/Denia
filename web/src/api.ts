@@ -1,4 +1,4 @@
-import type {
+﻿import type {
   CredentialInfo,
   DiscoveredModel,
   ModelCatalog,
@@ -8,8 +8,8 @@ import type {
   SessionHeader,
   SessionSummary,
   SettingsDescribe,
-  ModelSelection,
   WorkspaceRecord,
+  WireProtocol,
 } from './types'
 
 export class ApiError extends Error {
@@ -116,22 +116,12 @@ export function discoverModels(
   baseURL: string,
   apiKey?: string,
   apiKeyEnv?: string,
+  protocol?: WireProtocol,
 ): Promise<DiscoveredModel[]> {
   return http<{ models: DiscoveredModel[] }>('/api/llm/discover', {
     method: 'POST',
-    body: JSON.stringify({ baseURL, apiKey, apiKeyEnv }),
+    body: JSON.stringify({ baseURL, apiKey, apiKeyEnv, protocol }),
   }).then((data) => data.models)
-}
-
-export function getDefaultModel(): Promise<ModelSelection> {
-  return http('/api/llm/default-model')
-}
-
-export function saveDefaultModel(selection: ModelSelection): Promise<ModelSelection> {
-  return http('/api/llm/default-model', {
-    method: 'PUT',
-    body: JSON.stringify(selection),
-  })
 }
 
 /** Parses one SSE response body, invoking `onFrame` per data payload. */

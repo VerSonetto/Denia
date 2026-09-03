@@ -1,6 +1,5 @@
 //! Model catalog vocabulary and the browser-facing catalog projection.
 
-use denia_core::config::ModelSelection;
 use serde::{Deserialize, Serialize};
 
 use crate::LlmRegistry;
@@ -113,12 +112,11 @@ pub fn highest_reasoning_effort<'a>(
         .map(|id| (*id).to_string())
 }
 
-/// The console's whole-model view: default selection, routable providers,
-/// per-provider groups, and isolated failures.
+/// The console's whole-model view: routable providers, per-provider groups,
+/// and isolated failures.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelCatalog {
-    pub default: ModelSelection,
     pub routable_providers: Vec<String>,
     pub groups: Vec<ModelProviderGroup>,
     pub failures: Vec<ModelCatalogFailure>,
@@ -135,10 +133,7 @@ pub struct DiscoveredModel {
 
 /// Builds the catalog over every live route. One route's listing failure is
 /// isolated into `failures`; the rest of the catalog still ships.
-pub async fn build_model_catalog(
-    registry: &LlmRegistry,
-    default: ModelSelection,
-) -> ModelCatalog {
+pub async fn build_model_catalog(registry: &LlmRegistry) -> ModelCatalog {
     let providers = registry.list_providers();
     let routable_providers = providers.iter().map(|p| p.id.clone()).collect();
     let mut groups = Vec::new();
@@ -186,7 +181,6 @@ pub async fn build_model_catalog(
         }
     }
     ModelCatalog {
-        default,
         routable_providers,
         groups,
         failures,

@@ -9,6 +9,7 @@ pub mod catalog;
 mod deepseek;
 mod http;
 mod openai;
+mod protocols;
 mod request;
 mod retry;
 mod sse;
@@ -36,6 +37,7 @@ pub use openai::{
     OPENAI_SETTINGS_NS, OpenAiCatalogModel, OpenAiCompatAdapter, OpenAiProfile, OpenAiSection,
     discover_models,
 };
+pub use protocols::{AnthropicStream, CompletionsStream, EventTranslator, ResponsesStream, WireProtocol};
 pub use request::GenerateRequest;
 pub use retry::{RetryAttempt, RetryPolicy, with_retry};
 

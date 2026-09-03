@@ -1,4 +1,4 @@
-/** Wire types shared with the Rust backend. camelCase mirrors serde. */
+﻿/** Wire types shared with the Rust backend. camelCase mirrors serde. */
 
 export interface ProviderInfo {
   id: string
@@ -44,8 +44,10 @@ export interface ModelSelection {
   reasoningEffort?: string
 }
 
+/** 网关路由的线上协议(与 Rust `WireProtocol` 的 serde 标识对齐)。 */
+export type WireProtocol = 'openai-completions' | 'openai-responses' | 'anthropic-messages'
+
 export interface ModelCatalog {
-  default: ModelSelection
   routableProviders: string[]
   groups: ModelProviderGroup[]
   failures: ModelCatalogFailure[]
@@ -120,11 +122,13 @@ export type FinishReason =
   | { kind: 'aborted'; failure: LlmFailure }
   | { kind: 'error'; failure: LlmFailure }
 
-/** One configured OpenAI-compatible route in the `llm-openai` section. */
+/** One configured gateway route in the `llm-openai` section. */
 export interface OpenAiProfile {
   baseURL: string
   displayName?: string
   apiKeyEnv?: string
+  /** 路由的线上协议;缺省即 chat/completions。 */
+  protocol?: WireProtocol
   models: {
     id: string
     name?: string

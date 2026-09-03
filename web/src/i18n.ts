@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Console copy. Chinese is the key-set source of truth; `en` is typed
  * against `zh`, so a missing or extra English key is a compile error.
  */
@@ -78,11 +78,11 @@ const zh = {
   settingsTabAppearance: '外观',
   settingsAppearanceHint: '主题与界面语言会立即应用到控制台。',
   settingsTabGeneralDesc: '系统提示词与 agent 身份',
-  settingsTabModelsDesc: '默认模型与提供商',
+  settingsTabModelsDesc: '模型提供商',
   settingsTabSecurityDesc: '沙箱与文件访问',
   settingsTabAppearanceDesc: '主题与语言',
-  settingsPaneModelsTitle: '模型与提供商',
-  settingsPaneModelsDesc: '配置默认模型、API 网关与模型目录。',
+  settingsPaneModelsTitle: '模型网关',
+  settingsPaneModelsDesc: '配置模型网关与模型目录。',
   contextInjectionTitle: '上下文注入',
   sessionDeleted: '会话已删除',
   workspaceDeleted: '工作区已删除',
@@ -109,19 +109,18 @@ const zh = {
   statsCache: '缓存 {percent}%',
   statsCacheHint: '缓存命中 {percent}%(缓存读 {cache} / 输入 {input})',
 
-  defaultModelTitle: '默认模型',
-  defaultModelHint: '新会话默认使用的模型。点"保存"后生效。',
   modelProvidersLabel: '供应商',
   modelSearchPlaceholder: '搜索模型…',
   modelSearchEmpty: '没有匹配的模型',
-  providerLabel: '提供方',
-  modelLabel: '模型',
   reasoningLabel: '推理强度',
-  providerDefault: '跟随提供方默认',
-  saveDefaultModel: '应用',
-  defaultModelSaved: '默认模型已更新',
   catalogFailure: '目录加载失败',
   noModels: '该提供方暂无可用模型',
+
+  protocolLabel: 'API 协议',
+  protocolHint: '网关的接口协议;不确定就用 chat/completions。',
+  protocolCompletionsHint: 'OpenAI Chat Completions 兼容接口,大多数网关使用',
+  protocolResponsesHint: 'OpenAI Responses 接口(/responses)',
+  protocolMessagesHint: 'Anthropic Messages 接口(/v1/messages)',
 
   apiKeyLabel: 'API Key',
   apiKeyPlaceholder: '输入密钥后保存',
@@ -173,7 +172,7 @@ const zh = {
   modelsInvalid: '每个模型都需要有效的 ID',
 
   customTitle: '模型提供方',
-  customDescription: '添加 OpenAI 兼容网关:配置 Base URL、密钥与模型列表。',
+  customDescription: '添加模型网关:选择协议(chat/completions、responses、messages),配置 Base URL、密钥与模型列表。',
   noProvidersConfigured: '尚未添加提供方,点击"添加提供方"开始配置。',
   addProvider: '添加提供方',
   routeIdLabel: '路由 ID',
@@ -223,7 +222,7 @@ const zh = {
   reasonMaxTokens: '达到长度上限',
   reasonError: '出错',
   reasonInterrupted: '已中断',
-  currentModel: '默认模型',
+  currentModel: '当前模型',
 
   messageBranch: '在新对话中分支',
 
@@ -301,7 +300,6 @@ const zh = {
   catGeneral: '常规',
   catSecurity: '安全',
   catAppearance: '外观',
-  defaultModelLabel: '默认模型',
   sandboxDesc: '沙箱将文件工具限制在工作目录内(bash 等命令工具不受此限制,请自行留意命令行为)。关闭后允许读写工作目录之外的路径。',
   themeLabel: '主题',
   languageLabel: '语言',
@@ -428,11 +426,11 @@ const en: typeof zh = {
   settingsTabAppearance: 'Appearance',
   settingsAppearanceHint: 'Theme and language apply to the console immediately.',
   settingsTabGeneralDesc: 'System prompt and agent identity',
-  settingsTabModelsDesc: 'Default model and providers',
+  settingsTabModelsDesc: 'Model providers',
   settingsTabSecurityDesc: 'Sandbox and file access',
   settingsTabAppearanceDesc: 'Theme and language',
   settingsPaneModelsTitle: 'Models & providers',
-  settingsPaneModelsDesc: 'Configure the default model, API gateways, and model catalog.',
+  settingsPaneModelsDesc: 'Configure API gateways and the model catalog.',
   contextInjectionTitle: 'Context injection',
   sessionDeleted: 'Session deleted',
   workspaceDeleted: 'Workspace deleted',
@@ -459,19 +457,18 @@ const en: typeof zh = {
   statsCache: 'cache {percent}%',
   statsCacheHint: 'Cache hit {percent}% (cache read {cache} / input {input})',
 
-  defaultModelTitle: 'Default model',
-  defaultModelHint: 'Used by new sessions. Takes effect after saving.',
   modelProvidersLabel: 'Providers',
   modelSearchPlaceholder: 'Search models…',
   modelSearchEmpty: 'No matching models',
-  providerLabel: 'Provider',
-  modelLabel: 'Model',
   reasoningLabel: 'Reasoning effort',
-  providerDefault: 'Provider default',
-  saveDefaultModel: 'Apply',
-  defaultModelSaved: 'Default model updated',
   catalogFailure: 'Catalog failed to load',
   noModels: 'No models available from this provider',
+
+  protocolLabel: 'API protocol',
+  protocolHint: "The gateway's wire protocol; when unsure, use chat/completions.",
+  protocolCompletionsHint: 'OpenAI Chat Completions-compatible API; what most gateways speak',
+  protocolResponsesHint: 'OpenAI Responses API (/responses)',
+  protocolMessagesHint: 'Anthropic Messages API (/v1/messages)',
 
   apiKeyLabel: 'API key',
   apiKeyPlaceholder: 'Enter the key, then save',
@@ -523,7 +520,7 @@ const en: typeof zh = {
   modelsInvalid: 'Every model needs a valid ID',
 
   customTitle: 'Model providers',
-  customDescription: 'Add OpenAI-compatible gateways: base URL, credentials, and model list.',
+  customDescription: 'Add model gateways: pick a protocol (chat/completions, responses, messages), then base URL, credentials, and models.',
   noProvidersConfigured: 'No providers yet. Click "Add provider" to get started.',
   addProvider: 'Add provider',
   routeIdLabel: 'Route ID',
@@ -573,7 +570,7 @@ const en: typeof zh = {
   reasonMaxTokens: 'Hit the token limit',
   reasonError: 'Error',
   reasonInterrupted: 'Interrupted',
-  currentModel: 'Default model',
+  currentModel: 'Current model',
 
   messageBranch: 'Branch into a new conversation',
 
@@ -651,7 +648,6 @@ const en: typeof zh = {
   catGeneral: 'General',
   catSecurity: 'Security',
   catAppearance: 'Appearance',
-  defaultModelLabel: 'Default model',
   sandboxDesc: 'The sandbox confines file tools to the working directory (command tools like bash are not confined; mind what they run). Turning it off allows reads and writes outside the working directory.',
   themeLabel: 'Theme',
   languageLabel: 'Language',

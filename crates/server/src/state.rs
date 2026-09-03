@@ -1,4 +1,4 @@
-//! Composition root: opens stores, registers namespaces and adapters, and
+﻿//! Composition root: opens stores, registers namespaces and adapters, and
 //! keeps OpenAI-compatible routes in sync with settings.
 
 use std::collections::HashMap;
@@ -8,7 +8,6 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use async_trait::async_trait;
 use denia_agent_loop::{ApprovalBridge, SessionDriver};
-use denia_core::config::ModelSelection;
 use denia_core::session::ApprovalOutcome;
 use denia_credentials::{CredentialEvent, CredentialStore};
 use denia_llm::{RetryPolicy, OPENAI_SETTINGS_NS, OpenAiCompatAdapter, OpenAiSection, LlmRegistry};
@@ -18,8 +17,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
-
-pub const DEFAULT_MODEL_NS: &str = "agent-default-model";
 
 /// Console preferences namespace (settings page).
 pub const CONSOLE_NS: &str = "console";
@@ -329,26 +326,6 @@ pub fn spawn_live_evictor(live: Arc<LiveSessions>, interval_secs: u64, idle_afte
     });
 }
 
-/// The persisted `agent-default-model` section shape.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct DefaultModelSettings {
-    pub provider: String,
-    pub model: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub reasoning_effort: Option<String>,
-}
-
-impl From<DefaultModelSettings> for ModelSelection {
-    fn from(settings: DefaultModelSettings) -> Self {
-        ModelSelection {
-            provider: settings.provider,
-            model: settings.model,
-            reasoning_effort: settings.reasoning_effort,
-        }
-    }
-}
-
 /// Validates by round-tripping through the section's typed shape.
 fn validate_with<T>(value: Value) -> Result<Value, String>
 where
@@ -448,19 +425,6 @@ pub fn build_state(home: &Path, bound_remote: bool) -> Result<AppState, Box<dyn 
 
 fn register_namespaces(settings: &SettingsStore) -> Result<(), Box<dyn std::error::Error>> {
     settings.register(
-        DEFAULT_MODEL_NS,
-        NamespaceSpec {
-            defaults: json!({}),
-            validate: validate_with::<DefaultModelSettings>,
-            secrets: &[],
-            applies: Applies::Live,
-        },
-        json!({
-            "provider": "",
-            "model": "",
-        }),
-    )?;
-    settings.register(
         CONSOLE_NS,
         NamespaceSpec {
             defaults: json!({ "sandbox": true, "theme": "system", "locale": "zh" }),
@@ -481,22 +445,6 @@ fn register_namespaces(settings: &SettingsStore) -> Result<(), Box<dyn std::erro
         json!({}),
     )?;
     Ok(())
-}
-
-/// Reads the current default model selection from settings.
-pub fn current_default_selection(settings: &SettingsStore) -> ModelSelection {
-    let selection = settings
-        .resolved(DEFAULT_MODEL_NS)
-        .ok()
-        .and_then(|value| serde_json::from_value::<DefaultModelSettings>(value).ok());
-    match selection {
-        Some(selection) => selection.into(),
-        None => ModelSelection {
-            provider: String::new(),
-            model: String::new(),
-            reasoning_effort: None,
-        },
-    }
 }
 
 fn sync_openai_routes(

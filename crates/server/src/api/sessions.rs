@@ -1,4 +1,4 @@
-//! Session endpoints: list/create/read/delete, prompt, cancel, follow.
+﻿//! Session endpoints: list/create/read/delete, prompt, cancel, follow.
 //!
 //! ## 生命周期保证
 //!
@@ -29,7 +29,7 @@ use tokio_stream::wrappers::BroadcastStream;
 use tokio_util::sync::CancellationToken;
 
 use crate::error::ApiError;
-use crate::state::{AppState, RunningGuard, ServerEvent, current_default_selection};
+use crate::state::{AppState, RunningGuard, ServerEvent};
 
 pub fn router() -> Router<Arc<AppState>> {
     Router::new()
@@ -276,11 +276,20 @@ async fn prompt_session(
     // 消息落库后摘要变化:通知控制台刷新列表(excerpt 即时可见)。
     let _ = state.events.send(ServerEvent::SessionsUpdated);
 
-    let default = current_default_selection(&state.settings);
+    // 模型选择无服务端默认:前端为每个请求携带"上次使用的模型"。
+    let provider = body.provider.unwrap_or_default().trim().to_string();
+    let model = body.model.unwrap_or_default().trim().to_string();
+    if provider.is_empty() || model.is_empty() {
+        live.running.store(false, Ordering::SeqCst);
+        return Err(ApiError::bad_request(
+            "session/model-required",
+            "请先在输入栏选择模型再发送消息",
+        ));
+    }
     let selection = ModelSelection {
-        provider: body.provider.unwrap_or(default.provider),
-        model: body.model.unwrap_or(default.model),
-        reasoning_effort: body.reasoning_effort.or(default.reasoning_effort),
+        provider,
+        model,
+        reasoning_effort: body.reasoning_effort,
     };
     let resolved = match state
         .registry

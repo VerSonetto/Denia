@@ -1,29 +1,17 @@
-import { useCallback, useEffect, useState, type ReactNode } from 'react'
+﻿import { useCallback, useEffect, useState, type ReactNode } from 'react'
 import * as api from '../api'
 import { t } from '../i18n'
 import type { Notify } from '../App'
-import { ModelPicker } from './ModelPicker'
 import { IconClose, IconGear, IconPrompt, IconShield, IconSliders } from './icons'
 import { loadProviderCredentials, ModelProvidersPanel } from './settings/ModelProvidersPanel'
 import { Toggle } from './ui/controls'
-import { resolveSessionReasoningEffort } from '../modelCatalog'
-import type { ModelCatalog, ModelSelection, SettingsDescribe } from '../types'
+import type { SettingsDescribe } from '../types'
 
 type SettingsTab = 'general' | 'models' | 'security' | 'appearance'
 
 const CONSOLE_NS = 'console'
-const MODEL_NS = 'agent-default-model'
 
 const TABS: SettingsTab[] = ['general', 'models', 'security', 'appearance']
-
-function normalizeModelDraft(catalog: ModelCatalog, draft: ModelSelection): ModelSelection {
-  const group = catalog.groups.find((entry) => entry.id === draft.provider)
-  const model = group?.models.find((entry) => entry.id === draft.model)
-  return {
-    ...draft,
-    reasoningEffort: resolveSessionReasoningEffort(model?.reasoning?.efforts ?? [], draft.reasoningEffort),
-  }
-}
 
 function tabIcon(tab: SettingsTab, size = 16) {
   switch (tab) {
@@ -148,7 +136,6 @@ export function SettingsModal({ notify, onClose }: { notify: Notify; onClose: ()
   const [tab, setTab] = useState<SettingsTab>('general')
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
-  const [catalog, setCatalog] = useState<ModelCatalog | null>(null)
   const [settings, setSettings] = useState<SettingsDescribe | null>(null)
   const [credentials, setCredentials] = useState<Awaited<ReturnType<typeof loadProviderCredentials>>>({})
 
@@ -156,22 +143,18 @@ export function SettingsModal({ notify, onClose }: { notify: Notify; onClose: ()
   const [theme, setTheme] = useState('system')
   const [locale, setLocaleState] = useState('zh')
   const [consoleValue, setConsoleValue] = useState<Record<string, unknown>>({})
-  const [modelDraft, setModelDraft] = useState<ModelSelection | null>(null)
   const [consoleRevision, setConsoleRevision] = useState(0)
-  const [modelRevision, setModelRevision] = useState(0)
   const [promptText, setPromptText] = useState('')
   const [promptSource, setPromptSource] = useState<'file' | 'default'>('default')
 
   const load = useCallback(async () => {
     setLoading(true)
     try {
-      const [nextDescribe, nextCatalog, nextPrompt] = await Promise.all([
+      const [nextDescribe, nextPrompt] = await Promise.all([
         api.getSettings(),
-        api.getCatalog(),
         api.getSystemPrompt(),
       ])
       setSettings(nextDescribe)
-      setCatalog(nextCatalog)
       setPromptText(nextPrompt.text)
       setPromptSource(nextPrompt.source)
       setCredentials(await loadProviderCredentials(nextDescribe))
@@ -185,19 +168,6 @@ export function SettingsModal({ notify, onClose }: { notify: Notify; onClose: ()
         setConsoleRevision(console.revision)
       }
 
-      const model = nextDescribe.namespaces.find((n) => n.ns === MODEL_NS)
-      if (model) {
-        setModelDraft(
-          normalizeModelDraft(nextCatalog, {
-            provider: (model.value.provider as string) ?? nextCatalog.default.provider,
-            model: (model.value.model as string) ?? nextCatalog.default.model,
-            reasoningEffort: (model.value.reasoningEffort as string) ?? undefined,
-          }),
-        )
-        setModelRevision(model.revision)
-      } else {
-        setModelDraft(normalizeModelDraft(nextCatalog, nextCatalog.default))
-      }
     } catch (error) {
       notify('err', error instanceof Error ? error.message : String(error))
     } finally {
@@ -239,28 +209,6 @@ export function SettingsModal({ notify, onClose }: { notify: Notify; onClose: ()
         consoleRevision,
       )
       setConsoleRevision((view as { revision: number }).revision)
-      notify('ok', t('settingsSaved'))
-    } catch (error) {
-      notify('err', error instanceof Error ? error.message : String(error))
-      void load()
-    } finally {
-      setSaving(false)
-    }
-  }
-
-  const saveModel = async () => {
-    if (!modelDraft) return
-    setSaving(true)
-    try {
-      const section: Record<string, unknown> = {
-        provider: modelDraft.provider,
-        model: modelDraft.model,
-      }
-      if (modelDraft.reasoningEffort) {
-        section.reasoningEffort = modelDraft.reasoningEffort
-      }
-      const view = await api.replaceNamespace(MODEL_NS, section, modelRevision)
-      setModelRevision((view as { revision: number }).revision)
       notify('ok', t('settingsSaved'))
     } catch (error) {
       notify('err', error instanceof Error ? error.message : String(error))
@@ -396,29 +344,12 @@ export function SettingsModal({ notify, onClose }: { notify: Notify; onClose: ()
                 )}
 
                 {tab === 'models' && settings && (
-                  <>
-                    <section className="setm-section">
-                      <div className="setm-section-label">{t('defaultModelLabel')}</div>
-                      <p className="setm-section-hint">{t('defaultModelHint')}</p>
-                      {catalog && modelDraft && (
-                        <div className="setm-model-fields">
-                          <ModelPicker catalog={catalog} value={modelDraft} onChange={setModelDraft} />
-                        </div>
-                      )}
-                      <SetmActions>
-                        <SetmBtn disabled={saving || !modelDraft} onClick={() => void saveModel()}>
-                          {t('save')}
-                        </SetmBtn>
-                      </SetmActions>
-                    </section>
-
-                    <ModelProvidersPanel
-                      settings={settings}
-                      credentials={credentials}
-                      notify={notify}
-                      onChanged={() => void reloadProviders()}
-                    />
-                  </>
+                  <ModelProvidersPanel
+                    settings={settings}
+                    credentials={credentials}
+                    notify={notify}
+                    onChanged={() => void reloadProviders()}
+                  />
                 )}
 
                 {tab === 'security' && (
