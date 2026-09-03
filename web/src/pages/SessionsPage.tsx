@@ -945,7 +945,7 @@ export default function SessionsPage({
         {phase === 'active' && view === 'chat' && (
           <ConversationAxis nodes={transcriptNodes} scrollRef={scrollRef} />
         )}
-        <div className="conversation-view">
+        <div className={view === 'trajectory' ? 'conversation-view full-bleed' : 'conversation-view'}>
           {showTranscript && activeId ? (
             <SessionView
               key={`${activeId}-${transcriptReloadTick}`}
@@ -976,22 +976,24 @@ export default function SessionsPage({
             </div>
           )}
         </div>
-        <div className="composer-seat" ref={seatRef} data-composer-seat="">
-          <div className={`composer-stack${phase === 'hero' ? ' composer-hero' : ''}`}>
-            {phase === 'hero' && workspaceRow}
-            {phase === 'active' && <TodoPanel todos={todos} />}
-            {composerCard}
-            {phase === 'active' && (
-              <StatsBar
-                nodes={transcriptNodes}
-                running={running}
-                contextWindow={activeContextWindow}
-              />
-            )}
+        {(phase === 'hero' || view === 'chat') && (
+          <div className="composer-seat" ref={seatRef} data-composer-seat="">
+            <div className={`composer-stack${phase === 'hero' ? ' composer-hero' : ''}`}>
+              {phase === 'hero' && workspaceRow}
+              {phase === 'active' && <TodoPanel todos={todos} />}
+              {composerCard}
+              {phase === 'active' && (
+                <StatsBar
+                  nodes={transcriptNodes}
+                  running={running}
+                  contextWindow={activeContextWindow}
+                />
+              )}
+            </div>
           </div>
-        </div>
+        )}
       </div>
-      {phase === 'active' && !atBottom && (
+      {phase === 'active' && view === 'chat' && !atBottom && (
         <button
           type="button"
           className="jump-bottom"

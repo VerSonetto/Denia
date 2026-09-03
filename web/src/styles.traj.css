@@ -47,13 +47,25 @@
 
 /* ===================== 轨迹(dsh 形态 + 可读性增强) ===================== */
 
+/* 类型三色系(与 ContextRing 面板同源:琥珀=用户,蓝=消息,绿=工具) */
 .traj-pane {
+  --traj-user: #d8a35f;
+  --traj-message: #6187d8;
+  --traj-tool: #7aa86f;
+
   display: flex;
   flex-direction: column;
   gap: 8px;
-  width: min(100%, calc(var(--chat-content-width) + 360px));
-  margin: 0 auto;
+  width: 100%;
   padding: 8px 0 16px;
+}
+
+/* 轨迹视图不受消息区宽度限制:占满整行 */
+.conversation-view.full-bleed {
+  width: 100%;
+  max-width: none;
+  padding-left: 18px;
+  padding-right: 18px;
 }
 
 /* 主栏(概览 + 台账)与右侧 inspector 双栏;选中记录后面板常驻右侧。 */
@@ -85,8 +97,40 @@
   margin-right: 4px;
 }
 
-.traj-search {
+.traj-legend {
   margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 12px;
+  font-size: 11px;
+  color: var(--label-secondary);
+}
+
+.traj-legend span {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.traj-legend i {
+  width: 9px;
+  height: 9px;
+  border-radius: 3px;
+}
+
+.traj-legend i[data-kind='user'] {
+  background: var(--traj-user);
+}
+
+.traj-legend i[data-kind='message'] {
+  background: var(--traj-message);
+}
+
+.traj-legend i[data-kind='tool'] {
+  background: var(--traj-tool);
+}
+
+.traj-search {
   display: inline-flex;
   align-items: center;
   gap: 6px;
@@ -146,13 +190,13 @@
 }
 
 .traj-span.user {
-  background: var(--label-tertiary);
-  opacity: 0.5;
+  background: var(--traj-user);
+  opacity: 0.7;
 }
 
 .traj-span.message {
-  background: var(--accent);
-  opacity: 0.75;
+  background: var(--traj-message);
+  opacity: 0.85;
 }
 
 /* Assistant span 的 TTFT 段:更暗的斜纹,解码段保持实色 */
@@ -162,14 +206,14 @@
   border-radius: 3px 0 0 3px;
   background: repeating-linear-gradient(
     -45deg,
-    color-mix(in srgb, var(--accent) 55%, transparent) 0 3px,
+    color-mix(in srgb, var(--traj-message) 55%, transparent) 0 3px,
     transparent 3px 6px
   );
 }
 
 .traj-span.tool {
-  background: var(--success);
-  opacity: 0.6;
+  background: var(--traj-tool);
+  opacity: 0.75;
 }
 
 .traj-span.err {
@@ -231,7 +275,13 @@
   cursor: pointer;
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  gap: 8px;
+}
+
+.traj-focus-count {
+  padding-left: 8px;
+  border-left: 1px solid color-mix(in srgb, var(--accent) 40%, transparent);
+  opacity: 0.85;
 }
 
 /* ---- 台账 ---- */
@@ -400,19 +450,21 @@
 }
 
 .traj-badge.user {
-  color: var(--label-primary);
-  background: var(--bg-active);
+  color: var(--traj-user);
+  border-color: color-mix(in srgb, var(--traj-user) 45%, transparent);
+  background: color-mix(in srgb, var(--traj-user) 12%, transparent);
 }
 
 .traj-badge.message {
-  color: var(--accent);
-  border-color: color-mix(in srgb, var(--accent) 45%, transparent);
-  background: var(--accent-soft);
+  color: var(--traj-message);
+  border-color: color-mix(in srgb, var(--traj-message) 45%, transparent);
+  background: color-mix(in srgb, var(--traj-message) 12%, transparent);
 }
 
 .traj-badge.tool {
-  color: var(--success);
-  border-color: color-mix(in srgb, var(--success) 45%, transparent);
+  color: var(--traj-tool);
+  border-color: color-mix(in srgb, var(--traj-tool) 45%, transparent);
+  background: color-mix(in srgb, var(--traj-tool) 12%, transparent);
 }
 
 .traj-summary {
@@ -526,18 +578,18 @@
   bottom: 1px;
   height: 3px;
   border-radius: 2px;
-  background: var(--label-tertiary);
-  opacity: 0.5;
+  background: var(--traj-user);
+  opacity: 0.6;
 }
 
 .traj-dur-bar[data-kind='message'] {
-  background: var(--accent);
-  opacity: 0.55;
+  background: var(--traj-message);
+  opacity: 0.65;
 }
 
 .traj-dur-bar[data-kind='tool'] {
-  background: var(--success);
-  opacity: 0.55;
+  background: var(--traj-tool);
+  opacity: 0.65;
 }
 
 .traj-dur-bar[data-err] {
@@ -589,6 +641,93 @@
   font-size: 11px;
   color: var(--label-tertiary);
   font-variant-numeric: tabular-nums;
+}
+
+/* 统计条:时刻/耗时/TTFT/生成(或工具状态)一排小卡 */
+.traj-stats {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 6px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border-l);
+}
+
+.traj-stat {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.traj-stat .label {
+  font-size: 10px;
+  color: var(--label-tertiary);
+  white-space: nowrap;
+}
+
+.traj-stat b {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--label-primary);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.traj-stat .traj-stat-sub {
+  font-size: 10.5px;
+  font-weight: 400;
+  color: var(--label-tertiary);
+}
+
+.traj-stat b.ok {
+  color: var(--traj-tool);
+}
+
+.traj-stat b.err {
+  color: var(--error);
+}
+
+.traj-stat b.run {
+  color: var(--traj-message);
+}
+
+/* 正文卡片:banner(标签 + 复制)+ 内容 */
+.traj-card {
+  border: 1px solid var(--border-l);
+  border-radius: var(--r-sm);
+  overflow: hidden;
+}
+
+.traj-card + .traj-card {
+  margin-top: 10px;
+}
+
+.traj-card-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 2px 4px 2px 10px;
+  font-size: 10.5px;
+  color: var(--label-tertiary);
+  background: var(--bg-active);
+  border-bottom: 1px solid var(--border-l);
+}
+
+.traj-card-banner .copy-message-btn {
+  width: 26px;
+  height: 26px;
+}
+
+.traj-card .traj-code,
+.traj-card .traj-prose {
+  border: none;
+  max-height: 320px;
+  overflow: auto;
+  margin: 0;
+  padding: 10px 12px;
 }
 
 .traj-inspector-summary {

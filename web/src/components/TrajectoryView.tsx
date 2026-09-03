@@ -8,6 +8,7 @@ import {
 } from '../trajectory'
 import type { SessionEnvelope, TokenUsage } from '../types'
 import { toolCallSummary } from '../toolDisplay'
+import { CopyMessageButton } from './CopyMessageButton'
 import { IconChevron, IconSearch } from './icons'
 import { formatDuration } from './transcript'
 
@@ -72,9 +73,10 @@ export function TrajectoryView({ events }: { events: SessionEnvelope[] }) {
   const normalizedQuery = query.trim().toLowerCase()
   const matches = useCallback(
     (record: TrajectoryRecord) => {
+      // 聚焦语义:起点落在区间内的记录(用户预期"只显示滑选的区间";
+      // 相交语义会让横跨大半场的长工具永远可见,等于没筛)。
       if (interval) {
-        const end = record.durationMs !== undefined ? record.time + record.durationMs : record.time
-        if (end < interval.start || record.time > interval.end) return false
+        if (record.time < interval.start || record.time > interval.end) return false
       }
       if (!normalizedQuery) return true
       const haystack =
@@ -103,6 +105,43 @@ export function TrajectoryView({ events }: { events: SessionEnvelope[] }) {
       setPendingJump(null)
     }
   }, [pendingJump, visibleGroups])
+
+  const focusedCount = interval
+    ? layout.records.filter((r) => r.time >= interval.start && r.time <= interval.end).length
+    : 0
+
+  // 可见记录的扁平清单:面板 ↑/↓ 键导航沿它移动。
+  const visibleRecords = useMemo(
+    () => visibleGroups.flatMap(({ records }) => records),
+    [visibleGroups],
+  )
+  const visibleRecordsRef = useRef<TrajectoryRecord[]>([])
+  visibleRecordsRef.current = visibleRecords
+
+  // ↑/↓ 在可见记录间移动选中(输入框聚焦时让路);移动后走 pendingJump 滚动到行。
+  useEffect(() => {
+    if (!selected) return
+    const onKey = (event: KeyboardEvent) => {
+      const target = event.target as HTMLElement | null
+      if (
+        target &&
+        (target.tagName === 'INPUT' || target.tagName === 'TEXTAREA' || target.isContentEditable)
+      ) {
+        return
+      }
+      if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return
+      const list = visibleRecordsRef.current
+      const index = list.findIndex((r) => r.key === selected.key)
+      if (index < 0) return
+      const next = event.key === 'ArrowDown' ? list[index + 1] : list[index - 1]
+      if (!next) return
+      event.preventDefault()
+      setSelected(next)
+      setPendingJump(next.key)
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [selected])
 
   const toggleTurn = useCallback((turn: number) => {
     setCollapsedTurns((previous) => {
@@ -145,6 +184,20 @@ export function TrajectoryView({ events }: { events: SessionEnvelope[] }) {
             <IconChevron size={11} />
           </span>
         </button>
+        <div className="traj-legend" aria-hidden>
+          <span>
+            <i data-kind="user" />
+            {t('trajectoryKindUser')}
+          </span>
+          <span>
+            <i data-kind="message" />
+            {t('trajectoryKindMessage')}
+          </span>
+          <span>
+            <i data-kind="tool" />
+            {t('trajectoryKindTool')}
+          </span>
+        </div>
         <div className="traj-search">
           <IconSearch size={12} />
           <input
@@ -177,6 +230,7 @@ export function TrajectoryView({ events }: { events: SessionEnvelope[] }) {
                 onClick={() => setInterval(null)}
               >
                 {formatClock(interval.start)} → {formatClock(interval.end)}
+                <span className="traj-focus-count">{t('trajectoryFocusCount', { n: focusedCount })}</span>
                 <strong>×</strong>
               </button>
             </div>
@@ -334,15 +388,11 @@ function TimelineBar({
               const target = recordAt(current)
               if (target) onJump(target)
             } else {
-              // 滑选:聚焦区间并定位到区间起点。
+              // 滑选:聚焦区间(台账只显示起点落在区间内的记录)并定位到区间起点。
               const start = Math.min(anchor, current)
               const end = Math.max(anchor, current)
               onInterval({ start, end })
-              const first = layout.records.find(
-                (record) =>
-                  (record.durationMs !== undefined ? record.time + record.durationMs : record.time) >=
-                  start,
-              )
+              const first = layout.records.find((record) => record.time >= start)
               if (first) onOrient(first)
             }
           }
@@ -619,7 +669,7 @@ function kindLabel(kind: TrajectoryRecord['kind']): string {
   return t('trajectoryKindTool')
 }
 
-/* ---- inspector(概述/参数/结果/计时/用量) ---- */
+/* ---- inspector(右侧常驻面板:统计条 + 分区正文 + 复制) ---- */
 
 type InspectorTab = 'summary' | 'payload' | 'result' | 'timing' | 'usage'
 
@@ -645,6 +695,18 @@ function RecordInspector({
     return () => window.removeEventListener('keydown', onKey)
   }, [onClose])
 
+  const isError = record.result?.isError === true
+  const running = record.kind === 'tool' && record.result === undefined && record.durationMs === undefined
+  const bodyText =
+    record.kind === 'tool'
+      ? (record.result?.content ?? '')
+      : (record.text ?? record.content ?? '')
+  const argsRaw = record.args ? prettyJson(record.args) : ''
+  const throughput =
+    record.decodeMs !== undefined && record.usage && record.usage.outputTokens > 0
+      ? (record.usage.outputTokens / (record.decodeMs / 1000)).toFixed(1)
+      : null
+
   return (
     <aside className="traj-inspector" aria-label={t('trajectoryInspectorAria')}>
       <div className="traj-inspector-head">
@@ -653,7 +715,7 @@ function RecordInspector({
           <span className="traj-inspector-summary">
             {record.kind === 'tool'
               ? record.toolName
-              : firstLine(record.text ?? record.content ?? '', 60) || '—'}
+              : firstLine(bodyText, 60) || '—'}
           </span>
           <button type="button" className="icon-btn" onClick={onClose} aria-label={t('close')}>
             ×
@@ -665,9 +727,54 @@ function RecordInspector({
             : t('trajectoryTurnLabel', { turn: record.turn })}
           {' · '}
           {t('trajectoryEventSeq', { seq: record.seq })}
-          {' · '}
-          {formatClock(record.time)}
+          {record.step !== undefined && ` · ${t('trajectoryGroupStep', { step: record.step })}`}
         </div>
+      </div>
+      <div className="traj-stats">
+        <div className="traj-stat">
+          <span className="label">{t('trajectoryTimingStarted')}</span>
+          <b>{formatClock(record.time)}</b>
+        </div>
+        <div className="traj-stat">
+          <span className="label">{t('trajectoryTimingDuration')}</span>
+          <b>
+            {record.durationMs === undefined
+              ? t('trajectoryTimingNotRecorded')
+              : formatSelfDuration(record.durationMs)}
+          </b>
+        </div>
+        {record.kind === 'message' && record.ttftMs !== undefined && (
+          <div className="traj-stat">
+            <span className="label">{t('trajectoryTimingTtft')}</span>
+            <b>{formatSelfDuration(record.ttftMs)}</b>
+          </div>
+        )}
+        {record.kind === 'message' && record.decodeMs !== undefined && (
+          <div className="traj-stat">
+            <span className="label">{t('trajectoryTimingGeneration')}</span>
+            <b>
+              {formatSelfDuration(record.decodeMs)}
+              {throughput && (
+                <span className="traj-stat-sub">
+                  {' '}
+                  {t('trajectoryUnitTokensPerSecond', { value: throughput })}
+                </span>
+              )}
+            </b>
+          </div>
+        )}
+        {record.kind === 'tool' && (
+          <div className="traj-stat">
+            <span className="label">{t('trajectoryTabResult')}</span>
+            <b className={running ? 'run' : isError ? 'err' : 'ok'}>
+              {running
+                ? t('trajectoryStatusRunning')
+                : isError
+                  ? t('trajectoryStatusFailed')
+                  : t('trajectoryToolOk')}
+            </b>
+          </div>
+        )}
       </div>
       <div className="traj-tabs" role="tablist">
         {tabs.map((entry) => (
@@ -685,21 +792,33 @@ function RecordInspector({
       </div>
       <div className="traj-inspector-body">
         {tab === 'summary' && (
-          <div className="traj-prose">
-            {record.kind === 'tool'
-              ? (record.result?.content ?? t('trajectoryRecordNoResult'))
-              : (record.text ?? record.content ?? t('trajectoryRecordNoOutput'))}
+          <div className="traj-card">
+            <div className="traj-card-banner">
+              <span>{t('trajectoryTabSummary')}</span>
+              {bodyText && <CopyMessageButton text={bodyText} />}
+            </div>
+            <pre className="traj-prose">{bodyText || t('trajectoryRecordNoOutput')}</pre>
           </div>
         )}
         {tab === 'payload' && (
-          <pre className="traj-code">
-            {record.args ? prettyJson(record.args) : t('trajectoryRecordNoPayload')}
-          </pre>
+          <div className="traj-card">
+            <div className="traj-card-banner">
+              <span>{t('trajectoryTabPayload')}</span>
+              {argsRaw && <CopyMessageButton text={argsRaw} />}
+            </div>
+            <pre className="traj-code">{argsRaw || t('trajectoryRecordNoPayload')}</pre>
+          </div>
         )}
         {tab === 'result' && (
-          <pre className={`traj-code${record.result?.isError ? ' err' : ''}`}>
-            {record.result ? record.result.content : t('trajectoryRecordNoResult')}
-          </pre>
+          <div className="traj-card">
+            <div className="traj-card-banner">
+              <span>{t('trajectoryTabResult')}</span>
+              {record.result && <CopyMessageButton text={record.result.content} />}
+            </div>
+            <pre className={`traj-code${isError ? ' err' : ''}`}>
+              {record.result ? record.result.content : t('trajectoryRecordNoResult')}
+            </pre>
+          </div>
         )}
         {tab === 'timing' && <TimingTable record={record} />}
         {tab === 'usage' && <UsageTable usage={record.usage} />}
