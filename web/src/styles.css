@@ -1903,6 +1903,49 @@ button {
   color: var(--label-caption);
 }
 
+/* 一级列:搜索框(级联与搜索平铺共用头部) */
+.model-menu-search {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  flex: none;
+  height: 30px;
+  margin: 4px 10px 2px;
+  padding: 0 2px;
+  border: none;
+  border-bottom: 1px solid var(--border-l1);
+  background: transparent;
+  color: var(--label-tertiary);
+  transition: border-color 0.15s var(--ease);
+}
+
+.model-menu-search:focus-within {
+  border-color: var(--border-l3);
+}
+
+.model-menu-search input {
+  flex: 1;
+  min-width: 0;
+  border: none;
+  outline: none;
+  background: transparent;
+  color: var(--label-primary);
+  font-size: 12.5px;
+  line-height: 1.2;
+}
+
+.model-menu-search input::placeholder {
+  color: var(--label-caption);
+}
+
+/* 搜索无结果空态 */
+.model-menu-empty {
+  padding: 18px 12px;
+  text-align: center;
+  color: var(--label-caption);
+  font-size: 12.5px;
+}
+
 /* 一级:供应商条目 */
 .model-menu-provider {
   display: flex;

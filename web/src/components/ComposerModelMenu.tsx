@@ -9,8 +9,13 @@ import {
 import { formatContextWindow, resolveSessionReasoningEffort } from '../modelCatalog'
 import { reasoningEffortLabel } from '../reasoningEffort'
 import { t } from '../i18n'
-import type { ModelCatalog, ModelSelection } from '../types'
-import { IconCheck, IconChevron, IconThink } from './icons'
+import type {
+  CatalogModel,
+  ModelCatalog,
+  ModelProviderGroup,
+  ModelSelection,
+} from '../types'
+import { IconCheck, IconChevron, IconSearch, IconThink } from './icons'
 
 /** 二级菜单宽度 + 间距,与 styles.css 的 .model-menu-sub 保持一致(翻转探测用)。 */
 const SUB_MENU_WIDTH = 304
@@ -20,9 +25,16 @@ const HOVER_OPEN_DELAY = 180
 /** 鼠标离开后的二级宽限:吸收一二级之间穿过缝隙的短暂离开。 */
 const SUB_CLOSE_DELAY = 120
 
+/** 搜索命中项:模型连同所属供应商,平铺展示时用。 */
+interface SearchHit {
+  group: ModelProviderGroup
+  model: CatalogModel
+}
+
 /**
- * Composer 模型选择:两级级联菜单。
- * 一级 = 供应商列表(沿用目录分组顺序),二级 = 该供应商的模型 + 思考强度。
+ * Composer 模型选择:两级级联菜单 + 模型搜索。
+ * 一级 = 供应商列表(沿用目录分组顺序),二级 = 该供应商的模型 + 思考强度;
+ * 搜索词非空时一级列表切换为命中的模型平铺列表,点击直接选中。
  */
 export function ComposerModelMenu({
   catalog,
@@ -44,11 +56,13 @@ export function ComposerModelMenu({
   const [kbMode, setKbMode] = useState<'providers' | 'models'>('providers')
   const [kbProvider, setKbProvider] = useState(0)
   const [kbModel, setKbModel] = useState(0)
+  // 搜索词:非空时一级列表变为命中的模型平铺列表。
+  const [query, setQuery] = useState('')
 
   const rootRef = useRef<HTMLDivElement | null>(null)
   const chipRef = useRef<HTMLButtonElement | null>(null)
   const menuRef = useRef<HTMLDivElement | null>(null)
-  const subRef = useRef<HTMLDivElement | null>(null)
+  const searchRef = useRef<HTMLInputElement | null>(null)
   // 悬浮展开延迟与二级关闭宽限,两个定时器互斥使用。
   const openTimerRef = useRef<number | null>(null)
   const closeTimerRef = useRef<number | null>(null)
@@ -58,6 +72,27 @@ export function ComposerModelMenu({
   const efforts = model?.reasoning?.efforts ?? []
   const activeEffort = resolveSessionReasoningEffort(efforts, selection.reasoningEffort)
   const effortName = activeEffort ? reasoningEffortLabel(activeEffort) : ''
+
+  /* ---- 搜索派生:按模型名 / ID / 描述 / 供应商名匹配,保持分组顺序平铺 ---- */
+
+  const q = query.trim().toLowerCase()
+  const searching = q.length > 0
+  const searchHits: SearchHit[] = []
+  if (searching) {
+    for (const hitGroup of catalog.groups) {
+      const groupMatched = hitGroup.name.toLowerCase().includes(q)
+      for (const candidate of hitGroup.models) {
+        if (
+          groupMatched ||
+          candidate.name.toLowerCase().includes(q) ||
+          candidate.id.toLowerCase().includes(q) ||
+          (candidate.description ?? '').toLowerCase().includes(q)
+        ) {
+          searchHits.push({ group: hitGroup, model: candidate })
+        }
+      }
+    }
+  }
 
   const clearTimers = () => {
     if (openTimerRef.current !== null) {
@@ -75,6 +110,7 @@ export function ComposerModelMenu({
     setOpen(false)
     setFocusedProvider(null)
     setKbMode('providers')
+    setQuery('')
   }
 
   useEffect(() => closeMenu, [])
@@ -89,7 +125,12 @@ export function ComposerModelMenu({
     return () => document.removeEventListener('mousedown', onDoc)
   }, [open])
 
-  // 打开时:探测二级该放右侧还是左侧,并把一级列总高写入 CSS 变量,二级锁同高顶对齐。
+  // 搜索词变化时键盘高亮回到命中列表顶部。
+  useEffect(() => {
+    setKbModel(0)
+  }, [query])
+
+  // 打开时:翻转探测 + 一级列尺寸写入 CSS 变量 + 聚焦搜索框(可直接打字)。
   useLayoutEffect(() => {
     if (!open) return
     const menu = menuRef.current
@@ -103,13 +144,16 @@ export function ComposerModelMenu({
     // 一级列实测宽/高写入 CSS 变量:二级的 left 依一级右缘(--menu-w)定位,翻转侧用 100%(chip 左缘)。
     anchor?.style.setProperty('--menu-w', `${Math.round(rect.width)}px`)
     anchor?.style.setProperty('--menu-h', `${Math.round(rect.height)}px`)
+    searchRef.current?.focus()
   }, [open])
 
-  // 键盘高亮的模型条目跟随滚动。
+  // 键盘高亮条目跟随滚动(级联模型与搜索平铺共用 data-kb 标记)。
   useEffect(() => {
-    if (!open || kbMode !== 'models') return
-    subRef.current?.querySelector('[data-kb="true"]')?.scrollIntoView({ block: 'nearest' })
-  }, [open, kbMode, kbModel, focusedProvider])
+    if (!open) return
+    if (!searching && kbMode !== 'models') return
+    rootRef.current?.querySelector('[data-kb="true"]')?.scrollIntoView({ block: 'nearest' })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, kbMode, kbModel, focusedProvider, query])
 
   /* ---- 鼠标悬浮:延迟展开 + 宽限关闭,防缝隙闪烁 ---- */
 
@@ -162,19 +206,37 @@ export function ComposerModelMenu({
     onChange({ provider: providerId, model: modelId, reasoningEffort: resolved })
   }
 
-  /* ---- 键盘导航:焦点保持在 chip 上,由 chip 统一分发 ---- */
+  /* ---- 键盘导航:焦点可能在 chip 或搜索框,由容器统一分发 ---- */
 
-  const onChipKeyDown = (event: ReactKeyboardEvent<HTMLButtonElement>) => {
+  const onMenuKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
     if (!open) return
+    // 输入法组词阶段的 Enter / Esc 交给 IME,不当作菜单快捷键。
+    if (event.nativeEvent.isComposing) return
     const groups = catalog.groups
     if (event.key === 'Escape') {
       event.preventDefault()
-      // 二级里 Esc 返回一级;一级里 Esc 关闭整个菜单。
+      if (searching) {
+        setQuery('')
+        return
+      }
       if (kbMode === 'models') {
         setKbMode('providers')
         setFocusedProvider(null)
-      } else {
-        closeMenu()
+        return
+      }
+      closeMenu()
+      return
+    }
+    if (searching) {
+      // 搜索态:↑↓ 在命中模型间移动,Enter 直接选中。
+      if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+        event.preventDefault()
+        const delta = event.key === 'ArrowDown' ? 1 : -1
+        setKbModel((prev) => Math.min(searchHits.length - 1, Math.max(0, prev + delta)))
+      } else if (event.key === 'Enter') {
+        event.preventDefault()
+        const hit = searchHits[kbModel]
+        if (hit) pickModel(hit.group.id, hit.model.id)
       }
       return
     }
@@ -253,7 +315,11 @@ export function ComposerModelMenu({
     : null
 
   return (
-    <div className={`model-menu-anchor${open ? ' open' : ''}`} ref={rootRef}>
+    <div
+      className={`model-menu-anchor${open ? ' open' : ''}`}
+      ref={rootRef}
+      onKeyDown={onMenuKeyDown}
+    >
       <button
         ref={chipRef}
         type="button"
@@ -263,7 +329,6 @@ export function ComposerModelMenu({
         aria-expanded={open}
         title={t('sessionModelHint')}
         onClick={toggle}
-        onKeyDown={onChipKeyDown}
       >
         <span className="model-chip-label">{model?.name ?? selection.model}</span>
         {efforts.length > 0 && (
@@ -277,54 +342,112 @@ export function ComposerModelMenu({
       {open && (
         <>
           <div className="menu-backdrop" onClick={closeMenu} />
-          {/* 一级:供应商列表 */}
+          {/* 一级:搜索框 + (供应商列表 | 搜索命中平铺) */}
           <div className="model-menu" role="menu" aria-label={t('modelProvidersLabel')} ref={menuRef}>
-            <div className="model-menu-heading">{t('modelProvidersLabel')}</div>
-            <div className="model-menu-scroll" onMouseLeave={scheduleSubClose}>
-              {catalog.groups.map((g, index) => {
-                const hasCurrent = selection.provider === g.id
-                const expanded = focusedProvider === g.id
-                const kbHere = kbMode === 'providers' && index === kbProvider
-                return (
-                  <button
-                    key={g.id}
-                    type="button"
-                    role="menuitem"
-                    aria-haspopup="menu"
-                    aria-expanded={expanded}
-                    className={`model-menu-provider${hasCurrent ? ' active' : ''}${
-                      expanded ? ' expanded' : ''
-                    }${kbHere ? ' kb' : ''}`}
-                    onMouseEnter={() => {
-                      setKbMode('providers')
-                      hoverProvider(g.id)
-                    }}
-                    onClick={(event) => clickProvider(event, g.id, g.models.length > 0)}
-                  >
-                    <span className="glyph" aria-hidden="true">
-                      {g.name.charAt(0).toUpperCase()}
-                    </span>
-                    <span className="name">{g.name}</span>
-                    {hasCurrent && (
-                      <span className="mark" title={t('currentModel')}>
-                        <IconCheck size={13} />
-                      </span>
-                    )}
-                    <span className="chev" aria-hidden="true">
-                      <IconChevron size={12} />
-                    </span>
-                  </button>
-                )
-              })}
+            <div className="model-menu-search">
+              <IconSearch size={13} />
+              <input
+                ref={searchRef}
+                value={query}
+                onChange={(event) => setQuery(event.target.value)}
+                placeholder={t('modelSearchPlaceholder')}
+                aria-label={t('modelSearchPlaceholder')}
+                spellCheck={false}
+              />
             </div>
+            {searching ? (
+              <div className="model-menu-scroll">
+                {searchHits.length === 0 ? (
+                  <div className="model-menu-empty">{t('modelSearchEmpty')}</div>
+                ) : (
+                  searchHits.map(({ group: hitGroup, model: hitModel }, index) => {
+                    const active =
+                      selection.provider === hitGroup.id && selection.model === hitModel.id
+                    const kbHere = index === kbModel
+                    return (
+                      <button
+                        key={`${hitGroup.id}-${hitModel.id}`}
+                        type="button"
+                        role="menuitem"
+                        data-kb={kbHere || undefined}
+                        className={`model-menu-item${active ? ' active' : ''}${kbHere ? ' kb' : ''}`}
+                        onClick={() => pickModel(hitGroup.id, hitModel.id)}
+                      >
+                        <span className="row1">
+                          <span className="name">{hitModel.name}</span>
+                          <span className="meta">
+                            {hitModel.thinkingSupported && (
+                              <span className="think" title={t('thinkingLabel')}>
+                                <IconThink size={12} />
+                              </span>
+                            )}
+                            {hitModel.contextWindow ? (
+                              <span className="ctx" title={t('contextWindowColumn')}>
+                                {formatContextWindow(hitModel.contextWindow)}
+                              </span>
+                            ) : null}
+                            {active && (
+                              <span className="check" title={t('currentModel')}>
+                                <IconCheck size={13} />
+                              </span>
+                            )}
+                          </span>
+                        </span>
+                        <span className="hint">{hitGroup.name}</span>
+                      </button>
+                    )
+                  })
+                )}
+              </div>
+            ) : (
+              <>
+                <div className="model-menu-heading">{t('modelProvidersLabel')}</div>
+                <div className="model-menu-scroll" onMouseLeave={scheduleSubClose}>
+                  {catalog.groups.map((g, index) => {
+                    const hasCurrent = selection.provider === g.id
+                    const expanded = focusedProvider === g.id
+                    const kbHere = kbMode === 'providers' && index === kbProvider
+                    return (
+                      <button
+                        key={g.id}
+                        type="button"
+                        role="menuitem"
+                        aria-haspopup="menu"
+                        aria-expanded={expanded}
+                        className={`model-menu-provider${hasCurrent ? ' active' : ''}${
+                          expanded ? ' expanded' : ''
+                        }${kbHere ? ' kb' : ''}`}
+                        onMouseEnter={() => {
+                          setKbMode('providers')
+                          hoverProvider(g.id)
+                        }}
+                        onClick={(event) => clickProvider(event, g.id, g.models.length > 0)}
+                      >
+                        <span className="glyph" aria-hidden="true">
+                          {g.name.charAt(0).toUpperCase()}
+                        </span>
+                        <span className="name">{g.name}</span>
+                        {hasCurrent && (
+                          <span className="mark" title={t('currentModel')}>
+                            <IconCheck size={13} />
+                          </span>
+                        )}
+                        <span className="chev" aria-hidden="true">
+                          <IconChevron size={12} />
+                        </span>
+                      </button>
+                    )
+                  })}
+                </div>
+              </>
+            )}
           </div>
-          {/* 二级:该供应商的模型 + 思考强度 */}
-          {subGroup && subGroup.models.length > 0 && (
+          {/* 二级:该供应商的模型 + 思考强度(搜索态隐藏) */}
+          {!searching && subGroup && subGroup.models.length > 0 && (
             <div
               className={`model-menu-sub${flip ? ' flip' : ''}`}
               role="menu"
               aria-label={subGroup.name}
-              ref={subRef}
               onMouseEnter={() => {
                 cancelSubClose()
                 setKbMode('providers')
