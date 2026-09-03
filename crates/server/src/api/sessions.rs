@@ -1,4 +1,4 @@
-﻿//! Session endpoints: list/create/read/delete, prompt, cancel, follow.
+//! Session endpoints: list/create/read/delete, prompt, cancel, follow.
 //!
 //! ## 生命周期保证
 //!
@@ -21,6 +21,7 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use denia_core::config::ModelSelection;
 use denia_core::session::{ApprovalOutcome, PermissionMode, SessionEnvelope, SessionEvent};
+use denia_session::ToolResultPruneConfig;
 use denia_tools::permission::parse_permission_mode;
 use futures::StreamExt;
 use serde::Deserialize;
@@ -390,6 +391,10 @@ async fn prompt_session(
     tokio::spawn(async move {
         // RAII:任务结束(含 panic)自动复位 running + 清 cancel + 广播结束。
         let _guard = RunningGuard::new(live.clone(), events_for_guard);
+        let emit: Arc<dyn Fn(&SessionEnvelope) + Send + Sync> = Arc::new(move |envelope: &SessionEnvelope| {
+            let _ = followers_for_turn.send(envelope.clone());
+        });
+        let emit_for_prune = emit.clone();
         let _reason = driver
             .run_turn(
                 &session,
@@ -400,11 +405,22 @@ async fn prompt_session(
                 quoted,
                 vision_supported,
                 token,
-                Arc::new(move |envelope: &SessionEnvelope| {
-                    let _ = followers_for_turn.send(envelope.clone());
-                }),
+                emit,
             )
             .await;
+        // 轮次闭合后执行 dsh 式工具结果剪枝:超阈值历史结果替换为
+        // head+marker+tail,replacement 事件经 SSE 广播给前端。
+        if let Ok(pruned) = session.prune_tool_results(&ToolResultPruneConfig::default()) {
+            for item in &pruned {
+                if let Some(envelope) = session
+                    .events()
+                    .iter()
+                    .find(|envelope| envelope.seq == item.replacement_seq)
+                {
+                    emit_for_prune(envelope);
+                }
+            }
+        }
     });
 
     Ok((StatusCode::ACCEPTED, Json(json!({ "accepted": true }))))

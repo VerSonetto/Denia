@@ -657,6 +657,70 @@ mod tests {
     }
 
     #[test]
+    fn derive_folds_tool_result_replacement() {
+        let events = vec![
+            envelope(1, SessionEvent::TurnStart { turn: 1 }),
+            envelope(2, SessionEvent::UserMessage { text: "hi".into(), injected: false, images: Vec::new() }),
+            envelope(
+                3,
+                SessionEvent::AssistantMessage {
+                    turn: 1,
+                    step: 1,
+                    blocks: vec![ContentBlock::ToolCall {
+                        id: "c1".into(),
+                        name: "bash".into(),
+                        arguments: "{}".into(),
+                    }],
+                    usage: None,
+                    interrupted: false,
+                    source_event_seqs: Vec::new(),
+                },
+            ),
+            envelope(
+                4,
+                SessionEvent::ToolResult {
+                    turn: 1,
+                    step: 1,
+                    call_id: "c1".into(),
+                    content: "x".repeat(100),
+                    is_error: false,
+                    error: None,
+                    error_identity: None,
+                    meta: None,
+                    replaces: None,
+                },
+            ),
+            envelope(
+                5,
+                SessionEvent::ToolResult {
+                    turn: 1,
+                    step: 1,
+                    call_id: "c1".into(),
+                    content: "pruned".into(),
+                    is_error: false,
+                    error: None,
+                    error_identity: None,
+                    meta: None,
+                    replaces: Some(4),
+                },
+            ),
+            envelope(
+                6,
+                SessionEvent::TurnEnd {
+                    turn: 1,
+                    reason: TurnEndReason::Completed,
+                },
+            ),
+        ];
+        let messages = derive_messages(&events);
+        assert_eq!(messages.len(), 3);
+        assert_eq!(messages[0], ChatMessage::user("hi"));
+        assert_eq!(messages[1].tool_calls.len(), 1);
+        assert_eq!(messages[2], ChatMessage::tool_result("c1", "pruned"));
+        assert!(!messages[2].content.contains("xxx"));
+    }
+
+    #[test]
     fn derive_skips_empty_assistant_and_synthesizes_missing_results() {
         let events = vec![
             envelope(1, SessionEvent::UserMessage { text: "go".into(), injected: false, images: Vec::new() }),

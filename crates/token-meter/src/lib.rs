@@ -543,6 +543,61 @@ mod tests {
     }
 
     #[test]
+    fn tool_result_replacement_shrinks_surface_tokens() {
+        let mut meter = ContextMeter::new();
+        let long = "x".repeat(4_000);
+        let short = "pruned";
+        let user_tokens = estimate_message(&ChatMessage::user("hi"));
+        let long_tokens = estimate_message(&ChatMessage::tool_result("c", &long));
+        let short_tokens = estimate_message(&ChatMessage::tool_result("c", short));
+
+        meter.apply_one(&envelope(
+            1,
+            SessionEvent::UserMessage {
+                text: "hi".into(),
+                injected: false,
+                images: Vec::new(),
+            },
+        ));
+        meter.apply_one(&envelope(
+            2,
+            SessionEvent::ToolResult {
+                turn: 1,
+                step: 1,
+                call_id: "c".into(),
+                content: long,
+                is_error: false,
+                error: None,
+                error_identity: None,
+                meta: None,
+                replaces: None,
+            },
+        ));
+        assert_eq!(
+            meter.breakdown().message_tokens,
+            user_tokens + long_tokens
+        );
+
+        meter.apply_one(&envelope(
+            3,
+            SessionEvent::ToolResult {
+                turn: 1,
+                step: 1,
+                call_id: "c".into(),
+                content: short.into(),
+                is_error: false,
+                error: None,
+                error_identity: None,
+                meta: None,
+                replaces: Some(2),
+            },
+        ));
+        let after = meter.breakdown().message_tokens;
+        assert_eq!(after, user_tokens + short_tokens);
+        assert!(after < user_tokens + long_tokens);
+    }
+
+    #[test]
     fn pressure_anchor_uses_last_usage() {
         let mut meter = ContextMeter::new();
         // 模拟 turn 1 完整回放(锚点由 apply_one 在 usage 样本处设置)。

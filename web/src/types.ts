@@ -1,4 +1,4 @@
-﻿/** Wire types shared with the Rust backend. camelCase mirrors serde. */
+/** Wire types shared with the Rust backend. camelCase mirrors serde. */
 
 export interface ProviderInfo {
   id: string
@@ -221,6 +221,8 @@ export type SessionEnvelope =
       content: string
       is_error: boolean
       error?: string
+      /** 工具结果剪枝替换:本事件是对旧 tool-result 事件(seq)的 surface 替换。 */
+      replaces?: number
     }
   | {
       seq: number

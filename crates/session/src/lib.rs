@@ -68,11 +68,61 @@ pub struct RewindOutcome {
     pub removed_events: usize,
 }
 
+/// 工具结果剪枝配置(对齐 dsh `compaction-tool-result-pruner` 默认值)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ToolResultPruneConfig {
+    /// 超过该字符数(Unicode code point)的工具结果才剪。
+    pub threshold_chars: usize,
+    /// 剪枝后保留的头部字符数。
+    pub head_chars: usize,
+    /// 剪枝后保留的尾部字符数。
+    pub tail_chars: usize,
+}
+
+impl Default for ToolResultPruneConfig {
+    fn default() -> Self {
+        Self {
+            threshold_chars: 8_192,
+            head_chars: 4_096,
+            tail_chars: 1_024,
+        }
+    }
+}
+
+/// 剪枝替换的中间省略标记(原样抄 dsh `PRUNE_MARKER`)。
+pub const PRUNE_MARKER: &str = "\n\n[... tool result middle pruned ...]\n\n";
+
+/// 一条实际落地的工具结果剪枝。
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct PrunedToolResult {
+    pub original_seq: u64,
+    pub replacement_seq: u64,
+    pub call_id: String,
+    pub chars_before: usize,
+    pub chars_after: usize,
+}
+
 fn now_millis() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0)
+}
+
+/// 按 Unicode code point 对工具结果做 head + marker + tail 剪枝(对齐 dsh
+/// `pruneContent`)。未超过阈值返回 `None`。
+fn prune_content(content: &str, config: &ToolResultPruneConfig) -> Option<String> {
+    let chars: Vec<char> = content.chars().collect();
+    let total = chars.len();
+    if total <= config.threshold_chars {
+        return None;
+    }
+    let head_end = config.head_chars.min(total);
+    let tail_start = total.saturating_sub(config.tail_chars).max(head_end);
+    let mut out: String = chars[..head_end].iter().collect();
+    out.push_str(PRUNE_MARKER);
+    out.extend(chars[tail_start..].iter());
+    Some(out)
 }
 
 /// 文件尺寸/修改时间戳:索引失效校验的签名。
@@ -612,6 +662,80 @@ impl Session {
     pub fn derive_messages(&self) -> Vec<ChatMessage> {
         let inner = self.inner.lock().unwrap_or_else(|poison| poison.into_inner());
         derive_messages(&inner.events)
+    }
+
+    /// 当前 surface 中仍然有效的 tool-result 事件快照(已折叠剪枝替换)。
+    /// 供工具结果剪枝器扫描历史,避免把已被替换的旧结果再剪一遍。
+    pub fn surface_tool_results(&self) -> Vec<SessionEnvelope> {
+        let inner = self.inner.lock().unwrap_or_else(|poison| poison.into_inner());
+        let mut surface: Vec<SessionEnvelope> = Vec::new();
+        for envelope in &inner.events {
+            if let SessionEvent::ToolResult {
+                replaces: Some(replaced_seq),
+                ..
+            } = &envelope.event
+            {
+                if let Some(slot) = surface.iter_mut().find(|item| item.seq == *replaced_seq) {
+                    *slot = envelope.clone();
+                    continue;
+                }
+            }
+            if let SessionEvent::ToolResult { .. } = &envelope.event {
+                surface.push(envelope.clone());
+            }
+        }
+        surface
+    }
+
+    /// 对当前历史工具结果执行 dsh 式剪枝:超过 `threshold_chars` 的结果
+    /// 替换为 `head_chars + PRUNE_MARKER + tail_chars`。替换通过带
+    /// `replaces` 的 `tool-result` 事件落盘,`derive_messages` 与 token-meter
+    /// 都会自动折叠旧节点,因此模型历史和上下文占用同步下降。
+    pub fn prune_tool_results(
+        &self,
+        config: &ToolResultPruneConfig,
+    ) -> Result<Vec<PrunedToolResult>, SessionError> {
+        let candidates = self.surface_tool_results();
+        let mut pruned = Vec::new();
+        for envelope in candidates {
+            let SessionEvent::ToolResult {
+                turn,
+                step,
+                call_id,
+                content,
+                is_error,
+                error,
+                error_identity,
+                meta,
+                ..
+            } = envelope.event
+            else {
+                continue;
+            };
+            let Some(new_content) = prune_content(&content, config) else {
+                continue;
+            };
+            let chars_after = new_content.chars().count();
+            let replacement = self.append(SessionEvent::ToolResult {
+                turn,
+                step,
+                call_id: call_id.clone(),
+                content: new_content,
+                is_error,
+                error,
+                error_identity,
+                meta,
+                replaces: Some(envelope.seq),
+            })?;
+            pruned.push(PrunedToolResult {
+                original_seq: envelope.seq,
+                replacement_seq: replacement.seq,
+                call_id,
+                chars_before: content.chars().count(),
+                chars_after,
+            });
+        }
+        Ok(pruned)
     }
 
     /// The first user prompt, trimmed, for list views.
@@ -1416,6 +1540,86 @@ mod tests {
             .find(|s| s.id == child_id)
             .unwrap();
         assert_eq!(summary.parent_session.as_deref(), Some(source_id.as_str()));
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn prune_tool_results_replaces_history_and_shrinks_meter() {
+        let root = temp_root();
+        let store = SessionStore::open(&root).unwrap();
+        let cwd = root.join("work");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let session = store.create(&cwd, true).unwrap();
+
+        let long = "工具输出内容".repeat(3_000);
+        session.append(SessionEvent::TurnStart { turn: 1 }).unwrap();
+        session
+            .append(SessionEvent::UserMessage {
+                text: "hi".into(),
+                injected: false,
+                images: Vec::new(),
+            })
+            .unwrap();
+        session
+            .append(SessionEvent::AssistantMessage {
+                turn: 1,
+                step: 1,
+                blocks: vec![denia_core::stream::ContentBlock::ToolCall {
+                    id: "c1".into(),
+                    name: "bash".into(),
+                    arguments: "{}".into(),
+                }],
+                usage: None,
+                interrupted: false,
+                source_event_seqs: Vec::new(),
+            })
+            .unwrap();
+        let original = session
+            .append(SessionEvent::ToolResult {
+                turn: 1,
+                step: 1,
+                call_id: "c1".into(),
+                content: long.clone(),
+                is_error: false,
+                error: None,
+                error_identity: None,
+                meta: None,
+                replaces: None,
+            })
+            .unwrap();
+        session
+            .append(SessionEvent::TurnEnd {
+                turn: 1,
+                reason: TurnEndReason::Completed,
+            })
+            .unwrap();
+
+        let before_tokens = session.context_breakdown().message_tokens;
+        let before_messages = session.derive_messages();
+        assert_eq!(before_messages.len(), 3);
+        assert!(before_messages[2].content.contains("工具输出内容"));
+
+        let pruned = session.prune_tool_results(&ToolResultPruneConfig::default()).unwrap();
+        assert_eq!(pruned.len(), 1);
+        assert_eq!(pruned[0].original_seq, original.seq);
+        assert!(pruned[0].chars_after < pruned[0].chars_before);
+
+        let surface = session.surface_tool_results();
+        assert_eq!(surface.len(), 1);
+        let SessionEvent::ToolResult { content, replaces, .. } = &surface[0].event else {
+            panic!("surface should contain a tool-result");
+        };
+        assert!(content.contains("[... tool result middle pruned ...]"));
+        assert_eq!(*replaces, Some(original.seq));
+
+        let after_messages = session.derive_messages();
+        assert_eq!(after_messages.len(), 3);
+        assert!(after_messages[2].content.contains("[... tool result middle pruned ...]"));
+        assert!(after_messages[2].content.chars().count() < long.chars().count());
+
+        let after_tokens = session.context_breakdown().message_tokens;
+        assert!(after_tokens < before_tokens, "剪枝后 surface 应下降");
+
         std::fs::remove_dir_all(&root).unwrap();
     }
 }
