@@ -478,12 +478,14 @@ export interface ContextBreakdown {
   messageTokens: number
 }
 
-/** 上下文压力(provider 锚点 + 启发式)。 */
+/** 上下文压力投影(对齐 dsh `contextPressure`:字段各自 last-wins,可缺省)。 */
 export interface ContextPressure {
-  pressureTokens: number
-  /** 是否使用了 provider 精确锚点。 */
-  anchored: boolean
-  anchorTokens: number
+  /** 路由容量(最新 request/context 记录的上下文窗口)。 */
+  contextWindow?: number
+  /** 最近一次 provider usage 的 prompt 侧总量(锚点);无样本则缺省。 */
+  pressureTokens?: number
+  /** 锚点 + 锚点后表面增量(下一次请求的期望 prompt 规模)。 */
+  projectedTokens?: number
 }
 
 /** 精确 usage 累计(对齐 dsh `TurnTokenUsage`)。 */

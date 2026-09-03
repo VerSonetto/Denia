@@ -6,9 +6,11 @@
 //! 2. `TurnTokenUsage` —— **精确**,provider 上报的 usage 累加。`usage`
 //!    缺失或 lifecycle 缺段的轮次不进总和(同 dsh `deriveTurnTokenUsage`:
 //!    任何不完整则整个 Turn 跳过)。
-//! 3. `ContextPressure` —— **锚点 + 启发式**。最近一次 provider usage 提供
-//!    一个精确的"现在 prompt 多大"值;锚点之后的请求会引入新的输入消息,
-//!    这些用启发式叠加;锚点未设时全部启发式。
+//! 3. `ContextPressure` —— **锚点 + 表面增量**(wire 形状对齐 dsh)。最近
+//!    一次 provider usage 提供精确的 prompt 侧锚点;锚点之后消息的启发式
+//!    增量叠加出 `projectedTokens`(回答下一次请求的 prompt 规模);路由
+//!    容量来自 `request/context` 记录。没有 usage 样本就没有锚点,不做
+//!    启发式兜底 —— provider 没报数就不显示占用,同 dsh。
 
 use denia_core::message::{ChatMessage, ChatRole, ToolCallRef};
 use denia_core::session::{SessionEnvelope, SessionEvent};
@@ -41,21 +43,24 @@ pub struct TurnTokenUsage {
     pub reasoning_tokens: u64,
 }
 
-/// 上下文压力(用于圆环面板:百分比基于 pressure / window)。
+/// 上下文压力投影(对齐 dsh `contextPressure` 的 wire 形状,字段各自
+/// last-wins、可缺省,None 时不序列化)。
 ///
-/// `pressure_tokens` 是 "下一次请求的 prompt 期望"——
-/// - 若有 provider 锚点(最近 AssistantMessage.usage):锚点的
-///   `input + cache` 视作当前 prompt 大小;锚点之后已折的新消息按启发式
-///   累加。
-/// - 无锚点:全部用启发式累加 message_tokens + system + tools。
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+/// - `contextWindow`:最新 `request/context` 记录的路由容量。
+/// - `pressureTokens`:最近一次 provider usage 的 prompt 侧总量
+///   (input + cache_read + cache_write,不含输出);没有 usage 样本就没有
+///   该字段 —— dsh 语义:provider 没报数就不显示占用,不做启发式兜底。
+/// - `projectedTokens`:锚点加上锚点之后表面的启发式增量,回答"下一次
+///   请求的 prompt 有多大",而不是"上一次有多大"。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ContextPressure {
-    pub pressure_tokens: u64,
-    /// 是否使用了 provider 精确锚点(同 dsh `contextPressure` 的语义)。
-    pub anchored: bool,
-    /// 最近一次 provider usage 报告的 prompt 总量(锚点本身)。
-    pub anchor_tokens: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_window: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pressure_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub projected_tokens: Option<u64>,
 }
 
 fn estimate_text(text: &str) -> u64 {
@@ -251,20 +256,28 @@ impl TokenUsageExt for TokenUsage {
     }
 }
 
-/// 增量 fold:维护 `ContextBreakdown`(纯估算)+ `TurnTokenUsage`(精确)+ `ContextPressure`(锚点 + 启发式)。
+/// 增量 fold:维护 `ContextBreakdown`(纯估算)+ `TurnTokenUsage`(精确)+ `ContextPressure`(锚点 + 表面增量)。
+///
+/// 口径完全对齐 dsh `contextPressure` / `contextBreakdown` 投影:
+/// - 表面总量(`surface_tokens`)对所有模型可见消息持续累加,不因锚点重置;
+/// - 每个 usage 样本(AssistantMessage.usage)都重设锚点,且在**该消息加入
+///   表面之前**盖章 —— 样本对应的请求不包含它自己的回复,锚点必须对着
+///   请求所见的表面;
+/// - 路由容量来自最新 `request/context` 记录;
+/// - 没有 usage 样本就没有 `pressureTokens`,不做启发式兜底。
 pub struct ContextMeter {
     system_tokens: u64,
     tools_tokens: u64,
-    /// 启发式累计的 message_tokens;锚点之后从 anchor 重新计。
-    message_tokens: u64,
+    /// 模型可见消息的启发式运行总量(对齐 dsh `surfaceTokens`)。
+    surface_tokens: u64,
     /// session 内累计的精确 usage(每个完成的 Turn 累加一次)。
     turn_usage: TurnTokenUsage,
-    /// 最近一次 provider usage 的 prompt 总量(锚点)。
-    last_anchor: u64,
-    /// 锚点建立后,新 fold 出的 message 启发式增量(挂载在锚点之后)。
-    post_anchor_message: u64,
-    /// 是否已经有 provider 锚点。
-    has_anchor: bool,
+    /// 最近一次 provider usage 的 prompt 侧总量(锚点;None = 无样本)。
+    pressure_tokens: Option<u64>,
+    /// 取锚点时的表面总量;锚点后的表面增量 = surface - sampled。
+    sampled_surface_tokens: Option<u64>,
+    /// 最新 `request/context` 的路由容量(上下文窗口)。
+    context_window: Option<u64>,
 }
 
 impl ContextMeter {
@@ -272,32 +285,41 @@ impl ContextMeter {
         Self {
             system_tokens: 0,
             tools_tokens: 0,
-            message_tokens: 0,
+            surface_tokens: 0,
             turn_usage: TurnTokenUsage::default(),
-            last_anchor: 0,
-            post_anchor_message: 0,
-            has_anchor: false,
+            pressure_tokens: None,
+            sampled_surface_tokens: None,
+            context_window: None,
         }
     }
 
     /// 单事件增量回放。
     pub fn apply_one(&mut self, envelope: &SessionEnvelope) {
         match &envelope.event {
+            SessionEvent::RequestContext { context_window, .. } => {
+                // 路由容量 last-wins;未通告时移除(dsh 同语义)。
+                self.context_window = *context_window;
+            }
             SessionEvent::SystemPrompt { .. } => {
                 // 不参与 fold;由 driver 调 `set_system_tokens` 喂 framed 版本。
             }
             SessionEvent::UserMessage { text, .. } => {
                 let message = ChatMessage::user(text);
-                self.fold_message_delta(estimate_message(&message));
+                self.fold_message(estimate_message(&message));
             }
-            SessionEvent::AssistantMessage { blocks, .. } => {
+            SessionEvent::AssistantMessage { blocks, usage, .. } => {
+                // usage 样本先于本消息入表:消息本身不在产生它的请求里。
+                if let Some(sample) = usage {
+                    self.pressure_tokens = Some(prompt_tokens(sample));
+                    self.sampled_surface_tokens = Some(self.surface_tokens);
+                }
                 if let Some(message) = extract_assistant_message(blocks) {
-                    self.fold_message_delta(estimate_message(&message));
+                    self.fold_message(estimate_message(&message));
                 }
             }
             SessionEvent::ToolResult { content, .. } => {
                 let message = ChatMessage::tool_result("__unused__", content);
-                self.fold_message_delta(estimate_message(&message));
+                self.fold_message(estimate_message(&message));
             }
             _ => {}
         }
@@ -312,7 +334,7 @@ impl ContextMeter {
 
     /// 把 Turn 闭包内的事件喂进来,fold 出该 turn 的精确 usage 并并入会话累计。
     /// 必须在 turn 闭合时(`turn-end` 之后)调用;返回的 Option 表示该 turn
-    /// 是不是 fold 成功。
+    /// 是不是 fold 成功。锚点不在这里设:每个 usage 样本由 `apply_one` 处理。
     pub fn fold_turn(&mut self, events: &[SessionEnvelope]) -> bool {
         if let Some(turn) = derive_turn_token_usage(events) {
             self.turn_usage.uncached_input_tokens = self
@@ -335,37 +357,22 @@ impl ContextMeter {
                 .turn_usage
                 .reasoning_tokens
                 .saturating_add(turn.reasoning_tokens);
-
-            // 锚点:用最后一次 AssistantMessage.usage 的 input + cache 作 anchor。
-            if let Some(last_usage) = events.iter().rev().find_map(|e| match &e.event {
-                SessionEvent::AssistantMessage { usage: Some(u), .. } => Some(*u),
-                _ => None,
-            }) {
-                self.last_anchor = prompt_tokens(&last_usage);
-                self.has_anchor = true;
-                // 锚点之后的新消息会继续 fold_message_delta,挂到 post_anchor_message。
-            }
             true
         } else {
             false
         }
     }
 
-    fn fold_message_delta(&mut self, tokens: u64) {
-        if self.has_anchor {
-            // 锚点已建立,新增消息只挂在锚点之后,前面的 message_tokens 失效。
-            self.post_anchor_message = self.post_anchor_message.saturating_add(tokens);
-        } else {
-            self.message_tokens = self.message_tokens.saturating_add(tokens);
-        }
+    fn fold_message(&mut self, tokens: u64) {
+        self.surface_tokens = self.surface_tokens.saturating_add(tokens);
     }
 
-    /// 读当前快照(纯启发式拆分,不含锚点)。
+    /// 读当前快照(纯启发式拆分;message = 表面运行总量,不因锚点重置)。
     pub fn breakdown(&self) -> ContextBreakdown {
         ContextBreakdown {
             system_tokens: self.system_tokens,
             tools_tokens: self.tools_tokens,
-            message_tokens: self.message_tokens,
+            message_tokens: self.surface_tokens,
         }
     }
 
@@ -374,25 +381,17 @@ impl ContextMeter {
         self.turn_usage.clone()
     }
 
-    /// 读当前压力值(锚点 + 启发式)。
+    /// 读当前压力投影(锚点 + 锚点后表面增量)。
     pub fn context_pressure(&self) -> ContextPressure {
-        if self.has_anchor {
-            ContextPressure {
-                pressure_tokens: self
-                    .last_anchor
-                    .saturating_add(self.post_anchor_message),
-                anchored: true,
-                anchor_tokens: self.last_anchor,
-            }
-        } else {
-            ContextPressure {
-                pressure_tokens: self
-                    .system_tokens
-                    .saturating_add(self.tools_tokens)
-                    .saturating_add(self.message_tokens),
-                anchored: false,
-                anchor_tokens: 0,
-            }
+        let projected = self.pressure_tokens.map(|pressure| {
+            let sampled = self.sampled_surface_tokens.unwrap_or(0);
+            let drift = self.surface_tokens.saturating_sub(sampled);
+            pressure.saturating_add(drift)
+        });
+        ContextPressure {
+            context_window: self.context_window,
+            pressure_tokens: self.pressure_tokens,
+            projected_tokens: projected,
         }
     }
 
@@ -526,7 +525,7 @@ mod tests {
     #[test]
     fn pressure_anchor_uses_last_usage() {
         let mut meter = ContextMeter::new();
-        // 模拟 turn 1 闭合。
+        // 模拟 turn 1 完整回放(锚点由 apply_one 在 usage 样本处设置)。
         let events = vec![
             envelope(1, SessionEvent::TurnStart { turn: 1 }),
             envelope(2, SessionEvent::StepStart { turn: 1, step: 1 }),
@@ -549,11 +548,14 @@ mod tests {
             envelope(4, SessionEvent::StepEnd { turn: 1, step: 1 }),
             envelope(5, SessionEvent::TurnEnd { turn: 1, reason: denia_core::session::TurnEndReason::Completed }),
         ];
-        meter.fold_turn(&events);
+        meter.fold(&events);
+        // 锚点 = input + cache_read = 120;锚点在本消息入表前盖章,所以
+        // projected = 120 + 本消息启发式(dsh 语义:回答下一次请求规模)。
         let p = meter.context_pressure();
-        assert!(p.anchored);
-        assert_eq!(p.anchor_tokens, 120);
-        // 锚点之后多发一条 user 消息。
+        assert_eq!(p.pressure_tokens, Some(120));
+        let assistant_tokens = meter.breakdown().message_tokens;
+        assert_eq!(p.projected_tokens, Some(120 + assistant_tokens));
+        // 锚点之后多发一条 user 消息:projected 继续增长,锚点不动。
         meter.apply_one(&envelope(
             6,
             SessionEvent::UserMessage {
@@ -563,12 +565,17 @@ mod tests {
             },
         ));
         let p2 = meter.context_pressure();
-        assert!(p2.anchored);
-        assert!(p2.pressure_tokens > 120);
+        assert_eq!(p2.pressure_tokens, Some(120));
+        assert!(p2.projected_tokens.unwrap() > p.projected_tokens.unwrap());
+        // breakdown 的 message_tokens 是表面运行总量,与 projected 的表面
+        // 部分一致。
+        assert!(meter.breakdown().message_tokens > assistant_tokens);
     }
 
     #[test]
-    fn pressure_without_anchor_is_heuristic() {
+    fn pressure_without_anchor_has_no_fallback() {
+        // 无 usage 样本:没有 pressureTokens,不做启发式兜底(dsh 语义,
+        // provider 没报数就不显示占用)。
         let mut meter = ContextMeter::new();
         meter.set_system_tokens(100);
         meter.set_tools_tokens(50);
@@ -581,8 +588,80 @@ mod tests {
             },
         ));
         let p = meter.context_pressure();
-        assert!(!p.anchored);
-        // 100 + 50 + (role 4 + text ceil(2/4) 1) = 155。
-        assert_eq!(p.pressure_tokens, 155);
+        assert_eq!(p.pressure_tokens, None);
+        assert_eq!(p.projected_tokens, None);
+        assert_eq!(p.context_window, None);
+        // 纯启发式拆分照常可读;message = 表面运行总量(不含 system/tools)。
+        let b = meter.breakdown();
+        assert_eq!(b.system_tokens, 100);
+        assert_eq!(b.tools_tokens, 50);
+        // role 4 + text ceil(2/4) 1 = 5。
+        assert_eq!(b.message_tokens, 5);
+    }
+
+    #[test]
+    fn request_context_supplies_window_last_wins() {
+        let mut meter = ContextMeter::new();
+        meter.apply_one(&envelope(
+            1,
+            SessionEvent::RequestContext {
+                turn: 1,
+                step: 1,
+                provider: "deepseek".into(),
+                model: "deepseek-chat".into(),
+                context_window: Some(128_000),
+            },
+        ));
+        assert_eq!(meter.context_pressure().context_window, Some(128_000));
+        // 未通告的新记录移除容量(dsh 同语义)。
+        meter.apply_one(&envelope(
+            2,
+            SessionEvent::RequestContext {
+                turn: 1,
+                step: 2,
+                provider: "deepseek".into(),
+                model: "deepseek-chat".into(),
+                context_window: None,
+            },
+        ));
+        assert_eq!(meter.context_pressure().context_window, None);
+    }
+
+    #[test]
+    fn projected_tokens_answers_next_request() {
+        // 锚点后发消息,projected = 锚点 + 锚点后表面增量;换模型重锚后,
+        // 以新锚点为基准。
+        let mut meter = ContextMeter::new();
+        meter.apply_one(&envelope(
+            1,
+            SessionEvent::UserMessage {
+                text: "hi".into(),
+                injected: false,
+                images: Vec::new(),
+            },
+        ));
+        meter.apply_one(&envelope(
+            2,
+            SessionEvent::AssistantMessage {
+                turn: 1,
+                step: 1,
+                blocks: vec![ContentBlock::Text { text: "ok".into() }],
+                usage: Some(TokenUsage {
+                    input_tokens: 1_000,
+                    output_tokens: 5,
+                    cache_read_tokens: Some(0),
+                    reasoning_tokens: None,
+                }),
+                interrupted: false,
+                source_event_seqs: Vec::new(),
+            },
+        ));
+        let p = meter.context_pressure();
+        assert_eq!(p.pressure_tokens, Some(1_000));
+        // sampled = 锚点前表面(只有 user "hi"),projected = 1000 + assistant。
+        let user_tokens = estimate_message(&ChatMessage::user("hi"));
+        let assistant_tokens = estimate_message(&ChatMessage::assistant("ok", None, Vec::new()));
+        assert_eq!(p.projected_tokens, Some(1_000 + assistant_tokens));
+        assert_eq!(meter.breakdown().message_tokens, user_tokens + assistant_tokens);
     }
 }
