@@ -94,6 +94,140 @@ fn feedback_text(failure: &LlmFailure) -> String {
     )
 }
 
+/// 从正文提取"文本伪工具调用"中声明的函数名列表。
+///
+/// 部分缺少原生函数调用支持的模型/网关会把工具调用渲染成正文标签
+/// (<tool_call><function=name>…),而 wire 响应没有 tool_calls 字段——
+/// 这是实测 qwen3.8-flash(cat 网关)的故障形态。仅当文本同时出现
+/// `<tool_call` 标签与 `<function=` 赋值时才判定为伪调用,降低对普通
+/// 正文(如讲解标签格式)的误报。
+fn fake_tool_call_names(text: &str) -> Vec<String> {
+    let lower = text.to_ascii_lowercase();
+    if !lower.contains("<tool_call") {
+        return Vec::new();
+    }
+    let mut names = Vec::new();
+    let mut from = 0usize;
+    while let Some(rel) = lower[from..].find("<function=") {
+        let start = from + rel + "<function=".len();
+        let mut end = start;
+        while end < lower.len()
+            && (lower.as_bytes()[end].is_ascii_alphanumeric()
+                || matches!(lower.as_bytes()[end], b'_' | b'-' | b'.'))
+        {
+            end += 1;
+        }
+        let name = &lower[start..end];
+        if !name.is_empty() && !names.iter().any(|n| n == name) {
+            names.push(name.to_string());
+        }
+        match end.checked_add(1) {
+            Some(next) if next <= lower.len() => from = next,
+            _ => break,
+        }
+    }
+    names
+}
+
+/// 文本伪工具调用的自纠提示:与提供方拒绝共用一个反馈通道,让模型
+/// 看见"调用没被执行"的原因后改用原生 tool_calls 字段。
+fn fake_tool_call_feedback(names: &[String]) -> String {
+    let listed = names
+        .iter()
+        .map(|name| format!("{name}()"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "[harness] 你上一条输出把工具调用写成了正文标签(<tool_call>/<function=…>),这些调用没有被执行:{listed}。\n请改用响应的原生 tool_calls 字段发起工具调用,不要输出 <tool_call> 之类的文本标签;若确实不需要调用工具,直接给出文字回答。"
+    )
+}
+
+/// 从正文标签里救援出来的一个工具调用。
+#[derive(Debug, Clone, PartialEq)]
+struct RescuedCall {
+    name: String,
+    arguments: serde_json::Value,
+}
+
+/// 尝试把"文本伪工具调用"(<tool_call><function=…><parameter=…>)解析成
+/// 可执行的调用列表。任一块格式解析失败返回 None(整体放弃,退回自纠
+/// 注入,避免半吊子执行);整段没有伪调用也返回 None。参数值优先按
+/// JSON 解析,失败按字符串处理——bash 的 command 这类自由文本参数
+/// 正好落入后者。`.to_ascii_lowercase()` 不改变字节长度,lower 上算出的
+/// 索引可直接切原文。
+fn rescue_fake_tool_calls(text: &str) -> Option<Vec<RescuedCall>> {
+    let lower = text.to_ascii_lowercase();
+    let mut calls = Vec::new();
+    let mut from = 0usize;
+    while let Some(rel) = lower[from..].find("<tool_call") {
+        let block_start = from + rel;
+        let tail_start = block_start + "<tool_call".len();
+        let Some(rrel) = lower[tail_start..].find("</tool_call>") else {
+            // 尾部不完整块(截断/格式烂):整体放弃,交由自纠注入。
+            return None;
+        };
+        let block_end = tail_start + rrel;
+        let body = &lower[block_start..block_end];
+        // <function=name>
+        let Some(frel) = body.find("<function=") else {
+            return None;
+        };
+        let name_start = frel + "<function=".len();
+        let mut name_end = name_start;
+        while name_end < body.len()
+            && (body.as_bytes()[name_end].is_ascii_alphanumeric()
+                || matches!(body.as_bytes()[name_end], b'_' | b'-' | b'.'))
+        {
+            name_end += 1;
+        }
+        if name_end == name_start {
+            return None;
+        }
+        // <parameter=key>value</parameter> 反复提取。
+        let mut args = serde_json::Map::new();
+        let mut psearch = 0usize;
+        loop {
+            let Some(prel) = body[psearch..].find("<parameter=") else {
+                break;
+            };
+            let pkey_start = psearch + prel + "<parameter=".len();
+            let mut pkey_end = pkey_start;
+            while pkey_end < body.len()
+                && (body.as_bytes()[pkey_end].is_ascii_alphanumeric()
+                    || matches!(body.as_bytes()[pkey_end], b'_' | b'-' | b'.'))
+            {
+                pkey_end += 1;
+            }
+            if pkey_end == pkey_start {
+                return None;
+            }
+            // <parameter=key> 的 key 结束于 '>' 之前;值从 '>' 之后开始。
+            let Some(gt_rel) = body[pkey_end..].find('>') else {
+                return None;
+            };
+            let value_start = pkey_end + gt_rel + 1;
+            let Some(rrrel) = body[value_start..].find("</parameter>") else {
+                return None; // 参数块未闭合。
+            };
+            let raw = text[block_start + value_start..block_start + value_start + rrrel].trim();
+            let value = serde_json::from_str::<serde_json::Value>(raw)
+                .unwrap_or_else(|_| serde_json::Value::String(raw.to_string()));
+            args.insert(body[pkey_start..pkey_end].to_string(), value);
+            psearch = value_start + rrrel + "</parameter>".len();
+        }
+        calls.push(RescuedCall {
+            name: body[name_start..name_end].to_string(),
+            arguments: serde_json::Value::Object(args),
+        });
+        from = block_end + "</tool_call>".len();
+    }
+    if calls.is_empty() {
+        None
+    } else {
+        Some(calls)
+    }
+}
+
 /// Drives user turns on one session at a time.
 pub struct SessionDriver {
     registry: Arc<LlmRegistry>,
@@ -664,7 +798,7 @@ impl SessionDriver {
                 },
             )?;
 
-            let calls: Vec<ToolCallRef> = blocks
+            let mut calls: Vec<ToolCallRef> = blocks
                 .iter()
                 .filter_map(|block| match block {
                     ContentBlock::ToolCall {
@@ -682,14 +816,71 @@ impl SessionDriver {
             let hit_max_tokens = matches!(finish, Some(FinishReason::MaxTokens));
 
             if calls.is_empty() || hit_max_tokens {
-                append(session, &emit, SessionEvent::StepEnd { turn, step })?;
-                let reason = if hit_max_tokens {
-                    TurnEndReason::MaxTokens
-                } else {
-                    TurnEndReason::Completed
-                };
-                append(session, &emit, SessionEvent::TurnEnd { turn, reason: reason.clone() })?;
-                return Ok(reason);
+                // —— 文本伪调用救援 ——
+                // 模型把工具调用渲染成了正文标签且不会走 wire tool_calls
+                // (实测 qwen3.8-flash/cat 网关的故障形态)。标签可完整解析
+                // 时直接代为执行(走下方同一条 dispatch,权限/沙箱/审批
+                // 一视同仁);解析失败退回注入自纠;配额耗尽按原样收尾。
+                if !hit_max_tokens && calls.is_empty() {
+                    let mut combined: Vec<RescuedCall> = Vec::new();
+                    let mut parse_ok = true;
+                    for block in &blocks {
+                        if let ContentBlock::Text { text } = block {
+                            match rescue_fake_tool_calls(text) {
+                                Some(rescued) => combined.extend(rescued),
+                                None => parse_ok = false,
+                            }
+                        }
+                    }
+                    if parse_ok && !combined.is_empty() {
+                        tracing::info!(
+                            names = ?combined.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(),
+                            "rescued text-rendered tool calls"
+                        );
+                        calls = combined
+                            .into_iter()
+                            .map(|c| ToolCallRef {
+                                id: uuid::Uuid::new_v4().to_string(),
+                                name: c.name,
+                                arguments: serde_json::to_string(&c.arguments)
+                                    .unwrap_or_else(|_| "{}".to_string()),
+                            })
+                            .collect();
+                    } else if feedback < MAX_FEEDBACK {
+                        let fake_names: Vec<String> = blocks
+                            .iter()
+                            .filter_map(|block| match block {
+                                ContentBlock::Text { text } => Some(text.as_str()),
+                                _ => None,
+                            })
+                            .flat_map(fake_tool_call_names)
+                            .collect();
+                        if !fake_names.is_empty() {
+                            feedback += 1;
+                            append(session, &emit, SessionEvent::StepEnd { turn, step })?;
+                            append(
+                                session,
+                                &emit,
+                                SessionEvent::UserMessage {
+                                    text: fake_tool_call_feedback(&fake_names),
+                                    injected: true,
+                                    images: Vec::new(),
+                                },
+                            )?;
+                            continue 'step_loop;
+                        }
+                    }
+                }
+                if calls.is_empty() || hit_max_tokens {
+                    append(session, &emit, SessionEvent::StepEnd { turn, step })?;
+                    let reason = if hit_max_tokens {
+                        TurnEndReason::MaxTokens
+                    } else {
+                        TurnEndReason::Completed
+                    };
+                    append(session, &emit, SessionEvent::TurnEnd { turn, reason: reason.clone() })?;
+                    return Ok(reason);
+                }
             }
 
             // Sequential dispatch; every logged call gets exactly one result,
@@ -1321,6 +1512,175 @@ fn text_script(text: &str) -> Vec<StreamChunk> {
             )
         });
         assert!(has_interrupted);
+    }
+
+    #[test]
+    fn rescue_parses_tag_blocks_into_calls() {
+        // 完整模板:函数名 + 多参数;自由文本参数按字符串,JSON 参数原样。
+        let text = "\n<tool_call>\n<function=edit>\n<parameter=path>\nsrc/lib.rs\n</parameter>\n<parameter=old_string>\n{\"a\": 1}\n</parameter>\n</function>\n</tool_call>\n<tool_call>\n<function=bash>\n<parameter=command>\nGet-ChildItem\n</parameter>\n</function>\n</tool_call>";
+        let calls = rescue_fake_tool_calls(text).expect("blocks must parse");
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].name, "edit");
+        assert_eq!(calls[0].arguments["path"], "src/lib.rs");
+        // 值本身是合法 JSON(对象)时原样保留,不是一律字符串。
+        assert_eq!(calls[0].arguments["old_string"], serde_json::json!({"a": 1}));
+        assert_eq!(calls[1].name, "bash");
+        assert_eq!(calls[1].arguments["command"], "Get-ChildItem");
+        // 大小写不敏感,函数名归一为小写。
+        let upper = rescue_fake_tool_calls("<TOOL_CALL><FUNCTION=Echo><PARAMETER=text>x</PARAMETER></FUNCTION></TOOL_CALL>")
+            .expect("upper-case tags must parse");
+        assert_eq!(upper[0].name, "echo");
+        // 纯正文 → None。
+        assert!(rescue_fake_tool_calls("普通文本,没有工具标签").is_none());
+        // 未闭合的 parameter 块 → 整体放弃。
+        assert!(rescue_fake_tool_calls("<tool_call><function=bash><parameter=command>x</tool_call>").is_none());
+        // 无参数调用也能救(空对象)。
+        let bare = rescue_fake_tool_calls("<tool_call><function=baseline></tool_call>").expect("bare call must parse");
+        assert_eq!(bare[0].arguments, serde_json::json!({}));
+    }
+
+    #[tokio::test]
+    async fn text_rendered_call_is_rescued_and_executed() {
+        // 模型输出文本标签的 bash 调用:harness 代为解析执行,工具结果
+        // 回给模型,下一步模型基于真实结果继续——qwen3.8-flash 这类无
+        // 原生 FC 能力的模型也能真正干活。
+        let fake = "我先看一下\n\n<tool_call>\n<function=echo>\n<parameter=text>\nhello\n</parameter>\n</function>\n</tool_call>";
+        let (driver, _registry) = driver(vec![
+            MockScript::Chunks(text_script(fake)),
+            MockScript::Chunks(text_script("done")),
+        ]);
+        let session = temp_session();
+        let reason = driver
+            .run_turn(&session, &selection(), "分析项目", Vec::new(), Vec::new(), Vec::new(), true, CancellationToken::new(), noop_emit())
+            .await;
+        assert_eq!(reason, TurnEndReason::Completed);
+        // 工具被执行,且结果进了派生历史(模型下一步看得到)。
+        let result = session.events().iter().find_map(|e| match &e.event {
+            SessionEvent::ToolResult { content, is_error, .. } => Some((content.clone(), *is_error)),
+            _ => None,
+        });
+        let (content, is_error) = result.expect("rescued call must be dispatched");
+        assert!(!is_error);
+        assert!(content.contains("hello"));
+        let messages = session.derive_messages();
+        assert!(messages.iter().any(|m| m.role == denia_core::message::ChatRole::Tool));
+        // 自纠注入未发生(救援成功,无需反馈)。
+        let injected = session.events().iter().filter_map(|e| match &e.event {
+            SessionEvent::UserMessage { text, injected: true, .. } => Some(text.clone()),
+            _ => None,
+        }).collect::<Vec<_>>();
+        assert!(injected.is_empty(), "no feedback needed when rescue succeeded");
+    }
+
+    #[tokio::test]
+    async fn rescued_unknown_tool_yields_error_result() {
+        // 救援不校验工具存在性:未知工具照常走 dispatch,is_error 结果
+        // 回给模型自纠(与原生 tool_calls 的行为一致)。
+        let fake = "<tool_call>\n<function=nope>\n<parameter=text>\nx\n</parameter>\n</function>\n</tool_call>";
+        let (driver, _registry) = driver(vec![
+            MockScript::Chunks(text_script(fake)),
+            MockScript::Chunks(text_script("ok")),
+        ]);
+        let session = temp_session();
+        let reason = driver
+            .run_turn(&session, &selection(), "go", Vec::new(), Vec::new(), Vec::new(), true, CancellationToken::new(), noop_emit())
+            .await;
+        assert_eq!(reason, TurnEndReason::Completed);
+        let result = session.events().iter().find_map(|e| match &e.event {
+            SessionEvent::ToolResult { content, is_error, .. } => {
+                Some((content.clone(), *is_error))
+            }
+            _ => None,
+        });
+        let (content, is_error) = result.unwrap();
+        assert!(is_error);
+        assert!(content.contains("unknown tool: nope"));
+    }
+
+    #[test]
+    fn fake_tool_call_names_detects_tags() {
+        // Qwen 系"文本模拟工具调用"模板:识别并提取函数名。
+        let text = "先看目录\n<tool_call>\n<function=bash>\n<parameter=command>\nGet-ChildItem\n</parameter>\n</function>\n</tool_call>\n<tool_call>\n<function=read_file>\n</function>\n</tool_call>";
+        assert_eq!(
+            fake_tool_call_names(text),
+            vec!["bash".to_string(), "read_file".to_string()]
+        );
+        // 大小写不敏感,函数名归一为原文。
+        assert_eq!(
+            fake_tool_call_names("<TOOL_CALL><FUNCTION=Echo>"),
+            vec!["echo".to_string()]
+        );
+        // 纯正文没有标签 → 空。
+        assert!(fake_tool_call_names("普通文本,没有工具标签").is_empty());
+        // 有 <tool_call> 但无 <function= → 空(避免误报)。
+        assert!(fake_tool_call_names("提到了 <tool_call> 但没函数").is_empty());
+        // 同一函数重复声明只列一次。
+        assert_eq!(
+            fake_tool_call_names(
+                "<tool_call><function=bash></tool_call><tool_call><function=bash></tool_call>"
+            ),
+            vec!["bash".to_string()]
+        );
+        // 无名字的裸 <function=> 不 panic。
+        assert!(fake_tool_call_names("<tool_call><function=></tool_call>").is_empty());
+    }
+
+    #[tokio::test]
+    async fn text_fake_tool_call_is_fed_back_and_recovered() {
+        // 伪调用格式烂到无法救援(参数块未闭合)→ 注入自纠,重启一步后
+        // 模型改用原生 tool_calls,工具真正被执行。
+        let fake = "我先看一下\n\n<tool_call>\n<function=echo>\n<parameter=text>\nhi\n</tool_call>";
+        let (driver, _registry) = driver(vec![
+            MockScript::Chunks(text_script(fake)),
+            MockScript::Chunks(tool_script()),
+            MockScript::Chunks(text_script("done")),
+        ]);
+        let session = temp_session();
+        let reason = driver
+            .run_turn(&session, &selection(), "优化模型选择框", Vec::new(), Vec::new(), Vec::new(), true, CancellationToken::new(), noop_emit())
+            .await;
+        assert_eq!(reason, TurnEndReason::Completed);
+        // 注入的纠错提示恰一条,且点名了伪调用函数。
+        let injected = session.events().iter().filter_map(|e| match &e.event {
+            SessionEvent::UserMessage { text, injected: true, .. } => Some(text.clone()),
+            _ => None,
+        }).collect::<Vec<_>>();
+        assert_eq!(injected.len(), 1, "one self-correction injection expected");
+        assert!(injected[0].contains("原生 tool_calls"));
+        assert!(injected[0].contains("echo()"));
+        // 模型随后真的发了原生调用,工具被执行。
+        let has_call = session.events().iter().any(|e| {
+            matches!(&e.event, SessionEvent::ToolCall { name, .. } if name == "echo")
+        });
+        assert!(has_call, "recovered step must dispatch the native tool call");
+    }
+
+    #[tokio::test]
+    async fn fake_tool_call_quota_exhausts_then_completes() {
+        // 模型连续输出无法救援的伪调用(参数块未闭合):注入 2 次后配额
+        // 耗尽,第三次直接以 Completed 收尾(伪调用文本对用户可见),不死循环。
+        let fake = "<tool_call><function=bash><parameter=command>ls</tool_call>";
+        let (driver, _registry) = driver(vec![
+            MockScript::Chunks(text_script(fake)),
+            MockScript::Chunks(text_script(fake)),
+            MockScript::Chunks(text_script(fake)),
+        ]);
+        let session = temp_session();
+        let reason = driver
+            .run_turn(&session, &selection(), "go", Vec::new(), Vec::new(), Vec::new(), true, CancellationToken::new(), noop_emit())
+            .await;
+        assert_eq!(reason, TurnEndReason::Completed);
+        let injected = session.events().iter().filter_map(|e| match &e.event {
+            SessionEvent::UserMessage { text, injected: true, .. } => Some(text.clone()),
+            _ => None,
+        }).collect::<Vec<_>>();
+        assert_eq!(injected.len(), 2, "feedback quota must cap at MAX_FEEDBACK");
+        let calls = session.events().iter().filter(|e| matches!(e.event, SessionEvent::ToolCall { .. })).count();
+        assert_eq!(calls, 0, "no native tool call ever arrived");
+        // 日志平衡:step 数与 step-end 数一致。
+        let step_starts = session.events().iter().filter(|e| matches!(e.event, SessionEvent::StepStart { .. })).count();
+        let step_ends = session.events().iter().filter(|e| matches!(e.event, SessionEvent::StepEnd { .. })).count();
+        assert_eq!(step_starts, step_ends);
     }
 
     #[tokio::test]
