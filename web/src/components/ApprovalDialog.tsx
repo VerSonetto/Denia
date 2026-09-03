@@ -3,20 +3,22 @@ import { t } from '../i18n'
 
 /** 一次待审批的工具调用请求。 */
 export interface ApprovalRequest {
+  /** 后端请求 id,用于 POST 应答。 */
+  requestId: string
   /** 工具名(如 bash / edit)。 */
   toolName: string
   /** 调用参数预览(可选)。 */
   argsPreview?: string
+  /** 工具给出的升权理由。 */
+  reason?: string
 }
 
-export type ApprovalDecision = 'reject' | 'once' | 'session'
+export type ApprovalDecision = 'reject' | 'allow-once'
 
 /**
- * 审批弹窗:AI 调用需要审批的工具时,从**输入框上方**弹出。
- * 两种放行模式:
- * - 仅本次允许:这一次调用放行,下次同工具仍要审批;
- * - 本会话内无需再审批:该工具在本会话内免审;换其他工具仍需重新审批。
- * 当前阶段为前端占位 —— 选择不改变实际执行,弹窗底部注明。
+ * 审批弹窗:AI 请求沙箱升权时,从输入框上方弹出(抄 dsh ApprovalPanel)。
+ * 只有两种决策:拒绝、允许一次。没有“本会话免审”——dsh 的审批只作用于
+ * 这一次调用;要长期放行请切换更高的权限预设。
  */
 export function ApprovalDialog({
   request,
@@ -35,32 +37,29 @@ export function ApprovalDialog({
   }, [request, onDecide])
 
   if (!request) return null
+
   return (
     <div className="approval-pop" role="dialog" aria-modal="false" aria-label={t('approvalLabel')}>
       <div className="approval-pop-head">
-        <span className="approval-pop-title">{t('approvalLabel')}</span>
+        <span className="approval-pop-title">{t('approvalWaiting')}</span>
         <span className="approval-pop-tool">{request.toolName}</span>
       </div>
+      {request.reason && <p className="approval-pop-reason">{request.reason}</p>}
       {request.argsPreview && (
         <p className="approval-pop-desc">
           <code>{request.argsPreview}</code>
         </p>
       )}
-      <p className="approval-pop-note">{t('approvalPlaceholderNote')}</p>
       <div className="approval-pop-actions">
         <button type="button" className="approval-btn" onClick={() => onDecide('reject')}>
           {t('approvalReject')}
         </button>
-        <button type="button" className="approval-btn" onClick={() => onDecide('once')}>
-          {t('approvalOnce')}
-        </button>
         <button
           type="button"
           className="approval-btn primary"
-          onClick={() => onDecide('session')}
-          title={t('approvalSessionHint')}
+          onClick={() => onDecide('allow-once')}
         >
-          {t('approvalSession')}
+          {t('approvalAllowOnce')}
         </button>
       </div>
     </div>

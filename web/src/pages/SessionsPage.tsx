@@ -16,6 +16,7 @@ import {
   useWorkspaces,
 } from '../appStore'
 import { t } from '../i18n'
+import { attach } from '../sessionStreams'
 import { sessionDisplayTitle } from '../sessionDisplay'
 import type { TranscriptNode } from '../fold'
 import type { TrajectoryQuote } from '../trajectory'
@@ -31,6 +32,7 @@ import {
   IconBranch,
   IconChevron,
   IconClose,
+  IconDownload,
   IconFolder,
   IconImage,
   IconPlus,
@@ -44,10 +46,17 @@ import {
 import { resolveSessionReasoningEffort } from '../modelCatalog'
 import { TodoPanel } from '../components/TodoPanel'
 import { ConversationAxis } from '../components/ConversationAxis'
+import {
+  downloadFile,
+  serializeSession,
+  type ExportFormat,
+} from '../lib/exportSession'
 import type {
   CatalogModel,
   ModelCatalog,
   ModelSelection,
+  PermissionMode,
+  SessionEnvelope,
   SessionSummary,
   TodoItem,
   UserMessageImage,
@@ -75,6 +84,43 @@ const FOLLOW_THRESHOLD = 24
 function pendingMessageKey(message: { text: string; images?: UserMessageImage[] }): string {
   const images = message.images ?? []
   return `${message.text}\u0000${images.map((image) => `${image.mime}\u0000${image.data}`).join('\u0001')}`
+}
+
+/** dsh 权限模式 → 前端三档枚举。 */
+function permissionLevelFromMode(mode: PermissionMode): PermissionLevel {
+  return mode === 'danger-full-access' ? 'full' : mode
+}
+
+/** 前端三档枚举 → dsh 权限模式。 */
+function permissionModeForLevel(level: PermissionLevel): PermissionMode {
+  return level === 'full' ? 'danger-full-access' : level
+}
+
+/** 从事件流反向找最近一次 permission-mode。 */
+function latestPermissionMode(events: SessionEnvelope[]): PermissionLevel | null {
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index]
+    if (event.type === 'permission-mode') return permissionLevelFromMode(event.mode)
+  }
+  return null
+}
+
+/** 从事件流恢复仍未结算的审批请求(approval-asked 未被对应 decided 关闭)。 */
+function latestPendingApproval(events: SessionEnvelope[]): ApprovalRequest | null {
+  let pending: ApprovalRequest | null = null
+  for (const event of events) {
+    if (event.type === 'approval-asked') {
+      pending = {
+        requestId: event.request_id,
+        toolName: event.tool,
+        argsPreview: event.args_preview,
+        reason: event.reason,
+      }
+    } else if (event.type === 'approval-decided' && pending?.requestId === event.request_id) {
+      pending = null
+    }
+  }
+  return pending
 }
 
 export default function SessionsPage({
@@ -135,6 +181,9 @@ export default function SessionsPage({
   // 会话内容视图(dsh conversation.view 环):对话 / 轨迹。组件按
   // activeId 重挂(key),视图状态随会话切换自然复位。
   const [view, setView] = useState<'chat' | 'trajectory'>('chat')
+  // 导出菜单状态:exportOpen 控制下拉显隐,exportBusy 阻及双击。
+  const [exportOpen, setExportOpen] = useState(false)
+  const [exportBusy, setExportBusy] = useState(false)
   const sendingRef = useRef(false)
   const promptRef = useRef<HTMLTextAreaElement | null>(null)
   const scrollRef = useRef<HTMLDivElement | null>(null)
@@ -252,7 +301,7 @@ export default function SessionsPage({
     return model?.contextWindow ?? group?.models[0]?.contextWindow
   })()
 
-  /* ---- 粘贴图片 / 附件上传 / 权限占位 ---- */
+  /* ---- 粘贴图片 / 附件上传 / 权限与审批 ---- */
 
   const [pastedImages, setPastedImages] = useState<{
     name: string
@@ -267,40 +316,107 @@ export default function SessionsPage({
   const promptEmpty = !prompt.trim() && pastedImages.length === 0
   const primaryStops = running && promptEmpty
   const [permission, setPermission] = useState<PermissionLevel>(() => loadPermission())
+  const [permissionBusy, setPermissionBusy] = useState(false)
+  const [fullAccessConfirm, setFullAccessConfirm] = useState(false)
+  const pendingFullAccessRef = useRef<PermissionLevel | null>(null)
+  const [approvalReq, setApprovalReq] = useState<ApprovalRequest | null>(null)
   const fileInputRef = useRef<HTMLInputElement | null>(null)
 
-  /* ---- 审批弹窗(占位演示:权限非完整时,发送后在输入框上方弹出) ---- */
-  const [approvalReq, setApprovalReq] = useState<ApprovalRequest | null>(null)
-  // 本会话免审集合:同工具免审,换工具重新审批(占位语义)。
-  const approvedToolsRef = useRef(new Set<string>())
-  const demoIndexRef = useRef(0)
-  const DEMO_TOOLS = ['bash', 'edit', 'grep']
+  /** 切换当前会话权限(活动会话直接写后端;无活动会话先记本地,首次发送时带上)。 */
+  const applyPermission = useCallback(
+    (level: PermissionLevel) => {
+      if (activeId && level === permission) return
+      setPermission(level)
+      try {
+        window.localStorage.setItem('denia.permission', level)
+        if (level === 'full') {
+          window.localStorage.setItem('denia.permission.migrated', '1')
+        }
+      } catch {
+        /* storage unavailable */
+      }
+      if (!activeId) return
+      setPermissionBusy(true)
+      api
+        .setSessionPermission(activeId, permissionModeForLevel(level))
+        .catch((error) => notify('err', error instanceof Error ? error.message : String(error)))
+        .finally(() => setPermissionBusy(false))
+    },
+    [activeId, permission, notify],
+  )
 
-  const handleApproval = useCallback((decision: ApprovalDecision) => {
-    if (!approvalReq) return
-    const tool = approvalReq.toolName
-    setApprovalReq(null)
-    if (decision === 'reject') {
-      notify('ok', t('approvalNoticeReject'))
-    } else if (decision === 'once') {
-      notify('ok', t('approvalNoticeAllow'))
-    } else {
-      approvedToolsRef.current.add(tool)
-      notify('ok', t('approvalNoticeSession', { tool }))
+  /** 选择权限:完整权限走 dsh 同款风险确认,其余直接写。 */
+  const requestPermissionChange = useCallback(
+    (level: PermissionLevel) => {
+      if (level === 'full' && permission !== 'full') {
+        pendingFullAccessRef.current = level
+        setFullAccessConfirm(true)
+        return
+      }
+      void applyPermission(level)
+    },
+    [permission, applyPermission],
+  )
+
+  const confirmFullAccess = useCallback(() => {
+    const level = pendingFullAccessRef.current ?? 'full'
+    pendingFullAccessRef.current = null
+    setFullAccessConfirm(false)
+    void applyPermission(level)
+  }, [applyPermission])
+
+  const cancelFullAccess = useCallback(() => {
+    pendingFullAccessRef.current = null
+    setFullAccessConfirm(false)
+  }, [])
+
+  /** 把用户在审批弹窗里的选择 POST 回后端,driver 随即继续/拒绝该调用。 */
+  const handleApproval = useCallback(
+    (decision: ApprovalDecision) => {
+      if (!approvalReq || !activeId) return
+      const request = approvalReq
+      setApprovalReq(null)
+      api
+        .answerApproval(activeId, request.requestId, decision)
+        .catch((error) => notify('err', error instanceof Error ? error.message : String(error)))
+    },
+    [approvalReq, activeId, notify],
+  )
+
+  // 跟随会话事件流:同步服务端权限模式,并监听后端发起的审批请求。
+  useEffect(() => {
+    if (!activeId) {
+      setApprovalReq(null)
+      return
     }
-  }, [approvalReq, notify])
-
-  /** 占位演示触发:按工具轮换,已被"本会话免审"的工具不再弹出。 */
-  const maybePreviewApproval = useCallback(() => {
-    if (permission === 'full') return
-    const tool = DEMO_TOOLS[demoIndexRef.current % DEMO_TOOLS.length]
-    demoIndexRef.current += 1
-    if (approvedToolsRef.current.has(tool)) return
-    setApprovalReq({
-      toolName: tool,
-      argsPreview: tool === 'bash' ? '{"command":"…"}' : '{"path":"…"}',
+    const unsubscribe = attach(activeId, {
+      onSnapshot: (_header, events) => {
+        const mode = latestPermissionMode(events)
+        if (mode) setPermission(mode)
+        setApprovalReq(latestPendingApproval(events))
+      },
+      onEnvelope: (event) => {
+        if (event.type === 'permission-mode') {
+          setPermission(permissionLevelFromMode(event.mode))
+        } else if (event.type === 'approval-asked') {
+          setApprovalReq({
+            requestId: event.request_id,
+            toolName: event.tool,
+            argsPreview: event.args_preview,
+            reason: event.reason,
+          })
+        } else if (event.type === 'approval-decided') {
+          setApprovalReq((current) =>
+            current?.requestId === event.request_id ? null : current,
+          )
+        }
+      },
     })
-  }, [permission])
+    return () => {
+      unsubscribe()
+      setApprovalReq(null)
+    }
+  }, [activeId])
 
   const visionModelInfo = useCallback((): CatalogModel | null => {
     if (!catalog || !selection) return null
@@ -527,6 +643,36 @@ export default function SessionsPage({
     notify('ok', t('trajQuoted'))
   }, [])
 
+  /* ---- 导出会话:从后端拉全量 events 后回放文件 ---- */
+
+  const handleExport = useCallback(
+    async (format: ExportFormat) => {
+      if (!activeId || exportBusy) return
+      setExportOpen(false)
+      setExportBusy(true)
+      try {
+        const snapshot = await api.getSession(activeId)
+        if (snapshot.events.length === 0) {
+          notify('err', t('exportEmpty'))
+          return
+        }
+        const title = activeSession ? sessionDisplayTitle(activeSession) : t('blankSession')
+        const payload = serializeSession(format, {
+          header: snapshot.header,
+          events: snapshot.events,
+          title,
+        })
+        downloadFile(payload.content, payload.filename, payload.mimeType)
+        notify('ok', t('exportDownloaded', { name: payload.filename }))
+      } catch (error) {
+        notify('err', t('exportFailed'))
+      } finally {
+        setExportBusy(false)
+      }
+    },
+    [activeId, activeSession, exportBusy, notify],
+  )
+
   /* ---- 提示词优化:当前模型 + 最近 5 轮上下文,支持一键撤销 ---- */
 
   const handleOptimize = async () => {
@@ -701,12 +847,17 @@ export default function SessionsPage({
     sendingRef.current = true
     setSending(true)
     try {
+      // 从欢迎页发首条消息时,活动会话尚未创建;把当前选择的权限带到新会话。
+      const wasHero = !activeId
       const id = await ensureSession(activeWs)
       if (!id) {
         onOpenPicker()
         return
       }
       markStarted(id)
+      if (wasHero && permission !== 'workspace-write') {
+        await api.setSessionPermission(id, permissionModeForLevel(permission))
+      }
       // 附件上传(不限格式):先持久化,再随消息注入路径。
       const uploadedPaths: string[] = []
       for (const attachment of attachments) {
@@ -743,8 +894,6 @@ export default function SessionsPage({
       setAttachments([])
       setTrajQuotes([])
       setScrollTick((tick) => tick + 1)
-      // 占位:非完整权限下模拟审批请求(输入框上方弹出)。
-      maybePreviewApproval()
     } catch (error) {
       notify('err', error instanceof Error ? error.message : String(error))
       // 保留输入框内容;若会话侧已经创建但发送失败,等待用户重试。
@@ -944,8 +1093,8 @@ export default function SessionsPage({
         <div className="composer-modes">
           <PermissionSelector
             value={permission}
-            onChange={setPermission}
-            disabled={inert}
+            onChange={requestPermissionChange}
+            disabled={inert || permissionBusy}
           />
           {catalog && selection && (
             <ComposerModelMenu
@@ -1063,6 +1212,45 @@ export default function SessionsPage({
               {t('viewTrajectory')}
             </button>
           </div>
+          <div className={`session-export${exportOpen ? ' open' : ''}`}>
+            <button
+              type="button"
+              className="icon-btn session-export-btn"
+              title={t('exportSessionHint')}
+              aria-label={t('exportSession')}
+              aria-haspopup="menu"
+              aria-expanded={exportOpen}
+              disabled={!activeId || exportBusy}
+              onClick={() => setExportOpen((open) => !open)}
+            >
+              <IconDownload size={15} />
+            </button>
+            {exportOpen && (
+              <>
+                <div className="menu-backdrop" onClick={() => setExportOpen(false)} />
+                <div className="session-export-menu" role="menu">
+                  <button
+                    type="button"
+                    role="menuitem"
+                    className="session-export-item"
+                    onClick={() => void handleExport('markdown')}
+                  >
+                    <span className="session-export-item-title">{t('exportAsMarkdown')}</span>
+                    <span className="session-export-item-hint">.md</span>
+                  </button>
+                  <button
+                    type="button"
+                    role="menuitem"
+                    className="session-export-item"
+                    onClick={() => void handleExport('json')}
+                  >
+                    <span className="session-export-item-title">{t('exportAsJson')}</span>
+                    <span className="session-export-item-hint">.json</span>
+                  </button>
+                </div>
+              </>
+            )}
+          </div>
         </header>
       )}
       <div
@@ -1132,6 +1320,16 @@ export default function SessionsPage({
         >
           <IconChevron size={14} />
         </button>
+      )}
+      {fullAccessConfirm && (
+        <ConfirmDialog
+          open
+          title={t('permissionFullConfirmTitle')}
+          desc={t('permissionFullConfirmDesc')}
+          confirmLabel={t('permissionFullConfirmEnable')}
+          onConfirm={confirmFullAccess}
+          onCancel={cancelFullAccess}
+        />
       )}
       {rewindReq && (
         <ConfirmDialog

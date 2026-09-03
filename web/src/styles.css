@@ -3190,11 +3190,20 @@ button.btn.form-action {
   font-family: ui-monospace, monospace;
 }
 
+.approval-pop-reason {
+  margin: 0 0 4px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--label-secondary);
+}
+
 .approval-pop-desc {
   margin: 0 0 4px;
   font-size: 12px;
   line-height: 1.5;
   color: var(--label-secondary);
+  max-height: 120px;
+  overflow: auto;
 }
 
 .approval-pop-note {
@@ -3235,85 +3244,167 @@ button.btn.form-action {
   background: var(--accent);
 }
 
-/* ---- 权限选择器(占位) ---- */
+/* ---- 权限选择器(与模型选择器同一设计语言) ---- */
 
 .permission-selector {
   position: relative;
   display: inline-flex;
 }
 
+.permission-selector.open {
+  z-index: 52;
+}
+
 .permission-chip {
   display: inline-flex;
   align-items: center;
-  gap: 5px;
-  padding: 4px 8px;
-  border: 1px solid var(--border-l2);
-  border-radius: 8px;
+  gap: 6px;
+  height: 28px;
+  padding: 0 8px;
+  border: none;
+  border-radius: var(--r-sm);
   background: transparent;
   color: var(--label-secondary);
-  font-size: 12px;
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 20px;
   cursor: pointer;
+  transition: background 0.15s var(--ease), color 0.15s var(--ease);
 }
 
-.permission-chip:hover {
+.permission-chip:hover:not(:disabled),
+.permission-chip.open {
+  background: var(--hover-fill);
   color: var(--label-primary);
-  border-color: var(--border-l3);
+}
+
+.permission-chip:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.permission-chip-icon {
+  display: inline-flex;
+  color: var(--label-tertiary);
+  transition: color 0.15s var(--ease);
+}
+
+.permission-chip:hover:not(:disabled) .permission-chip-icon,
+.permission-chip.open .permission-chip-icon {
+  color: var(--label-primary);
+}
+
+.permission-chip-name {
+  white-space: nowrap;
 }
 
 .permission-menu {
   position: absolute;
   left: 0;
   bottom: calc(100% + 8px);
-  z-index: 40;
+  z-index: 53;
   display: flex;
   flex-direction: column;
   gap: 2px;
-  min-width: 260px;
-  padding: 8px;
+  width: 300px;
+  max-width: calc(100vw - 48px);
+  padding: 6px;
   border: 1px solid var(--border-l2);
-  border-radius: 12px;
+  border-radius: var(--r-md);
   background: var(--bg-layer-1);
   box-shadow: var(--shadow-lv2);
+  animation: permission-menu-in 0.14s var(--ease);
 }
 
-.permission-menu-label {
-  padding: 4px 8px;
+.permission-menu-heading {
+  padding: 6px 8px 4px;
   font-size: 11px;
   font-weight: 600;
-  color: var(--label-caption);
-  text-transform: uppercase;
   letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--label-caption);
 }
 
 .permission-item {
   display: flex;
-  flex-direction: column;
-  gap: 2px;
-  padding: 7px 8px;
+  align-items: flex-start;
+  gap: 10px;
+  width: 100%;
+  padding: 8px;
   border: none;
-  border-radius: 8px;
+  border-radius: var(--r-sm);
   background: transparent;
   text-align: left;
   cursor: pointer;
+  transition: background 0.15s var(--ease);
 }
 
 .permission-item:hover {
-  background: var(--bg-hover);
+  background: var(--hover-fill);
 }
 
 .permission-item.active {
-  background: var(--bg-active);
+  background: var(--active-fill);
+}
+
+/* 图标小卡片:透明底 + 细描边,避免灰块感 */
+.permission-item-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  flex: none;
+  margin-top: 1px;
+  border: 1px solid var(--border-l2);
+  border-radius: 7px;
+  background: transparent;
+  color: var(--label-secondary);
+  transition: color 0.15s var(--ease), border-color 0.15s var(--ease);
+}
+
+.permission-item.active .permission-item-icon,
+.permission-item:hover .permission-item-icon {
+  color: var(--label-primary);
+  border-color: var(--border-l2);
+}
+
+.permission-item-text {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
 }
 
 .permission-item-label {
-  font-size: 12.5px;
+  font-size: 13px;
+  font-weight: 500;
   color: var(--label-primary);
 }
 
 .permission-item-desc {
   font-size: 11.5px;
-  line-height: 1.4;
+  line-height: 1.45;
   color: var(--label-tertiary);
+}
+
+.permission-item-check {
+  display: inline-flex;
+  align-self: center;
+  flex: none;
+  color: var(--label-primary);
+}
+
+@keyframes permission-menu-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
 }
 
 .permission-menu-divider {

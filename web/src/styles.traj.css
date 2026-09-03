@@ -1,13 +1,99 @@
 /* ===================== 视图切换(对话 / 轨迹) ===================== */
 
 .view-switch {
-  margin-left: auto;
   display: inline-flex;
   gap: 2px;
   padding: 2px;
   border: 1px solid var(--border-l);
   border-radius: var(--r-pill);
   background: var(--bg-base);
+}
+
+/* 头部栏最右端的导出按钮与下拉。view-switch 紧跟标题,
+   把 margin-left:auto 下放到这里,让 export 贴右对齐。 */
+.session-export {
+  margin-left: auto;
+  position: relative;
+  display: inline-flex;
+}
+
+.session-export-btn {
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--r-pill);
+}
+
+.session-export.open .session-export-btn {
+  background: var(--hover-fill);
+  color: var(--label-primary);
+}
+
+.session-export-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 45;
+  min-width: 220px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 4px;
+  border: 1px solid var(--border-l);
+  border-radius: var(--r-md);
+  background: var(--bg-layer-3);
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.35);
+  animation: session-export-in 0.14s var(--ease);
+}
+
+@keyframes session-export-in {
+  from {
+    opacity: 0;
+    transform: translateY(-4px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.session-export-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  border: none;
+  background: transparent;
+  color: var(--label-secondary);
+  border-radius: var(--r-sm);
+  padding: 8px 10px;
+  font: inherit;
+  font-size: 12.5px;
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.15s var(--ease), color 0.15s var(--ease);
+}
+
+.session-export-item:hover {
+  background: var(--hover-fill);
+  color: var(--label-primary);
+}
+
+.session-export-item-title {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.session-export-item-hint {
+  flex: none;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  padding: 1px 6px;
+  border-radius: var(--r-pill);
+  background: var(--bg-active);
+  color: var(--label-tertiary);
 }
 
 .view-switch-tab {

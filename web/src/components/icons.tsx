@@ -132,6 +132,35 @@ export function IconShield(props: IconProps) {
   )
 }
 
+/** 眼睛:只读权限(可看不可改)。 */
+export function IconEye(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <path d="M1.8 8S3.7 4 8 4s6.2 4 6.2 4-1.9 4-6.2 4-6.2-4-6.2-4Z" stroke="currentColor" strokeWidth="1.2" strokeLinejoin="round" />
+      <circle cx="8" cy="8" r="1.8" stroke="currentColor" strokeWidth="1.2" />
+    </Svg>
+  )
+}
+
+/** 铅笔:工作区写入权限。 */
+export function IconPencil(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <path d="M11.3 2a1.9 1.9 0 1 1 2.7 2.7L5 13.7 1.3 14.7 2.3 11l9-9Z" stroke="currentColor" strokeWidth="1.2" strokeLinejoin="round" />
+      <path d="m10.2 3.1 2.7 2.7" stroke="currentColor" strokeWidth="1.2" />
+    </Svg>
+  )
+}
+
+/** 闪电:完整权限(不受限)。 */
+export function IconZap(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <path d="M8.7 1.3 2 9.3h6L7.3 14.7 14 6.7H8l.7-5.4Z" stroke="currentColor" strokeWidth="1.2" strokeLinejoin="round" />
+    </Svg>
+  )
+}
+
 /** 回形针:附件/上传文件的通用图标。 */
 export function IconPaperclip(props: IconProps) {
   return (
@@ -203,6 +232,20 @@ export function IconBranch(props: IconProps) {
       />
       <circle cx="5" cy="3.6" r="1.4" stroke="currentColor" strokeWidth="1.4" />
       <circle cx="12.4" cy="13.8" r="1.4" stroke="currentColor" strokeWidth="1.4" />
+    </Svg>
+  )
+}
+
+export function IconDownload(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <path
+        d="M8 2.5v8M8 10.5l-3-3M8 10.5l3-3M3 12.5v1a1.5 1.5 0 0 0 1.5 1.5h7a1.5 1.5 0 0 0 1.5-1.5v-1"
+        stroke="currentColor"
+        strokeWidth="1.4"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
     </Svg>
   )
 }

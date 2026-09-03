@@ -2,6 +2,7 @@ import type {
   CredentialInfo,
   DiscoveredModel,
   ModelCatalog,
+  PermissionMode,
   ProviderInfo,
   SessionEnvelope,
   SessionHeader,
@@ -424,6 +425,32 @@ export function postPrompt(
     method: 'POST',
     body: JSON.stringify(body),
   })
+}
+
+/** 切换当前会话权限预设(抄 dsh /permission 写路径)。 */
+export function setSessionPermission(
+  id: string,
+  mode: PermissionMode,
+): Promise<{ mode: PermissionMode }> {
+  return http(`/api/sessions/${encodeURIComponent(id)}/permission`, {
+    method: 'PUT',
+    body: JSON.stringify({ mode }),
+  })
+}
+
+/** 应答一次挂起的审批(抄 dsh ui approval panel)。 */
+export function answerApproval(
+  id: string,
+  requestId: string,
+  decision: 'allow-once' | 'reject',
+): Promise<{ ok: boolean }> {
+  return http(
+    `/api/sessions/${encodeURIComponent(id)}/approvals/${encodeURIComponent(requestId)}`,
+    {
+      method: 'POST',
+      body: JSON.stringify({ decision }),
+    },
+  )
 }
 
 /** 上传一个附件(不限格式),返回持久化后的绝对路径与字节数。 */

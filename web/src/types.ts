@@ -222,6 +222,28 @@ export type SessionEnvelope =
       type: 'todo-write'
       todos: TodoItem[]
     }
+  | { seq: number; time: number; type: 'permission-mode'; mode: PermissionMode }
+  | { seq: number; time: number; type: 'approval-policy'; policy: 'ask' | 'never' }
+  | {
+      seq: number
+      time: number
+      type: 'approval-asked'
+      request_id: string
+      call_id: string
+      tool: string
+      args_preview: string
+      reason?: string
+    }
+  | {
+      seq: number
+      time: number
+      type: 'approval-decided'
+      request_id: string
+      outcome: 'allowed-once' | 'rejected' | 'cancelled' | 'unavailable'
+    }
+
+/** 当前会话权限模式(与 Rust `PermissionMode` 对齐)。 */
+export type PermissionMode = 'read-only' | 'workspace-write' | 'danger-full-access'
 
 export interface SessionHeader {
   type: 'session'
