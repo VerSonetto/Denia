@@ -681,6 +681,20 @@ button {
   text-overflow: ellipsis;
 }
 
+/* 侧栏血缘徽标:子会话标题后的小胶囊,与运行中圆点同尺度 */
+.session-row .branch-tag {
+  flex: none;
+  font-size: 9.5px;
+  line-height: 14px;
+  padding: 0 6px;
+  border-radius: var(--r-pill);
+  background: var(--accent-soft);
+  color: var(--accent);
+  border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
+  letter-spacing: 0.02em;
+  user-select: none;
+}
+
 .expand-rest {
   border: none;
   background: none;

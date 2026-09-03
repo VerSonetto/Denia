@@ -167,9 +167,10 @@ export function IconClose(props: IconProps) {
 
 export function IconCopy(props: IconProps) {
   return (
-    <Svg {...props}>
-      <rect x="5.5" y="5.5" width="7" height="7" rx="1.2" stroke="currentColor" strokeWidth="1.3" />
-      <path d="M10.5 3.5h-3.8A2.2 2.2 0 0 0 4.5 5.7v4.8" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" />
+    <Svg {...props} viewBox="0 0 18 18">
+      <rect x="5.5" y="5.5" width="8" height="8" rx="1.4" stroke="currentColor" strokeWidth="1.4" />
+      <path d="M12.5 3.5h-4A2.2 2.2 0 0 0 6.3 5.7v0" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
+      <path d="M9.3 3.5h-1.4A1.8 1.8 0 0 0 6.1 5.3V5.5" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
     </Svg>
   )
 }
@@ -192,11 +193,17 @@ export function IconRewind(props: IconProps) {
 
 export function IconBranch(props: IconProps) {
   return (
-    <Svg {...props}>
-      <path d="M4 5.1v5.8M12 5.1v1.4a5 5 0 0 1-5 5H5.6" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
-      <circle cx="4" cy="3.5" r="1.6" stroke="currentColor" strokeWidth="1.4" />
-      <circle cx="4" cy="12.5" r="1.6" stroke="currentColor" strokeWidth="1.4" />
-      <circle cx="12" cy="3.5" r="1.6" stroke="currentColor" strokeWidth="1.4" />
+    <Svg {...props} viewBox="0 0 18 18">
+      <path
+        d="M5 5.1v5.8M14 5.1v1.4a5 5 0 0 1-5 5H6.6"
+        stroke="currentColor"
+        strokeWidth="1.6"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+      <circle cx="5" cy="3.5" r="1.6" stroke="currentColor" strokeWidth="1.4" />
+      <circle cx="5" cy="12.5" r="1.6" stroke="currentColor" strokeWidth="1.4" />
+      <circle cx="14" cy="3.5" r="1.6" stroke="currentColor" strokeWidth="1.4" />
     </Svg>
   )
 }

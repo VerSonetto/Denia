@@ -224,6 +224,9 @@ const zh = {
   messageBranch: '在新对话中分支',
   messageBranchUnavailable: '仅可从已完成轮次的最后一条消息分支',
 
+  branchTag: '分支',
+  branchTagHint: '从父会话分支出的子会话(血缘已嵌套显示)',
+
   trajQuoteRecord: '引用此记录',
   trajQuoteInterval: '引用区间',
   trajQuoted: '已引用到输入框,补写问题后发送',
@@ -560,6 +563,9 @@ const en: typeof zh = {
 
   messageBranch: 'Branch into a new conversation',
   messageBranchUnavailable: 'Only the last message of a completed turn can branch',
+
+  branchTag: 'fork',
+  branchTagHint: 'A child session forked from a parent (lineage already nested)',
 
   trajQuoteRecord: 'Quote this record',
   trajQuoteInterval: 'Quote interval',

@@ -879,10 +879,13 @@ function SessionRow({
   onOpen: () => void
   onDelete: () => void
 }) {
+  // 标题前补"(父)"提示,让用户一眼看出这是分支出来的子会话(已嵌套显示,
+  // 但同工作区里有多个分支时文字也帮回忆),只对子会话生效,顶会不画。
+  const isBranch = depth > 0
   return (
     <div
-      className={`session-row-wrap${active ? ' active' : ''}${depth > 0 ? ' nested' : ''}`}
-      style={depth > 0 ? { paddingLeft: 10 + depth * 14 } : undefined}
+      className={`session-row-wrap${active ? ' active' : ''}${isBranch ? ' nested' : ''}`}
+      style={isBranch ? { paddingLeft: 10 + depth * 14 } : undefined}
     >
       <button type="button" className={`session-row${active ? ' active' : ''}`} onClick={onOpen}>
         <span className="lead">
@@ -893,6 +896,11 @@ function SessionRow({
           ) : null}
         </span>
         <span className="excerpt">{sessionDisplayTitle(session)}</span>
+        {isBranch && (
+          <span className="branch-tag" title={t('branchTagHint')} aria-label={t('branchTagHint')}>
+            {t('branchTag')}
+          </span>
+        )}
       </button>
       <span className="row-actions">
         <button
