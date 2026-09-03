@@ -219,6 +219,7 @@ const zh = {
   reasonAborted: '已中止',
   reasonMaxTokens: '达到长度上限',
   reasonError: '出错',
+  reasonInterrupted: '已中断',
   currentModel: '默认模型',
 
   messageBranch: '在新对话中分支',
@@ -340,16 +341,13 @@ const zh = {
   optimizing: '优化中…',
   optimizePromptHint: '使用当前模型优化提示词，并注入最近 5 轮对话上下文',
   optimizeDone: '提示词已优化',
-  contextRingLabel: '上下文窗口',
-  contextPanelTitle: '上下文窗口占用',
+  contextAria: '上下文已用 {percent}',
+  contextUsed: '上下文已用',
   contextSystem: '系统提示词',
-  contextTools: '工具提示词',
-  contextUser: '用户消息',
-  contextOther: '助手与工具结果',
-  contextFree: '剩余窗口',
-  contextTokens: '{n} tok',
-  contextEstimate: '估算值,基于字符长度换算',
-  contextAnchored: '锚定(provider 上报)',
+  contextTools: '工具',
+  contextMessages: '对话消息',
+  numberThousand: '{value}K',
+  numberMillion: '{value}M',
 }
 
 const en: typeof zh = {
@@ -568,6 +566,7 @@ const en: typeof zh = {
   reasonAborted: 'Aborted',
   reasonMaxTokens: 'Hit the token limit',
   reasonError: 'Error',
+  reasonInterrupted: 'Interrupted',
   currentModel: 'Default model',
 
   messageBranch: 'Branch into a new conversation',
@@ -689,16 +688,13 @@ const en: typeof zh = {
   optimizing: 'Optimizing…',
   optimizePromptHint: 'Optimize the prompt with the current model, injecting the last 5 turns of context',
   optimizeDone: 'Prompt optimized',
-  contextRingLabel: 'Context window',
-  contextPanelTitle: 'Context usage',
+  contextAria: '{percent} of context used',
+  contextUsed: 'of context used',
   contextSystem: 'System prompt',
-  contextTools: 'Tool definitions',
-  contextUser: 'User messages',
-  contextOther: 'Assistant & tool results',
-  contextFree: 'Remaining window',
-  contextTokens: '{n} tok',
-  contextEstimate: 'Estimated from byte length',
-  contextAnchored: 'Anchored (provider reported)',
+  contextTools: 'Tools',
+  contextMessages: 'Messages',
+  numberThousand: '{value}K',
+  numberMillion: '{value}M',
 }
 
 type LocaleId = 'zh' | 'en'
