@@ -25,6 +25,10 @@ pub struct SessionHeader {
     /// Confines file tools to `cwd`; orthogonal to the directory choice.
     #[serde(default = "default_true")]
     pub sandbox: bool,
+    /// 分支来源:本会话由哪个父会话 fork 而来(dsh parentSession 血缘)。
+    /// 旧日志/普通会话无此字段。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_session: Option<String>,
 }
 
 fn default_true() -> bool {
@@ -153,6 +157,31 @@ pub struct SessionEnvelope {
 /// answered (aborts, crashes) so the derived wire history stays valid.
 pub const INTERRUPTED_TOOL_RESULT: &str = "[tool execution was interrupted]";
 
+/// 会话分支(抄 dsh `session.fork` 的边界切割语义)在日志前缀上的纯函数:
+/// 返回种子事件数量(切片右端,不含)。
+///
+/// - `at_seq` 给定且未越过日志末尾:锚定到第一个 `seq >= at_seq` 的
+///   `turn-end`(锚点落在某个已完成轮次内,切点绝不回退到上一轮)。
+/// - `at_seq` 未给或越过末尾:锚定到最后一个 `turn-end`。
+/// - 找不到边界(尚无任何已完成轮次)→ `None`,调用方报 fork-unavailable。
+///
+/// 与 dsh 的差异:dsh 的 turn/end 后可能残留属于该轮的冻结节点(需要
+/// 延伸到下一个 turn/start);本仓驱动器把下一轮的用户消息写在 turn-end
+/// 与下一轮 turn-start 之间,那些事件属于下一轮,必须排除——切点严格
+/// 落在 `turn-end` 之后。
+pub fn fork_cut_index(events: &[SessionEnvelope], at_seq: Option<u64>) -> Option<usize> {
+    let last_seq = events.last()?.seq;
+    let boundary_idx = match at_seq {
+        Some(anchor) if anchor <= last_seq => events.iter().position(|envelope| {
+            envelope.seq >= anchor && matches!(envelope.event, SessionEvent::TurnEnd { .. })
+        }),
+        _ => events
+            .iter()
+            .rposition(|envelope| matches!(envelope.event, SessionEvent::TurnEnd { .. })),
+    }?;
+    Some(boundary_idx + 1)
+}
+
 /// Projects the model-facing history from the log.
 ///
 /// `user-message` becomes a user message; `assistant-message` becomes an
@@ -253,6 +282,7 @@ mod tests {
             created_at: 1_700_000_000_000,
             cwd: "/tmp/work".to_string(),
             sandbox: true,
+            parent_session: None,
         };
         let json = serde_json::to_string(&header).unwrap();
         assert_eq!(
@@ -454,5 +484,99 @@ mod tests {
             json,
             r#"{"kind":"error","failure":{"message":"too many steps","code":"STEP_LIMIT"}}"#
         );
+    }
+
+    /// 两轮完整对话:1 turn-start, 2 user, 3 assistant, 4 turn-end,
+    /// 5 turn-start, 6 user, 7 assistant, 8 turn-end。
+    fn two_turn_log() -> Vec<SessionEnvelope> {
+        let mut events = vec![
+            envelope(1, SessionEvent::TurnStart { turn: 1 }),
+            envelope(2, SessionEvent::UserMessage { text: "first".into(), injected: false, images: Vec::new() }),
+            envelope(
+                3,
+                SessionEvent::AssistantMessage {
+                    turn: 1,
+                    step: 1,
+                    blocks: vec![ContentBlock::Text { text: "hi".into() }],
+                    usage: None,
+                    interrupted: false,
+                },
+            ),
+            envelope(4, SessionEvent::TurnEnd { turn: 1, reason: TurnEndReason::Completed }),
+            envelope(5, SessionEvent::TurnStart { turn: 2 }),
+            envelope(6, SessionEvent::UserMessage { text: "second".into(), injected: false, images: Vec::new() }),
+            envelope(
+                7,
+                SessionEvent::AssistantMessage {
+                    turn: 2,
+                    step: 1,
+                    blocks: vec![ContentBlock::Text { text: "done".into() }],
+                    usage: None,
+                    interrupted: false,
+                },
+            ),
+            envelope(8, SessionEvent::TurnEnd { turn: 2, reason: TurnEndReason::Completed }),
+        ];
+        for (index, envelope) in events.iter_mut().enumerate() {
+            envelope.seq = index as u64 + 1;
+        }
+        events
+    }
+
+    #[test]
+    fn fork_cut_without_anchor_ends_on_last_completed_turn() {
+        let events = two_turn_log();
+        // 无锚点:切到最后一个 turn-end(含)= 8 条种子。
+        assert_eq!(fork_cut_index(&events, None), Some(8));
+    }
+
+    #[test]
+    fn fork_cut_anchor_clamps_forward_to_turn_end() {
+        let events = two_turn_log();
+        // 锚点落在第 1 轮中间:向前找到本轮 turn-end(seq 4),不回退。
+        assert_eq!(fork_cut_index(&events, Some(2)), Some(4));
+        assert_eq!(fork_cut_index(&events, Some(1)), Some(4));
+        // 锚点正好是 turn-end 本身:切在本轮之后。
+        assert_eq!(fork_cut_index(&events, Some(4)), Some(4));
+        // 锚点指向下一轮的 turn-start:归入第 2 轮之后。
+        assert_eq!(fork_cut_index(&events, Some(5)), Some(8));
+    }
+
+    #[test]
+    fn fork_cut_anchor_beyond_end_falls_back_to_last_turn_end() {
+        let events = two_turn_log();
+        assert_eq!(fork_cut_index(&events, Some(99)), Some(8));
+    }
+
+    #[test]
+    fn fork_cut_excludes_next_turn_prelude() {
+        // 本仓布局:下一轮的用户消息写在 turn-end 与下一轮 turn-start 之间,
+        // 属于下一轮,不进种子(切点严格落在 turn-end 之后)。
+        let mut events = two_turn_log();
+        events.insert(
+            4,
+            envelope(0, SessionEvent::UserMessage { text: "next turn prompt".into(), injected: false, images: Vec::new() }),
+        );
+        for (index, envelope) in events.iter_mut().enumerate() {
+            envelope.seq = index as u64 + 1;
+        }
+        // 锚定第 1 轮:boundary seq 4 → 种子 4 条;下一轮预置消息(seq 5)被排除。
+        assert_eq!(fork_cut_index(&events, Some(1)), Some(4));
+        // 无锚点:切到最后一个 turn-end(seq 9 → index 8 → 9 条)。
+        assert_eq!(fork_cut_index(&events, None), Some(9));
+    }
+
+    #[test]
+    fn fork_cut_without_any_completed_turn_is_unavailable() {
+        let events = vec![
+            envelope(1, SessionEvent::TurnStart { turn: 1 }),
+            envelope(2, SessionEvent::UserMessage { text: "hi".into(), injected: false, images: Vec::new() }),
+        ];
+        assert_eq!(fork_cut_index(&events, None), None);
+        // 锚点在未完成轮次内且不越过末尾:无边界 → None(dsh fork-unavailable)。
+        assert_eq!(fork_cut_index(&events, Some(2)), None);
+        // 锚点越过末尾:回退到最后一个 turn-end,仍没有 → None。
+        assert_eq!(fork_cut_index(&events, Some(99)), None);
+        assert_eq!(fork_cut_index(&[], None), None);
     }
 }

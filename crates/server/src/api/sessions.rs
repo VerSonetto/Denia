@@ -39,6 +39,7 @@ pub fn router() -> Router<Arc<AppState>> {
         )
         .route("/api/sessions/{id}/prompt", post(prompt_session))
         .route("/api/sessions/{id}/cancel", post(cancel_session))
+        .route("/api/sessions/{id}/fork", post(fork_session))
         .route("/api/sessions/{id}/follow", get(follow_session))
         .route("/api/sessions/{id}/context-breakdown", get(context_breakdown))
         .route("/api/sessions/{id}/checkpoints", get(list_checkpoints))
@@ -355,6 +356,74 @@ async fn cancel_session(
         token.cancel();
     }
     Ok(Json(json!({ "ok": true })))
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ForkBody {
+    /// 分支锚点:锚定到第一个 `seq >= atSeq` 的已完成轮次边界。
+    /// 缺省 = 会话末尾(最后一个已完成轮次)。
+    #[serde(default)]
+    at_seq: Option<u64>,
+}
+
+/// 从源会话某个已完成轮次边界分支出一个全新会话(抄 dsh `session.fork`):
+/// 种子 = 源日志前缀原样回放(seq 重排、时间戳保留),血缘写进子会话头,
+/// 并挂到源会话所在工作区。源会话本身不动——分支非破坏性,与回退互补。
+async fn fork_session(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    body: Option<Json<ForkBody>>,
+) -> Result<impl IntoResponse, ApiError> {
+    let body = body.map(|Json(body)| body).unwrap_or_default();
+    let live = state
+        .live
+        .get_or_load(&state.sessions, &id)
+        .map_err(ApiError::from_session)?;
+    if live.running.load(Ordering::SeqCst) {
+        return Err(ApiError::new(
+            StatusCode::CONFLICT,
+            "session/running",
+            "cancel the running turn before forking",
+        ));
+    }
+    let (source_events, header) = {
+        let session = live.session.clone();
+        (session.events(), session.header().clone())
+    };
+    let cut = denia_core::session::fork_cut_index(&source_events, body.at_seq).ok_or_else(|| {
+        ApiError::bad_request(
+            "session/fork-unavailable",
+            "仅可从已完成的轮次分支:该会话还没有已完成的轮次(或锚点所在轮次尚未完成)",
+        )
+    })?;
+    let cwd = std::path::PathBuf::from(&header.cwd);
+    let child = state
+        .sessions
+        .create_forked(&source_events, cut, &cwd, header.sandbox, &id)
+        .map_err(ApiError::from_session)?;
+    // 挂到源会话所在工作区;工作区刚被删时回滚子会话,不留孤儿。
+    let workspace = state.workspaces.resolve_by_path(&cwd);
+    if let Some(ws) = &workspace {
+        if !state.workspaces.attach(&ws.id, child.id()) {
+            let _ = state.sessions.delete(child.id());
+            return Err(ApiError::new(
+                StatusCode::NOT_FOUND,
+                "workspace/not-found",
+                "workspace not found",
+            ));
+        }
+    }
+    let summary = json!({
+        "id": child.id(),
+        "created_at": child.header().created_at,
+        "excerpt": child.first_prompt_excerpt(80),
+        "cwd": child.header().cwd,
+        "sandbox": child.header().sandbox,
+        "parent_session": child.header().parent_session,
+    });
+    let _ = state.events.send(ServerEvent::SessionsUpdated);
+    Ok((StatusCode::CREATED, Json(json!({ "session": summary }))))
 }
 
 /// 列出该会话所有可回退的用户消息(checkpoint)。

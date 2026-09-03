@@ -714,7 +714,7 @@ mod tests {
                 .unwrap()
                 .as_nanos()
         ));
-        Arc::new(Session::create(&dir, uuid::Uuid::new_v4().to_string(), &dir, true).unwrap())
+        Arc::new(Session::create(&dir, uuid::Uuid::new_v4().to_string(), &dir, true, None).unwrap())
     }
 
     fn selection() -> ModelSelection {

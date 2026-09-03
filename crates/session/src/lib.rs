@@ -122,7 +122,14 @@ impl Session {
     /// Creates a fresh session file (header line only) inside `dir`.
     /// `id` becomes both the header id and, by store convention, the
     /// directory name. `sandbox` confines file tools to `cwd`.
-    pub fn create(dir: &Path, id: String, cwd: &Path, sandbox: bool) -> Result<Session, SessionError> {
+    /// `parent_session` 记录分支血缘(非分支会话为 `None`)。
+    pub fn create(
+        dir: &Path,
+        id: String,
+        cwd: &Path,
+        sandbox: bool,
+        parent_session: Option<String>,
+    ) -> Result<Session, SessionError> {
         std::fs::create_dir_all(dir)?;
         let file = dir.join("session.jsonl");
         let header = SessionHeader {
@@ -132,6 +139,7 @@ impl Session {
             created_at: now_millis(),
             cwd: cwd.to_string_lossy().to_string(),
             sandbox,
+            parent_session,
         };
         {
             let mut handle = File::create(&file)?;
@@ -279,10 +287,20 @@ impl Session {
     ///
     /// 写入走 BufWriter:高频流式帧不逐条 flush,崩溃尾部由 torn-tail 修复。
     pub fn append(&self, event: SessionEvent) -> Result<SessionEnvelope, SessionError> {
+        self.append_with_time(event, now_millis())
+    }
+
+    /// [`Session::append`] 的时间显式版:分支种子回放保留源事件时间戳,
+    /// 轨迹时间轴在子会话里保持真实。
+    fn append_with_time(
+        &self,
+        event: SessionEvent,
+        time: u64,
+    ) -> Result<SessionEnvelope, SessionError> {
         let mut inner = self.inner.lock().unwrap_or_else(|poison| poison.into_inner());
         let envelope = SessionEnvelope {
             seq: inner.events.len() as u64 + 1,
-            time: now_millis(),
+            time,
             event,
         };
         // 维护 last_turn / last_system_prompt 的 O(1) 投影。
@@ -330,6 +348,17 @@ impl Session {
         }
         inner.events.push(envelope.clone());
         Ok(envelope)
+    }
+
+    /// 分支种子回放:把源日志前缀原样写入新会话(重新从 1 连续编号,
+    /// 保留源事件时间戳),last_turn/last_system_prompt/token-meter 随
+    /// `append_with_time` 一致重建。回放后新会话 `derive_messages` 与
+    /// 源会话前缀逐字一致——model-visible == logged 的不变量不破坏。
+    pub fn seed_from(&self, source: &[SessionEnvelope]) -> Result<(), SessionError> {
+        for envelope in source {
+            self.append_with_time(envelope.event.clone(), envelope.time)?;
+        }
+        Ok(())
     }
 
     /// 物理回退:截断会话日志到目标用户消息**之前**,并把回退审计追加到
@@ -565,6 +594,10 @@ pub struct SessionSummary {
     /// Whether the recorded working directory still exists; sessions with a
     /// dead cwd refuse new prompts.
     pub cwd_alive: bool,
+    /// 分支血缘:父会话 id(非分支会话为 `None`)。侧栏据此把子会话
+    /// 嵌套在源会话之下(抄 dsh parentSessionId)。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent_session: Option<String>,
 }
 
 /// 索引条目:启动/失效时从文件摘要得到,list 只读它。
@@ -581,6 +614,7 @@ pub struct SessionMeta {
     pub excerpt: Option<String>,
     pub cwd: String,
     pub sandbox: bool,
+    pub parent_session: Option<String>,
 }
 
 /// The sessions root: `<home>/sessions` + 内存索引。
@@ -628,9 +662,34 @@ impl SessionStore {
     }
 
     pub fn create(&self, cwd: &Path, sandbox: bool) -> Result<Session, SessionError> {
+        self.create_with_parent(cwd, sandbox, None)
+    }
+
+    /// 分支创建:新会话继承父会话的 cwd/sandbox,血缘写进 header,
+    /// 并把源日志前缀(`source[..cut]`)作为种子回放。
+    pub fn create_forked(
+        &self,
+        source_events: &[SessionEnvelope],
+        cut: usize,
+        cwd: &Path,
+        sandbox: bool,
+        parent_id: &str,
+    ) -> Result<Session, SessionError> {
+        let session =
+            self.create_with_parent(cwd, sandbox, Some(parent_id.to_string()))?;
+        session.seed_from(&source_events[..cut])?;
+        Ok(session)
+    }
+
+    fn create_with_parent(
+        &self,
+        cwd: &Path,
+        sandbox: bool,
+        parent_session: Option<String>,
+    ) -> Result<Session, SessionError> {
         let id = uuid::Uuid::new_v4().to_string();
         let dir = self.root.join(&id);
-        let session = Session::create(&dir, id, cwd, sandbox)?;
+        let session = Session::create(&dir, id, cwd, sandbox, parent_session)?;
         let meta = meta_of(&session);
         self.index
             .lock()
@@ -754,9 +813,13 @@ impl SessionStore {
                     }
                 }
             }
+            // 活跃会话已在步骤 1 产出摘要,索引并入时跳过,避免同一会话出现两行。
+            let listed: std::collections::HashSet<String> =
+                summaries.iter().map(|s| s.id.clone()).collect();
             summaries.extend(
                 index
                     .values()
+                    .filter(|entry| !listed.contains(&entry.meta.id))
                     .map(|entry| summary_of_meta(&entry.meta)),
             );
         }
@@ -806,6 +869,7 @@ fn meta_of(session: &Session) -> SessionMeta {
         excerpt: session.first_prompt_excerpt(80),
         cwd: session.header().cwd.clone(),
         sandbox: session.header().sandbox,
+        parent_session: session.header().parent_session.clone(),
     }
 }
 
@@ -821,6 +885,7 @@ fn summary_of_meta(meta: &SessionMeta) -> SessionSummary {
         cwd: Some(meta.cwd.clone()),
         sandbox: Some(meta.sandbox),
         cwd_alive: Path::new(&meta.cwd).is_dir(),
+        parent_session: meta.parent_session.clone(),
     }
 }
 
@@ -871,6 +936,7 @@ fn read_summary(file: &Path) -> Option<(SessionMeta, FileStamp)> {
             excerpt,
             cwd: header.cwd,
             sandbox: header.sandbox,
+            parent_session: header.parent_session,
         },
         stamp,
     ))
@@ -1081,7 +1147,7 @@ mod tests {
         let dir = root.join("s");
         let cwd = root.join("work");
         std::fs::create_dir_all(&cwd).unwrap();
-        let session = Session::create(&dir, "s".to_string(), &cwd, true).unwrap();
+        let session = Session::create(&dir, "s".to_string(), &cwd, true, None).unwrap();
         session
             .append(SessionEvent::UserMessage { text: "first".into(), injected: false, images: Vec::new() })
             .unwrap();
@@ -1102,6 +1168,87 @@ mod tests {
 
         let audit = std::fs::read_to_string(dir.join("rewinds.jsonl")).unwrap();
         assert!(audit.contains("\"to_seq\":4"));
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn forked_session_replays_seed_with_lineage() {
+        use denia_core::session::fork_cut_index;
+
+        let root = temp_root();
+        let store = SessionStore::open(&root).unwrap();
+        let cwd = root.join("work");
+        std::fs::create_dir_all(&cwd).unwrap();
+
+        let source = store.create(&cwd, true).unwrap();
+        let source_id = source.id().to_string();
+        source
+            .append(SessionEvent::TurnStart { turn: 1 })
+            .unwrap();
+        source
+            .append(SessionEvent::UserMessage {
+                text: "first".into(),
+                injected: false,
+                images: Vec::new(),
+            })
+            .unwrap();
+        source
+            .append(SessionEvent::AssistantMessage {
+                turn: 1,
+                step: 1,
+                blocks: vec![denia_core::stream::ContentBlock::Text { text: "hi".into() }],
+                usage: None,
+                interrupted: false,
+            })
+            .unwrap();
+        source
+            .append(SessionEvent::TurnEnd { turn: 1, reason: TurnEndReason::Completed })
+            .unwrap();
+        // 未完成轮次:不应进入种子。
+        source
+            .append(SessionEvent::TurnStart { turn: 2 })
+            .unwrap();
+        source
+            .append(SessionEvent::UserMessage {
+                text: "running".into(),
+                injected: false,
+                images: Vec::new(),
+            })
+            .unwrap();
+        let source_events = source.events();
+
+        let cut = fork_cut_index(&source_events, None).unwrap();
+        assert_eq!(cut, 4, "无锚点切到最后一个 turn-end(含)");
+        let child = store
+            .create_forked(&source_events, cut, &cwd, true, &source_id)
+            .unwrap();
+
+        // 种子回放:seq 重排连续、时间戳保留、派生历史与前缀逐字一致。
+        let child_events = child.events();
+        assert_eq!(child_events.len(), 4);
+        for (index, envelope) in child_events.iter().enumerate() {
+            assert_eq!(envelope.seq, index as u64 + 1);
+            assert_eq!(envelope.time, source_events[index].time, "种子保留源时间戳");
+        }
+        assert_eq!(
+            child.derive_messages(),
+            derive_messages(&source_events[..cut]),
+        );
+        // 未完成轮次的消息不属于子会话。
+        assert!(child.first_prompt_excerpt(80).unwrap().contains("first"));
+        let child_id = child.id().to_string();
+        drop(child);
+
+        // 血缘:header 与摘要都带 parent_session;重载后仍在。
+        let reloaded = store.load(&child_id).unwrap();
+        assert_eq!(reloaded.header().parent_session.as_deref(), Some(source_id.as_str()));
+        let summary = store
+            .list()
+            .unwrap()
+            .into_iter()
+            .find(|s| s.id == child_id)
+            .unwrap();
+        assert_eq!(summary.parent_session.as_deref(), Some(source_id.as_str()));
         std::fs::remove_dir_all(&root).unwrap();
     }
 }

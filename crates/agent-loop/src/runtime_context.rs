@@ -65,7 +65,7 @@ mod tests {
                 .unwrap()
                 .as_nanos()
         ));
-        Session::create(&dir, uuid::Uuid::new_v4().to_string(), &dir, true).unwrap()
+        Session::create(&dir, uuid::Uuid::new_v4().to_string(), &dir, true, None).unwrap()
     }
 
     #[test]
