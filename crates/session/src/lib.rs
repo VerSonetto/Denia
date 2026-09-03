@@ -688,6 +688,7 @@ impl Session {
                     error: None,
                     error_identity: None,
                     meta: None,
+                    replaces: None,
                 },
                 last_time,
             )?;

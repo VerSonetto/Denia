@@ -263,6 +263,11 @@ pub enum SessionEvent {
         /// 工具私有展示载荷(对齐 dsh `tool/result.meta`);核心不解释其形状。
         #[serde(default, skip_serializing_if = "Option::is_none")]
         meta: Option<serde_json::Value>,
+        /// 工具结果剪枝替换:本事件是对旧 `ToolResult` 事件(seq)的 surface
+        /// 替换,旧节点不再进入模型历史与 token-meter 表面(对齐 dsh
+        /// `tool/result` 的 `surfaceOp.replace`)。None = 普通追加。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        replaces: Option<u64>,
     },
     /// Whole-list todo snapshot; latest write wins on replay. Log-only UI
     /// state — never part of the derived model history.
@@ -371,18 +376,30 @@ pub fn fork_cut_index(events: &[SessionEnvelope], at_seq: Option<u64>) -> Option
 /// `tool-result` becomes a tool-role message. Chunks and boundary events
 /// project nothing. Tool calls left unanswered by the end of the log get a
 /// synthetic interrupted result, in call order, after everything else.
+///
+/// Tool-result pruning replacements (`tool-result` with `replaces`) fold the
+/// surface: the replacement takes the original node's position and the old
+/// content no longer reaches the model (对齐 dsh `surfaceOp.replace`)。
 pub fn derive_messages(events: &[SessionEnvelope]) -> Vec<ChatMessage> {
-    let mut messages: Vec<ChatMessage> = Vec::new();
+    /// 当前模型可见 surface 节点(仅 user/assistant/tool-result 三类有消息)。
+    struct SurfaceItem {
+        seq: u64,
+        message: ChatMessage,
+    }
+
+    let mut surface: Vec<SurfaceItem> = Vec::new();
     let mut unanswered: Vec<String> = Vec::new();
 
     for envelope in events {
+        let seq = envelope.seq;
         match &envelope.event {
             SessionEvent::UserMessage { text, images, .. } => {
-                if images.is_empty() {
-                    messages.push(ChatMessage::user(text));
+                let message = if images.is_empty() {
+                    ChatMessage::user(text)
                 } else {
-                    messages.push(ChatMessage::user_with_images(text, images.clone()));
-                }
+                    ChatMessage::user_with_images(text, images.clone())
+                };
+                surface.push(SurfaceItem { seq, message });
             }
             SessionEvent::AssistantMessage { blocks, .. } => {
                 let text: String = blocks
@@ -420,22 +437,38 @@ pub fn derive_messages(events: &[SessionEnvelope]) -> Vec<ChatMessage> {
                 for call in &calls {
                     unanswered.push(call.id.clone());
                 }
-                messages.push(ChatMessage::assistant(
-                    text,
-                    (!reasoning.is_empty()).then_some(reasoning),
-                    calls,
-                ));
+                surface.push(SurfaceItem {
+                    seq,
+                    message: ChatMessage::assistant(
+                        text,
+                        (!reasoning.is_empty()).then_some(reasoning),
+                        calls,
+                    ),
+                });
             }
             SessionEvent::ToolResult {
-                call_id, content, ..
+                call_id,
+                content,
+                replaces,
+                ..
             } => {
                 unanswered.retain(|id| id != call_id);
-                messages.push(ChatMessage::tool_result(call_id, content));
+                if let Some(replaced_seq) = replaces {
+                    if let Some(item) = surface.iter_mut().find(|item| item.seq == *replaced_seq) {
+                        item.message = ChatMessage::tool_result(call_id.clone(), content.clone());
+                        continue;
+                    }
+                }
+                surface.push(SurfaceItem {
+                    seq,
+                    message: ChatMessage::tool_result(call_id, content),
+                });
             }
             _ => {}
         }
     }
 
+    let mut messages: Vec<ChatMessage> = surface.into_iter().map(|item| item.message).collect();
     for call_id in unanswered {
         messages.push(ChatMessage::tool_result(call_id, INTERRUPTED_TOOL_RESULT));
     }
@@ -582,6 +615,7 @@ mod tests {
                     error: None,
                     error_identity: None,
                     meta: None,
+                    replaces: None,
                 },
             ),
             envelope(
@@ -780,6 +814,7 @@ mod tests {
                     code: "SANDBOX_DENIED".into(),
                 }),
                 meta: Some(serde_json::json!({ "diff": "…" })),
+                replaces: None,
             },
         );
         let json = serde_json::to_string(&env).unwrap();

@@ -978,6 +978,7 @@ impl SessionDriver {
                         error: None,
                         error_identity: None,
                         meta: None,
+                        replaces: None,
                     },
                 )?;
             }

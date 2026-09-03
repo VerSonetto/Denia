@@ -12,6 +12,8 @@
 //!    容量来自 `request/context` 记录。没有 usage 样本就没有锚点,不做
 //!    启发式兜底 —— provider 没报数就不显示占用,同 dsh。
 
+use std::collections::HashMap;
+
 use denia_core::message::{ChatMessage, ChatRole, ToolCallRef};
 use denia_core::session::{SessionEnvelope, SessionEvent};
 use denia_core::stream::{ContentBlock, TokenUsage};
@@ -270,6 +272,9 @@ pub struct ContextMeter {
     tools_tokens: u64,
     /// 模型可见消息的启发式运行总量(对齐 dsh `surfaceTokens`)。
     surface_tokens: u64,
+    /// 每个 surface 节点(事件 seq)的启发式 token 数;替换剪枝时据此扣减
+    /// 旧节点(对齐 dsh shadow-price 的净效果;内存版不需要落 shadow 事件)。
+    surface_nodes: HashMap<u64, u64>,
     /// session 内累计的精确 usage(每个完成的 Turn 累加一次)。
     turn_usage: TurnTokenUsage,
     /// 最近一次 provider usage 的 prompt 侧总量(锚点;None = 无样本)。
@@ -286,6 +291,7 @@ impl ContextMeter {
             system_tokens: 0,
             tools_tokens: 0,
             surface_tokens: 0,
+            surface_nodes: HashMap::new(),
             turn_usage: TurnTokenUsage::default(),
             pressure_tokens: None,
             sampled_surface_tokens: None,
@@ -305,7 +311,7 @@ impl ContextMeter {
             }
             SessionEvent::UserMessage { text, .. } => {
                 let message = ChatMessage::user(text);
-                self.fold_message(estimate_message(&message));
+                self.fold_message_add(envelope.seq, estimate_message(&message));
             }
             SessionEvent::AssistantMessage { blocks, usage, .. } => {
                 // usage 样本先于本消息入表:消息本身不在产生它的请求里。
@@ -314,12 +320,25 @@ impl ContextMeter {
                     self.sampled_surface_tokens = Some(self.surface_tokens);
                 }
                 if let Some(message) = extract_assistant_message(blocks) {
-                    self.fold_message(estimate_message(&message));
+                    self.fold_message_add(envelope.seq, estimate_message(&message));
                 }
             }
-            SessionEvent::ToolResult { content, .. } => {
+            SessionEvent::ToolResult {
+                content,
+                replaces,
+                ..
+            } => {
                 let message = ChatMessage::tool_result("__unused__", content);
-                self.fold_message(estimate_message(&message));
+                let tokens = estimate_message(&message);
+                if let Some(replaced_seq) = replaces {
+                    // 剪枝替换:从表面总量里扣掉旧节点,再按当前 seq 落新节点。
+                    if let Some(old_tokens) = self.surface_nodes.remove(replaced_seq) {
+                        self.surface_tokens = self.surface_tokens.saturating_sub(old_tokens);
+                    } else {
+                        // 旧节点不在表面(异常/旧日志):降级为普通追加,不破坏不变量。
+                    }
+                }
+                self.fold_message_add(envelope.seq, tokens);
             }
             _ => {}
         }
@@ -363,8 +382,9 @@ impl ContextMeter {
         }
     }
 
-    fn fold_message(&mut self, tokens: u64) {
+    fn fold_message_add(&mut self, seq: u64, tokens: u64) {
         self.surface_tokens = self.surface_tokens.saturating_add(tokens);
+        self.surface_nodes.insert(seq, tokens);
     }
 
     /// 读当前快照(纯启发式拆分;message = 表面运行总量,不因锚点重置)。
