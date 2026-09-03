@@ -4,6 +4,9 @@
 //! 而是把图片作为视觉输入注入会话(需要当前模型标记为可识图),
 //! 与 DSH 的"读图工具"一致 —— 只是这里复用 read_file 一个入口。
 
+use std::fs::File;
+use std::io::{BufRead, BufReader};
+
 use async_trait::async_trait;
 use denia_core::session::PermissionMode;
 use denia_core::tool::ToolSchema;
@@ -12,7 +15,10 @@ use serde::Deserialize;
 use crate::permission::{denial_marker, escalation_hint};
 use crate::{Tool, ToolContext, ToolOutput, parse_args_lenient, resolve_within, truncate};
 
-const READ_CAP: usize = 256_000;
+/// 单次 read_file 返回的最大字符数(安全阀,防止单行超长把上下文撑爆)。
+const READ_CAP: usize = 32_000;
+/// read_file 默认最多读取的行数。
+const DEFAULT_READ_LIMIT: u64 = 400;
 
 /// 图片魔数表:(magic 前缀, mime)。
 const IMAGE_MAGICS: &[(&[u8], &str)] = &[
@@ -81,8 +87,22 @@ fn sniff_image(data: &[u8]) -> Option<(&'static str, Option<u32>, Option<u32>)> 
 }
 
 #[derive(Deserialize)]
-struct PathArgs {
+struct ReadArgs {
     path: String,
+    /// 1-based 起始行;默认 1。
+    #[serde(default = "default_read_offset")]
+    offset: u64,
+    /// 最多读取行数;默认 400。
+    #[serde(default = "default_read_limit")]
+    limit: u64,
+}
+
+fn default_read_offset() -> u64 {
+    1
+}
+
+fn default_read_limit() -> u64 {
+    DEFAULT_READ_LIMIT
 }
 
 #[derive(Deserialize)]
@@ -104,7 +124,21 @@ impl ReadFileTool {
                 description: "Read one UTF-8 text file from the session workspace. Relative paths anchor at the workspace.".to_string(),
                 parameters: serde_json::json!({
                     "type": "object",
-                    "properties": { "path": { "type": "string" } },
+                    "properties": {
+                        "path": { "type": "string" },
+                        "offset": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "default": 1,
+                            "description": "1-based start line. Defaults to 1."
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "default": 400,
+                            "description": "Maximum number of lines to read. Defaults to 400."
+                        }
+                    },
                     "required": ["path"]
                 }),
             },
@@ -125,7 +159,7 @@ impl Tool for ReadFileTool {
     }
 
     async fn execute(&self, arguments: &str, ctx: &ToolContext) -> ToolOutput {
-        let args: PathArgs = match parse_args_lenient(arguments) {
+        let args: ReadArgs = match parse_args_lenient(arguments) {
             Ok(args) => args,
             Err(error) => {
                 return ToolOutput {
@@ -134,6 +168,12 @@ impl Tool for ReadFileTool {
                 };
             }
         };
+        if args.offset < 1 || args.limit < 1 {
+            return ToolOutput {
+                content: "invalid arguments: offset and limit must be >= 1".to_string(),
+                is_error: true,
+            };
+        }
         let path = match resolve_within(&ctx.cwd, &args.path, ctx.confined) {
             Ok(path) => path,
             Err(message) => return ToolOutput { content: message, is_error: true },
@@ -182,15 +222,54 @@ impl Tool for ReadFileTool {
                 };
             }
         }
-        match std::fs::read_to_string(&path) {
-            Ok(text) => ToolOutput {
-                content: truncate(&text, READ_CAP),
-                is_error: false,
-            },
-            Err(error) => ToolOutput {
-                content: format!("read failed: {error}"),
-                is_error: true,
-            },
+        // 文本文件:按行读取 offset/limit,再用字符硬顶兜底。
+        let file = match File::open(&path) {
+            Ok(file) => file,
+            Err(error) => {
+                return ToolOutput {
+                    content: format!("read failed: {error}"),
+                    is_error: true,
+                };
+            }
+        };
+        let reader = BufReader::new(file);
+        let mut lines: Vec<String> = Vec::new();
+        let mut current: u64 = 0;
+        for line in reader.lines() {
+            current += 1;
+            if current < args.offset {
+                continue;
+            }
+            if lines.len() as u64 >= args.limit {
+                break;
+            }
+            match line {
+                Ok(text) => lines.push(text),
+                Err(error) => {
+                    return ToolOutput {
+                        content: format!("read failed: {error}"),
+                        is_error: true,
+                    };
+                }
+            }
+        }
+        let count = lines.len();
+        let end = if count == 0 {
+            args.offset
+        } else {
+            args.offset + count as u64 - 1
+        };
+        let body = truncate(&lines.join("\n"), READ_CAP);
+        ToolOutput {
+            content: format!(
+                "{} 第 {}-{} 行（{} 行）:\n{}",
+                args.path,
+                args.offset,
+                end,
+                count,
+                body
+            ),
+            is_error: false,
         }
     }
 }
@@ -360,7 +439,46 @@ mod tests {
             .execute(r#"{"path":"notes/hello.txt"}"#, &ctx)
             .await;
         assert!(!read.is_error);
-        assert_eq!(read.content, "hello harness");
+        assert!(read.content.contains("hello harness"));
+        assert!(read.content.contains("第 1-1 行（1 行）"));
+    }
+
+    #[tokio::test]
+    async fn read_file_respects_offset_and_limit() {
+        let (_guard, ctx) = workspace();
+        let content = (1..=10)
+            .map(|i| format!("line{i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let path = ctx.cwd.join("lines.txt");
+        std::fs::write(&path, &content).unwrap();
+        let reader = ReadFileTool::new();
+        let out = reader
+            .execute(r#"{"path":"lines.txt","offset":3,"limit":4}"#, &ctx)
+            .await;
+        assert!(!out.is_error, "{}", out.content);
+        assert!(out.content.contains("第 3-6 行（4 行）"));
+        assert!(out.content.contains("line3"));
+        assert!(out.content.contains("line6"));
+        assert!(!out.content.contains("line2"));
+        assert!(!out.content.contains("line7"));
+    }
+
+    #[tokio::test]
+    async fn read_file_defaults_to_400_lines() {
+        let (_guard, ctx) = workspace();
+        let content = (1..=410)
+            .map(|i| format!("line{i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(ctx.cwd.join("big.txt"), &content).unwrap();
+        let reader = ReadFileTool::new();
+        let out = reader.execute(r#"{"path":"big.txt"}"#, &ctx).await;
+        assert!(!out.is_error, "{}", out.content);
+        assert!(out.content.contains("第 1-400 行（400 行）"));
+        assert!(out.content.contains("line1"));
+        assert!(out.content.contains("line400"));
+        assert!(!out.content.contains("line401"));
     }
 
     #[tokio::test]

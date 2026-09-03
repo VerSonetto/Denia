@@ -108,7 +108,14 @@ impl Tool for EditTool {
             Err(error) => return ToolOutput { content: format!("read failed: {error}"), is_error: true },
         };
 
-        let count = text.matches(&args.old_string).count();
+        // CRLF 容错(对齐 dsh fs-e2b):内容与 old/new 都在 LF 视图上精确匹配,
+        // 写回时按原文件主导换行风格还原,避免 Windows 文件被搞成混合换行。
+        let crlf = detect_crlf(&text);
+        let view = normalize_line_endings(&text);
+        let old_view = normalize_line_endings(&args.old_string);
+        let new_view = normalize_line_endings(&args.new_string);
+
+        let count = view.matches(&old_view).count();
         if count == 0 {
             return ToolOutput {
                 content: format!(
@@ -129,12 +136,13 @@ impl Tool for EditTool {
             };
         }
 
-        let first_line = line_of(&text, &args.old_string);
-        let updated = if args.replace_all {
-            text.replace(&args.old_string, &args.new_string)
+        let first_line = line_of(&view, &old_view);
+        let updated_view = if args.replace_all {
+            view.replace(&old_view, &new_view)
         } else {
-            text.replacen(&args.old_string, &args.new_string, 1)
+            view.replacen(&old_view, &new_view, 1)
         };
+        let updated = restore_line_endings(&updated_view, crlf);
 
         if let Some(file_history) = &ctx.file_history {
             if let Err(message) = file_history.track_before_write(&path).await {
@@ -171,6 +179,29 @@ fn display(path: &std::path::Path, cwd: &std::path::Path) -> String {
 fn line_of(text: &str, needle: &str) -> usize {
     let pos = text.find(needle).unwrap_or(0);
     1 + text[..pos].bytes().filter(|byte| *byte == b'\n').count()
+}
+
+/// 把 CRLF 统一成 LF(对齐 dsh `normalizeLineEndings`)。
+fn normalize_line_endings(value: &str) -> String {
+    value.replace("\r\n", "\n")
+}
+
+/// 采样前 4096 个字符,判断文件主导换行风格是否为 CRLF(对齐 dsh `detectsCrlf`)。
+fn detect_crlf(value: &str) -> bool {
+    let sample: String = value.chars().take(4096).collect();
+    let crlf = sample.matches("\r\n").count();
+    let lf_total = sample.matches('\n').count();
+    let lf = lf_total - crlf;
+    crlf > lf
+}
+
+/// 按原文件主导风格还原换行:CRLF 文件把 LF 视图写回 `\r\n`(对齐 dsh `restoreLineEndings`)。
+fn restore_line_endings(value: &str, crlf: bool) -> String {
+    if crlf {
+        normalize_line_endings(value).replace('\n', "\r\n")
+    } else {
+        value.to_string()
+    }
 }
 
 #[cfg(test)]
@@ -261,6 +292,24 @@ mod tests {
             .await;
         assert!(out.is_error);
         assert!(out.content.contains("not found"));
+        std::fs::remove_dir_all(&ctx.cwd).unwrap();
+    }
+
+    #[tokio::test]
+    async fn edits_crlf_file_with_lf_old_string() {
+        let root = temp_root();
+        std::fs::write(root.join("a.txt"), "hello\r\nworld\r\ngoodbye world\r\n").unwrap();
+        let ctx = context(root.clone());
+        let tool = EditTool::new();
+        let out = tool
+            .execute(
+                r#"{"path":"a.txt","old_string":"hello\nworld","new_string":"goodbye\nworld"}"#,
+                &ctx,
+            )
+            .await;
+        assert!(!out.is_error, "{}", out.content);
+        let after = std::fs::read_to_string(root.join("a.txt")).unwrap();
+        assert_eq!(after, "goodbye\r\nworld\r\ngoodbye world\r\n");
         std::fs::remove_dir_all(&ctx.cwd).unwrap();
     }
 }

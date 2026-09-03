@@ -110,13 +110,6 @@ fn extract_assistant_message(blocks: &[ContentBlock]) -> Option<ChatMessage> {
             _ => None,
         })
         .collect();
-    let reasoning: String = blocks
-        .iter()
-        .filter_map(|block| match block {
-            ContentBlock::Reasoning { text } => Some(text.as_str()),
-            _ => None,
-        })
-        .collect();
     let calls: Vec<ToolCallRef> = blocks
         .iter()
         .filter_map(|block| match block {
@@ -135,11 +128,9 @@ fn extract_assistant_message(blocks: &[ContentBlock]) -> Option<ChatMessage> {
     if text.is_empty() && calls.is_empty() {
         None
     } else {
-        Some(ChatMessage::assistant(
-            text,
-            (!reasoning.is_empty()).then_some(reasoning),
-            calls,
-        ))
+        // 与 derive_messages 一致:模型历史剥离 reasoning_content,表面估算
+        // 也只按实际回传的 assistant 消息计价。
+        Some(ChatMessage::assistant(text, None, calls))
     }
 }
 

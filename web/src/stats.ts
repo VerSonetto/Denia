@@ -108,15 +108,16 @@ export function formatCompactDuration(ms: number): string {
   return `${Math.floor(whole / 60)}m${whole % 60}s`
 }
 
-/** token 数紧凑显示:1234 → 1.2k,45678 → 45.7k。 */
+/** token 数紧凑显示:1234 → 1.2k,45678 → 45.7k,1234567 → 1.2m。 */
 export function formatTokens(count: number): string {
-  if (count < 1000) return String(count)
-  return `${(count / 1000).toFixed(1)}k`
+  if (count < 1_000) return String(count)
+  if (count < 1_000_000) return `${(count / 1_000).toFixed(1)}k`
+  return `${(count / 1_000_000).toFixed(1)}m`
 }
 
-/** 缓存命中率:整数百分比;无输入返回 null。 */
+/** 缓存命中率:两位小数百分比;无输入返回 null。 */
 export function cacheHitPercent(stats: SessionStats): string | null {
   if (stats.inputTokens <= 0) return null
   const percent = (stats.cacheReadTokens / stats.inputTokens) * 100
-  return String(Math.min(100, Math.round(percent)))
+  return Math.min(100, percent).toFixed(2)
 }
