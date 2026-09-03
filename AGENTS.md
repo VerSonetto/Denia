@@ -1,6 +1,18 @@
 # AGENTS.md
 
-denia 是 DeepSeek Harness(dsh)的 Rust 重写版:后端 Rust(axum + tokio),控制台 React + Vite + TS。本文件是仓库规范,在这个仓库干活的 agent 必须遵守。
+## 开发模式:denia 自己改自己(当前生效)
+
+本仓库现处于自举开发模式:用户对话的正式实例 `denia.exe`(3600 端口)**保持不动**,所有改动的构建与验证都走开发实例,由 agent 在完成任务后**自动执行,无需询问用户**。
+
+- **开发实例**:仓库根 `denia_develop.exe`,端口 **3601**,数据目录与正式实例**共享**(跟随 `resolve_home`:`~/.denia`,不存在则沿用 `~/.dsh-rs`;设 `DEV_HOME` 环境变量可隔离),模型配置/会话两边同步可见;控制台从磁盘 `web/dist` 读取(`--web`)。
+- **完成任务后自动构建并运行**:
+  - 纯前端改动:`cd web && pnpm build`,然后提醒用户刷新 http://127.0.0.1:3601 即可(开发实例不用重启)。
+  - 涉及后端改动:`pwsh scripts/dev.ps1 -Bg`(构建 → 杀旧开发实例 → 后台起新实例;**绝不碰正式 `denia.exe`**)。脚本内循环吞掉 `pnpm install` 这类子命令失败时必须按防御纪律显式处理。
+- **红线**:**严禁**执行 `scripts/build.sh`——它第一步 `taskkill denia.exe`,会把正在对话的正式实例扬了。正式版发布由用户手动跑。
+- **脚本环境**:本机沙盒命令走 pwsh,开发脚本是 `scripts/dev.ps1`;`dev.sh` 已废弃删除,不要重建。
+- **验收分工不变**:agent 负责构建级验证(脚本退出码、端口探测),浏览器验收依旧由用户在 3601 上做。
+
+denia 是 DeepSeek Harness(dsh)的 Rust 重写版:后端 Rust(axum + tokio),控制台 React + Vite + TS。其余规范见下文。
 
 ## 项目定位与参考源
 
