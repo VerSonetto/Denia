@@ -572,15 +572,17 @@ impl SessionDriver {
                 });
                 if let Some(failure) = failure {
                     let has_chunks = !source_event_seqs.is_empty();
-                    let is_finish_error =
-                        matches!(finish, Some(FinishReason::Error { .. }) | Some(FinishReason::Aborted { .. }));
                     let retryable = retry_policy.is_retryable(&failure.code)
                         && step_retries < retry_policy.max_retries
                         && !cancel.is_cancelled();
-                    // 可重试:finish 错误无条件重试(dsh:llm-retry 丢弃失败
-                    // 尝试的 chunk);流错误仅在尚无任何输出时重试(有可见
-                    // 输出不重放,避免重复副作用语义)。
-                    if retryable && (is_finish_error || !has_chunks) {
+                    // 可重试:finish 错误与流错误都重试(dsh:llm-retry 丢弃
+                    // 失败尝试的 chunk)。重放 LLM 请求无副作用:半成品 chunk
+                    // 留在日志但不进派生历史(derive 只投影最终
+                    // assistant-message),工具尚未执行;失败尝试中若模型已
+                    // 输出部分内容,重试后由新 attempt 的 blocks 整体取代。
+                    // 曾限制"仅无输出时重试",实测被网关断流掐死的收尾步
+                    // 白白死亡——有输出重放是安全的,故取消该限制。
+                    if retryable {
                         step_retries += 1;
                         let delay = retry_policy
                             .delay_ms(step_retries, failure.provider_retry_after_ms)
@@ -939,6 +941,8 @@ mod tests {
     enum MockScript {
         Chunks(Vec<StreamChunk>),
         Fail(LlmFailure),
+        /// 先产出 chunk,再以流错误终止(模拟 [DONE] 前断流)。
+        ChunksThenFail(Vec<StreamChunk>, LlmFailure),
     }
 
     struct MockAdapter {
@@ -994,6 +998,11 @@ mod tests {
                 }
                 Some(MockScript::Chunks(chunks)) => Ok(Box::pin(
                     futures::stream::iter(chunks.into_iter().map(Ok)),
+                )),
+                Some(MockScript::ChunksThenFail(chunks, failure)) => Ok(Box::pin(
+                    futures::stream::iter(chunks.into_iter().map(Ok)).chain(
+                        futures::stream::once(async move { Err::<StreamChunk, LlmFailure>(failure) }),
+                    ),
                 )),
                 None => Ok(Box::pin(futures::stream::empty())),
             }
@@ -1409,6 +1418,50 @@ fn text_script(text: &str) -> Vec<StreamChunk> {
             _ => None,
         }).collect::<Vec<_>>();
         assert_eq!(attempts, vec!["EMPTY_RESPONSE".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn stream_closed_with_partial_output_retries_and_recovers() {
+        // 网关在 [DONE] 前断流(已有部分输出):step 内重试一次后成功。
+        // 曾限制"仅无输出时重试",导致收尾步被断流白白掐死——现在有输出
+        // 也重放(重放无副作用:半成品 chunk 不进派生历史)。
+        let (driver, _registry) = driver(vec![
+            MockScript::ChunksThenFail(
+                vec![
+                    StreamChunk::BlockStart {
+                        index: 0,
+                        block_type: BlockType::Text,
+                    },
+                    StreamChunk::TextDelta {
+                        index: 0,
+                        text: "partial".to_string(),
+                    },
+                ],
+                LlmFailure::new(denia_core::error::codes::STREAM_CLOSED, "stream ended before the [DONE] marker"),
+            ),
+            MockScript::Chunks(text_script("recovered")),
+        ]);
+        let session = temp_session();
+        let reason = driver
+            .run_turn(&session, &selection(), "go", Vec::new(), Vec::new(), Vec::new(), true, CancellationToken::new(), noop_emit())
+            .await;
+        assert_eq!(reason, TurnEndReason::Completed);
+        // 重试轨迹:1 条 STREAM_CLOSED。
+        let attempts = session.events().iter().filter_map(|e| match &e.event {
+            SessionEvent::RetryAttempt { code, .. } => Some(code.clone()),
+            _ => None,
+        }).collect::<Vec<_>>();
+        assert_eq!(attempts, vec!["STREAM_CLOSED".to_string()]);
+        // 最终 assistant-message 的 source_event_seqs 只引用第二次尝试的 chunk
+        // (partial 尝试的 chunk 不在序列内)——重放未污染派生历史。
+        let final_msg = session.events().iter().find_map(|e| match &e.event {
+            SessionEvent::AssistantMessage { interrupted, source_event_seqs, .. } if !interrupted => {
+                Some(source_event_seqs.clone())
+            }
+            _ => None,
+        });
+        let seqs = final_msg.expect("final assistant-message must exist");
+        assert_eq!(seqs.len(), 5, "source seqs must cover only the recovered attempt");
     }
 
     #[tokio::test]
