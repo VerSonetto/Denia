@@ -135,7 +135,9 @@ impl SessionDriver {
     /// `session` is shared (`Arc`) because tools like `todo_write` append
     /// log-only events through a `'static` sink wired back to the same log.
     /// `images` are inline pasted images (vision models); `files` are paths of
-    /// uploaded files, injected as a context message before the prompt.
+    /// uploaded files; `quoted` are trajectory references (title, text),
+    /// injected as a context message before the prompt — same channel as the
+    /// file notice.
     #[allow(clippy::too_many_arguments)]
     pub async fn run_turn(
         &self,
@@ -144,13 +146,14 @@ impl SessionDriver {
         prompt: &str,
         images: Vec<denia_core::message::ImageData>,
         files: Vec<String>,
+        quoted: Vec<(String, String)>,
         // 当前模型是否标记为可识图(read_file 图片注入与图片发送的依据)。
         vision_supported: bool,
         cancel: CancellationToken,
         emit: Arc<dyn Fn(&SessionEnvelope) + Send + Sync>,
     ) -> TurnEndReason {
         match self
-            .run_turn_inner(session, selection, prompt, images, files, vision_supported, cancel, emit)
+            .run_turn_inner(session, selection, prompt, images, files, quoted, vision_supported, cancel, emit)
             .await
         {
             Ok(reason) => reason,
@@ -167,6 +170,7 @@ impl SessionDriver {
         prompt: &str,
         images: Vec<denia_core::message::ImageData>,
         files: Vec<String>,
+        quoted: Vec<(String, String)>,
         vision_supported: bool,
         cancel: CancellationToken,
         emit: Arc<dyn Fn(&SessionEnvelope) + Send + Sync>,
@@ -188,6 +192,26 @@ impl SessionDriver {
                 &emit,
                 SessionEvent::UserMessage {
                     text: format!("[harness] 用户上传了文件:\n{list}\n这些文件已保存,可随时用工具读取。"),
+                    injected: true,
+                    images: Vec::new(),
+                },
+            )?;
+        }
+        if !quoted.is_empty() {
+            // 轨迹引用:与文件通知同一注入通道,真实用户消息之前落库,
+            // 模型在看到提问前先看到引用内容。
+            let body = quoted
+                .iter()
+                .map(|(title, text)| format!("---\n[{title}]\n{text}\n"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            append(
+                session,
+                &emit,
+                SessionEvent::UserMessage {
+                    text: format!(
+                        "[harness] 用户从轨迹视图引用了以下记录,请结合这些内容回答:\n\n{body}"
+                    ),
                     injected: true,
                     images: Vec::new(),
                 },
@@ -734,7 +758,7 @@ mod tests {
         let (driver, _registry) = driver(vec![MockScript::Chunks(text_script("done!"))]);
         let session = temp_session();
         let reason = driver
-            .run_turn(&session, &selection(), "hello", Vec::new(), Vec::new(), true, CancellationToken::new(), noop_emit())
+            .run_turn(&session, &selection(), "hello", Vec::new(), Vec::new(), Vec::new(), true, CancellationToken::new(), noop_emit())
             .await;
         assert_eq!(reason, TurnEndReason::Completed);
 
@@ -775,7 +799,7 @@ mod tests {
         let (driver, _registry) = driver(vec![MockScript::Chunks(tool_script()), MockScript::Chunks(text_script("after tool"))]);
         let session = temp_session();
         let reason = driver
-            .run_turn(&session, &selection(), "use the tool", Vec::new(), Vec::new(), true, CancellationToken::new(), noop_emit())
+            .run_turn(&session, &selection(), "use the tool", Vec::new(), Vec::new(), Vec::new(), true, CancellationToken::new(), noop_emit())
             .await;
         assert_eq!(reason, TurnEndReason::Completed);
 
@@ -812,7 +836,7 @@ mod tests {
         let (driver, _registry) = driver(vec![MockScript::Chunks(unknown), MockScript::Chunks(text_script("ok"))]);
         let session = temp_session();
         let reason = driver
-            .run_turn(&session, &selection(), "go", Vec::new(), Vec::new(), true, CancellationToken::new(), noop_emit())
+            .run_turn(&session, &selection(), "go", Vec::new(), Vec::new(), Vec::new(), true, CancellationToken::new(), noop_emit())
             .await;
         assert_eq!(reason, TurnEndReason::Completed);
         let result = session.events().iter().find_map(|envelope| match &envelope.event {
@@ -882,7 +906,7 @@ mod tests {
             cancel_clone.cancel();
         });
         let reason = driver
-            .run_turn(&session, &selection(), "go", Vec::new(), Vec::new(), true, cancel, noop_emit())
+            .run_turn(&session, &selection(), "go", Vec::new(), Vec::new(), Vec::new(), true, cancel, noop_emit())
             .await;
         assert_eq!(reason, TurnEndReason::Aborted);
         let has_interrupted = session.events().iter().any(|envelope| {
@@ -902,7 +926,7 @@ mod tests {
         ]);
         let session = temp_session();
         let reason = driver
-            .run_turn(&session, &selection(), "go", Vec::new(), Vec::new(), true, CancellationToken::new(), noop_emit())
+            .run_turn(&session, &selection(), "go", Vec::new(), Vec::new(), Vec::new(), true, CancellationToken::new(), noop_emit())
             .await;
         assert_eq!(reason, TurnEndReason::Completed);
         // 纠错提示以 injected 用户消息落日志,模型看得见。

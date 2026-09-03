@@ -191,7 +191,21 @@ struct PromptBody {
     /// 已上传文件(绝对路径);作为注入上下文随消息发送。
     #[serde(default)]
     files: Vec<String>,
+    /// 轨迹引用(标题, 正文);以 injected 上下文消息随本轮注入。
+    #[serde(default)]
+    quoted: Vec<PromptQuote>,
 }
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PromptQuote {
+    title: String,
+    text: String,
+}
+
+/// 引用正文上限:单条 64k 字符、合计 256k,防异常体积拖垮本轮。
+const QUOTE_TEXT_LIMIT: usize = 64 * 1024;
+const QUOTE_TOTAL_LIMIT: usize = 256 * 1024;
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -316,6 +330,38 @@ async fn prompt_session(
             data: image.data,
         })
         .collect();
+    // 轨迹引用:非空校验 + 体积上限(fail loud,不静默丢弃)。
+    let mut quoted: Vec<(String, String)> = Vec::with_capacity(body.quoted.len());
+    let mut quoted_total = 0usize;
+    for quote in body.quoted {
+        let title = quote.title.trim().to_string();
+        let text = quote.text.trim().to_string();
+        if text.is_empty() {
+            live.running.store(false, Ordering::SeqCst);
+            return Err(ApiError::bad_request(
+                "session/empty-quote",
+                "引用的轨迹内容为空",
+            ));
+        }
+        if title.len() > 200 || text.len() > QUOTE_TEXT_LIMIT {
+            live.running.store(false, Ordering::SeqCst);
+            return Err(ApiError::bad_request(
+                "session/quote-too-large",
+                format!(
+                    "引用过大:标题 ≤ 200 字符、单条正文 ≤ {QUOTE_TEXT_LIMIT} 字符"
+                ),
+            ));
+        }
+        quoted_total += text.len();
+        if quoted_total > QUOTE_TOTAL_LIMIT {
+            live.running.store(false, Ordering::SeqCst);
+            return Err(ApiError::bad_request(
+                "session/quote-too-large",
+                format!("引用总量超过 {QUOTE_TOTAL_LIMIT} 字符上限"),
+            ));
+        }
+        quoted.push((title, text));
+    }
 
     let token = CancellationToken::new();
     *live.cancel.lock().unwrap() = Some(token.clone());
@@ -335,6 +381,7 @@ async fn prompt_session(
                 &prompt,
                 images,
                 upload_files,
+                quoted,
                 vision_supported,
                 token,
                 Arc::new(move |envelope: &SessionEnvelope| {
