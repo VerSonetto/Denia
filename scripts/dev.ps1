@@ -7,8 +7,9 @@
 #
 # 环境变量覆盖:
 #   DEV_PORT   开发实例端口(默认 3601)
-#   DEV_HOME   开发实例数据目录(默认跟随主实例:~/.denia,不存在则沿用旧目录 ~/.dsh-rs,
-#              即与正式实例共享模型配置/会话;想完全隔离可显式指定其他目录)
+#   DEV_HOME   开发实例数据目录(默认跟随主实例:~/.denia;旧目录 ~/.dsh-rs 由
+#              服务端启动时一次性整体迁移过去,两边仍共享模型配置/会话;
+#              想完全隔离可显式指定其他目录)
 [CmdletBinding()]
 param(
   [switch]$Bg,
@@ -18,14 +19,9 @@ $ErrorActionPreference = 'Stop'
 Set-Location (Split-Path $PSScriptRoot -Parent)
 
 $DevPort = if ($env:DEV_PORT) { $env:DEV_PORT } else { 3601 }
-# 与 main.rs resolve_home 同规则:~/.denia 不存在且 ~/.dsh-rs 是目录时沿用旧目录。
-$DevHome = if ($env:DEV_HOME) {
-  $env:DEV_HOME
-} else {
-  $primary = Join-Path $HOME '.denia'
-  $legacy = Join-Path $HOME '.dsh-rs'
-  if ((Test-Path $primary) -or -not (Test-Path $legacy -PathType Container)) { $primary } else { $legacy }
-}
+# 与 main.rs resolve_home 同规则:数据目录始终 ~/.denia(旧 ~/.dsh-rs 由服务端
+# 启动时自动迁移)。
+$DevHome = if ($env:DEV_HOME) { $env:DEV_HOME } else { Join-Path $HOME '.denia' }
 
 Write-Host "`n==> building web console"
 if (-not (Test-Path 'web/node_modules')) {
