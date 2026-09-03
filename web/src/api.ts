@@ -262,6 +262,8 @@ export function postPrompt(
     images?: { name?: string; mime: string; data: string }[]
     /** 已上传文件的绝对路径(作为注入上下文随消息发送)。 */
     files?: string[]
+    /** 轨迹引用(标题, 正文);以 injected 上下文消息随本轮注入。 */
+    quoted?: { title: string; text: string }[]
   },
 ): Promise<unknown> {
   return http(`/api/sessions/${encodeURIComponent(id)}/prompt`, {

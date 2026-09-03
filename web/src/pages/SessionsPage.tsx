@@ -17,6 +17,7 @@ import {
 import { t } from '../i18n'
 import { sessionDisplayTitle } from '../sessionDisplay'
 import type { TranscriptNode } from '../fold'
+import type { TrajectoryQuote } from '../trajectory'
 import { SessionView } from '../components/SessionView'
 import { StatsBar } from '../components/StatsBar'
 import { ComposerModelMenu } from '../components/ComposerModelMenu'
@@ -26,6 +27,7 @@ import { ConfirmDialog } from '../components/ConfirmDialog'
 import { ContextRing, type ContextPart } from '../components/ContextRing'
 import {
   BrandMark,
+  IconBranch,
   IconChevron,
   IconClose,
   IconFolder,
@@ -245,6 +247,8 @@ export default function SessionsPage({
     preview: string
   }[]>([])
   const [attachments, setAttachments] = useState<{ name: string; mime: string; file: File }[]>([])
+  // 轨迹引用(芯片挂在输入框上方,随消息以 injected 上下文注入)。
+  const [trajQuotes, setTrajQuotes] = useState<TrajectoryQuote[]>([])
   const promptEmpty = !prompt.trim() && pastedImages.length === 0
   const primaryStops = running && promptEmpty
   const [permission, setPermission] = useState<PermissionLevel>(() => loadPermission())
@@ -498,6 +502,15 @@ export default function SessionsPage({
     [activeId, activeWs],
   )
 
+  /* ---- 轨迹引用:芯片挂到输入框上方,随消息注入(与粘贴图片一致) ---- */
+
+  const handleQuote = useCallback((quote: TrajectoryQuote) => {
+    setTrajQuotes((previous) => [...previous, quote])
+    // 引用动作来自轨迹视图:切回对话视图,在输入框上方补写问题后发送。
+    setView('chat')
+    notify('ok', t('trajQuoted'))
+  }, [])
+
   const confirmRewind = useCallback(async () => {
     if (!activeId || !rewindReq || rewindBusy) return
     setRewindBusy(true)
@@ -589,7 +602,8 @@ export default function SessionsPage({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [context, activeId])
 
-  const showAttachRow = pastedImages.length > 0 || attachments.length > 0
+  const showAttachRow =
+    pastedImages.length > 0 || attachments.length > 0 || trajQuotes.length > 0
 
   const pushPending = useCallback((text: string, images?: UserMessageImage[]) => {
     const message = { text, images }
@@ -653,6 +667,7 @@ export default function SessionsPage({
         reasoningEffort: selection?.reasoningEffort,
         images: pastedImages.map(({ name, mime, data }) => ({ name, mime, data })),
         files: uploadedPaths,
+        quoted: trajQuotes.map(({ title, text }) => ({ title, text })),
       })
       const sentImages: UserMessageImage[] = pastedImages.map(({ mime, data }) => ({ mime, data }))
       // 收到 202:服务端已接单,立即乐观反馈(running 也由服务端 SSE 推送)。
@@ -661,6 +676,7 @@ export default function SessionsPage({
       setPrompt('')
       setPastedImages([])
       setAttachments([])
+      setTrajQuotes([])
       setScrollTick((tick) => tick + 1)
       // 占位:非完整权限下模拟审批请求(输入框上方弹出)。
       maybePreviewApproval()
@@ -772,6 +788,25 @@ export default function SessionsPage({
       <ApprovalDialog request={approvalReq} onDecide={handleApproval} />
       {showAttachRow && (
         <div className="composer-attachments">
+          {trajQuotes.map((quote) => (
+            <span className="att-chip traj-quote-chip" key={quote.id}>
+              <IconBranch size={12} />
+              <span className="att-name" title={quote.title}>
+                {quote.title}
+              </span>
+              <button
+                type="button"
+                className="att-remove"
+                title={t('removeAttachment')}
+                onClick={(event) => {
+                  event.stopPropagation()
+                  setTrajQuotes((previous) => previous.filter((q) => q.id !== quote.id))
+                }}
+              >
+                <IconClose size={10} />
+              </button>
+            </span>
+          ))}
           {pastedImages.map((image, index) => (
             <div className="composer-image-thumb" key={`img-${index}`}>
               <img src={image.preview} alt="" />
@@ -964,6 +999,7 @@ export default function SessionsPage({
               }}
               onRewind={(seq) => void handleRewind(seq)}
               onFork={(seq) => void handleFork(seq)}
+              onQuote={handleQuote}
             />
           ) : (
             <div className="session-hero">

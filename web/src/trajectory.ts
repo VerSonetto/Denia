@@ -345,3 +345,116 @@ export function formatSelfDuration(ms?: number): string {
   const seconds = Math.round((ms % 60_000) / 1000)
   return `+${minutes}m${String(seconds).padStart(2, '0')}s`
 }
+
+/* ---- 轨迹引用(发给 AI 的上下文,插入方式与粘贴图片一致) ---- */
+
+export interface TrajectoryQuote {
+  /** composer 芯片标识与移除键。 */
+  id: string
+  /** 芯片上的短标题(轨迹 · bash · 12:03 / 轨迹区间 · 14 条)。 */
+  title: string
+  /** 发给模型的完整引用正文。 */
+  text: string
+}
+
+/** 引用正文的单条上限;超出截断并注明。 */
+const QUOTE_TEXT_LIMIT = 60_000
+
+function quoteClock(time: number): string {
+  return new Date(time).toLocaleTimeString('zh-CN', { hour12: false })
+}
+
+function quotePretty(raw: string): string {
+  try {
+    return JSON.stringify(JSON.parse(raw), null, 2)
+  } catch {
+    return raw
+  }
+}
+
+function quoteFence(content: string): string {
+  const trimmed = content.length > 4000 ? `${content.slice(0, 4000)}\n…(已截断)` : content
+  const fences = trimmed.match(/^`{3,}/gm)
+  const fence = fences ? '`'.repeat(Math.max(3, ...fences.map((f) => f.length)) + 1) : '```'
+  return `${fence}\n${trimmed}\n${fence}`
+}
+
+function kindLabelZh(record: TrajectoryRecord): string {
+  if (record.kind === 'user') return '用户消息'
+  if (record.kind === 'message') return '助手消息'
+  return `工具 ${record.toolName ?? '?'}`
+}
+
+function recordTurnLabel(record: TrajectoryRecord): string {
+  if (record.turn === null) return '轮次之间'
+  const step = record.step !== undefined ? ` · 步骤 ${record.step}` : ''
+  return `第 ${record.turn} 轮${step}`
+}
+
+/** 单条轨迹记录 → 引用正文块。 */
+function quoteRecordBlock(record: TrajectoryRecord): string {
+  const head = `### ${kindLabelZh(record)}(${recordTurnLabel(record)}) · ${quoteClock(record.time)}`
+  const lines: string[] = [head]
+  if (record.kind === 'tool') {
+    lines.push(`- 耗时:${formatSelfDuration(record.durationMs)}`)
+    if (record.args) lines.push(`- 参数:\n${quoteFence(quotePretty(record.args))}`)
+    if (record.result) {
+      lines.push(
+        `- 结果(${record.result.isError ? '失败' : '成功'}):\n${quoteFence(record.result.content)}`,
+      )
+    } else {
+      lines.push('- 结果:未捕获(进行中)')
+    }
+  } else if (record.kind === 'message') {
+    const timing: string[] = []
+    if (record.ttftMs !== undefined) timing.push(`首 token ${formatSelfDuration(record.ttftMs)}`)
+    if (record.decodeMs !== undefined) timing.push(`生成 ${formatSelfDuration(record.decodeMs)}`)
+    lines.push(`- 耗时:${formatSelfDuration(record.durationMs)}${timing.length ? `(${timing.join(' · ')})` : ''}`)
+    if (record.usage) {
+      lines.push(`- Token:输入 ${record.usage.inputTokens} · 输出 ${record.usage.outputTokens}`)
+    }
+    lines.push(`- 内容:\n${quoteFence(record.content ?? '(无文本内容)')}`)
+  } else {
+    lines.push(`- 内容:\n${quoteFence(record.text ?? '')}`)
+  }
+  return lines.join('\n')
+}
+
+/** 单条轨迹记录 → 引用(芯片 + 正文)。 */
+export function quoteTrajectoryRecord(record: TrajectoryRecord): TrajectoryQuote {
+  const text = recordRecordText(record)
+  return {
+    id: `traj-q-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    title: `轨迹 · ${record.toolName ?? (record.kind === 'message' ? '消息' : '用户消息')} · ${quoteClock(record.time)}`,
+    text,
+  }
+}
+
+function recordRecordText(record: TrajectoryRecord): string {
+  const body = `## 引用轨迹记录\n\n${quoteRecordBlock(record)}`
+  return truncateQuote(body)
+}
+
+/** 一段区间(起点入区间的记录)→ 引用。 */
+export function quoteTrajectoryInterval(
+  records: TrajectoryRecord[],
+  start: number,
+  end: number,
+): TrajectoryQuote | null {
+  if (records.length === 0) return null
+  const body = [
+    `## 引用轨迹区间 ${quoteClock(start)} → ${quoteClock(end)}(共 ${records.length} 条记录)`,
+    '',
+    ...records.map(quoteRecordBlock),
+  ].join('\n\n')
+  return {
+    id: `traj-q-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    title: `轨迹区间 · ${records.length} 条`,
+    text: truncateQuote(body),
+  }
+}
+
+function truncateQuote(text: string): string {
+  if (text.length <= QUOTE_TEXT_LIMIT) return text
+  return `${text.slice(0, QUOTE_TEXT_LIMIT)}\n\n…(引用过长,已截断)`
+}

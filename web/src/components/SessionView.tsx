@@ -4,6 +4,7 @@ import type { TranscriptNode } from '../fold'
 import { t } from '../i18n'
 import { attach } from '../sessionStreams'
 import type { SessionEnvelope, TodoItem, UserMessageImage } from '../types'
+import type { TrajectoryQuote } from '../trajectory'
 import { Transcript } from './transcript'
 import { TrajectoryView } from './TrajectoryView'
 
@@ -38,6 +39,7 @@ export function SessionView({
   onNodesChange,
   onRewind,
   onFork,
+  onQuote,
 }: {
   id: string
   /** 内容视图:对话 transcript 或轨迹台账(共用同一事件流订阅)。 */
@@ -55,6 +57,8 @@ export function SessionView({
   onRewind?: (seq: number) => void
   /** 轮次收尾消息分支按钮触发(以该消息 seq 为锚点开新会话)。 */
   onFork?: (seq: number) => void
+  /** 轨迹引用(单条/区间)提交到 composer。 */
+  onQuote?: (quote: TrajectoryQuote) => void
 }) {
   const [nodes, setNodes] = useState<TranscriptNode[]>([])
   // 原始事件流:轨迹视图的 fold 源(与 transcript 共用一次订阅)。
@@ -135,7 +139,7 @@ export function SessionView({
   }
 
   if (view === 'trajectory') {
-    return <TrajectoryView events={events} />
+    return <TrajectoryView events={events} onQuote={onQuote} />
   }
 
   return (

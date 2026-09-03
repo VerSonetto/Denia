@@ -3,7 +3,10 @@ import { t } from '../i18n'
 import {
   deriveTrajectory,
   formatSelfDuration,
+  quoteTrajectoryInterval,
+  quoteTrajectoryRecord,
   type TrajectoryGroup,
+  type TrajectoryQuote,
   type TrajectoryRecord,
 } from '../trajectory'
 import type { SessionEnvelope, TokenUsage } from '../types'
@@ -23,7 +26,14 @@ import { formatDuration } from './transcript'
  * - 轮次组头:结束原因徽标(完成/中止/超长/出错)+ 步数/工具数/token 小计;
  * - token k 化、零值弱化、斑马纹、错误行染色、工具名 mono 芯片。
  */
-export function TrajectoryView({ events }: { events: SessionEnvelope[] }) {
+export function TrajectoryView({
+  events,
+  onQuote,
+}: {
+  events: SessionEnvelope[]
+  /** 引用单条/区间到 composer(父级切回对话视图并挂芯片)。 */
+  onQuote?: (quote: TrajectoryQuote) => void
+}) {
   const layout = useMemo(() => deriveTrajectory(events), [events])
   const durationMax = useMemo(
     () => layout.records.reduce((max, r) => Math.max(max, r.durationMs ?? 0), 0),
@@ -222,6 +232,21 @@ export function TrajectoryView({ events }: { events: SessionEnvelope[] }) {
           />
           {interval && (
             <div className="traj-focus-row">
+              {onQuote && (
+                <button
+                  type="button"
+                  className="traj-quote-btn"
+                  onClick={() => {
+                    const records = layout.records.filter(
+                      (r) => r.time >= interval.start && r.time <= interval.end,
+                    )
+                    const quote = quoteTrajectoryInterval(records, interval.start, interval.end)
+                    if (quote) onQuote(quote)
+                  }}
+                >
+                  {t('trajQuoteInterval')}
+                </button>
+              )}
               <button
                 type="button"
                 className="traj-focus-clear"
@@ -254,7 +279,13 @@ export function TrajectoryView({ events }: { events: SessionEnvelope[] }) {
             ))}
           </div>
         </div>
-        {selected && <RecordInspector record={selected} onClose={() => setSelected(null)} />}
+        {selected && (
+          <RecordInspector
+            record={selected}
+            onClose={() => setSelected(null)}
+            onQuote={onQuote}
+          />
+        )}
       </div>
     </div>
   )
@@ -676,9 +707,11 @@ type InspectorTab = 'summary' | 'payload' | 'result' | 'timing' | 'usage'
 function RecordInspector({
   record,
   onClose,
+  onQuote,
 }: {
   record: TrajectoryRecord
   onClose: () => void
+  onQuote?: (quote: TrajectoryQuote) => void
 }) {
   const tabs = inspectorTabs(record)
   const [tab, setTab] = useState<InspectorTab>(tabs[0])
@@ -717,6 +750,15 @@ function RecordInspector({
               ? record.toolName
               : firstLine(bodyText, 60) || '—'}
           </span>
+          {onQuote && (
+            <button
+              type="button"
+              className="traj-quote-btn"
+              onClick={() => onQuote(quoteTrajectoryRecord(record))}
+            >
+              {t('trajQuoteRecord')}
+            </button>
+          )}
           <button type="button" className="icon-btn" onClick={onClose} aria-label={t('close')}>
             ×
           </button>

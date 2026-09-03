@@ -643,6 +643,38 @@
   font-variant-numeric: tabular-nums;
 }
 
+/* 引用按钮(面板头部 + 聚焦行):accent 胶囊 */
+.traj-quote-btn {
+  flex: none;
+  border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent);
+  background: var(--accent-soft);
+  color: var(--accent);
+  font: inherit;
+  font-size: 11.5px;
+  padding: 3px 10px;
+  border-radius: var(--r-pill);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 80ms var(--ease);
+}
+
+.traj-quote-btn:hover {
+  background: color-mix(in srgb, var(--accent) 22%, transparent);
+}
+
+.traj-focus-row .traj-quote-btn {
+  margin-right: auto;
+}
+
+/* composer 里的轨迹引用芯片(与附件芯片同族,图标着 accent 色) */
+.traj-quote-chip {
+  border-color: color-mix(in srgb, var(--accent) 40%, transparent);
+}
+
+.traj-quote-chip > svg {
+  color: var(--accent);
+}
+
 /* 统计条:时刻/耗时/TTFT/生成(或工具状态)一排小卡 */
 .traj-stats {
   display: grid;

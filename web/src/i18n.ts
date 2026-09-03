@@ -224,6 +224,10 @@ const zh = {
   messageBranch: '在新对话中分支',
   messageBranchUnavailable: '仅可从已完成轮次的最后一条消息分支',
 
+  trajQuoteRecord: '引用此记录',
+  trajQuoteInterval: '引用区间',
+  trajQuoted: '已引用到输入框,补写问题后发送',
+
   viewChat: '对话',
   viewTrajectory: '轨迹',
   trajectoryEmpty: '暂无轨迹记录',
@@ -556,6 +560,10 @@ const en: typeof zh = {
 
   messageBranch: 'Branch into a new conversation',
   messageBranchUnavailable: 'Only the last message of a completed turn can branch',
+
+  trajQuoteRecord: 'Quote this record',
+  trajQuoteInterval: 'Quote interval',
+  trajQuoted: 'Quoted into the composer — add your question and send',
 
   viewChat: 'Chat',
   viewTrajectory: 'Trajectory',
