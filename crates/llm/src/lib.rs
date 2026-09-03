@@ -37,7 +37,7 @@ pub use openai::{
     discover_models,
 };
 pub use request::GenerateRequest;
-pub use retry::{RetryPolicy, with_retry};
+pub use retry::{RetryAttempt, RetryPolicy, with_retry};
 
 /// A boxed chunk stream: adapter output, one attempt.
 pub type ChunkStream = Pin<Box<dyn Stream<Item = Result<StreamChunk, LlmFailure>> + Send>>;
@@ -87,6 +87,10 @@ struct RegistryState {
 pub struct LlmRegistry {
     state: RwLock<RegistryState>,
 }
+
+/// 重试轨迹接收器:每次退避重试前被调用(`Option` 便于透传端点
+/// 关闭;agent-loop 用它把重试落盘成 `retry-attempt` 事件)。
+pub type RetrySink = Arc<dyn Fn(&RetryAttempt) + Send + Sync>;
 
 impl LlmRegistry {
     pub fn new() -> Self {
@@ -190,11 +194,13 @@ impl LlmRegistry {
     }
 
     /// One streaming attempt against one route, retried per its policy.
-    /// Setup errors retry; mid-stream chunk errors do not.
+    /// Setup errors retry; mid-stream chunk errors do not. Every retry
+    /// attempt is reported through `retry_sink` (对齐 dsh llm-retry 事件化)。
     pub async fn stream(
         &self,
         provider: &str,
         request: &GenerateRequest,
+        retry_sink: Option<RetrySink>,
     ) -> Result<ChunkStream, LlmError> {
         let (adapter, policy) = {
             let state = self.state.read().unwrap();
@@ -208,7 +214,12 @@ impl LlmRegistry {
                 }
             }
         };
-        with_retry(&policy, || adapter.stream(provider, request)).await
+        with_retry(&policy, |attempt| {
+            if let Some(sink) = &retry_sink {
+                sink(attempt);
+            }
+        }, || adapter.stream(provider, request))
+        .await
     }
 
     /// Validates one call config against the route's adapter and returns the

@@ -148,7 +148,7 @@ pub struct OpenAiCompatAdapter {
 impl OpenAiCompatAdapter {
     pub fn new(settings: Arc<SettingsStore>, credentials: Arc<CredentialStore>) -> Self {
         let http = reqwest::Client::builder()
-            .connect_timeout(Duration::from_secs(30))
+            .connect_timeout(Duration::from_secs(60))
             .build()
             .expect("reqwest client builds");
         Self {
@@ -303,6 +303,13 @@ impl LlmAdapter for OpenAiCompatAdapter {
         if let Some(api_key) = &api_key {
             builder = builder.header("authorization", format!("Bearer {api_key}"));
         }
+        // 超时合理化(优化项):连接阶段 30s;请求总超时按请求体规模放宽——
+        // 大体量请求(xhigh 推理 + 长上下文)提供方处理慢,实测 200K 字符
+        // payload 正常 TTFB 21.8s,固定短超时会系统性错杀;30s 仅覆盖
+        // 连接建立(connect_timeout 已在 client 上),这里管整个请求。
+        let body_size = serde_json::to_string(&body).map(|s| s.len()).unwrap_or(0);
+        let request_timeout_secs = if body_size > 100_000 { 120 } else { 60 };
+        builder = builder.timeout(Duration::from_secs(request_timeout_secs));
         let response = builder.json(&body).send().await.map_err(crate::http::transport_error)?;
 
         if !response.status().is_success() {

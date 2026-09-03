@@ -177,7 +177,7 @@ async fn chat(
         tools: Vec::new(),
     };
 
-    let stream: SseStream = match state.registry.stream(&provider, &request).await {
+    let stream: SseStream = match state.registry.stream(&provider, &request, None).await {
         Ok(chunks) => Box::pin(futures::stream::unfold(chunks, |mut chunks| async move {
             match chunks.next().await {
                 Some(Ok(chunk)) => Some((

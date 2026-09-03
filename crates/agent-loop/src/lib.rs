@@ -14,11 +14,12 @@ use std::sync::Arc;
 
 use arc_swap::ArcSwap;
 use async_trait::async_trait;
-use denia_core::config::ModelSelection;
+use denia_core::config::{LlmCallConfig, ModelSelection};
 use denia_core::error::{LlmFailure, codes};
 use denia_core::message::ToolCallRef;
 use denia_core::session::{
-    ApprovalOutcome, PermissionMode, SessionEnvelope, SessionEvent, TurnEndReason,
+    AbortCause, ApprovalOutcome, PermissionMode, RequestHeaderReason, RequestHeaderSnapshot,
+    SessionEnvelope, SessionEvent, TurnEndReason,
 };
 use denia_core::stream::{ContentBlock, FinishReason, StreamChunk, TokenUsage};
 use denia_llm::{GenerateRequest, LlmRegistry};
@@ -70,6 +71,20 @@ pub trait ApprovalBridge: Send + Sync {
 /// 请求失败时回注给模型的纠错提示(抄 dsh inject 上下文思路):
 /// 不中断,让模型看见拒绝原因自己纠正;每轮最多 MAX_FEEDBACK 次防死循环。
 const MAX_FEEDBACK: u32 = 2;
+
+/// 反馈注入的适用范围(模型输出/请求形态问题,模型自纠有意义):
+/// 提供方抖动(TRANSPORT/TIMEOUT/SERVER/RATE_LIMIT 等)与配置/凭据问题
+/// (AUTH/MISSING_CREDENTIAL 等)不在此列——前者由退避重试处理,后者
+/// 直接 error 终止(dsh 语义),都不浪费注入配额。
+fn feedback_eligible(code: &str) -> bool {
+    matches!(
+        code,
+        codes::INVALID_REQUEST
+            | codes::MALFORMED_RESPONSE
+            | codes::UNSUPPORTED_CONTENT
+            | codes::UNSUPPORTED_REASONING_EFFORT
+    )
+}
 
 fn feedback_text(failure: &LlmFailure) -> String {
     format!(
@@ -272,12 +287,27 @@ impl SessionDriver {
         let mut step: u32 = 0;
         let mut feedback: u32 = 0;
         let mut runtime_projection = RuntimeContextProjection::restore(session);
-        loop {
+        // dsh 对齐:请求头/路由元数据按需落盘(request-header / request-context)。
+        // 头相同的连续请求不重复写(最近快照即重建);context 仅在路由或容量变化时写。
+        let has_request_header = session
+            .events()
+            .iter()
+            .any(|envelope| matches!(envelope.event, SessionEvent::RequestHeader { .. }));
+        let mut last_header: Option<RequestHeaderSnapshot> = None;
+        let mut last_context: Option<(String, String, Option<u64>)> = None;
+        // 解析一次路由容量;失败不影响主流程(日志记录尽力而为)。
+        let context_window = self
+            .registry
+            .resolve_call(&selection.provider, &selection.model, selection.reasoning_effort.as_deref())
+            .await
+            .ok()
+            .and_then(|resolved| resolved.context_window);
+        'step_loop: loop {
             step += 1;
             append(session, &emit, SessionEvent::StepStart { turn, step })?;
 
             let cwd = session.header().cwd.clone();
-            let assembly = self
+            let assembly = match self
                 .system_prompt
                 .load()
                 .assemble(&AssembleContext {
@@ -286,10 +316,18 @@ impl SessionDriver {
                     provider: Some(selection.provider.clone()),
                     permission_mode: Some(session.permission_mode().as_str().to_string()),
                     approval_policy: Some(session.approval_policy().as_str().to_string()),
-                })
-                .map_err(|error| LlmFailure::new(codes::UNKNOWN, error))?;
-
-            // 更新 token-meter 的工具声明 token(与 provider 请求同口径的估算)。
+                }) {
+                Ok(assembly) => assembly,
+                Err(error) => {
+                    // 日志平衡:step 已开,补 step-end + turn-end(对齐 dsh
+                    // 的 finally 配对语义;不再让轮次裸开等 load 合成)。
+                    let failure = LlmFailure::new(codes::UNKNOWN, error);
+                    append(session, &emit, SessionEvent::StepEnd { turn, step })?;
+                    let reason = TurnEndReason::Error { failure: failure.clone() };
+                    append(session, &emit, SessionEvent::TurnEnd { turn, reason })?;
+                    return Ok(TurnEndReason::Error { failure });
+                }
+            };
             let tools_tokens = serde_json::to_string(&assembly.tools)
                 .map(|json| (json.len() as u64).div_ceil(4).saturating_add(4))
                 .unwrap_or(0);
@@ -322,6 +360,58 @@ impl SessionDriver {
             let framed_system = frame_system_prompt_for_model(&model_prompt);
             session.set_system_tokens(estimate_system_tokens(&framed_system));
 
+            // request-header / request-context(对齐 dsh):请求 dispatch 前落盘。
+            let snapshot = RequestHeaderSnapshot {
+                config: LlmCallConfig {
+                    provider: selection.provider.clone(),
+                    model: selection.model.clone(),
+                    reasoning_effort: selection.reasoning_effort.clone(),
+                    temperature: None,
+                    max_tokens: None,
+                    stop: Vec::new(),
+                },
+                system: Some(framed_system.clone()),
+                tools: assembly.tools.clone(),
+            };
+            if last_header.as_ref() != Some(&snapshot) {
+                let reason = match &last_header {
+                    None if !has_request_header => RequestHeaderReason::Initial,
+                    None => RequestHeaderReason::Resume,
+                    Some(_) => RequestHeaderReason::Change,
+                };
+                append(
+                    session,
+                    &emit,
+                    SessionEvent::RequestHeader {
+                        turn,
+                        step,
+                        header: snapshot.clone(),
+                        reason,
+                        starts_series: reason == RequestHeaderReason::Change,
+                    },
+                )?;
+                last_header = Some(snapshot);
+            }
+            let context = (
+                selection.provider.clone(),
+                selection.model.clone(),
+                context_window,
+            );
+            if last_context.as_ref() != Some(&context) {
+                append(
+                    session,
+                    &emit,
+                    SessionEvent::RequestContext {
+                        turn,
+                        step,
+                        provider: context.0.clone(),
+                        model: context.1.clone(),
+                        context_window: context.2,
+                    },
+                )?;
+                last_context = Some(context);
+            }
+
             let request = GenerateRequest {
                 model: selection.model.clone(),
                 reasoning_effort: selection.reasoning_effort.clone(),
@@ -332,108 +422,231 @@ impl SessionDriver {
                 max_tokens: None,
                 stop: Vec::new(),
             };
-            let mut stream = match self.registry.stream(&selection.provider, &request).await {
-                Ok(stream) => stream,
-                Err(error) => {
-                    let failure = error.failure.clone();
+            let retry_sink: Option<denia_llm::RetrySink> = Some(Arc::new({
+                let session = session.clone();
+                let emit = emit.clone();
+                move |attempt: &denia_llm::RetryAttempt| {
+                    // 重试轨迹落盘(对齐 dsh llm-retry 事件化):失败不阻断
+                    // 主流程,只记录。
+                    if let Err(error) = append(
+                        &session,
+                        &emit,
+                        SessionEvent::RetryAttempt {
+                            turn,
+                            step,
+                            attempt: attempt.attempt,
+                            code: attempt.code.clone(),
+                            message: attempt.message.clone(),
+                            delay_ms: attempt.delay_ms,
+                        },
+                    ) {
+                        tracing::warn!(
+                            session_id = session.id(),
+                            error_code = %error.code,
+                            error_message = %error.message,
+                            "retry attempt append failed"
+                        );
+                    }
+                }
+            }));
+            // —— 请求派发:dsh 对齐的 step 内 attempt 循环 ——
+            // setup 失败:registry 内部已按 RetryPolicy 退避重试(maxRetries=5),
+            // 耗尽后分流——模型输出问题(INVALID_REQUEST/MALFORMED 等)注入
+            // 自纠反馈(denia 保留特性);提供方/配置问题直接 error 终止
+            // (dsh 语义:setup 失败不进重试环)。
+            // finish 错误(可重试码、预算内、未取消)→ 同 step 内退避重试
+            // (对应 dsh 的 step while-loop + llm-retry,失败尝试的 chunk 保留
+            // 在日志但排除在最终 source_event_seqs 之外);无 chunk 的流错误
+            // 也重试(优化:结果未知时重放安全)。
+            let retry_policy = denia_llm::RetryPolicy::default();
+            let mut step_retries: u32 = 0;
+            // 流消费状态:attempt 循环外声明(成功路径读取最后一次尝试的值),
+            // 每次 attempt 开头重置;首个 attempt 必先赋值再读取。
+            let mut blocks: Vec<ContentBlock>;
+            let mut source_event_seqs: Vec<u64>;
+            let mut usage: Option<TokenUsage>;
+            let mut finish: Option<FinishReason>;
+            let mut stream_error: Option<LlmFailure>;
+            let mut interrupted: bool;
+            'attempts: loop {
+                // 请求前检查点(对齐 dsh checkpoint-policy):请求前缀刷盘
+                // 成功才派发;失败 fail-closed(不发出请求)。
+                session
+                    .flush()
+                    .map_err(|error| LlmFailure::new(codes::UNKNOWN, format!("log flush before dispatch failed: {error}")))?;
+                let mut stream = match self
+                    .registry
+                    .stream(&selection.provider, &request, retry_sink.clone())
+                    .await
+                {
+                    Ok(stream) => stream,
+                    Err(error) => {
+                        let failure = error.failure.clone();
+                        append(session, &emit, SessionEvent::StepEnd { turn, step })?;
+                        if feedback_eligible(&failure.code) && feedback < MAX_FEEDBACK {
+                            feedback += 1;
+                            append(
+                                session,
+                                &emit,
+                                SessionEvent::UserMessage { text: feedback_text(&failure), injected: true, images: Vec::new() },
+                            )?;
+                            continue 'step_loop;
+                        }
+                        let reason = TurnEndReason::Error { failure };
+                        append(session, &emit, SessionEvent::TurnEnd { turn, reason: reason.clone() })?;
+                        return Ok(reason);
+                    }
+                };
+
+                blocks = Vec::new();
+                source_event_seqs = Vec::new();
+                usage = None;
+                finish = None;
+                stream_error = None;
+                interrupted = false;
+                loop {
+                    let next = tokio::select! {
+                        biased;
+                        _ = cancel.cancelled() => {
+                            interrupted = true;
+                            break;
+                        }
+                        item = stream.next() => item,
+                    };
+                    match next {
+                        Some(Ok(chunk)) => {
+                            let envelope = append(
+                                session,
+                                &emit,
+                                SessionEvent::AssistantChunk {
+                                    turn,
+                                    step,
+                                    chunk: chunk.clone(),
+                                },
+                            )?;
+                            source_event_seqs.push(envelope.seq);
+                            match chunk {
+                                StreamChunk::BlockEnd { block, .. } => blocks.push(block),
+                                StreamChunk::Usage { usage: next_usage } => usage = Some(next_usage),
+                                StreamChunk::Finish { reason } => finish = Some(reason),
+                                _ => {}
+                            }
+                        }
+                        Some(Err(failure)) => {
+                            stream_error = Some(failure);
+                            break;
+                        }
+                        None => break,
+                    }
+                }
+
+                if interrupted {
+                    append(
+                        session,
+                        &emit,
+                        SessionEvent::AssistantMessage {
+                            turn,
+                            step,
+                            blocks: blocks.clone(),
+                            usage,
+                            interrupted: true,
+                            source_event_seqs: source_event_seqs.clone(),
+                        },
+                    )?;
                     append(session, &emit, SessionEvent::StepEnd { turn, step })?;
-                    if feedback < MAX_FEEDBACK {
+                    let reason = TurnEndReason::Aborted {
+                        cause: Some(AbortCause::User),
+                    };
+                    append(session, &emit, SessionEvent::TurnEnd { turn, reason })?;
+                    return Ok(TurnEndReason::Aborted {
+                        cause: Some(AbortCause::User),
+                    });
+                }
+
+                // 错误统一分流:流错误 或 finish { Error | Aborted }。
+                let failure = stream_error.clone().or_else(|| match &finish {
+                    Some(FinishReason::Error { failure }) | Some(FinishReason::Aborted { failure }) => {
+                        Some(failure.clone())
+                    }
+                    _ => None,
+                });
+                if let Some(failure) = failure {
+                    let has_chunks = !source_event_seqs.is_empty();
+                    let is_finish_error =
+                        matches!(finish, Some(FinishReason::Error { .. }) | Some(FinishReason::Aborted { .. }));
+                    let retryable = retry_policy.is_retryable(&failure.code)
+                        && step_retries < retry_policy.max_retries
+                        && !cancel.is_cancelled();
+                    // 可重试:finish 错误无条件重试(dsh:llm-retry 丢弃失败
+                    // 尝试的 chunk);流错误仅在尚无任何输出时重试(有可见
+                    // 输出不重放,避免重复副作用语义)。
+                    if retryable && (is_finish_error || !has_chunks) {
+                        step_retries += 1;
+                        let delay = retry_policy
+                            .delay_ms(step_retries, failure.provider_retry_after_ms)
+                            .unwrap_or(0);
+                        append(
+                            session,
+                            &emit,
+                            SessionEvent::RetryAttempt {
+                                turn,
+                                step,
+                                attempt: step_retries,
+                                code: failure.code.clone(),
+                                message: failure.message.clone(),
+                                delay_ms: delay,
+                            },
+                        )?;
+                        let sleep = tokio::time::sleep(std::time::Duration::from_millis(delay));
+                        tokio::select! {
+                            biased;
+                            // 取消压倒重试(dsh:signal.abort 优先于 retry)。
+                            _ = cancel.cancelled() => {}
+                            _ = sleep => {}
+                        }
+                        if cancel.is_cancelled() {
+                            if has_chunks {
+                                append(
+                                    session,
+                                    &emit,
+                                    SessionEvent::AssistantMessage {
+                                        turn,
+                                        step,
+                                        blocks: blocks.clone(),
+                                        usage,
+                                        interrupted: true,
+                                        source_event_seqs: source_event_seqs.clone(),
+                                    },
+                                )?;
+                            }
+                            append(session, &emit, SessionEvent::StepEnd { turn, step })?;
+                            let reason = TurnEndReason::Aborted {
+                                cause: Some(AbortCause::User),
+                            };
+                            append(session, &emit, SessionEvent::TurnEnd { turn, reason })?;
+                            return Ok(TurnEndReason::Aborted {
+                                cause: Some(AbortCause::User),
+                            });
+                        }
+                        continue 'attempts;
+                    }
+                    // 不可重试/预算耗尽:失败尝试不产出终稿消息(dsh:流错误
+                    // rethrow 不终稿;已落盘的 chunk 保留在日志),分流终止。
+                    append(session, &emit, SessionEvent::StepEnd { turn, step })?;
+                    if feedback_eligible(&failure.code) && feedback < MAX_FEEDBACK {
                         feedback += 1;
                         append(
                             session,
                             &emit,
                             SessionEvent::UserMessage { text: feedback_text(&failure), injected: true, images: Vec::new() },
                         )?;
-                        continue;
+                        continue 'step_loop;
                     }
                     let reason = TurnEndReason::Error { failure };
                     append(session, &emit, SessionEvent::TurnEnd { turn, reason: reason.clone() })?;
                     return Ok(reason);
                 }
-            };
-
-            let mut blocks: Vec<ContentBlock> = Vec::new();
-            let mut usage: Option<TokenUsage> = None;
-            let mut finish: Option<FinishReason> = None;
-            let mut stream_error: Option<LlmFailure> = None;
-            let mut interrupted = false;
-            loop {
-                let next = tokio::select! {
-                    biased;
-                    _ = cancel.cancelled() => {
-                        interrupted = true;
-                        break;
-                    }
-                    item = stream.next() => item,
-                };
-                match next {
-                    Some(Ok(chunk)) => {
-                        append(
-                            session,
-                            &emit,
-                            SessionEvent::AssistantChunk {
-                                turn,
-                                step,
-                                chunk: chunk.clone(),
-                            },
-                        )?;
-                        match chunk {
-                            StreamChunk::BlockEnd { block, .. } => blocks.push(block),
-                            StreamChunk::Usage { usage: next_usage } => usage = Some(next_usage),
-                            StreamChunk::Finish { reason } => finish = Some(reason),
-                            _ => {}
-                        }
-                    }
-                    Some(Err(failure)) => {
-                        stream_error = Some(failure);
-                        break;
-                    }
-                    None => break,
-                }
-            }
-
-            if interrupted {
-                append(
-                    session,
-                    &emit,
-                    SessionEvent::AssistantMessage {
-                        turn,
-                        step,
-                        blocks,
-                        usage,
-                        interrupted: true,
-                    },
-                )?;
-                append(session, &emit, SessionEvent::StepEnd { turn, step })?;
-                let reason = TurnEndReason::Aborted;
-                append(session, &emit, SessionEvent::TurnEnd { turn, reason })?;
-                return Ok(TurnEndReason::Aborted);
-            }
-            if let Some(failure) = stream_error {
-                append(
-                    session,
-                    &emit,
-                    SessionEvent::AssistantMessage {
-                        turn,
-                        step,
-                        blocks,
-                        usage,
-                        interrupted: true,
-                    },
-                )?;
-                append(session, &emit, SessionEvent::StepEnd { turn, step })?;
-                if feedback < MAX_FEEDBACK {
-                    feedback += 1;
-                    append(
-                        session,
-                        &emit,
-                        SessionEvent::UserMessage { text: feedback_text(&failure), injected: true, images: Vec::new() },
-                    )?;
-                    continue;
-                }
-                let reason = TurnEndReason::Error { failure };
-                append(session, &emit, SessionEvent::TurnEnd { turn, reason: reason.clone() })?;
-                return Ok(reason);
+                break 'attempts;
             }
 
             append(
@@ -445,6 +658,7 @@ impl SessionDriver {
                     blocks: blocks.clone(),
                     usage,
                     interrupted: false,
+                    source_event_seqs,
                 },
             )?;
 
@@ -569,6 +783,8 @@ impl SessionDriver {
                         content: output.content,
                         is_error: output.is_error,
                         error: None,
+                        error_identity: None,
+                        meta: None,
                     },
                 )?;
             }
@@ -805,7 +1021,16 @@ mod tests {
         }
     }
 
-    fn text_script(text: &str) -> Vec<StreamChunk> {
+    /// 一条 finish-error 流:模拟网关空响应(EMPTY_RESPONSE 以 finish 错误产出)。
+fn error_finish_script() -> Vec<StreamChunk> {
+    vec![StreamChunk::Finish {
+        reason: FinishReason::Error {
+            failure: LlmFailure::new(denia_core::error::codes::EMPTY_RESPONSE, "empty response"),
+        },
+    }]
+}
+
+fn text_script(text: &str) -> Vec<StreamChunk> {
         vec![
             StreamChunk::BlockStart {
                 index: 0,
@@ -1074,7 +1299,12 @@ mod tests {
         let reason = driver
             .run_turn(&session, &selection(), "go", Vec::new(), Vec::new(), Vec::new(), true, cancel, noop_emit())
             .await;
-        assert_eq!(reason, TurnEndReason::Aborted);
+        assert_eq!(
+            reason,
+            TurnEndReason::Aborted {
+                cause: Some(AbortCause::User)
+            }
+        );
         let has_interrupted = session.events().iter().any(|envelope| {
             matches!(
                 &envelope.event,
@@ -1087,7 +1317,8 @@ mod tests {
     #[tokio::test]
     async fn request_failure_is_fed_back_for_self_correction() {
         let (driver, _registry) = driver(vec![
-            MockScript::Fail(LlmFailure::new("INVALID_REQUEST", "bad params")),
+            // MALFORMED_RESPONSE:feedback_eligible 且不在可重试集 → 注入自纠。
+            MockScript::Fail(LlmFailure::new("MALFORMED_RESPONSE", "bad payload")),
             MockScript::Chunks(text_script("fixed")),
         ]);
         let session = temp_session();
@@ -1100,7 +1331,151 @@ mod tests {
             SessionEvent::UserMessage { text, injected, .. } if *injected => Some(text.clone()),
             _ => None,
         }).collect::<Vec<_>>();
-        assert_eq!(injected.len(), 1);
-        assert!(injected[0].contains("INVALID_REQUEST"));
+        assert_eq!(injected.len(), 1, "feedback-injected message must exist");
+        assert!(injected[0].contains("MALFORMED_RESPONSE"));
+    }
+
+    #[tokio::test]
+    async fn provider_failure_terminates_without_feedback_waste() {
+        // AUTH:不可重试、不可自纠 → 直接 error 终止,不注入反馈(不烧配额)。
+        let (driver, _registry) = driver(vec![MockScript::Fail(LlmFailure::new(
+            "AUTH",
+            "bad key",
+        ))]);
+        let session = temp_session();
+        let reason = driver
+            .run_turn(&session, &selection(), "go", Vec::new(), Vec::new(), Vec::new(), true, CancellationToken::new(), noop_emit())
+            .await;
+        assert_eq!(
+            reason,
+            TurnEndReason::Error {
+                failure: LlmFailure::new("AUTH", "bad key")
+            }
+        );
+        let injected = session.events().iter().filter_map(|e| match &e.event {
+            SessionEvent::UserMessage { text, injected, .. } if *injected => Some(text.clone()),
+            _ => None,
+        }).collect::<Vec<_>>();
+        assert!(injected.is_empty(), "AUTH must not waste the feedback quota");
+        // 日志平衡:step-end 与 turn-end 都已落盘。
+        let step_starts = session.events().iter().filter(|e| matches!(e.event, SessionEvent::StepStart { .. })).count();
+        let step_ends = session.events().iter().filter(|e| matches!(e.event, SessionEvent::StepEnd { .. })).count();
+        assert_eq!(step_starts, step_ends);
+    }
+
+    #[tokio::test]
+    async fn retryable_setup_failure_retries_and_records_attempts() {
+        // INVALID_REQUEST 在可重试集:registry 内部退避重试,重试轨迹落盘。
+        let (driver, _registry) = driver(vec![
+            MockScript::Fail(LlmFailure::new("INVALID_REQUEST", "openai_error").with_status(404)),
+            MockScript::Fail(LlmFailure::new("INVALID_REQUEST", "openai_error").with_status(404)),
+            MockScript::Chunks(text_script("ok")),
+        ]);
+        let session = temp_session();
+        let reason = driver
+            .run_turn(&session, &selection(), "go", Vec::new(), Vec::new(), Vec::new(), true, CancellationToken::new(), noop_emit())
+            .await;
+        assert_eq!(reason, TurnEndReason::Completed);
+        // 两次失败 → 两次 retry-attempt 落盘(带退避与错误信息)。
+        let attempts = session.events().iter().filter_map(|e| match &e.event {
+            SessionEvent::RetryAttempt { attempt, code, delay_ms, .. } => {
+                Some((*attempt, code.clone(), *delay_ms))
+            }
+            _ => None,
+        }).collect::<Vec<_>>();
+        assert_eq!(attempts.len(), 2);
+        assert_eq!(attempts[0].0, 1);
+        assert_eq!(attempts[1].0, 2);
+        assert!(attempts.iter().all(|(_, code, _)| code == "INVALID_REQUEST"));
+        assert!(attempts[0].2 >= 400 && attempts[1].2 >= 800, "backoff must grow");
+    }
+
+    #[tokio::test]
+    async fn finish_error_is_not_swallowed_as_completed() {
+        // finish 带 Error{…}(如 EMPTY_RESPONSE):不再被吞成 Completed;
+        // 可重试码空流重试一次后成功(step 内 attempt 循环)。
+        let (driver, _registry) = driver(vec![
+            MockScript::Chunks(error_finish_script()),
+            MockScript::Chunks(text_script("recovered")),
+        ]);
+        let session = temp_session();
+        let reason = driver
+            .run_turn(&session, &selection(), "go", Vec::new(), Vec::new(), Vec::new(), true, CancellationToken::new(), noop_emit())
+            .await;
+        assert_eq!(reason, TurnEndReason::Completed);
+        // step 内重试轨迹:1 条 retry-attempt(EMPTY_RESPONSE)。
+        let attempts = session.events().iter().filter_map(|e| match &e.event {
+            SessionEvent::RetryAttempt { code, .. } => Some(code.clone()),
+            _ => None,
+        }).collect::<Vec<_>>();
+        assert_eq!(attempts, vec!["EMPTY_RESPONSE".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn request_header_and_context_are_logged() {
+        let (driver, _registry) = driver(vec![MockScript::Chunks(text_script("hi"))]);
+        let session = temp_session();
+        let reason = driver
+            .run_turn(&session, &selection(), "go", Vec::new(), Vec::new(), Vec::new(), true, CancellationToken::new(), noop_emit())
+            .await;
+        assert_eq!(reason, TurnEndReason::Completed);
+
+        let events = session.events();
+        // request-header:initial 快照,带 provider/model/system/tools。
+        let (snapshot, header_reason) = events
+            .iter()
+            .find_map(|envelope| match &envelope.event {
+                SessionEvent::RequestHeader { header, reason, .. } => Some((header, reason)),
+                _ => None,
+            })
+            .expect("request-header must be logged on the first request");
+        assert_eq!(*header_reason, RequestHeaderReason::Initial);
+        assert_eq!(snapshot.config.provider, "mock");
+        assert_eq!(snapshot.config.model, "mock-1");
+        assert!(snapshot
+            .system
+            .as_deref()
+            .unwrap_or("")
+            .contains("你是由 denia 驱动的"));
+        assert!(!snapshot.tools.is_empty());
+        // 注册路由后只写一次:同一 step 循环的下一请求不会重复落盘(snapshot 相同)。
+        let header_count = events
+            .iter()
+            .filter(|envelope| matches!(envelope.event, SessionEvent::RequestHeader { .. }))
+            .count();
+        assert_eq!(header_count, 1);
+
+        // request-context:provider/model/context_window(来自 resolve_call)。
+        events
+            .iter()
+            .find_map(|envelope| match &envelope.event {
+                SessionEvent::RequestContext { provider, model, context_window, .. } => {
+                    Some((provider, model, context_window))
+                }
+                _ => None,
+            })
+            .map(|(provider, model, window)| {
+                assert_eq!(provider, "mock");
+                assert_eq!(model, "mock-1");
+                assert_eq!(*window, Some(100_000));
+            })
+            .expect("request-context must be logged");
+
+        // assistant-message 的 source_event_seqs 引用全部 chunk seq(5 个)。
+        let seqs = events
+            .iter()
+            .find_map(|envelope| match &envelope.event {
+                SessionEvent::AssistantMessage { source_event_seqs, .. } => Some(source_event_seqs),
+                _ => None,
+            })
+            .expect("assistant-message must exist");
+        assert_eq!(seqs.len(), 5);
+        // 引用的 seq 都是 chunk 事件(顺带验证方向正确)。
+        let chunk_seqs = events
+            .iter()
+            .filter(|envelope| matches!(envelope.event, SessionEvent::AssistantChunk { .. }))
+            .map(|envelope| envelope.seq)
+            .collect::<Vec<_>>();
+        assert_eq!(chunk_seqs, *seqs);
     }
 }

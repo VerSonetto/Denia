@@ -221,7 +221,7 @@ pub struct DeepSeekAdapter {
 impl DeepSeekAdapter {
     pub fn new(settings: Arc<SettingsStore>, credentials: Arc<CredentialStore>) -> Self {
         let http = reqwest::Client::builder()
-            .connect_timeout(Duration::from_secs(30))
+            .connect_timeout(Duration::from_secs(60))
             .build()
             .expect("reqwest client builds");
         Self {
@@ -447,6 +447,10 @@ impl LlmAdapter for DeepSeekAdapter {
         let body = build_deepseek_body(request, effort, &section);
 
         let url = format!("{}/chat/completions", Self::base_url(&section).trim_end_matches('/'));
+        // 请求总超时按请求体规模放宽(优化项,与 openai.rs 同口径):
+        // 大体量 + 深度思考请求提供方处理慢,固定短超时会系统性错杀。
+        let body_size = serde_json::to_string(&body).map(|s| s.len()).unwrap_or(0);
+        let request_timeout_secs = if body_size > 100_000 { 120 } else { 60 };
         let response = self
             .http
             .post(&url)
@@ -455,6 +459,7 @@ impl LlmAdapter for DeepSeekAdapter {
             .header("accept", "text/event-stream")
             .header("user-agent", USER_AGENT)
             .json(&body)
+            .timeout(std::time::Duration::from_secs(request_timeout_secs))
             .send()
             .await
             .map_err(crate::http::transport_error)?;

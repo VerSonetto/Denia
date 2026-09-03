@@ -27,6 +27,7 @@ use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use denia_core::message::ChatMessage;
+use denia_core::stream::ContentBlock;
 use denia_core::session::{
     ApprovalPolicy, PermissionMode, SessionEnvelope, SessionEvent, SessionHeader,
     SessionHeaderKind, TurnEndReason, SESSION_FORMAT_VERSION, approval_policy_for, derive_messages,
@@ -36,6 +37,12 @@ use thiserror::Error;
 
 /// 摘要重读上限:防止异常的超长行拖垮列表。
 const SUMMARY_SCAN_LIMIT: usize = 64 * 1024;
+
+/// 崩溃孤儿轮闭合时,给"已落库但未答复"的工具调用补的合成结果
+/// (对齐 dsh `TOOL_OUTCOME_UNKNOWN` 文案:结果未知,谨慎重试,不盲目重放)。
+pub const ORPHAN_TOOL_RESULT: &str = "该工具调用在落库后被中断,没有持久化的结果记录,其结果未知。\
+    请从工具语义判断是否重试:仅当操作只读或幂等时才重试;如果可能产生副作用,\
+    先核实外部状态或询问用户。不要盲目重试。";
 
 #[derive(Debug, Error)]
 pub enum SessionError {
@@ -303,6 +310,17 @@ impl Session {
     /// 写入走 BufWriter:高频流式帧不逐条 flush,崩溃尾部由 torn-tail 修复。
     pub fn append(&self, event: SessionEvent) -> Result<SessionEnvelope, SessionError> {
         self.append_with_time(event, now_millis())
+    }
+
+    /// 把缓冲的日志前缀刷到磁盘(对齐 dsh checkpoint-policy 的
+    /// "模型请求前"检查点):agent-loop 在模型请求 dispatched 之前调用,
+    /// 保证请求前缀(step-start/system-prompt/request-header/context)已
+    /// 落盘,崩溃后能完整重建请求上下文;fail-closed——flush 失败则
+    /// 不派发请求。
+    pub fn flush(&self) -> Result<(), SessionError> {
+        let mut inner = self.inner.lock().unwrap_or_else(|poison| poison.into_inner());
+        inner.writer.flush()?;
+        Ok(())
     }
 
     /// [`Session::append`] 的时间显式版:分支种子回放保留源事件时间戳,
@@ -607,26 +625,83 @@ impl Session {
     }
 
     /// Crash recovery: a `turn-start` without `turn/end` gets a synthetic
-    /// aborted close, persisted like any other event.
+    /// interrupted close(对齐 dsh `interruptedTurnClosers`):先为已落库但
+    /// 未答复的工具调用补合成错误结果,再补 `step/end`,最后补
+    /// `turn/end { interrupted }`;时间戳复用最后真实事件时间戳(确定性,
+    /// 不发明未来时间)。用户取消的 `aborted` 与崩溃闭合区分开。
     fn close_orphaned_turn(&self) -> Result<(), SessionError> {
-        let open_turn = {
+        let (open_turn, last_step, pending_calls, last_time) = {
             let inner = self.inner.lock().unwrap_or_else(|poison| poison.into_inner());
             let mut open_turn: Option<u32> = None;
+            let mut last_step: Option<u32> = None;
+            let mut answered: Vec<String> = Vec::new();
+            let mut announced: Vec<(String, u32, u32)> = Vec::new();
+            let mut last_time: u64 = 0;
             for envelope in &inner.events {
+                last_time = envelope.time;
                 match &envelope.event {
-                    SessionEvent::TurnStart { turn } => open_turn = Some(*turn),
-                    SessionEvent::TurnEnd { .. } => open_turn = None,
+                    SessionEvent::TurnStart { turn } => {
+                        open_turn = Some(*turn);
+                        last_step = None;
+                    }
+                    SessionEvent::TurnEnd { .. } => {
+                        open_turn = None;
+                        last_step = None;
+                    }
+                    SessionEvent::StepStart { turn, step } => {
+                        if Some(*turn) == open_turn {
+                            last_step = Some(*step);
+                        }
+                    }
+                    SessionEvent::AssistantMessage { blocks, turn, step, .. } => {
+                        if Some(*turn) == open_turn {
+                            for block in blocks {
+                                if let ContentBlock::ToolCall { id, .. } = block {
+                                    if !announced.iter().any(|(c, _, _)| c == id) {
+                                        announced.push((id.clone(), *turn, *step));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    SessionEvent::ToolResult { call_id, .. } => answered.push(call_id.clone()),
                     _ => {}
                 }
             }
-            open_turn
+            let pending_calls: Vec<(String, u32, u32)> = announced
+                .into_iter()
+                .filter(|(call, _, _)| !answered.contains(call))
+                .collect();
+            (open_turn, last_step, pending_calls, last_time)
         };
-        if let Some(turn) = open_turn {
-            self.append(SessionEvent::TurnEnd {
-                turn,
-                reason: TurnEndReason::Aborted,
-            })?;
+        let Some(turn) = open_turn else {
+            return Ok(());
+        };
+        for (call_id, call_turn, call_step) in &pending_calls {
+            self.append_with_time(
+                SessionEvent::ToolResult {
+                    turn: *call_turn,
+                    step: *call_step,
+                    call_id: call_id.clone(),
+                    content: ORPHAN_TOOL_RESULT.to_string(),
+                    is_error: true,
+                    error: None,
+                    error_identity: None,
+                    meta: None,
+                },
+                last_time,
+            )?;
         }
+        if let Some(step) = last_step {
+            self.append_with_time(SessionEvent::StepEnd { turn, step }, last_time)?;
+        }
+        self.append_with_time(
+            SessionEvent::TurnEnd {
+                turn,
+                reason: TurnEndReason::Interrupted,
+            },
+            last_time,
+        )?;
         Ok(())
     }
 }
@@ -1168,7 +1243,7 @@ mod tests {
         match &loaded.events()[2].event {
             SessionEvent::TurnEnd { turn, reason } => {
                 assert_eq!(*turn, 1);
-                assert_eq!(*reason, TurnEndReason::Aborted);
+                assert_eq!(*reason, TurnEndReason::Interrupted);
             }
             other => panic!("expected turn-end, got {other:?}"),
         }
@@ -1289,6 +1364,7 @@ mod tests {
                 blocks: vec![denia_core::stream::ContentBlock::Text { text: "hi".into() }],
                 usage: None,
                 interrupted: false,
+                source_event_seqs: Vec::new(),
             })
             .unwrap();
         source
