@@ -1109,7 +1109,7 @@ button {
 .message-actions {
   display: none;
   align-items: center;
-  gap: 2px;
+  gap: 1px;
 }
 
 /* 助手消息末尾的复制按钮始终可见,不依赖 hover。 */
@@ -1122,8 +1122,8 @@ button {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 32px;
-  height: 32px;
+  width: 28px;
+  height: 28px;
   padding: 0;
   border: none;
   border-radius: 50%;
@@ -1131,6 +1131,12 @@ button {
   color: var(--label-tertiary);
   cursor: pointer;
   transition: color 80ms ease, background 80ms ease, transform 80ms ease;
+}
+
+.copy-message-btn svg {
+  /* 图标 16px 渲染在 28px 容器里比原来 32px 更内敛,看起来更紧凑 */
+  width: 15px;
+  height: 15px;
 }
 
 .msg-assistant .message-actions {

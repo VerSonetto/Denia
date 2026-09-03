@@ -195,15 +195,14 @@ export function IconBranch(props: IconProps) {
   return (
     <Svg {...props} viewBox="0 0 18 18">
       <path
-        d="M5 5.1v5.8M14 5.1v1.4a5 5 0 0 1-5 5H6.6"
+        d="M5 5.6v4.2a4 4 0 0 0 4 4h3.4"
         stroke="currentColor"
-        strokeWidth="1.6"
+        strokeWidth="1.4"
         strokeLinecap="round"
         strokeLinejoin="round"
       />
-      <circle cx="5" cy="3.5" r="1.6" stroke="currentColor" strokeWidth="1.4" />
-      <circle cx="5" cy="12.5" r="1.6" stroke="currentColor" strokeWidth="1.4" />
-      <circle cx="14" cy="3.5" r="1.6" stroke="currentColor" strokeWidth="1.4" />
+      <circle cx="5" cy="3.6" r="1.4" stroke="currentColor" strokeWidth="1.4" />
+      <circle cx="12.4" cy="13.8" r="1.4" stroke="currentColor" strokeWidth="1.4" />
     </Svg>
   )
 }
