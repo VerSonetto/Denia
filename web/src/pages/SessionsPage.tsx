@@ -1,10 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ClipboardEvent, type KeyboardEvent, type WheelEvent } from 'react'
 import * as api from '../api'
 import {
+  addSessionLocal,
   ensureSession,
   getActiveWorkspace,
   markStarted,
   notify,
+  refreshList,
   setActiveId,
   setRunningStatus,
   useCatalogTick,
@@ -119,6 +121,9 @@ export default function SessionsPage({
   // 当前会话的 transcript 节点,供状态栏统计。
   const [transcriptNodes, setTranscriptNodes] = useState<TranscriptNode[]>([])
   const [todos, setTodos] = useState<TodoItem[]>([])
+  // 会话内容视图(dsh conversation.view 环):对话 / 轨迹。组件按
+  // activeId 重挂(key),视图状态随会话切换自然复位。
+  const [view, setView] = useState<'chat' | 'trajectory'>('chat')
   const sendingRef = useRef(false)
   const promptRef = useRef<HTMLTextAreaElement | null>(null)
   const scrollRef = useRef<HTMLDivElement | null>(null)
@@ -469,6 +474,29 @@ export default function SessionsPage({
       notify('err', error instanceof Error ? error.message : String(error))
     }
   }, [activeId, transcriptNodes, rewindBusy])
+
+  /* ---- 分支(抄 dsh forkAt):从收尾消息分叉出全新会话并立即切换 ---- */
+
+  const forkBusyRef = useRef(false)
+
+  const handleFork = useCallback(
+    async (seq: number) => {
+      if (!activeId || forkBusyRef.current) return
+      forkBusyRef.current = true
+      try {
+        const { session } = await api.forkSession(activeId, seq)
+        // 子会话挂同一工作区(dsh:fork 后立即 open 子会话)。
+        addSessionLocal({ ...session, cwd_alive: true }, activeWs?.id)
+        setActiveId(session.id, activeWs?.id ?? null)
+        void refreshList()
+      } catch (error) {
+        notify('err', error instanceof Error ? error.message : String(error))
+      } finally {
+        forkBusyRef.current = false
+      }
+    },
+    [activeId, activeWs],
+  )
 
   const confirmRewind = useCallback(async () => {
     if (!activeId || !rewindReq || rewindBusy) return
@@ -886,6 +914,26 @@ export default function SessionsPage({
               {t('deadCwd')}
             </span>
           )}
+          <div className="view-switch" role="tablist" aria-label={t('viewTrajectory')}>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={view === 'chat'}
+              className={`view-switch-tab${view === 'chat' ? ' active' : ''}`}
+              onClick={() => setView('chat')}
+            >
+              {t('viewChat')}
+            </button>
+            <button
+              type="button"
+              role="tab"
+              aria-selected={view === 'trajectory'}
+              className={`view-switch-tab${view === 'trajectory' ? ' active' : ''}`}
+              onClick={() => setView('trajectory')}
+            >
+              {t('viewTrajectory')}
+            </button>
+          </div>
         </header>
       )}
       <div
@@ -894,7 +942,7 @@ export default function SessionsPage({
         onScroll={handleScroll}
         data-conversation-scroll=""
       >
-        {phase === 'active' && (
+        {phase === 'active' && view === 'chat' && (
           <ConversationAxis nodes={transcriptNodes} scrollRef={scrollRef} />
         )}
         <div className="conversation-view">
@@ -902,6 +950,7 @@ export default function SessionsPage({
             <SessionView
               key={`${activeId}-${transcriptReloadTick}`}
               id={activeId}
+              view={view}
               pendingMessages={pendingMessages}
               onTodosChange={setTodos}
               onPendingSettled={settlePending}
@@ -914,6 +963,7 @@ export default function SessionsPage({
                 followIfPinned()
               }}
               onRewind={(seq) => void handleRewind(seq)}
+              onFork={(seq) => void handleFork(seq)}
             />
           ) : (
             <div className="session-hero">

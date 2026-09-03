@@ -230,6 +230,8 @@ export interface SessionHeader {
   created_at: number
   cwd: string
   sandbox: boolean
+  /** 分支血缘:父会话 id(旧日志/普通会话无此字段)。 */
+  parent_session?: string
 }
 
 export interface SessionSummary {
@@ -239,6 +241,8 @@ export interface SessionSummary {
   cwd?: string
   sandbox?: boolean
   cwd_alive?: boolean
+  /** 分支血缘:父会话 id;侧栏据此把子会话嵌套在源会话之下。 */
+  parent_session?: string
 }
 
 export interface WorkspaceEntry {

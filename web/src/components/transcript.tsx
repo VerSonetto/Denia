@@ -7,7 +7,7 @@ import type { MarkdownLabels } from '../markdown/MarkdownText'
 import { toolCallInput, toolCallSummary } from '../toolDisplay'
 import type { UserMessageImage } from '../types'
 import { UserMessageBubble } from './UserMessageImages'
-import { CopyMessageButton } from './CopyMessageButton'
+import { BranchMessageButton, CopyMessageButton } from './CopyMessageButton'
 import {
   IconChevron,
   IconEdit,
@@ -25,23 +25,39 @@ export function Transcript({
   nodes,
   pendingMessages = [],
   onRewind,
+  onFork,
 }: {
   nodes: TranscriptNode[]
   /** 已发送未获确认的用户消息:渲染为尾部"发送中"行。 */
   pendingMessages?: { text: string; images?: UserMessageImage[] }[]
   /** 用户消息点击回退按钮时回调。 */
   onRewind?: (seq: number) => void
+  /** 轮次收尾消息点击分支按钮时回调(以该消息 seq 为锚点)。 */
+  onFork?: (seq: number) => void
 }) {
   if (nodes.length === 0 && pendingMessages.length === 0) {
     return <div className="empty-hint">{t('emptyTranscript')}</div>
   }
   const rows = groupTranscript(nodes)
-  // 只给“已结束轮次的最后一条助手消息”挂复制按钮;运行中/中间 step 不显示。
+  // 只给"已结束轮次的最后一条助手消息"挂复制/分支按钮;运行中/中间 step 不显示。
   const lastAssistantStep = new Map<number, number>()
   const endedTurns = new Set<number>()
   for (const node of nodes) {
     if (node.kind === 'assistant') lastAssistantStep.set(node.turn, node.step)
     else if (node.kind === 'turn-end') endedTurns.add(node.turn)
+  }
+  // dsh 分支可用性:分支锚点必须是 transcript 当前尾部的收尾消息——
+  // 取最后一条内容节点(user/assistant/tool/context)的 seq;
+  // 历史轮次与运行中轮次的收尾消息按钮可见但禁用。
+  let lastContentSeq = 0
+  for (const node of nodes) {
+    const seq =
+      node.kind === 'user'
+        ? node.anchor
+        : node.kind === 'assistant' || node.kind === 'tool' || node.kind === 'context-injection'
+          ? node.seq
+          : undefined
+    if (seq !== undefined) lastContentSeq = Math.max(lastContentSeq, seq)
   }
   return (
     <>
@@ -51,11 +67,13 @@ export function Transcript({
             key={index}
             node={row.node}
             onRewind={onRewind}
-            showCopy={
+            onFork={onFork}
+            showActions={
               row.node.kind === 'assistant' &&
               endedTurns.has(row.node.turn) &&
               row.node.step === lastAssistantStep.get(row.node.turn)
             }
+            lastContentSeq={lastContentSeq}
           />
         ) : (
           <TurnOverview key={index} row={row} />
@@ -71,7 +89,7 @@ export function Transcript({
 }
 
 /** Compact duration: 45秒 below a minute, 2分30秒 beyond, 1小时02分30秒 past an hour. */
-function formatDuration(ms: number): string {
+export function formatDuration(ms: number): string {
   const total = Math.max(0, Math.floor(ms / 1000))
   const hours = Math.floor(total / 3600)
   const minutes = Math.floor((total % 3600) / 60)
@@ -112,11 +130,17 @@ function TurnOverview({ row }: { row: OverviewRow }) {
 const NodeView = memo(function NodeView({
   node,
   onRewind,
-  showCopy = false,
+  onFork,
+  showActions = false,
+  lastContentSeq = 0,
 }: {
   node: TranscriptNode
   onRewind?: (seq: number) => void
-  showCopy?: boolean
+  onFork?: (seq: number) => void
+  /** 已结束轮次的最后一条助手消息:显示复制/分支图标簇。 */
+  showActions?: boolean
+  /** transcript 最后一条内容节点的 seq;分支按钮的可用性依据。 */
+  lastContentSeq?: number
 }) {
   switch (node.kind) {
     case 'user':
@@ -135,7 +159,14 @@ const NodeView = memo(function NodeView({
     case 'system-prompt':
       return <SystemPromptRow text={node.text} />
     case 'assistant':
-      return <AssistantNode node={node} showCopy={showCopy} />
+      return (
+        <AssistantNode
+          node={node}
+          showActions={showActions}
+          branchAvailable={node.seq !== undefined && node.seq === lastContentSeq}
+          onFork={onFork}
+        />
+      )
     case 'turn-start':
       // Boundary marker; only carries the turn's start time.
       return null
@@ -148,11 +179,16 @@ const NodeView = memo(function NodeView({
 
 function AssistantNode({
   node,
-  showCopy,
+  showActions,
+  branchAvailable,
+  onFork,
 }: {
   node: Extract<TranscriptNode, { kind: 'assistant' }>
-  /** 仅已结束轮次的最后一条助手消息显示复制按钮。 */
-  showCopy: boolean
+  /** 仅已结束轮次的最后一条助手消息显示图标簇。 */
+  showActions: boolean
+  /** dsh 语义:只有 transcript 当前尾部的收尾消息可分支;否则可见但禁用。 */
+  branchAvailable: boolean
+  onFork?: (seq: number) => void
 }) {
   // markdown chrome 文案:locale 变化时重建(引用变化让流式渲染缓存失效);
   // locale 稳定时保持同一引用,流式缓存在 chunk 间存活。
@@ -167,7 +203,7 @@ function AssistantNode({
     node.streaming ||
     node.interrupted ||
     node.blocks.some((b) => b.kind !== 'tool-call')
-  if (!hasVisible) return null
+  if (!hasVisible && !showActions) return null
   const copyText = node.blocks
     .filter((block) => block.kind === 'text')
     .map((block) => (block.kind === 'text' ? block.text : ''))
@@ -192,9 +228,15 @@ function AssistantNode({
         )
       })}
       {node.interrupted && <span className="badge warn">{t('interrupted')}</span>}
-      {showCopy && copyText && (
+      {showActions && (
         <div className="message-actions always-visible">
-          <CopyMessageButton text={copyText} />
+          {copyText && <CopyMessageButton text={copyText} />}
+          {onFork && node.seq !== undefined && (
+            <BranchMessageButton
+              available={branchAvailable}
+              onBranch={() => onFork(node.seq!)}
+            />
+          )}
         </div>
       )}
     </div>

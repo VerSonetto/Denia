@@ -11,12 +11,14 @@ export interface UiBlock {
 
 export type TranscriptNode =
   | { kind: 'user'; text: string; anchor?: number; images?: UserMessageImage[] }
-  | { kind: 'context-injection'; text: string }
+  | { kind: 'context-injection'; text: string; seq?: number }
   | { kind: 'system-prompt'; text: string }
   | {
       kind: 'assistant'
       turn: number
       step: number
+      /** assistant-message 事件的 seq;流式未 settle 时缺省。分支锚点。 */
+      seq?: number
       blocks: UiBlock[]
       usage?: TokenUsage
       interrupted: boolean
@@ -33,6 +35,8 @@ export type TranscriptNode =
       callId: string
       name: string
       args: string
+      /** tool-call 事件的 seq;孤儿结果行用 result 事件的 seq。 */
+      seq?: number
       result?: { content: string; isError: boolean }
     }
   | { kind: 'turn-start'; turn: number; time: number }
@@ -146,7 +150,7 @@ export function foldEvents(events: SessionEnvelope[]): TranscriptNode[] {
       case 'user-message':
         closeOpen()
         if (event.injected) {
-          nodes.push({ kind: 'context-injection', text: event.text })
+          nodes.push({ kind: 'context-injection', text: event.text, seq: event.seq })
         } else {
           nodes.push({
             kind: 'user',
@@ -190,6 +194,7 @@ export function foldEvents(events: SessionEnvelope[]): TranscriptNode[] {
           open.usage = event.usage
           open.interrupted = event.interrupted ?? false
           open.settleTime = event.time
+          open.seq = event.seq
           closeOpen()
         } else {
           closeOpen()
@@ -197,6 +202,7 @@ export function foldEvents(events: SessionEnvelope[]): TranscriptNode[] {
             kind: 'assistant',
             turn: event.turn,
             step: event.step,
+            seq: event.seq,
             blocks,
             usage: event.usage,
             interrupted: event.interrupted ?? false,
@@ -215,6 +221,7 @@ export function foldEvents(events: SessionEnvelope[]): TranscriptNode[] {
           callId: event.call_id,
           name: event.name,
           args: event.arguments,
+          seq: event.seq,
         }
         tools.set(event.call_id, node)
         nodes.push(node)
@@ -231,6 +238,7 @@ export function foldEvents(events: SessionEnvelope[]): TranscriptNode[] {
             callId: event.call_id,
             name: '?',
             args: '',
+            seq: event.seq,
             result,
           })
         }
@@ -282,7 +290,7 @@ export function applyEnvelope(
       return [...nodes, { kind: 'turn-start', turn: event.turn, time: event.time }]
     case 'user-message':
       if (event.injected) {
-        return [...nodes, { kind: 'context-injection', text: event.text }]
+        return [...nodes, { kind: 'context-injection', text: event.text, seq: event.seq }]
       }
       return [
         ...nodes,
@@ -332,6 +340,7 @@ export function applyEnvelope(
         kind: 'assistant',
         turn: event.turn,
         step: event.step,
+        seq: event.seq,
         blocks: event.blocks.map(toUiBlock),
         usage: event.usage,
         interrupted: event.interrupted ?? false,
@@ -353,7 +362,7 @@ export function applyEnvelope(
     case 'tool-call':
       return [
         ...nodes,
-        { kind: 'tool', callId: event.call_id, name: event.name, args: event.arguments },
+        { kind: 'tool', callId: event.call_id, name: event.name, args: event.arguments, seq: event.seq },
       ]
     case 'tool-result': {
       for (let i = nodes.length - 1; i >= 0; i--) {
@@ -374,6 +383,7 @@ export function applyEnvelope(
           callId: event.call_id,
           name: '?',
           args: '',
+          seq: event.seq,
           result: { content: event.content, isError: event.is_error },
         },
       ]

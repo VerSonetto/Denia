@@ -240,6 +240,17 @@ export function deleteSession(id: string): Promise<unknown> {
   return http(`/api/sessions/${encodeURIComponent(id)}`, { method: 'DELETE' })
 }
 
+/** 从某个已完成轮次边界分支出全新会话(dsh session.fork)。 */
+export function forkSession(
+  id: string,
+  atSeq?: number,
+): Promise<{ session: SessionSummary }> {
+  return http(`/api/sessions/${encodeURIComponent(id)}/fork`, {
+    method: 'POST',
+    body: JSON.stringify(atSeq === undefined ? {} : { atSeq }),
+  })
+}
+
 export function postPrompt(
   id: string,
   body: {

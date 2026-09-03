@@ -530,6 +530,35 @@ export default function App() {
 const UNGROUPED_KEY = 'ungrouped'
 const COLLAPSED_LIMIT = 5
 
+/**
+ * 血缘嵌套排序(抄 dsh parentSessionId 列表嵌套):子会话紧跟其父会话
+ * 之后(先序遍历);父不在本组(跨组/已删)的子会话留在顶层。
+ */
+function nestByParent(members: SessionSummary[]): { session: SessionSummary; depth: number }[] {
+  const ids = new Set(members.map((s) => s.id))
+  const byParent = new Map<string, SessionSummary[]>()
+  const roots: SessionSummary[] = []
+  for (const session of members) {
+    const parent = session.parent_session
+    if (parent && ids.has(parent)) {
+      const list = byParent.get(parent)
+      if (list) list.push(session)
+      else byParent.set(parent, [session])
+    } else {
+      roots.push(session)
+    }
+  }
+  const out: { session: SessionSummary; depth: number }[] = []
+  const walk = (list: SessionSummary[], depth: number) => {
+    for (const session of list) {
+      out.push({ session, depth })
+      walk(byParent.get(session.id) ?? [], depth + 1)
+    }
+  }
+  walk(roots, 0)
+  return out
+}
+
 function SidebarWorkspaces({
   sessions,
   workspaces,
@@ -702,7 +731,9 @@ function SidebarWorkspaces({
         )}
         {filteredGroups.map(({ ws, members }) => {
           const open = searching || isGroupOpen(ws.id, members.some((s) => s.id === activeId))
-          const visible = searching || showAll[ws.id] ? members : members.slice(0, COLLAPSED_LIMIT)
+          const nested = nestByParent(members)
+          const visible =
+            searching || showAll[ws.id] ? nested : nested.slice(0, COLLAPSED_LIMIT)
           return (
             <div className={`ws-group${open ? ' open' : ''}`} key={ws.id}>
               <div className="ws-group-head-row">
@@ -746,10 +777,11 @@ function SidebarWorkspaces({
               </div>
               <div className={`ws-group-body${open ? ' open' : ''}`}>
                 <div className="ws-group-body-inner">
-                  {visible.map((session) => (
+                  {visible.map(({ session, depth }) => (
                     <SessionRow
                       key={session.id}
                       session={session}
+                      depth={depth}
                       active={session.id === activeId}
                       running={!!runningIds[session.id]}
                       onOpen={() => onOpenSession(session.id, ws.id)}
@@ -807,22 +839,23 @@ function SidebarWorkspaces({
                 </button>
               </span>
             </div>
-            <div
-              className={`ws-group-body${searching || isGroupOpen(UNGROUPED_KEY, true) ? ' open' : ''}`}
-            >
-              <div className="ws-group-body-inner">
-                {filteredUngrouped.map((session) => (
-                  <SessionRow
-                    key={session.id}
-                    session={session}
-                    active={session.id === activeId}
-                    running={!!runningIds[session.id]}
-                    onOpen={() => onOpenSession(session.id)}
-                    onDelete={() => onDeleteSession(session)}
-                  />
-                ))}
+              <div
+                className={`ws-group-body${searching || isGroupOpen(UNGROUPED_KEY, true) ? ' open' : ''}`}
+              >
+                <div className="ws-group-body-inner">
+                  {nestByParent(filteredUngrouped).map(({ session, depth }) => (
+                    <SessionRow
+                      key={session.id}
+                      session={session}
+                      depth={depth}
+                      active={session.id === activeId}
+                      running={!!runningIds[session.id]}
+                      onOpen={() => onOpenSession(session.id)}
+                      onDelete={() => onDeleteSession(session)}
+                    />
+                  ))}
+                </div>
               </div>
-            </div>
           </div>
         )}
       </div>
@@ -832,19 +865,25 @@ function SidebarWorkspaces({
 
 function SessionRow({
   session,
+  depth = 0,
   active,
   running,
   onOpen,
   onDelete,
 }: {
   session: SessionSummary
+  /** 血缘嵌套深度:0 = 顶层,>0 = 分支子会话(缩进显示)。 */
+  depth?: number
   active: boolean
   running: boolean
   onOpen: () => void
   onDelete: () => void
 }) {
   return (
-    <div className={`session-row-wrap${active ? ' active' : ''}`}>
+    <div
+      className={`session-row-wrap${active ? ' active' : ''}${depth > 0 ? ' nested' : ''}`}
+      style={depth > 0 ? { paddingLeft: 10 + depth * 14 } : undefined}
+    >
       <button type="button" className={`session-row${active ? ' active' : ''}`} onClick={onOpen}>
         <span className="lead">
           {session.cwd_alive === false ? (

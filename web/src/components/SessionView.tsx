@@ -5,6 +5,7 @@ import { t } from '../i18n'
 import { attach } from '../sessionStreams'
 import type { SessionEnvelope, TodoItem, UserMessageImage } from '../types'
 import { Transcript } from './transcript'
+import { TrajectoryView } from './TrajectoryView'
 
 /** Latest todo snapshot wins; both snapshot and live frames feed it. */
 function latestTodos(events: { type: string; todos?: TodoItem[] }[]): TodoItem[] {
@@ -29,14 +30,18 @@ function latestTodos(events: { type: string; todos?: TodoItem[] }[]): TodoItem[]
  */
 export function SessionView({
   id,
+  view = 'chat',
   pendingMessages,
   onTodosChange,
   onNotFound,
   onPendingSettled,
   onNodesChange,
   onRewind,
+  onFork,
 }: {
   id: string
+  /** 内容视图:对话 transcript 或轨迹台账(共用同一事件流订阅)。 */
+  view?: 'chat' | 'trajectory'
   /** 已发送未获服务端确认的用户消息(乐观行,渲染在 transcript 尾部)。 */
   pendingMessages: { text: string; images?: UserMessageImage[] }[]
   onTodosChange?: (todos: TodoItem[]) => void
@@ -48,8 +53,12 @@ export function SessionView({
   onNodesChange?: (nodes: TranscriptNode[]) => void
   /** 用户消息回退按钮触发。 */
   onRewind?: (seq: number) => void
+  /** 轮次收尾消息分支按钮触发(以该消息 seq 为锚点开新会话)。 */
+  onFork?: (seq: number) => void
 }) {
   const [nodes, setNodes] = useState<TranscriptNode[]>([])
+  // 原始事件流:轨迹视图的 fold 源(与 transcript 共用一次订阅)。
+  const [events, setEvents] = useState<SessionEnvelope[]>([])
   const [loading, setLoading] = useState(true)
   const settleRef = useRef(onPendingSettled)
   settleRef.current = onPendingSettled
@@ -70,6 +79,7 @@ export function SessionView({
       const batch = queueRef.current
       queueRef.current = []
       if (batch.length === 0) return
+      setEvents((previous) => [...previous, ...batch])
       setNodes((previous) => batch.reduce((acc, env) => applyEnvelope(acc, env), previous))
     }
     const settlePending = (events: SessionEnvelope[]) => {
@@ -80,11 +90,12 @@ export function SessionView({
       }
     }
     const unsubscribe = attach(id, {
-      onSnapshot: (_header, events) => {
+      onSnapshot: (_header, snapshot) => {
         queueRef.current = []
-        setNodes(foldEvents(events))
-        onTodosChange?.(latestTodos(events))
-        settlePending(events)
+        setEvents(snapshot)
+        setNodes(foldEvents(snapshot))
+        onTodosChange?.(latestTodos(snapshot))
+        settlePending(snapshot)
         setLoading(false)
       },
       onEnvelope: (envelope) => {
@@ -106,6 +117,7 @@ export function SessionView({
       if (rafRef.current !== undefined) window.cancelAnimationFrame(rafRef.current)
       rafRef.current = undefined
       queueRef.current = []
+      setEvents([])
     }
     // 仅依赖 id:监听回调经 ref 透传,避免每次渲染重挂流。
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -122,9 +134,13 @@ export function SessionView({
     return <div className="empty-hint">{t('loading')}</div>
   }
 
+  if (view === 'trajectory') {
+    return <TrajectoryView events={events} />
+  }
+
   return (
     <div className="transcript-pane">
-      <Transcript nodes={nodes} pendingMessages={pendingMessages} onRewind={onRewind} />
+      <Transcript nodes={nodes} pendingMessages={pendingMessages} onRewind={onRewind} onFork={onFork} />
     </div>
   )
 }

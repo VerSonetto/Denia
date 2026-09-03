@@ -1,0 +1,688 @@
+/* ===================== 分支按钮(dsh message.branch) ===================== */
+
+/* 不可分支(非 transcript 当前尾部):可见但禁用,tooltip 说明原因。 */
+.copy-message-btn[data-unavailable] {
+  opacity: 0.35;
+  cursor: default;
+}
+
+.copy-message-btn[data-unavailable]:hover {
+  background: transparent;
+  transform: none;
+  color: var(--label-tertiary);
+}
+
+/* ===================== 视图切换(对话 / 轨迹) ===================== */
+
+.view-switch {
+  margin-left: auto;
+  display: inline-flex;
+  gap: 2px;
+  padding: 2px;
+  border: 1px solid var(--border-l);
+  border-radius: var(--r-pill);
+  background: var(--bg-base);
+}
+
+.view-switch-tab {
+  border: none;
+  background: transparent;
+  color: var(--label-secondary);
+  font: inherit;
+  font-size: 12px;
+  padding: 3px 12px;
+  border-radius: var(--r-pill);
+  cursor: pointer;
+  transition: background 80ms var(--ease), color 80ms var(--ease);
+}
+
+.view-switch-tab:hover {
+  color: var(--label-primary);
+}
+
+.view-switch-tab.active {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+/* ===================== 轨迹(dsh 形态 + 可读性增强) ===================== */
+
+.traj-pane {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  width: min(100%, calc(var(--chat-content-width) + 360px));
+  margin: 0 auto;
+  padding: 8px 0 16px;
+}
+
+/* 主栏(概览 + 台账)与右侧 inspector 双栏;选中记录后面板常驻右侧。 */
+.traj-body {
+  display: flex;
+  gap: 12px;
+  align-items: stretch;
+  min-width: 0;
+}
+
+.traj-main {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.traj-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.traj-toolbar-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--label-secondary);
+  margin-right: 4px;
+}
+
+.traj-search {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 10px;
+  border: 1px solid var(--border-l);
+  border-radius: var(--r-pill);
+  color: var(--label-tertiary);
+}
+
+.traj-search input {
+  border: none;
+  background: transparent;
+  color: var(--label-primary);
+  font: inherit;
+  font-size: 12px;
+  width: 140px;
+  outline: none;
+}
+
+/* ---- 时间概览条 ---- */
+
+.traj-overview {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 6px 0 2px;
+}
+
+.traj-overview-track {
+  position: relative;
+  height: 36px;
+  border: 1px solid var(--border-l);
+  border-radius: var(--r-sm);
+  background: var(--bg-base);
+  overflow: hidden;
+  touch-action: none;
+  user-select: none;
+}
+
+/* 轮次边界刻度 */
+.traj-tick {
+  position: absolute;
+  top: 0;
+  height: 100%;
+  width: 1px;
+  background: var(--border-l);
+}
+
+.traj-span {
+  position: absolute;
+  top: 6px;
+  height: 22px;
+  border-radius: 3px;
+  min-width: 1px;
+  pointer-events: auto;
+  transition: opacity 60ms var(--ease), filter 60ms var(--ease);
+}
+
+.traj-span.user {
+  background: var(--label-tertiary);
+  opacity: 0.5;
+}
+
+.traj-span.message {
+  background: var(--accent);
+  opacity: 0.75;
+}
+
+/* Assistant span 的 TTFT 段:更暗的斜纹,解码段保持实色 */
+.traj-span.message .ttft {
+  position: absolute;
+  inset: 0 auto 0 0;
+  border-radius: 3px 0 0 3px;
+  background: repeating-linear-gradient(
+    -45deg,
+    color-mix(in srgb, var(--accent) 55%, transparent) 0 3px,
+    transparent 3px 6px
+  );
+}
+
+.traj-span.tool {
+  background: var(--success);
+  opacity: 0.6;
+}
+
+.traj-span.err {
+  background: var(--error);
+  opacity: 0.9;
+}
+
+.traj-span.running {
+  opacity: 0.25;
+  outline: 1px dashed var(--label-tertiary);
+  outline-offset: -1px;
+}
+
+/* hover 联动:概览条 span 高亮 */
+.traj-span.hot {
+  opacity: 1;
+  filter: brightness(1.15);
+  box-shadow: 0 0 0 1.5px var(--accent);
+  z-index: 2;
+}
+
+.traj-span-focus {
+  position: absolute;
+  top: 0;
+  height: 100%;
+  background: var(--accent);
+  opacity: 0.12;
+  border-left: 1px solid var(--accent);
+  border-right: 1px solid var(--accent);
+  pointer-events: none;
+}
+
+.traj-overview-axis {
+  display: flex;
+  justify-content: space-between;
+  font-size: 10.5px;
+  color: var(--label-tertiary);
+  font-variant-numeric: tabular-nums;
+}
+
+.traj-overview-axis span:nth-child(2) {
+  transform: translateX(-50%);
+}
+
+.traj-focus-row {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.traj-focus-clear {
+  border: 1px solid var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent);
+  font: inherit;
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+  padding: 2px 10px;
+  border-radius: var(--r-pill);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* ---- 台账 ---- */
+
+.traj-ledger {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--border-l);
+  border-radius: var(--r-md);
+  overflow: hidden;
+}
+
+.traj-turn + .traj-turn {
+  border-top: 2px solid var(--border-l);
+}
+
+/* 组头:与台账行同栅格(dsh 同款,列标签与数据列几何对齐) */
+.traj-turn-head {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  display: grid;
+  grid-template-columns: 52px minmax(0, 1fr) 126px 64px 110px;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 14px;
+  background: var(--bg-active);
+  border-bottom: 1px solid var(--border-l);
+  font-size: 12px;
+  color: var(--label-secondary);
+  cursor: pointer;
+}
+
+.traj-turn-head .traj-head-main {
+  grid-column: 1 / 3;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.traj-turn-head .title {
+  font-weight: 600;
+  color: var(--label-primary);
+  flex: none;
+}
+
+.traj-turn-head .wall {
+  color: var(--label-primary);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  flex: none;
+}
+
+.traj-turn-head .sep {
+  flex: 1;
+}
+
+.traj-turn-head .histogram {
+  display: inline-flex;
+  gap: 10px;
+  color: var(--label-tertiary);
+  font-variant-numeric: tabular-nums;
+}
+
+.traj-chips {
+  display: inline-flex;
+  gap: 4px;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.traj-chip {
+  flex: none;
+  font-size: 10.5px;
+  color: var(--label-secondary);
+  border: 1px solid var(--border-l);
+  border-radius: var(--r-pill);
+  padding: 0 7px;
+  line-height: 16px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.traj-head-cols {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 6px;
+  text-align: right;
+  font-size: 10px;
+  color: var(--label-tertiary);
+}
+
+.traj-head-col {
+  text-align: right;
+  font-size: 10px;
+  color: var(--label-tertiary);
+}
+
+/* 轮次之间组:整体弱化 */
+.traj-turn.between .traj-turn-head {
+  cursor: default;
+}
+
+.traj-turn.between {
+  opacity: 0.75;
+}
+
+/* ---- 台账行:徽标 · 摘要 · tokens · 时刻 · 耗时微条 ---- */
+
+.traj-row {
+  display: grid;
+  grid-template-columns: 52px minmax(0, 1fr) 126px 64px 110px;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  min-height: 38px;
+  padding: 3px 14px;
+  border: none;
+  background: transparent;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.traj-row + .traj-row {
+  border-top: 1px solid var(--border-l);
+}
+
+/* 斑马纹:长表扫读不串行 */
+.traj-rows > .traj-row:nth-child(even) {
+  background: color-mix(in srgb, var(--bg-active) 45%, transparent);
+}
+
+.traj-row:hover,
+.traj-row.hot {
+  background: var(--hover-fill);
+}
+
+.traj-row.selected {
+  box-shadow: inset 0 0 0 2px var(--accent);
+}
+
+/* 错误行:红色左缘 + 轻染色 */
+.traj-row.err {
+  box-shadow: inset 3px 0 0 var(--error);
+  background: color-mix(in srgb, var(--error) 5%, transparent);
+}
+
+.traj-row.err.selected {
+  box-shadow:
+    inset 3px 0 0 var(--error),
+    inset 0 0 0 2px var(--accent);
+}
+
+.traj-badge {
+  justify-self: start;
+  font-size: 10.5px;
+  font-weight: 600;
+  padding: 1px 7px;
+  border-radius: var(--r-pill);
+  border: 1px solid var(--border-l);
+  color: var(--label-secondary);
+  white-space: nowrap;
+}
+
+.traj-badge.user {
+  color: var(--label-primary);
+  background: var(--bg-active);
+}
+
+.traj-badge.message {
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+  background: var(--accent-soft);
+}
+
+.traj-badge.tool {
+  color: var(--success);
+  border-color: color-mix(in srgb, var(--success) 45%, transparent);
+}
+
+.traj-summary {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  overflow: hidden;
+  white-space: nowrap;
+  font-size: 12.5px;
+  color: var(--label-primary);
+}
+
+.traj-row.user .traj-summary {
+  color: var(--label-secondary);
+}
+
+.traj-summary-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.traj-summary-text.dim {
+  color: var(--label-tertiary);
+  flex: 1 1 auto;
+}
+
+.traj-tool-chip {
+  flex: none;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--label-secondary);
+  background: var(--bg-active);
+  border: 1px solid var(--border-l);
+  border-radius: 4px;
+  padding: 0 6px;
+  line-height: 17px;
+}
+
+.traj-row.err .traj-summary-text {
+  color: var(--error);
+}
+
+.traj-interrupted {
+  font-style: normal;
+  flex: none;
+  font-size: 11px;
+  color: var(--warn);
+}
+
+.traj-running-dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+  animation: traj-pulse 1.1s ease-in-out infinite;
+}
+
+@keyframes traj-pulse {
+  0%,
+  100% {
+    opacity: 0.25;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+.traj-tokens {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 6px;
+  text-align: right;
+  font-size: 11.5px;
+  color: var(--label-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+.traj-tokens .dim {
+  color: var(--label-tertiary);
+  opacity: 0.6;
+}
+
+.traj-clock {
+  text-align: right;
+  font-size: 11px;
+  color: var(--label-tertiary);
+  font-variant-numeric: tabular-nums;
+}
+
+/* 耗时列:微条打底 + 自身耗时标签 */
+.traj-dur {
+  position: relative;
+  display: block;
+  min-height: 20px;
+  text-align: right;
+}
+
+.traj-dur b {
+  position: relative;
+  font-weight: 400;
+  font-size: 11.5px;
+  color: var(--label-secondary);
+  font-variant-numeric: tabular-nums;
+}
+
+.traj-dur-bar {
+  position: absolute;
+  left: 0;
+  bottom: 1px;
+  height: 3px;
+  border-radius: 2px;
+  background: var(--label-tertiary);
+  opacity: 0.5;
+}
+
+.traj-dur-bar[data-kind='message'] {
+  background: var(--accent);
+  opacity: 0.55;
+}
+
+.traj-dur-bar[data-kind='tool'] {
+  background: var(--success);
+  opacity: 0.55;
+}
+
+.traj-dur-bar[data-err] {
+  background: var(--error);
+  opacity: 0.7;
+}
+
+.traj-row.running .traj-dur b {
+  color: var(--label-tertiary);
+}
+
+/* ---- inspector:右侧常驻面板(dsh 本地 inspector 形态) ---- */
+
+.traj-inspector {
+  width: 344px;
+  flex: none;
+  align-self: flex-start;
+  position: sticky;
+  top: 12px;
+  max-height: calc(100vh - 190px);
+  border: 1px solid var(--border-l);
+  border-radius: var(--r-md);
+  background: var(--bg-base);
+  display: flex;
+  flex-direction: column;
+  box-shadow: 0 4px 18px rgba(0, 0, 0, 0.08);
+}
+
+.traj-inspector-head {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border-l);
+}
+
+.traj-inspector-title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.traj-inspector-title .icon-btn {
+  margin-left: auto;
+}
+
+.traj-inspector-meta {
+  font-size: 11px;
+  color: var(--label-tertiary);
+  font-variant-numeric: tabular-nums;
+}
+
+.traj-inspector-summary {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12.5px;
+  color: var(--label-primary);
+}
+
+.traj-tabs {
+  display: flex;
+  gap: 2px;
+  padding: 0 12px;
+  border-bottom: 1px solid var(--border-l);
+}
+
+.traj-tab {
+  border: none;
+  background: transparent;
+  font: inherit;
+  font-size: 12px;
+  color: var(--label-tertiary);
+  padding: 5px 10px;
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+}
+
+.traj-tab:hover {
+  color: var(--label-primary);
+}
+
+.traj-tab.active {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+}
+
+.traj-inspector-body {
+  overflow: auto;
+  padding: 10px 12px;
+}
+
+.traj-prose {
+  font-size: 12.5px;
+  line-height: 1.55;
+  color: var(--label-primary);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.traj-code {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--label-primary);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.traj-code.err {
+  color: var(--error);
+}
+
+.traj-kv {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 6px 18px;
+  margin: 0;
+  font-size: 12px;
+}
+
+.traj-kv dt {
+  color: var(--label-tertiary);
+}
+
+.traj-kv dd {
+  margin: 0;
+  color: var(--label-primary);
+  font-variant-numeric: tabular-nums;
+}
+
+/* 窄屏:面板回落到台账下方 */
+@media (max-width: 1080px) {
+  .traj-body {
+    flex-direction: column;
+  }
+
+  .traj-inspector {
+    width: auto;
+    position: static;
+    max-height: 46vh;
+    order: 3;
+  }
+}

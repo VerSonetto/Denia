@@ -190,6 +190,17 @@ export function IconRewind(props: IconProps) {
   )
 }
 
+export function IconBranch(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <path d="M4 5.1v5.8M12 5.1v1.4a5 5 0 0 1-5 5H5.6" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
+      <circle cx="4" cy="3.5" r="1.6" stroke="currentColor" strokeWidth="1.4" />
+      <circle cx="4" cy="12.5" r="1.6" stroke="currentColor" strokeWidth="1.4" />
+      <circle cx="12" cy="3.5" r="1.6" stroke="currentColor" strokeWidth="1.4" />
+    </Svg>
+  )
+}
+
 export function IconChevron(props: IconProps) {
   return (
     <Svg {...props}>
