@@ -39,25 +39,13 @@ export function Transcript({
     return <div className="empty-hint">{t('emptyTranscript')}</div>
   }
   const rows = groupTranscript(nodes)
-  // 只给"已结束轮次的最后一条助手消息"挂复制/分支按钮;运行中/中间 step 不显示。
+  // 每个已完成轮次的最后一条助手消息挂复制/分支按钮;运行中/中间 step 不显示。
+  // dsh 语义:任意已完成轮次都可分支,不再限制"仅 transcript 尾部"。
   const lastAssistantStep = new Map<number, number>()
   const endedTurns = new Set<number>()
   for (const node of nodes) {
     if (node.kind === 'assistant') lastAssistantStep.set(node.turn, node.step)
     else if (node.kind === 'turn-end') endedTurns.add(node.turn)
-  }
-  // dsh 分支可用性:分支锚点必须是 transcript 当前尾部的收尾消息——
-  // 取最后一条内容节点(user/assistant/tool/context)的 seq;
-  // 历史轮次与运行中轮次的收尾消息按钮可见但禁用。
-  let lastContentSeq = 0
-  for (const node of nodes) {
-    const seq =
-      node.kind === 'user'
-        ? node.anchor
-        : node.kind === 'assistant' || node.kind === 'tool' || node.kind === 'context-injection'
-          ? node.seq
-          : undefined
-    if (seq !== undefined) lastContentSeq = Math.max(lastContentSeq, seq)
   }
   return (
     <>
@@ -73,7 +61,6 @@ export function Transcript({
               endedTurns.has(row.node.turn) &&
               row.node.step === lastAssistantStep.get(row.node.turn)
             }
-            lastContentSeq={lastContentSeq}
           />
         ) : (
           <TurnOverview key={index} row={row} />
@@ -132,15 +119,12 @@ const NodeView = memo(function NodeView({
   onRewind,
   onFork,
   showActions = false,
-  lastContentSeq = 0,
 }: {
   node: TranscriptNode
   onRewind?: (seq: number) => void
   onFork?: (seq: number) => void
   /** 已结束轮次的最后一条助手消息:显示复制/分支图标簇。 */
   showActions?: boolean
-  /** transcript 最后一条内容节点的 seq;分支按钮的可用性依据。 */
-  lastContentSeq?: number
 }) {
   switch (node.kind) {
     case 'user':
@@ -159,14 +143,7 @@ const NodeView = memo(function NodeView({
     case 'system-prompt':
       return <SystemPromptRow text={node.text} />
     case 'assistant':
-      return (
-        <AssistantNode
-          node={node}
-          showActions={showActions}
-          branchAvailable={node.seq !== undefined && node.seq === lastContentSeq}
-          onFork={onFork}
-        />
-      )
+      return <AssistantNode node={node} showActions={showActions} onFork={onFork} />
     case 'turn-start':
       // Boundary marker; only carries the turn's start time.
       return null
@@ -180,14 +157,11 @@ const NodeView = memo(function NodeView({
 function AssistantNode({
   node,
   showActions,
-  branchAvailable,
   onFork,
 }: {
   node: Extract<TranscriptNode, { kind: 'assistant' }>
-  /** 仅已结束轮次的最后一条助手消息显示图标簇。 */
+  /** 已结束轮次的最后一条助手消息显示图标簇(dsh 语义:每个已完成轮次都可分支)。 */
   showActions: boolean
-  /** dsh 语义:只有 transcript 当前尾部的收尾消息可分支;否则可见但禁用。 */
-  branchAvailable: boolean
   onFork?: (seq: number) => void
 }) {
   // markdown chrome 文案:locale 变化时重建(引用变化让流式渲染缓存失效);
@@ -232,10 +206,7 @@ function AssistantNode({
         <div className="message-actions always-visible">
           {copyText && <CopyMessageButton text={copyText} />}
           {onFork && node.seq !== undefined && (
-            <BranchMessageButton
-              available={branchAvailable}
-              onBranch={() => onFork(node.seq!)}
-            />
+            <BranchMessageButton onBranch={() => onFork(node.seq!)} />
           )}
         </div>
       )}

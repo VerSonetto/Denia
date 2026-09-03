@@ -39,27 +39,24 @@ export function CopyMessageButton({ text }: { text: string }) {
 
 /**
  * 轮次收尾消息的分支按钮(抄 dsh MessageIconActions 的 branch 位):
- * 不可分支(非 transcript 当前尾部)时保持可见但禁用,tooltip 说明原因。
+ * dsh 原版每个已完成轮次的 turn-tail 都挂分支,不再限制"仅 transcript
+ * 尾部"——这样从任何已完成轮次都可以开新分支继续对话。
  */
 export function BranchMessageButton({
-  available,
   onBranch,
 }: {
-  available: boolean
   onBranch: () => void
 }) {
-  const label = available ? t('messageBranch') : t('messageBranchUnavailable')
+  const label = t('messageBranch')
   return (
     <button
       type="button"
       className="copy-message-btn branch"
       title={label}
       aria-label={label}
-      aria-disabled={available ? undefined : true}
-      data-unavailable={available ? undefined : ''}
-      onClick={available ? onBranch : undefined}
+      onClick={onBranch}
     >
-      <IconBranch size={16} />
+      <IconBranch size={15} />
     </button>
   )
 }
