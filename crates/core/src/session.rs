@@ -6,9 +6,11 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::config::LlmCallConfig;
 use crate::error::LlmFailure;
 use crate::message::{ChatMessage, ToolCallRef};
 use crate::stream::{ContentBlock, StreamChunk, TokenUsage};
+use crate::tool::ToolSchema;
 
 /// On-disk and wire format version; pinned while unreleased.
 pub const SESSION_FORMAT_VERSION: u32 = 0;
@@ -46,9 +48,26 @@ pub enum SessionHeaderKind {
 #[serde(tag = "kind", rename_all = "kebab-case")]
 pub enum TurnEndReason {
     Completed,
-    Aborted,
+    /// 取消中断(对齐 dsh `aborted` + `AgentCancelCause`);cause 缺失 = 旧日志。
+    Aborted {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cause: Option<AbortCause>,
+    },
     MaxTokens,
     Error { failure: LlmFailure },
+    /// 崩溃孤儿轮次的合成闭合(对齐 dsh `interrupted`;仅加载时生成,loop 不发射)。
+    Interrupted,
+}
+
+/// 取消的发起方(对齐 dsh `AgentCancelCause`;`Legacy` 兼容旧日志无 cause 记录)。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum AbortCause {
+    User,
+    Parent,
+    Hook { reason: String },
+    Disposed,
+    Legacy,
 }
 
 /// 会话当前权限模式(抄 dsh sandbox-mode + permission-preset)。
@@ -132,6 +151,45 @@ pub enum TodoStatus {
     Completed,
 }
 
+/// 为何写入 `request-header` 快照(对齐 dsh `RequestHeaderReason`)。
+///
+/// - `initial` — 日志里第一条 header(全新会话的第一次请求);
+/// - `resume` — 日志已有 header,本次 loop 实例的第一次请求(重启/续开/fork 种子);
+/// - `change` — 后续请求的 header 与上次不同(同时开启新消息列);
+/// - `series` — 头未变但开始显式独立消息列(本仓暂不产出,保留位对齐)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum RequestHeaderReason {
+    Initial,
+    Resume,
+    Change,
+    Series,
+}
+
+/// 一次模型请求的完整头部快照(对齐 dsh `EpochHeader`):调用配置 +
+/// 模型实际收到的系统提示 + 工具 schema。日志专用,不进入派生历史;
+/// 最近的快照即可重建一次请求的形态。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RequestHeaderSnapshot {
+    /// 调用配置(provider/model/推理强度/采样参数)。
+    pub config: LlmCallConfig,
+    /// 渲染后的完整系统提示(含模型框架,模型实际收到的原文);无 system 请求时缺省。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system: Option<String>,
+    /// 组装好的工具 schema 列表;无工具请求时缺省。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tools: Vec<ToolSchema>,
+}
+
+/// 工具调用的内部失败身份(对齐 dsh `tool/result.error { name, code }`)。
+/// 与 `ToolResult.error`(模型可见错误文本)互补:这里记的是工具内部的
+/// 失败种类与码,供诊断聚合,不进入派生历史。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolFailureIdentity {
+    pub name: String,
+    pub code: String,
+}
+
 /// The durable event vocabulary, internally tagged on `type`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "kebab-case")]
@@ -179,6 +237,10 @@ pub enum SessionEvent {
         usage: Option<TokenUsage>,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         interrupted: bool,
+        /// 构建本条消息的 chunk 事件 seq 引用(对齐 dsh `sourceEventSeqs`)。
+        /// 空流(无任何 chunk)时为缺省,不记录。
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        source_event_seqs: Vec<u64>,
     },
     ToolCall {
         turn: u32,
@@ -195,6 +257,12 @@ pub enum SessionEvent {
         is_error: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         error: Option<String>,
+        /// 工具内部失败身份(对齐 dsh `tool/result.error{name,code}`);None = 无内部标识。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error_identity: Option<ToolFailureIdentity>,
+        /// 工具私有展示载荷(对齐 dsh `tool/result.meta`);核心不解释其形状。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        meta: Option<serde_json::Value>,
     },
     /// Whole-list todo snapshot; latest write wins on replay. Log-only UI
     /// state — never part of the derived model history.
@@ -218,6 +286,41 @@ pub enum SessionEvent {
     ApprovalDecided {
         request_id: String,
         outcome: ApprovalOutcome,
+    },
+    /// 下一个模型请求的完整头部快照(对齐 dsh `request/header`),在其 step
+    /// 内、请求 dispatch 之前落盘。仅日志;最近的快照重建请求形态。
+    /// 按 dsh 语义按需写入:日志无 header 时写 `initial`,loop 恢复时写
+    /// `resume`,header 与上次不同时写 `change`(带 `starts_series`),
+    /// 相同则不重复写。
+    RequestHeader {
+        turn: u32,
+        step: u32,
+        header: RequestHeaderSnapshot,
+        reason: RequestHeaderReason,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        starts_series: bool,
+    },
+    /// 下一个请求的路由元数据(对齐 dsh `request/context`):仅在路由或
+    /// 容量(上下文窗口)变化时记录;不参与请求重建与 header 相等性判断。
+    RequestContext {
+        turn: u32,
+        step: u32,
+        provider: String,
+        model: String,
+        /// 路由通告的最大上下文(输入+输出,token);未通告时缺省。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        context_window: Option<u64>,
+    },
+    /// 一次模型请求重试尝试的轨迹(对齐 dsh llm-retry 的事件化重试):
+    /// 提供方抖动时 harness 按退避重发,每次尝试失败落一条。仅日志,
+    /// 不进入模型历史;`delay_ms` 是本次失败后的退避(下一次尝试前等待)。
+    RetryAttempt {
+        turn: u32,
+        step: u32,
+        attempt: u32,
+        code: String,
+        message: String,
+        delay_ms: u64,
     },
 }
 
@@ -455,6 +558,7 @@ mod tests {
                     ],
                     usage: None,
                     interrupted: false,
+                    source_event_seqs: vec![4],
                 },
             ),
             envelope(
@@ -476,6 +580,8 @@ mod tests {
                     content: "exit code: 0".into(),
                     is_error: false,
                     error: None,
+                    error_identity: None,
+                    meta: None,
                 },
             ),
             envelope(
@@ -491,6 +597,7 @@ mod tests {
                         reasoning_tokens: None,
                     }),
                     interrupted: false,
+                    source_event_seqs: Vec::new(),
                 },
             ),
             envelope(
@@ -527,6 +634,7 @@ mod tests {
                     blocks: vec![],
                     usage: Some(TokenUsage::default()),
                     interrupted: false,
+                    source_event_seqs: Vec::new(),
                 },
             ),
             envelope(
@@ -541,6 +649,7 @@ mod tests {
                     }],
                     usage: None,
                     interrupted: true,
+                    source_event_seqs: Vec::new(),
                 },
             ),
         ];
@@ -565,6 +674,123 @@ mod tests {
         );
     }
 
+    #[test]
+    fn aborted_cause_round_trips_and_legacy_json_still_loads() {
+        // 新版:带取消来源。
+        let with_cause = TurnEndReason::Aborted {
+            cause: Some(AbortCause::User),
+        };
+        let json = serde_json::to_string(&with_cause).unwrap();
+        assert_eq!(json, r#"{"kind":"aborted","cause":{"kind":"user"}}"#);
+        assert_eq!(
+            serde_json::from_str::<TurnEndReason>(&json).unwrap(),
+            with_cause
+        );
+        // 旧日志:{"kind":"aborted"} 无 cause → 兼容加载为 None。
+        let legacy = serde_json::from_str::<TurnEndReason>(r#"{"kind":"aborted"}"#).unwrap();
+        assert_eq!(
+            legacy,
+            TurnEndReason::Aborted { cause: None }
+        );
+        // 输出保持旧形状(无 cause 不写字段)。
+        assert_eq!(serde_json::to_string(&legacy).unwrap(), r#"{"kind":"aborted"}"#);
+    }
+
+    #[test]
+    fn interrupted_orphan_close_round_trips() {
+        let reason = TurnEndReason::Interrupted;
+        let json = serde_json::to_string(&reason).unwrap();
+        assert_eq!(json, r#"{"kind":"interrupted"}"#);
+        assert_eq!(
+            serde_json::from_str::<TurnEndReason>(&json).unwrap(),
+            reason
+        );
+    }
+
+    #[test]
+    fn request_header_and_context_round_trip() {
+        let header = RequestHeaderSnapshot {
+            config: LlmCallConfig {
+                provider: "cat".into(),
+                model: "glm-5.3-flash".into(),
+                reasoning_effort: Some("xhigh".into()),
+                temperature: None,
+                max_tokens: None,
+                stop: Vec::new(),
+            },
+            system: Some("你是 agent".into()),
+            tools: vec![ToolSchema {
+                name: "bash".into(),
+                description: "run a command".into(),
+                parameters: serde_json::json!({ "type": "object" }),
+            }],
+        };
+        let env = envelope(
+            3,
+            SessionEvent::RequestHeader {
+                turn: 1,
+                step: 1,
+                header: header.clone(),
+                reason: RequestHeaderReason::Initial,
+                starts_series: false,
+            },
+        );
+        let json = serde_json::to_string(&env).unwrap();
+        // 类型标签与关键信息必须可见。
+        assert!(json.contains(r#""type":"request-header""#));
+        assert!(json.contains(r#""provider":"cat""#));
+        assert!(json.contains(r#""reason":"initial""#));
+        assert!(!json.contains("startsSeries"));
+        assert_eq!(
+            serde_json::from_str::<SessionEnvelope>(&json).unwrap(),
+            env
+        );
+
+        let ctx = envelope(
+            4,
+            SessionEvent::RequestContext {
+                turn: 1,
+                step: 1,
+                provider: "cat".into(),
+                model: "glm-5.3-flash".into(),
+                context_window: Some(1_000_000),
+            },
+        );
+        let ctx_json = serde_json::to_string(&ctx).unwrap();
+        assert!(ctx_json.contains(r#""type":"request-context""#));
+        assert_eq!(
+            serde_json::from_str::<SessionEnvelope>(&ctx_json).unwrap(),
+            ctx
+        );
+    }
+
+    #[test]
+    fn tool_result_identity_and_meta_round_trip() {
+        let env = envelope(
+            7,
+            SessionEvent::ToolResult {
+                turn: 1,
+                step: 1,
+                call_id: "c1".into(),
+                content: "exit code: 0".into(),
+                is_error: false,
+                error: None,
+                error_identity: Some(ToolFailureIdentity {
+                    name: "bash".into(),
+                    code: "SANDBOX_DENIED".into(),
+                }),
+                meta: Some(serde_json::json!({ "diff": "…" })),
+            },
+        );
+        let json = serde_json::to_string(&env).unwrap();
+        assert!(json.contains(r#""error_identity":{"name":"bash","code":"SANDBOX_DENIED"}"#));
+        assert!(json.contains(r#""meta":{"diff":"…"}"#));
+        assert_eq!(
+            serde_json::from_str::<SessionEnvelope>(&json).unwrap(),
+            env
+        );
+    }
+
     /// 两轮完整对话:1 turn-start, 2 user, 3 assistant, 4 turn-end,
     /// 5 turn-start, 6 user, 7 assistant, 8 turn-end。
     fn two_turn_log() -> Vec<SessionEnvelope> {
@@ -579,6 +805,7 @@ mod tests {
                     blocks: vec![ContentBlock::Text { text: "hi".into() }],
                     usage: None,
                     interrupted: false,
+                    source_event_seqs: Vec::new(),
                 },
             ),
             envelope(4, SessionEvent::TurnEnd { turn: 1, reason: TurnEndReason::Completed }),
@@ -592,6 +819,7 @@ mod tests {
                     blocks: vec![ContentBlock::Text { text: "done".into() }],
                     usage: None,
                     interrupted: false,
+                    source_event_seqs: Vec::new(),
                 },
             ),
             envelope(8, SessionEvent::TurnEnd { turn: 2, reason: TurnEndReason::Completed }),
