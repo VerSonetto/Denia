@@ -595,6 +595,8 @@ function endReasonLabel(reason: NonNullable<TrajectoryGroup['endReason']>): stri
       return t('reasonMaxTokens')
     case 'error':
       return t('reasonError')
+    case 'interrupted':
+      return t('reasonInterrupted')
     default:
       return t('reasonCompleted')
   }

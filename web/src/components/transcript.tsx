@@ -417,7 +417,9 @@ function TurnChrome({
         ? t('reasonAborted')
         : reason.kind === 'max-tokens'
           ? t('reasonMaxTokens')
-          : `${t('reasonError')}: [${reason.failure.code}] ${reason.failure.message}`
+          : reason.kind === 'interrupted'
+            ? t('reasonInterrupted')
+            : `${t('reasonError')}: [${reason.failure?.code ?? 'unknown'}] ${reason.failure?.message ?? ''}`
   const cls =
     reason.kind === 'completed' ? '' : reason.kind === 'error' ? 'err' : 'warn'
   return (
