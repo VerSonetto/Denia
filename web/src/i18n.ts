@@ -111,6 +111,7 @@ const zh = {
 
   defaultModelTitle: '默认模型',
   defaultModelHint: '新会话默认使用的模型。点"保存"后生效。',
+  modelProvidersLabel: '供应商',
   providerLabel: '提供方',
   modelLabel: '模型',
   reasoningLabel: '推理强度',
@@ -458,6 +459,7 @@ const en: typeof zh = {
 
   defaultModelTitle: 'Default model',
   defaultModelHint: 'Used by new sessions. Takes effect after saving.',
+  modelProvidersLabel: 'Providers',
   providerLabel: 'Provider',
   modelLabel: 'Model',
   reasoningLabel: 'Reasoning effort',

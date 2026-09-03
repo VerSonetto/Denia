@@ -1862,35 +1862,40 @@ button {
   min-width: 0;
 }
 
+/* ---- 模型级联菜单:一级供应商列 / 二级模型列 ---- */
+
 .model-menu {
   position: absolute;
   bottom: calc(100% + 8px);
   left: 0;
   z-index: 53;
-  width: min(320px, calc(100vw - 48px));
-  max-height: min(420px, 60vh);
+  min-width: 232px;
   display: flex;
   flex-direction: column;
   background: var(--bg-layer-2);
   border: 1px solid var(--border-l2);
   border-radius: var(--r-md);
-  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.35);
+  box-shadow: var(--shadow-float);
   overflow: hidden;
+  animation: model-menu-in 0.16s var(--ease);
+}
+
+/* 两列共用上限;二级另用 --menu-h(组件测得的一级总高)锁同高顶对齐。 */
+.model-menu,
+.model-menu-sub {
+  max-height: min(440px, 62vh);
 }
 
 .model-menu-scroll {
+  flex: 1;
+  min-height: 0;
   overflow-y: auto;
   padding: 6px;
 }
 
-.model-menu-section + .model-menu-section {
-  margin-top: 4px;
-  padding-top: 4px;
-  border-top: 1px solid var(--border-l1);
-}
-
 .model-menu-heading {
-  padding: 6px 8px 4px;
+  flex: none;
+  padding: 9px 12px 5px;
   font-size: 11px;
   font-weight: 600;
   letter-spacing: 0.04em;
@@ -1898,13 +1903,127 @@ button {
   color: var(--label-caption);
 }
 
+/* 一级:供应商条目 */
+.model-menu-provider {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  padding: 7px 9px;
+  border: none;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--label-secondary);
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 20px;
+  cursor: pointer;
+  text-align: left;
+  transition: background 0.12s var(--ease), color 0.12s var(--ease);
+}
+
+.model-menu-provider:hover,
+.model-menu-provider.kb {
+  background: var(--hover-fill);
+  color: var(--label-primary);
+}
+
+.model-menu-provider.active {
+  background: var(--active-fill);
+  color: var(--label-primary);
+}
+
+.model-menu-provider .glyph {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  flex: none;
+  border-radius: 7px;
+  background: var(--accent-soft);
+  color: var(--label-secondary);
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.model-menu-provider.active .glyph,
+.model-menu-provider.expanded .glyph {
+  color: var(--label-primary);
+}
+
+.model-menu-provider .name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.model-menu-provider .mark {
+  display: inline-flex;
+  flex: none;
+  color: var(--label-primary);
+}
+
+.model-menu-provider .chev {
+  display: inline-flex;
+  flex: none;
+  color: var(--label-caption);
+  transition: color 0.12s var(--ease);
+}
+
+.model-menu-provider.expanded .chev {
+  color: var(--label-primary);
+}
+
+/* 二级:模型列(与一级同高、顶对齐,右侧放不下时翻到左侧) */
+.model-menu-sub {
+  position: absolute;
+  bottom: calc(100% + 8px);
+  left: calc(var(--menu-w, 100%) + 6px);
+  z-index: 54;
+  width: 304px;
+  height: var(--menu-h, auto);
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-layer-2);
+  border: 1px solid var(--border-l2);
+  border-radius: var(--r-md);
+  box-shadow: var(--shadow-float);
+  overflow: hidden;
+  animation: model-sub-in 0.16s var(--ease);
+}
+
+.model-menu-sub.flip {
+  left: auto;
+  right: calc(100% + 6px);
+  animation-name: model-sub-in-flip;
+}
+
+/* 模型条目:名称行 + 徽标 + 描述 + 思考强度分段 */
+.model-menu-model {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  border-radius: var(--r-sm);
+}
+
+.model-menu-model + .model-menu-model {
+  margin-top: 2px;
+}
+
+.model-menu-model.active {
+  background: var(--active-fill);
+}
+
 .model-menu-item {
   display: flex;
   flex-direction: column;
-  align-items: flex-start;
+  align-items: stretch;
   gap: 2px;
   width: 100%;
-  padding: 8px 10px;
+  padding: 6px 8px;
   border: none;
   border-radius: var(--r-sm);
   background: transparent;
@@ -1914,60 +2033,153 @@ button {
   cursor: pointer;
 }
 
-.model-menu-item:hover {
+.model-menu-item:hover,
+.model-menu-item.kb {
   background: var(--hover-fill);
   color: var(--label-primary);
 }
 
-.model-menu-item.active {
-  background: var(--active-fill);
+.model-menu-model.active .model-menu-item {
   color: var(--label-primary);
 }
 
+.model-menu-item .row1 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
 .model-menu-item .name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   font-weight: 600;
+}
+
+.model-menu-item .meta {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+  color: var(--label-caption);
+}
+
+.model-menu-item .think {
+  display: inline-flex;
+}
+
+.model-menu-item .ctx {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+}
+
+.model-menu-item .check {
+  display: inline-flex;
+  color: var(--label-primary);
 }
 
 .model-menu-item .hint {
   font-size: 11px;
   color: var(--label-tertiary);
-  line-height: 1.35;
+  line-height: 1.4;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
 }
 
-.model-menu-efforts {
-  padding: 8px 10px 10px;
-  border-top: 1px solid var(--border-l1);
-  background: var(--bg-layer-1);
-}
-
-.effort-row {
+/* 条目内思考强度分段控件(紧凑版,只对支持档位的模型渲染) */
+.mm-effort-row {
   display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  padding-top: 4px;
+  align-items: center;
+  gap: 8px;
+  padding: 0 8px 4px;
 }
 
-.effort-chip {
-  height: 26px;
-  padding: 0 10px;
+.mm-effort-label {
+  flex: none;
+  font-size: 10.5px;
+  color: var(--label-caption);
+}
+
+.mm-effort-seg {
+  display: inline-flex;
+  gap: 2px;
+  padding: 2px;
+  border-radius: 8px;
+  background: var(--bg-layer-3);
   border: 1px solid var(--border-l1);
-  border-radius: 999px;
-  background: transparent;
-  color: var(--label-secondary);
-  font-size: 12px;
-  cursor: pointer;
 }
 
-.effort-chip:hover {
+.mm-effort-btn {
+  border: none;
+  background: transparent;
+  color: var(--label-tertiary);
+  font-size: 11px;
+  font-weight: 550;
+  line-height: 1;
+  padding: 4px 9px;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background 0.12s var(--ease), color 0.12s var(--ease);
+}
+
+.mm-effort-btn:hover {
   background: var(--hover-fill);
   color: var(--label-primary);
 }
 
-.effort-chip.active {
+.mm-effort-btn.active {
   background: var(--label-primary);
-  border-color: var(--label-primary);
   color: var(--bg-base);
 }
+
+/* chip 展开时 chevron 转向上方 */
+.model-chip > svg {
+  transition: transform 0.15s var(--ease);
+}
+
+.model-chip.open > svg {
+  transform: rotate(-90deg);
+}
+
+@keyframes model-menu-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes model-sub-in {
+  from {
+    opacity: 0;
+    transform: translateX(-4px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes model-sub-in-flip {
+  from {
+    opacity: 0;
+    transform: translateX(4px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
 
 .tool-row .disc-head .summary {
   font-family: inherit;
