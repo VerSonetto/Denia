@@ -1720,6 +1720,38 @@ button {
   cursor: pointer;
 }
 
+/* 优化进行中:输入框银光呼吸,锁定编辑状态。 */
+.prompt-panel.optimizing {
+  border-color: rgba(210, 220, 255, 0.28);
+  box-shadow:
+    0 0 0 1px rgba(210, 220, 255, 0.18),
+    0 0 22px rgba(200, 215, 255, 0.22),
+    var(--shadow-lv2);
+  animation: optimize-glow 1.6s ease-in-out infinite;
+}
+
+.prompt-panel.optimizing textarea {
+  color: var(--label-secondary);
+  cursor: wait;
+  text-shadow: 0 0 14px rgba(210, 225, 255, 0.35);
+}
+
+@keyframes optimize-glow {
+  0%,
+  100% {
+    box-shadow:
+      0 0 0 1px rgba(210, 220, 255, 0.16),
+      0 0 16px rgba(200, 215, 255, 0.16),
+      var(--shadow-lv2);
+  }
+  50% {
+    box-shadow:
+      0 0 0 1px rgba(210, 220, 255, 0.3),
+      0 0 34px rgba(200, 215, 255, 0.32),
+      var(--shadow-lv2);
+  }
+}
+
 .prompt-bar {
   display: flex;
   flex-wrap: wrap;
@@ -3415,6 +3447,52 @@ button.btn.form-action {
 
 .composer-upload-btn.icon-btn:hover {
   color: var(--label-primary);
+}
+
+.composer-opt-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 4px;
+  border: none;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--label-secondary);
+  cursor: pointer;
+  transition:
+    background 0.15s var(--ease),
+    color 0.15s var(--ease),
+    opacity 0.15s var(--ease);
+}
+
+.composer-opt-btn:hover:not(:disabled) {
+  background: var(--hover-fill);
+  color: var(--label-primary);
+}
+
+.composer-opt-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.composer-opt-btn.undo {
+  color: var(--label-primary);
+}
+
+.composer-opt-btn.busy {
+  animation: pulse 1.2s var(--ease) infinite;
+}
+
+.composer-opt-btn.busy svg {
+  animation: composer-spin 1s linear infinite;
+}
+
+@keyframes composer-spin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 .context-ring-wrap {

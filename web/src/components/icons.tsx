@@ -316,6 +316,41 @@ export function IconCollapseAll(props: IconProps) {
   )
 }
 
+/** 提示词优化:魔法/星芒,表示“优化”。 */
+export function IconSparkles(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <path
+        d="M6 2.5 7 5.2l2.7 1-2.7 1-1 2.7-1-2.7-2.7-1 2.7-1L6 2.5Z"
+        stroke="currentColor"
+        strokeWidth="1.2"
+        strokeLinejoin="round"
+      />
+      <path
+        d="m11.8 9.6.55 1.45 1.45.55-1.45.55-.55 1.45-.55-1.45-1.45-.55 1.45-.55.55-1.45Z"
+        fill="currentColor"
+      />
+    </Svg>
+  )
+}
+
+/** 优化进行中:旋转弧形 loading 图标。 */
+export function IconSpinner(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <circle
+        cx="8"
+        cy="8"
+        r="5.5"
+        stroke="currentColor"
+        strokeWidth="1.4"
+        strokeLinecap="round"
+        strokeDasharray="8 20"
+      />
+    </Svg>
+  )
+}
+
 export function IconPrompt(props: IconProps) {
   return (
     <Svg {...props}>

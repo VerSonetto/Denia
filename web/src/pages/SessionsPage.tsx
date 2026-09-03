@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ClipboardEvent, type KeyboardEvent, type WheelEvent } from 'react'
 import * as api from '../api'
+import { optimizePromptText } from '../promptOptimizer'
 import {
   addSessionLocal,
   ensureSession,
@@ -34,7 +35,10 @@ import {
   IconImage,
   IconPlus,
   IconPaperclip,
+  IconRewind,
   IconSend,
+  IconSparkles,
+  IconSpinner,
   IconStop,
 } from '../components/icons'
 import { resolveSessionReasoningEffort } from '../modelCatalog'
@@ -103,6 +107,11 @@ export default function SessionsPage({
   const [selection, setSelection] = useState<ModelSelection | null>(null)
   const [wsMenuOpen, setWsMenuOpen] = useState(false)
   const [sending, setSending] = useState(false)
+  const [optimizing, setOptimizing] = useState(false)
+  const [optimizedPrompt, setOptimizedPrompt] = useState<string | null>(null)
+  const originalPromptRef = useRef('')
+  const optimizeAbortRef = useRef<AbortController | null>(null)
+  const optimizingRef = useRef(false)
   const [scrollTick, setScrollTick] = useState(0)
   const [atBottom, setAtBottom] = useState(true)
   // 已发送未获服务端确认的用户消息(乐观行)。
@@ -142,6 +151,12 @@ export default function SessionsPage({
   }
 
   useEffect(() => {
+    optimizeAbortRef.current?.abort()
+    optimizeAbortRef.current = null
+    optimizingRef.current = false
+    setOptimizing(false)
+    setOptimizedPrompt(null)
+    originalPromptRef.current = ''
     setPrompt('')
     setSending(false)
     setPendingMessages([])
@@ -316,6 +331,7 @@ export default function SessionsPage({
 
   const handlePaste = useCallback(
     async (event: ClipboardEvent<HTMLTextAreaElement>) => {
+      if (optimizing) return
       const items = event.clipboardData?.items
       if (!items) return
       const imageItems = Array.from(items).filter(
@@ -349,7 +365,7 @@ export default function SessionsPage({
         }
       }
     },
-    [ensureVision, readFileAsDataUrl],
+    [ensureVision, readFileAsDataUrl, optimizing],
   )
 
   const onPickFiles = useCallback((event: React.ChangeEvent<HTMLInputElement>) => {
@@ -511,6 +527,51 @@ export default function SessionsPage({
     notify('ok', t('trajQuoted'))
   }, [])
 
+  /* ---- 提示词优化:当前模型 + 最近 5 轮上下文,支持一键撤销 ---- */
+
+  const handleOptimize = async () => {
+    if (!activeId || !selection || optimizing || optimizingRef.current || inert || running || sending) return
+    const original = prompt
+    if (!original.trim()) return
+    const sessionId = activeId
+    const controller = new AbortController()
+    optimizeAbortRef.current?.abort()
+    optimizeAbortRef.current = controller
+    optimizingRef.current = true
+    originalPromptRef.current = original
+    setOptimizedPrompt(null)
+    setOptimizing(true)
+    try {
+      const optimized = await optimizePromptText({
+        sessionId,
+        prompt: original,
+        selection,
+        signal: controller.signal,
+      })
+      if (activeId !== sessionId || optimizeAbortRef.current !== controller) return
+      setPrompt(optimized)
+      setOptimizedPrompt(optimized)
+      syncPromptHeight()
+      notify('ok', t('optimizeDone'))
+    } catch (error) {
+      if (controller.signal.aborted || optimizeAbortRef.current !== controller) return
+      notify('err', error instanceof Error ? error.message : String(error))
+    } finally {
+      if (optimizeAbortRef.current === controller) {
+        optimizeAbortRef.current = null
+        optimizingRef.current = false
+        setOptimizing(false)
+      }
+    }
+  }
+
+  const handleUndoOptimize = () => {
+    if (!optimizedPrompt) return
+    setPrompt(originalPromptRef.current)
+    setOptimizedPrompt(null)
+    syncPromptHeight()
+  }
+
   const confirmRewind = useCallback(async () => {
     if (!activeId || !rewindReq || rewindBusy) return
     setRewindBusy(true)
@@ -518,6 +579,8 @@ export default function SessionsPage({
       const result = await api.rewindSession(activeId, rewindReq.seq)
       // 恢复目标消息文本/图片到输入框,方便修改后重发。
       setPrompt(result.toMessage ?? rewindReq.text)
+      setOptimizedPrompt(null)
+      originalPromptRef.current = ''
       if (rewindReq.images && rewindReq.images.length > 0) {
         setPastedImages(
           rewindReq.images.map((image) => ({
@@ -628,7 +691,7 @@ export default function SessionsPage({
     const trimmed = prompt.trim()
     const message =
       trimmed || (pastedImages.length > 0 ? t('pastedImageLabel') : '')
-    if (!message || sendingRef.current) return
+    if (optimizing || !message || sendingRef.current) return
     if (inert) {
       onOpenPicker()
       return
@@ -674,6 +737,8 @@ export default function SessionsPage({
       pushPending(message, sentImages.length > 0 ? sentImages : undefined)
       setRunningStatus(id, true)
       setPrompt('')
+      setOptimizedPrompt(null)
+      originalPromptRef.current = ''
       setPastedImages([])
       setAttachments([])
       setTrajQuotes([])
@@ -701,6 +766,7 @@ export default function SessionsPage({
   const onPromptKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
     if (event.key !== 'Enter' || event.shiftKey) return
     event.preventDefault()
+    if (optimizing) return
     if (primaryStops) {
       void stop()
       return
@@ -782,7 +848,7 @@ export default function SessionsPage({
 
   const composerCard = (
     <div
-      className={`prompt-panel${inert ? ' pick-target' : ''}`}
+      className={`prompt-panel${inert ? ' pick-target' : ''}${optimizing ? ' optimizing' : ''}`}
       onClick={inert ? onOpenPicker : undefined}
     >
       <ApprovalDialog request={approvalReq} onDecide={handleApproval} />
@@ -860,7 +926,8 @@ export default function SessionsPage({
           }
           value={prompt}
           aria-label={inert ? t('heroChooseWorkspace') : t('chatPlaceholder')}
-          readOnly={inert}
+          readOnly={inert || optimizing}
+          aria-readonly={optimizing}
           onChange={(event) => {
             setPrompt(event.target.value)
             syncPromptHeight()
@@ -884,7 +951,7 @@ export default function SessionsPage({
             <ComposerModelMenu
               catalog={catalog}
               selection={selection}
-              disabled={inert}
+              disabled={inert || optimizing}
               onChange={applySelection}
             />
           )}
@@ -901,10 +968,37 @@ export default function SessionsPage({
             type="button"
             className="icon-btn composer-upload-btn"
             title={t('uploadFile')}
-            disabled={inert}
+            disabled={inert || optimizing}
             onClick={() => fileInputRef.current?.click()}
           >
             <IconPaperclip size={16} />
+          </button>
+          <button
+            type="button"
+            className={`icon-btn composer-opt-btn${optimizedPrompt ? ' undo' : ''}${optimizing ? ' busy' : ''}`}
+            title={t('optimizePromptHint')}
+            aria-label={optimizing ? t('optimizing') : optimizedPrompt ? t('optimizeUndo') : t('optimizePrompt')}
+            disabled={
+              inert ||
+              optimizing ||
+              running ||
+              sending ||
+              !activeId ||
+              !selection ||
+              (!optimizedPrompt && !prompt.trim())
+            }
+            onClick={() => {
+              if (optimizedPrompt) handleUndoOptimize()
+              else void handleOptimize()
+            }}
+          >
+            {optimizing ? (
+              <IconSpinner size={16} />
+            ) : optimizedPrompt ? (
+              <IconRewind size={16} />
+            ) : (
+              <IconSparkles size={16} />
+            )}
           </button>
           <ContextRing
             contextWindow={activeContextWindow}
@@ -925,7 +1019,7 @@ export default function SessionsPage({
             <button
               type="button"
               className="btn-send"
-              disabled={promptEmpty || sending || inert}
+              disabled={promptEmpty || sending || optimizing || inert}
               onClick={() => void send()}
               title={t('run')}
             >

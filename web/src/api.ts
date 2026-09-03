@@ -169,6 +169,160 @@ async function parseSseBody(
   }
 }
 
+/* ---- llm chat (SSE, used by prompt optimization) ---- */
+
+export interface ChatMessageInput {
+  role: 'system' | 'user' | 'assistant'
+  content: string
+}
+
+export interface ChatCompletionOptions {
+  provider: string
+  model: string
+  reasoningEffort?: string
+  system?: string
+  messages: ChatMessageInput[]
+}
+
+/** 优化类长请求允许更长的等待时间(流式,非 15s 默认)。 */
+const CHAT_TIMEOUT_MS = 120_000
+
+interface ChatStreamPayload {
+  type?: string
+  text?: string
+  block?: { type?: string; text?: string }
+  reason?: { kind?: string; failure?: { code?: string; message?: string } }
+  code?: string
+  message?: string
+}
+
+/** Calls the SSE chat smoke-test endpoint and resolves with complete text. */
+export async function chatCompletion(
+  options: ChatCompletionOptions,
+  signal?: AbortSignal,
+): Promise<string> {
+  const controller = new AbortController()
+  let timedOut = false
+  const timer = window.setTimeout(() => {
+    timedOut = true
+    controller.abort()
+  }, CHAT_TIMEOUT_MS)
+  const onOuterAbort = () => controller.abort()
+  if (signal) {
+    if (signal.aborted) controller.abort()
+    else signal.addEventListener('abort', onOuterAbort, { once: true })
+  }
+  try {
+    let response: Response
+    try {
+      response = await fetch('/api/llm/chat', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          provider: options.provider,
+          model: options.model,
+          reasoningEffort: options.reasoningEffort,
+          system: options.system,
+          messages: options.messages.map(({ role, content }) => ({ role, content })),
+        }),
+        signal: controller.signal,
+      })
+    } catch (error) {
+      if (controller.signal.aborted) {
+        throw new ApiError(
+          timedOut ? 'chat/timeout' : 'chat/aborted',
+          timedOut ? '模型请求超时' : '模型请求已取消',
+          timedOut ? 504 : 499,
+        )
+      }
+      throw error
+    }
+    if (!response.ok) {
+      let code = `http-${response.status}`
+      let message = response.statusText
+      try {
+        const body = await response.json()
+        if (body?.error) {
+          code = body.error.code ?? code
+          message = body.error.message ?? message
+        }
+      } catch {
+        /* body was not JSON */
+      }
+      throw new ApiError(code, message, response.status)
+    }
+    if (!response.body) {
+      throw new ApiError('chat/empty-body', '模型没有返回内容', 500)
+    }
+    const reader = response.body.getReader()
+    const decoder = new TextDecoder()
+    let buffer = ''
+    let isError = false
+    let text = ''
+    let failure: { code?: string; message?: string } | null = null
+    for (;;) {
+      const { done, value } = await reader.read()
+      if (done) break
+      buffer += decoder.decode(value, { stream: true })
+      const lines = buffer.split('\n')
+      buffer = lines.pop() ?? ''
+      for (const line of lines) {
+        const trimmed = line.trimEnd()
+        if (trimmed.startsWith('event:')) {
+          isError = trimmed.slice(6).trim() === 'error'
+        } else if (trimmed.startsWith('data:')) {
+          const payload = trimmed.slice(5).trim()
+          if (!payload) continue
+          let parsed: ChatStreamPayload
+          try {
+            parsed = JSON.parse(payload) as ChatStreamPayload
+          } catch {
+            continue
+          }
+          if (isError) {
+            failure = parsed as { code?: string; message?: string }
+            isError = false
+            continue
+          }
+          if (parsed.type === 'text-delta' && typeof parsed.text === 'string') {
+            text += parsed.text
+          } else if (
+            parsed.type === 'block-end' &&
+            parsed.block?.type === 'text' &&
+            typeof parsed.block.text === 'string'
+          ) {
+            text = parsed.block.text
+          } else if (parsed.type === 'finish') {
+            const kind = parsed.reason?.kind
+            if (kind && kind !== 'stop') {
+              failure = parsed.reason?.failure ?? { message: '模型输出失败' }
+            }
+          }
+        }
+      }
+      if (controller.signal.aborted) break
+    }
+    if (controller.signal.aborted) {
+      throw new ApiError(
+        timedOut ? 'chat/timeout' : 'chat/aborted',
+        timedOut ? '模型请求超时' : '模型请求已取消',
+        timedOut ? 504 : 499,
+      )
+    }
+    if (failure) {
+      throw new ApiError(
+        failure.code ?? 'chat/failed',
+        failure.message ?? '模型调用失败',
+        500,
+      )
+    }
+    return text.trim()
+  } finally {
+    window.clearTimeout(timer)
+    signal?.removeEventListener('abort', onOuterAbort)
+  }
+}
+
 /* ---- sessions ---- */
 
 export function listSessions(): Promise<{ sessions: SessionSummary[] }> {
