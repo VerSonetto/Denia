@@ -30,8 +30,10 @@ use denia_core::message::ChatMessage;
 use denia_core::stream::ContentBlock;
 use denia_core::session::{
     ApprovalPolicy, PermissionMode, SessionEnvelope, SessionEvent, SessionHeader,
-    SessionHeaderKind, TurnEndReason, SESSION_FORMAT_VERSION, approval_policy_for, derive_messages,
+    SessionHeaderKind, TurnEndReason, SESSION_FORMAT_VERSION, ToolResultPruneConfig,
+    approval_policy_for, derive_messages, derive_messages_projected, prune_text,
 };
+pub use denia_core::session::PRUNE_MARKER;
 use denia_token_meter::{ContextBreakdown, ContextMeter, ContextPressure, TurnTokenUsage};
 use thiserror::Error;
 
@@ -68,30 +70,6 @@ pub struct RewindOutcome {
     pub removed_events: usize,
 }
 
-/// 工具结果剪枝配置(对齐 dsh `compaction-tool-result-pruner` 默认值)。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ToolResultPruneConfig {
-    /// 超过该字符数(Unicode code point)的工具结果才剪。
-    pub threshold_chars: usize,
-    /// 剪枝后保留的头部字符数。
-    pub head_chars: usize,
-    /// 剪枝后保留的尾部字符数。
-    pub tail_chars: usize,
-}
-
-impl Default for ToolResultPruneConfig {
-    fn default() -> Self {
-        Self {
-            threshold_chars: 8_192,
-            head_chars: 4_096,
-            tail_chars: 1_024,
-        }
-    }
-}
-
-/// 剪枝替换的中间省略标记(原样抄 dsh `PRUNE_MARKER`)。
-pub const PRUNE_MARKER: &str = "\n\n[... tool result middle pruned ...]\n\n";
-
 /// 一条实际落地的工具结果剪枝。
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct PrunedToolResult {
@@ -107,22 +85,6 @@ fn now_millis() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0)
-}
-
-/// 按 Unicode code point 对工具结果做 head + marker + tail 剪枝(对齐 dsh
-/// `pruneContent`)。未超过阈值返回 `None`。
-fn prune_content(content: &str, config: &ToolResultPruneConfig) -> Option<String> {
-    let chars: Vec<char> = content.chars().collect();
-    let total = chars.len();
-    if total <= config.threshold_chars {
-        return None;
-    }
-    let head_end = config.head_chars.min(total);
-    let tail_start = total.saturating_sub(config.tail_chars).max(head_end);
-    let mut out: String = chars[..head_end].iter().collect();
-    out.push_str(PRUNE_MARKER);
-    out.extend(chars[tail_start..].iter());
-    Some(out)
 }
 
 /// 文件尺寸/修改时间戳:索引失效校验的签名。
@@ -664,6 +626,18 @@ impl Session {
         derive_messages(&inner.events)
     }
 
+    /// 带投影的模型历史派生:压力闸门开启时传 `Some(config)`,超预算工具
+    /// 结果以 head/marker/tail 投影(不落盘,日志保持 append-only);低压力
+    /// 传 `None` 原文直出,provider 前缀缓存不被破坏。
+    /// 同时折叠 `compaction-summary` 事件(LLM 压缩区间 → 摘要消息)。
+    pub fn derive_messages_projected(
+        &self,
+        projection: Option<&ToolResultPruneConfig>,
+    ) -> Vec<ChatMessage> {
+        let inner = self.inner.lock().unwrap_or_else(|poison| poison.into_inner());
+        derive_messages_projected(&inner.events, projection)
+    }
+
     /// 当前 surface 中仍然有效的 tool-result 事件快照(已折叠剪枝替换)。
     /// 供工具结果剪枝器扫描历史,避免把已被替换的旧结果再剪一遍。
     pub fn surface_tool_results(&self) -> Vec<SessionEnvelope> {
@@ -712,7 +686,7 @@ impl Session {
             else {
                 continue;
             };
-            let Some(new_content) = prune_content(&content, config) else {
+            let Some(new_content) = prune_text(&content, config) else {
                 continue;
             };
             let chars_after = new_content.chars().count();

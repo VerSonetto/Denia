@@ -331,6 +331,28 @@ impl ContextMeter {
                 }
                 self.fold_message_add(envelope.seq, tokens);
             }
+            SessionEvent::CompactionSummary {
+                summary,
+                replaces_from,
+                replaces_to,
+                ..
+            } => {
+                // LLM 总结压缩:被压缩区间的事件不再占据表面,摘要消息
+                // 代替它们计价(对齐 Claude Code compact:日志保留旧事件,
+                // 表面只投影新形态)。
+                let mut removed = 0u64;
+                self.surface_nodes.retain(|seq, tokens| {
+                    if *seq >= *replaces_from && *seq <= *replaces_to {
+                        removed = removed.saturating_add(*tokens);
+                        false
+                    } else {
+                        true
+                    }
+                });
+                self.surface_tokens = self.surface_tokens.saturating_sub(removed);
+                let message = ChatMessage::user(summary);
+                self.fold_message_add(envelope.seq, estimate_message(&message));
+            }
             _ => {}
         }
     }
