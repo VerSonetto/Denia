@@ -1219,7 +1219,7 @@ mod tests {
     #[test]
     fn derive_projection_trims_over_budget_tool_results_only() {
         // 合法预算:head + marker + tail 必须 ≤ threshold(dsh 校验语义);
-        // 原文 96 > threshold 70,剪后 head24 + marker33 + tail8 = 65。
+        // 原文 96 > threshold 70,剪后 head24 + marker39 + tail8 = 71。
         let config = ToolResultPruneConfig {
             threshold_chars: 70,
             head_chars: 24,
@@ -1263,7 +1263,7 @@ mod tests {
         assert_eq!(plain[2].content, long);
         // 有投影:head + marker + tail。无投影时一字不改。
         let projected = derive_messages_projected(&events, Some(&config));
-        assert_eq!(projected[2].content.chars().count(), 65);
+        assert_eq!(projected[2].content.chars().count(), 71);
         assert!(projected[2].content.starts_with(&"A".repeat(24)));
         assert!(projected[2].content.contains(PRUNE_MARKER));
         assert!(projected[2].content.ends_with(&"A".repeat(8)));
