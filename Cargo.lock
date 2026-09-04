@@ -508,6 +508,7 @@ dependencies = [
  "denia-llm",
  "denia-session",
  "denia-system-prompt",
+ "denia-token-meter",
  "denia-tools",
  "futures",
  "serde_json",

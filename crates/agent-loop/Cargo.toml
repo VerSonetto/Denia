@@ -10,6 +10,7 @@ denia-core = { workspace = true }
 denia-llm = { workspace = true }
 denia-session = { workspace = true }
 denia-system-prompt = { workspace = true }
+denia-token-meter = { workspace = true }
 denia-tools = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }

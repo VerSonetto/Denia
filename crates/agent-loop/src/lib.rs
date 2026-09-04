@@ -7,16 +7,18 @@
 //! authority. A turn whose appends fail mid-flight is left open; session
 //! load closes it with a synthetic aborted `turn-end`.
 
+mod compact;
 mod runtime_context;
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
 use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use denia_core::config::{LlmCallConfig, ModelSelection};
 use denia_core::error::{LlmFailure, codes};
-use denia_core::message::ToolCallRef;
+use denia_core::message::{ChatMessage, ToolCallRef};
 use denia_core::session::{
     AbortCause, ApprovalOutcome, PermissionMode, RequestHeaderReason, RequestHeaderSnapshot,
     SessionEnvelope, SessionEvent, TurnEndReason,
@@ -35,6 +37,12 @@ use denia_tools::{FileHistoryBackend, ToolContext, ToolRegistry};
 use futures::StreamExt;
 use runtime_context::RuntimeContextProjection;
 use tokio_util::sync::CancellationToken;
+
+pub use compact::{CompactOutcome, CompactionSettings};
+use compact::{
+    build_summary_messages, format_summary, prune_projection, rough_tokens, select_keep_start,
+    should_compact, truncate_head,
+};
 
 /// 文件历史提供者:server 侧实现,按会话提供备份句柄并在用户消息落库后
 /// 固化快照。`None` 表示该部署不启用文件回退。
@@ -235,6 +243,10 @@ pub struct SessionDriver {
     system_prompt: Arc<ArcSwap<SystemPrompt>>,
     file_history: Option<Arc<dyn FileHistoryProvider>>,
     approval: Option<Arc<dyn ApprovalBridge>>,
+    /// 层叠上下文管理:投影剪枝闸门 + LLM 总结压缩(学 dsh / Claude Code)。
+    compaction: CompactionSettings,
+    /// 连续压缩失败计数(熔断,学 Claude Code `MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES`)。
+    compact_failures: AtomicU32,
 }
 
 fn should_log_system_prompt(session: &Session, step: u32, text: &str) -> bool {
@@ -263,7 +275,172 @@ impl SessionDriver {
             system_prompt,
             file_history: None,
             approval: None,
+            compaction: CompactionSettings::default(),
+            compact_failures: AtomicU32::new(0),
         }
+    }
+
+    /// 覆盖层叠上下文管理配置(投影闸门 + LLM 压缩;默认值见
+    /// [`CompactionSettings::default`])。
+    pub fn with_compaction(mut self, settings: CompactionSettings) -> Self {
+        self.compaction = settings;
+        self
+    }
+
+    /// 当前层叠上下文管理配置(server 热更新用)。
+    pub fn compaction_settings(&self) -> CompactionSettings {
+        self.compaction.clone()
+    }
+
+    /// LLM 总结压缩(学 Claude Code compact):把 surface 中旧事件区间
+    /// 折叠成一条摘要。摘要请求复用主请求的 system + tools + 消息前缀
+    /// (学 `tengu_compact_cache_prefix` / `runForkedAgent`:前缀不变则
+    /// provider 缓存命中,压缩成本几乎只是增量)。
+    ///
+    /// 失败(PTL 等)时按 Claude Code `truncateHeadForPTLRetry` 丢最老约
+    /// 20% 消息重试,最多 `max_attempts` 次;仍失败返回 `Err`(调用方熔断)。
+    async fn compact_context(
+        &self,
+        session: &Arc<Session>,
+        selection: &ModelSelection,
+        framed_system: &str,
+        tools: &[denia_core::tool::ToolSchema],
+        turn: u32,
+        step: u32,
+        cancel: &CancellationToken,
+    ) -> Result<Option<CompactOutcome>, LlmFailure> {
+        let settings = self.compaction.clone();
+        let events = session.events();
+        // 压缩输入走投影口径:被压缩的历史里,超预算工具结果本来就是
+        // head/marker/tail(与闸门下的主请求同视角),摘要更省 token。
+        let surface = denia_core::session::derive_surface(&events, Some(&settings.prune));
+        let Some(keep_start) = select_keep_start(&surface, &settings) else {
+            return Ok(None);
+        };
+        let (compressed, kept) = surface.split_at(keep_start);
+        let pre_tokens = compressed
+            .iter()
+            .fold(0u64, |acc, item| acc.saturating_add(rough_tokens(&item.message)));
+        let post_tokens = kept
+            .iter()
+            .fold(0u64, |acc, item| acc.saturating_add(rough_tokens(&item.message)));
+
+        let mut attempt = 0u32;
+        let mut messages = build_summary_messages(compressed, "");
+        let mut summary: Option<String> = None;
+        while attempt < settings.max_attempts {
+            attempt += 1;
+            if cancel.is_cancelled() {
+                return Err(LlmFailure::new(
+                    codes::ABORTED,
+                    "compaction cancelled by user",
+                ));
+            }
+            let request = GenerateRequest {
+                model: selection.model.clone(),
+                reasoning_effort: selection.reasoning_effort.clone(),
+                messages: messages.clone(),
+                system: Some(framed_system.to_string()),
+                tools: tools.to_vec(),
+                temperature: Some(0.0),
+                max_tokens: Some(settings.summary_max_tokens),
+                stop: Vec::new(),
+            };
+            let stream = match self
+                .registry
+                .stream(&selection.provider, &request, None)
+                .await
+            {
+                Ok(stream) => stream,
+                Err(error) => {
+                    tracing::warn!(
+                        session_id = session.id(),
+                        error_code = %error.failure.code,
+                        attempt,
+                        "compaction summary request setup failed"
+                    );
+                    if attempt >= settings.max_attempts {
+                        return Err(error.failure);
+                    }
+                    messages = truncate_head(&messages, attempt);
+                    continue;
+                }
+            };
+            let mut stream = stream;
+            let mut text = String::new();
+            let mut stream_error: Option<LlmFailure> = None;
+            loop {
+                let next = tokio::select! {
+                    biased;
+                    _ = cancel.cancelled() => {
+                        return Err(LlmFailure::new(
+                            codes::ABORTED,
+                            "compaction cancelled by user",
+                        ));
+                    }
+                    item = stream.next() => item,
+                };
+                match next {
+                    Some(Ok(StreamChunk::TextDelta { text: delta, .. })) => {
+                        text.push_str(&delta);
+                    }
+                    Some(Ok(_)) => {}
+                    Some(Err(failure)) => {
+                        stream_error = Some(failure);
+                        break;
+                    }
+                    None => break,
+                }
+            }
+            if let Some(failure) = stream_error {
+                tracing::warn!(
+                    session_id = session.id(),
+                    error_code = %failure.code,
+                    error_message = %failure.message,
+                    attempt,
+                    "compaction summary stream failed"
+                );
+                if attempt >= settings.max_attempts || cancel.is_cancelled() {
+                    return Err(failure);
+                }
+                messages = truncate_head(&messages, attempt);
+                continue;
+            }
+            let formatted = format_summary(&text);
+            if formatted.is_empty() {
+                tracing::warn!(
+                    session_id = session.id(),
+                    attempt,
+                    "compaction summary produced no text"
+                );
+                if attempt >= settings.max_attempts {
+                    return Err(LlmFailure::new(
+                        codes::MALFORMED_RESPONSE,
+                        "compaction summary produced no text".to_string(),
+                    ));
+                }
+                messages = truncate_head(&messages, attempt);
+                continue;
+            }
+            summary = Some(formatted);
+            break;
+        }
+
+        let Some(summary) = summary else {
+            return Err(LlmFailure::new(
+                codes::UNKNOWN,
+                "compaction exhausted retries without a summary".to_string(),
+            ));
+        };
+        Ok(Some(CompactOutcome {
+            summary: summary.clone(),
+            replaces_from: compressed[0].seq,
+            replaces_to: compressed[compressed.len() - 1].seq,
+            keep_from: kept[0].seq,
+            pre_tokens,
+            // 摘要消息本身的开销按角色框 + 文本估算,并入压缩后占用。
+            post_tokens: post_tokens.saturating_add(rough_tokens(&ChatMessage::user(&summary))),
+        }))
     }
 
     /// 启用文件历史:回退功能依赖此提供者。
@@ -546,10 +723,63 @@ impl SessionDriver {
                 last_context = Some(context);
             }
 
+            // —— 层叠上下文管理(学 dsh 压力驱动剪枝 + Claude Code compact)——
+            // 1. 高压力:LLM 总结压缩,把旧事件区间折叠成摘要(落盘
+            //    compaction-summary,日志保持 append-only)。
+            // 2. 中压力:投影剪枝,派生历史时对超预算工具结果做
+            //    head/marker/tail(不落盘,请求前缀才稳定)。
+            // 3. 低压力:什么都不做 —— 请求内容与日志逐字一致,provider
+            //    前缀缓存持续命中。
+            let pressure = session.context_pressure();
+            if should_compact(&pressure, &self.compaction)
+                && self.compact_failures.load(Ordering::SeqCst) < self.compaction.max_attempts
+            {
+                match self
+                    .compact_context(&session, &selection, &framed_system, &assembly.tools, turn, step, &cancel)
+                    .await
+                {
+                    Ok(Some(outcome)) => {
+                        // 压缩成功:熔断清零,落盘事件由 append 广播给前端。
+                        self.compact_failures.store(0, Ordering::SeqCst);
+                        append(
+                            session,
+                            &emit,
+                            SessionEvent::CompactionSummary {
+                                turn,
+                                step,
+                                summary: outcome.summary,
+                                replaces_from: outcome.replaces_from,
+                                replaces_to: outcome.replaces_to,
+                                keep_from: outcome.keep_from,
+                                pre_tokens: outcome.pre_tokens,
+                                post_tokens: outcome.post_tokens,
+                            },
+                        )?;
+                    }
+                    Ok(None) => {
+                        // 无可压缩区间(历史太短/窗口选择失败):不计数。
+                    }
+                    Err(error) => {
+                        self.compact_failures.fetch_add(1, Ordering::SeqCst);
+                        tracing::warn!(
+                            session_id = session.id(),
+                            error_code = %error.code,
+                            error_message = %error.message,
+                            failures = self.compact_failures.load(Ordering::SeqCst),
+                            "llm compaction failed; skipping and continuing with full history"
+                        );
+                    }
+                }
+            }
+            // 压缩成功后压力已下降(compaction-summary 折叠进 meter),重新
+            // 决策投影闸门;低压力即原文直出。
+            let pressure = session.context_pressure();
+            let projection = prune_projection(&pressure, &self.compaction);
+
             let request = GenerateRequest {
                 model: selection.model.clone(),
                 reasoning_effort: selection.reasoning_effort.clone(),
-                messages: session.derive_messages(),
+                messages: session.derive_messages_projected(projection.as_ref()),
                 system: Some(framed_system.clone()),
                 tools: assembly.tools,
                 temperature: None,
@@ -1920,3 +2150,4 @@ fn text_script(text: &str) -> Vec<StreamChunk> {
         assert_eq!(chunk_seqs, *seqs);
     }
 }
+
