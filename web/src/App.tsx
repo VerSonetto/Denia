@@ -273,6 +273,39 @@ export default function App() {
     if (recent) connectWorkspace(recent)
   }, [workspaces, activeId, hashSettled, recentWorkspace, connectWorkspace])
 
+  /* ---- 空白会话不保留:离开即删 + 非活跃清扫 ---- */
+
+  const prevActiveIdRef = useRef<string | null>(null)
+  useEffect(() => {
+    const prev = prevActiveIdRef.current
+    prevActiveIdRef.current = activeId
+    if (prev === null || prev === activeId) return
+    // 焦点从空白会话切走:它没有任何内容,直接清理,不留账本残影。
+    const left = sessions.find((s) => s.id === prev)
+    if (left && isBlank(left)) {
+      deleteSessionAction(prev).catch(() => {
+        // 删除失败(如网络抖动):残留空白无害,非活跃清扫会兜底重试。
+      })
+    }
+  }, [activeId, sessions, isBlank])
+
+  // 兜底清扫:启动/列表刷新后,非活跃的空白会话(历史遗留、浏览器直接
+  // 关闭的残留)统一静默清掉;timer 推迟一拍,避免抢在启动自动落点的
+  // 空白复用之前动手。
+  useEffect(() => {
+    if (!sessionsLoaded) return
+    const timer = window.setTimeout(() => {
+      for (const s of sessions) {
+        if (s.id !== activeId && isBlank(s)) {
+          deleteSessionAction(s.id).catch(() => {
+            // 同上:删除失败静默留待下次机会,不打断用户操作。
+          })
+        }
+      }
+    }, 0)
+    return () => window.clearTimeout(timer)
+  }, [sessions, sessionsLoaded, activeId, isBlank])
+
   /* ---- 显式"新建会话" ---- */
 
   const startSession = useCallback(
@@ -288,11 +321,8 @@ export default function App() {
         setActiveId(null, null)
         return
       }
-      const blank = findWorkspaceBlank(target.path)
-      if (blank) {
-        focusSession(blank.id, target.id)
-        return
-      }
+      // 侧栏"新建会话"总是创建全新会话,不复用空白(空白由"离开即删"
+      // 与"非活跃清扫"自动清理,不会堆积)。
       try {
         const { session } = await api.createSession({ workspaceId: target.id })
         const summary: SessionSummary = {
@@ -310,7 +340,7 @@ export default function App() {
         notify('err', error instanceof Error ? error.message : String(error))
       }
     },
-    [workspaces, activeSession, recentWorkspace, focusSession],
+    [workspaces, activeSession, recentWorkspace],
   )
 
   /* ---- 目录流入口 ---- */
