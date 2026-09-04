@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { setLocale, t } from './i18n'
 import SessionsPage from './pages/SessionsPage'
 import * as api from './api'
@@ -37,8 +37,12 @@ import {
 } from './components/icons'
 import { DirPicker } from './components/DirPicker'
 import { ConfirmDialog } from './components/ConfirmDialog'
-import { SettingsModal } from './components/SettingsModal'
-import BrowserPanel from './components/BrowserPanel'
+
+// 设置/浏览器面板按需加载,减少首屏主包体积。
+const LazySettingsModal = lazy(() =>
+  import('./components/SettingsModal').then((module) => ({ default: module.SettingsModal })),
+)
+const LazyBrowserPanel = lazy(() => import('./components/BrowserPanel'))
 import { subscribeBrowserEvents } from './browserApi'
 import { sessionDisplayTitle } from './sessionDisplay'
 import type { SessionSummary, WorkspaceRecord } from './types'
@@ -562,20 +566,24 @@ export default function App() {
                 </button>
               </div>
               <div className="brw-body">
-                <BrowserPanel />
+                <Suspense fallback={<div className="empty-hint">{t('loading')}</div>}>
+                  <LazyBrowserPanel />
+                </Suspense>
               </div>
             </aside>
           )}
         </div>
       </main>
       {settingsOpen && (
-        <SettingsModal
-          notify={notify}
-          onClose={() => {
-            setSettingsOpen(false)
-            applyConsoleSettings()
-          }}
-        />
+        <Suspense fallback={<div className="empty-hint">{t('loading')}</div>}>
+          <LazySettingsModal
+            notify={notify}
+            onClose={() => {
+              setSettingsOpen(false)
+              applyConsoleSettings()
+            }}
+          />
+        </Suspense>
       )}
       {pickerOpen && (
         <DirPicker
@@ -670,12 +678,18 @@ function SidebarWorkspaces({
   const searchInputRef = useRef<HTMLInputElement>(null)
   const lastExpandTickRef = useRef(0)
 
+  // 10k 会话时避免每次 get/sessionIds 都做 O(n) find;一次建 Map,O(1) 取行。
+  const sessionsById = useMemo(
+    () => new Map(sessions.map((session) => [session.id, session])),
+    [sessions],
+  )
+
   const membersOf = useCallback(
     (ws: WorkspaceRecord) =>
       ws.sessionIds
-        .map((id) => sessions.find((s) => s.id === id))
+        .map((id) => sessionsById.get(id))
         .filter((s): s is SessionSummary => !!s && s.cwd === ws.path),
-    [sessions],
+    [sessionsById],
   )
 
   const ungrouped = sessions.filter((s) => !workspaces.some((w) => w.path === s.cwd))

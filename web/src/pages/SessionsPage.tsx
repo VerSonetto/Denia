@@ -16,7 +16,7 @@ import {
   useWorkspaces,
 } from '../appStore'
 import { t } from '../i18n'
-import { attach } from '../sessionStreams'
+import { attach, ensureFollowing } from '../sessionStreams'
 import { sessionDisplayTitle } from '../sessionDisplay'
 import type { TranscriptNode } from '../fold'
 import type { TrajectoryQuote } from '../trajectory'
@@ -554,6 +554,12 @@ export default function SessionsPage({
     followIfPinned()
   }, [running, followIfPinned])
 
+  // 运行中的会话才需要 SSE follow 长连接;普通浏览走分页快照,
+  // 避免打开长会话就把完整历史加载进服务端 live cache。
+  useEffect(() => {
+    if (activeId && running) ensureFollowing(activeId)
+  }, [activeId, running])
+
   useEffect(() => {
     if (scrollTick === 0) return
     snapToBottom()
@@ -864,6 +870,8 @@ export default function SessionsPage({
         files: uploadedPaths,
         quoted: trajQuotes.map(({ title, text }) => ({ title, text })),
       })
+      // 发送成功后立即打开 follow,收流式增量;不要等 running SSE 才建连。
+      ensureFollowing(id)
       const sentImages: UserMessageImage[] = pastedImages.map(({ mime, data }) => ({ mime, data }))
       // 收到 202:服务端已接单,立即乐观反馈(running 也由服务端 SSE 推送)。
       pushPending(message, sentImages.length > 0 ? sentImages : undefined)

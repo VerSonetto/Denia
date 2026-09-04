@@ -24,9 +24,14 @@ import type { SessionEnvelope, SessionHeader } from './types'
  * 会话被删(404)则停止重连并通知视图卸载。
  */
 
+export interface SessionPageMeta {
+  total: number
+  hasMoreBefore: boolean
+}
+
 export interface SessionStreamListener {
-  /** 全量快照(fold 重建基础);重连自愈后也会再次送达。 */
-  onSnapshot(header: SessionHeader, events: SessionEnvelope[]): void
+  /** 有限窗口快照(fold 重建基础);重连自愈后也会再次送达。 */
+  onSnapshot(header: SessionHeader, events: SessionEnvelope[], meta?: SessionPageMeta): void
   /** 增量帧,已按 seq 去重并保证连续。 */
   onEnvelope(envelope: SessionEnvelope): void
   /** 会话已不存在(被删除):视图应卸载,引擎停止重连。 */
@@ -47,7 +52,12 @@ interface StreamState {
   lastFrameAt: number
   /** 主动关闭(会话删除/引擎卸载→不再重连)。 */
   dead: boolean
+  /** 是否已请求 follow:运行中才开长连接,普通浏览不加载全量后端会话。 */
+  followRequested: boolean
 }
+
+/** 初始快照只拉尾部这么多事件,避免长会话一次全量进前端。 */
+const INITIAL_PAGE_LIMIT = 500
 
 const streams = new Map<string, StreamState>()
 
@@ -70,6 +80,7 @@ function stateOf(id: string): StreamState {
       watchdogTimer: null,
       lastFrameAt: now(),
       dead: false,
+      followRequested: false,
     }
     streams.set(id, state)
   }
@@ -104,7 +115,7 @@ function abortAndNull(state: StreamState) {
   }
 }
 
-/** (重)连接:先快照,再 follow。gen 守卫所有回调。 */
+/** (重)连接:先有限窗口快照,按需再 follow。gen 守卫所有回调。 */
 function reconnect(id: string, state: StreamState) {
   if (state.dead) return
   if (state.retryTimer !== null) {
@@ -119,18 +130,23 @@ function reconnect(id: string, state: StreamState) {
 
   void (async () => {
     try {
-      const data = await api.getSession(id, controller.signal)
+      const data = await api.getSessionPage(id, { limit: INITIAL_PAGE_LIMIT }, controller.signal)
       if (gen !== state.generation || state.dead) return
       // 快照成功:重置退避,以快照校正 cursor。
       state.retryDelayMs = 300
       state.cursor = data.events.length ? data.events[data.events.length - 1].seq : 0
       state.lastFrameAt = now()
-      for (const listener of state.listeners) listener.onSnapshot(data.header, data.events)
+      const meta = { total: data.total, hasMoreBefore: data.hasMoreBefore }
+      for (const listener of state.listeners) {
+        listener.onSnapshot(data.header, data.events, meta)
+      }
       if (state.listeners.size === 0) {
         disposeState(state)
         return
       }
-      openFollow(id, state, gen)
+      if (state.followRequested) {
+        openFollow(id, state, gen)
+      }
     } catch (error) {
       if (gen !== state.generation || state.dead) return
       if (isNotFound(error)) {
@@ -143,6 +159,18 @@ function reconnect(id: string, state: StreamState) {
       scheduleRetry(id, state)
     }
   })()
+}
+
+/** 请求打开 SSE follow(通常由“会话已运行”触发);不加载全量快照路径。 */
+export function ensureFollowing(id: string): void {
+  const state = streams.get(id)
+  if (!state || state.dead) return
+  if (state.followRequested) return
+  state.followRequested = true
+  // 若当前已有监听且未建立 follow,重连一次走“快照后再 follow”。
+  if (state.listeners.size > 0) {
+    reconnect(id, state)
+  }
 }
 
 function isNotFound(error: unknown): boolean {

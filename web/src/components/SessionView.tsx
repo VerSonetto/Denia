@@ -1,12 +1,19 @@
-import { useEffect, useRef, useState } from 'react'
+import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react'
+import * as api from '../api'
 import { applyEnvelope, foldEvents } from '../fold'
 import type { TranscriptNode } from '../fold'
 import { t } from '../i18n'
-import { attach } from '../sessionStreams'
+import { attach, type SessionPageMeta } from '../sessionStreams'
 import type { SessionEnvelope, TodoItem, UserMessageImage } from '../types'
 import type { TrajectoryQuote } from '../trajectory'
 import { Transcript } from './transcript'
-import { TrajectoryView } from './TrajectoryView'
+
+const OLDER_PAGE_LIMIT = 500
+
+// 轨迹台账体积不小(拖入大量历史事件),按需加载,不挤占对话首屏。
+const LazyTrajectoryView = lazy(() =>
+  import('./TrajectoryView').then((module) => ({ default: module.TrajectoryView })),
+)
 
 /** Latest todo snapshot wins; both snapshot and live frames feed it. */
 function latestTodos(events: { type: string; todos?: TodoItem[] }[]): TodoItem[] {
@@ -63,7 +70,10 @@ export function SessionView({
   const [nodes, setNodes] = useState<TranscriptNode[]>([])
   // 原始事件流:轨迹视图的 fold 源(与 transcript 共用一次订阅)。
   const [events, setEvents] = useState<SessionEnvelope[]>([])
+  const [pageMeta, setPageMeta] = useState<SessionPageMeta>({ total: 0, hasMoreBefore: false })
+  const [loadingOlder, setLoadingOlder] = useState(false)
   const [loading, setLoading] = useState(true)
+  const eventsRef = useRef<SessionEnvelope[]>([])
   const settleRef = useRef(onPendingSettled)
   settleRef.current = onPendingSettled
   const nodesChangeRef = useRef(onNodesChange)
@@ -76,6 +86,10 @@ export function SessionView({
   useEffect(() => {
     nodesChangeRef.current?.(nodes)
   }, [nodes])
+
+  useEffect(() => {
+    eventsRef.current = events
+  }, [events])
 
   useEffect(() => {
     const flush = () => {
@@ -94,9 +108,12 @@ export function SessionView({
       }
     }
     const unsubscribe = attach(id, {
-      onSnapshot: (_header, snapshot) => {
+      onSnapshot: (_header, snapshot, meta) => {
         queueRef.current = []
+        const pageInfo = meta ?? { total: snapshot.length, hasMoreBefore: false }
+        eventsRef.current = snapshot
         setEvents(snapshot)
+        setPageMeta(pageInfo)
         setNodes(foldEvents(snapshot))
         onTodosChange?.(latestTodos(snapshot))
         settlePending(snapshot)
@@ -134,16 +151,53 @@ export function SessionView({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id])
 
+  /** 向上翻页:把更早的有限窗口 prepend 到当前事件流并重建 fold。 */
+  const loadOlder = useCallback(async () => {
+    const current = eventsRef.current
+    const oldest = current[0]?.seq
+    if (!oldest || loadingOlder || !pageMeta.hasMoreBefore) return
+    setLoadingOlder(true)
+    try {
+      const page = await api.getSessionPage(id, { before: oldest, limit: OLDER_PAGE_LIMIT })
+      const merged = [...page.events, ...eventsRef.current]
+      eventsRef.current = merged
+      setEvents(merged)
+      setNodes(foldEvents(merged))
+      setPageMeta({ total: page.total, hasMoreBefore: page.hasMoreBefore })
+      onTodosChange?.(latestTodos(merged))
+    } catch {
+      /* 翻页失败不打断已有内容;按钮保持可重试 */
+    } finally {
+      setLoadingOlder(false)
+    }
+  }, [id, loadingOlder, pageMeta.hasMoreBefore, onTodosChange])
+
   if (loading) {
     return <div className="empty-hint">{t('loading')}</div>
   }
 
   if (view === 'trajectory') {
-    return <TrajectoryView events={events} onQuote={onQuote} />
+    return (
+      <Suspense fallback={<div className="empty-hint">{t('loading')}</div>}>
+        <LazyTrajectoryView events={events} onQuote={onQuote} />
+      </Suspense>
+    )
   }
 
   return (
     <div className="transcript-pane">
+      {pageMeta.hasMoreBefore && (
+        <div className="load-older-row">
+          <button
+            type="button"
+            className="load-older-btn"
+            disabled={loadingOlder}
+            onClick={() => void loadOlder()}
+          >
+            {loadingOlder ? t('loadingOlder') : t('loadOlder')}
+          </button>
+        </div>
+      )}
       <Transcript nodes={nodes} pendingMessages={pendingMessages} onRewind={onRewind} onFork={onFork} />
     </div>
   )

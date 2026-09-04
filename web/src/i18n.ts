@@ -346,6 +346,8 @@ const zh = {
   trajectoryRecordImageOnly: '（仅图片）',
 
   loading: '加载中…',
+  loadOlder: '加载更早记录',
+  loadingOlder: '正在加载更早记录…',
   retry: '重试',
   cancel: '取消',
   save: '保存',
@@ -757,6 +759,8 @@ const en: typeof zh = {
   trajectoryRecordImageOnly: '(images only)',
 
   loading: 'Loading…',
+  loadOlder: 'Load earlier records',
+  loadingOlder: 'Loading earlier records…',
   retry: 'Retry',
   cancel: 'Cancel',
   save: 'Save',

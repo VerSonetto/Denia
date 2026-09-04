@@ -5415,3 +5415,45 @@ button.btn.form-action {
 .recon-level-warning {
   color: var(--color-warning, #b7791f);
 }
+
+/* ---------- 长会话性能:有限窗口 + 浏览器跳过屏外渲染 ---------- */
+
+.load-older-row {
+  display: flex;
+  justify-content: center;
+  padding: 4px 0;
+}
+
+.load-older-btn {
+  border: 1px solid var(--border-subtle, rgba(128, 128, 128, 0.25));
+  border-radius: 999px;
+  background: var(--bg-elevated, rgba(128, 128, 128, 0.08));
+  color: var(--label-secondary, #666);
+  font-size: 12px;
+  padding: 5px 14px;
+  cursor: pointer;
+  transition: background 80ms ease, color 80ms ease;
+}
+
+.load-older-btn:hover {
+  background: var(--hover-fill, rgba(128, 128, 128, 0.14));
+  color: var(--label-primary, #222);
+}
+
+.load-older-btn:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+/* 历史消息行交给浏览器按需渲染;大面积长会话首屏/滚动不再全部布局。 */
+.transcript-pane > .user-row,
+.transcript-pane > .msg-assistant,
+.transcript-pane > .process-group,
+.transcript-pane > .turn-chrome,
+.transcript-pane > .tool-row,
+.transcript-pane > .compaction-row,
+.transcript-pane > .disc-row,
+.transcript-pane > .inject-row {
+  content-visibility: auto;
+  contain-intrinsic-size: auto 64px;
+}

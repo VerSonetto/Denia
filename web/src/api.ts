@@ -381,6 +381,29 @@ export function getSession(id: string, signal?: AbortSignal): Promise<{
   return http(`/api/sessions/${encodeURIComponent(id)}`, { signal })
 }
 
+export interface SessionPageResponse {
+  header: SessionHeader
+  events: SessionEnvelope[]
+  total: number
+  hasMoreBefore: boolean
+}
+
+/** 分页读取会话事件窗口:不经过全量快照,长会话首屏只拉尾部有限窗口。 */
+export function getSessionPage(
+  id: string,
+  options: { before?: number; limit?: number } = {},
+  signal?: AbortSignal,
+): Promise<SessionPageResponse> {
+  const query = new URLSearchParams()
+  if (options.before !== undefined) query.set('before', String(options.before))
+  if (options.limit !== undefined) query.set('limit', String(options.limit))
+  const qs = query.toString()
+  return http(
+    `/api/sessions/${encodeURIComponent(id)}/events${qs ? `?${qs}` : ''}`,
+    { signal },
+  )
+}
+
 export function deleteSession(id: string): Promise<unknown> {
   return http(`/api/sessions/${encodeURIComponent(id)}`, { method: 'DELETE' })
 }
