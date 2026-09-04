@@ -6,6 +6,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use tokio::sync::Mutex;
 use std::time::Instant;
 
@@ -14,6 +15,7 @@ use serde_json::{json, Value};
 use crate::cdp::{CdpEvent, CdpHandle};
 use crate::commands;
 use crate::launch;
+use crate::recon::ReconStore;
 use crate::{BrowserCommand, CommandOutcome};
 
 /// 每个 tab 的运行时状态。
@@ -63,6 +65,11 @@ pub struct BrowserManager {
     pending_dialogs: std::sync::Arc<std::sync::Mutex<HashMap<String, Value>>>,
     /// 网络抓包缓冲(事件泵写入,networkList/GetBody 读取)。
     network_log: std::sync::Arc<std::sync::Mutex<NetworkLog>>,
+    /// JS 逆向侦察状态(脚本表/断点/暂停态/控制台)。
+    recon: Arc<ReconStore>,
+    /// 导航视图(tabId -> (url, title)):事件泵写 url,命令写 url+title;
+    /// 快照/列表合并覆盖 TabInfo 的启动时值,保证 tab 栏/地址栏即时刷新。
+    tab_views: std::sync::Arc<std::sync::Mutex<HashMap<String, (String, String)>>>,
 }
 
 /// 面板订阅的推送事件。
@@ -79,6 +86,10 @@ pub enum BrowserEvent {
     DialogClosed { tab_id: String },
     /// tab 导航完成(刷新地址栏)。
     Navigated { tab_id: String, url: String, title: String },
+    /// 逆向:调试器暂停(断点命中/异常;frames 为帧摘要数组)。
+    DebuggerPaused { tab_id: String, reason: String, frames: Vec<serde_json::Value> },
+    /// 逆向:调试器恢复执行。
+    DebuggerResumed { tab_id: String },
     /// 浏览器实例退出。
     Exited,
 }
@@ -175,7 +186,32 @@ impl BrowserManager {
             event_broadcast,
             pending_dialogs: std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
             network_log: std::sync::Arc::new(std::sync::Mutex::new(NetworkLog::default())),
+            recon: ReconStore::new(),
+            tab_views: std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
         }
+    }
+
+    /// 命令路径回写导航视图(导航/reload/后退等成功后,tab 栏 url+title 即时刷新)。
+    pub(crate) fn update_tab_view(&self, tab_id: &str, url: &str, title: &str) {
+        self.tab_views
+            .lock()
+            .unwrap()
+            .insert(tab_id.to_string(), (url.to_string(), title.to_string()));
+    }
+
+    /// tab 关闭时清理视图残留。
+    pub(crate) fn forget_tab_view(&self, tab_id: &str) {
+        self.tab_views.lock().unwrap().remove(tab_id);
+    }
+
+    /// 当前导航视图(快照合并用)。
+    pub(crate) fn tab_view(&self, tab_id: &str) -> Option<(String, String)> {
+        self.tab_views.lock().unwrap().get(tab_id).cloned()
+    }
+
+    /// JS 逆向侦察状态句柄(脚本表/断点/暂停/控制台)。
+    pub fn recon(&self) -> Arc<ReconStore> {
+        self.recon.clone()
     }
 
     pub fn subscribe(&self) -> tokio::sync::broadcast::Receiver<BrowserEvent> {
@@ -283,12 +319,22 @@ impl BrowserManager {
             let mut guard = self.inner.lock().await;
             *guard = Some(inner);
         }
-        // 事件泵:掉线→广播 Exited;dialog/screencast/导航→广播。
+        // 事件泵:掉线→广播 Exited;dialog/screencast/导航/逆向侦察→广播。
         let pending_dialogs = self.pending_dialogs.clone();
         let network_log = self.network_log.clone();
+        let recon = self.recon.clone();
+        let tab_views = self.tab_views.clone();
         tokio::spawn(async move {
-            Self::event_pump(handle_for_pump, inner_event_rx, event_broadcast, pending_dialogs, network_log)
-                .await;
+            Self::event_pump(
+                handle_for_pump,
+                inner_event_rx,
+                event_broadcast,
+                pending_dialogs,
+                network_log,
+                recon,
+                tab_views,
+            )
+            .await;
         });
         let _ = self.event_broadcast.send(BrowserEvent::TabsChanged);
         Ok(())
@@ -362,6 +408,12 @@ impl BrowserManager {
             .handle
             .send_with_session("Runtime.enable", json!({}), Some(&session_id))
             .await;
+        // 调试器常开:scriptParsed 补发已加载脚本 → 源码检索/断点可用。
+        // 不设断点则页面不会暂停,零干扰。
+        let _ = inner
+            .handle
+            .send_with_session("Debugger.enable", json!({}), Some(&session_id))
+            .await;
         let _ = inner
             .handle
             .send_with_session(
@@ -419,6 +471,21 @@ impl BrowserManager {
         if let Err(error) = self.get_or_start().await {
             return CommandOutcome::err("backend_unavailable", error, elapsed(&started));
         }
+        // 逆向断点暂停会冻结页面:主动命令执行前自动恢复目标 tab(断点保留,
+        // 模型导航/交互不会卡死在断点上;面板用户从暂停横幅接管调试节奏)。
+        if !Self::is_passive(&command) && self.recon.is_paused(None) {
+            let explicit = command.tab_id_probe().map(str::to_string);
+            let active = {
+                let inner_guard = self.inner.lock().await;
+                inner_guard.as_ref().and_then(|inner| inner.active_tab.clone())
+            };
+            let target = explicit.or(active);
+            if let (Some(paused_tab), Some(target)) = (self.recon.paused_tab(), target) {
+                if paused_tab == target {
+                    let _ = self.recon.resume(self, &target).await;
+                }
+            }
+        }
         let outcome = {
             let mut guard = self.inner.lock().await;
             let Some(inner) = guard.as_mut() else {
@@ -428,6 +495,47 @@ impl BrowserManager {
         };
         self.maybe_evict_tabs().await;
         outcome
+    }
+
+    /// 解析目标 tab(缺省 active)并返回 (tab_id, session_id);浏览器未跑报错。
+    /// recon REST 端点入口;不拉起浏览器(侦察操作需要浏览器本就运行)。
+    pub async fn recon_resolve_tab(&self, tab_id: Option<&str>) -> Result<(String, String), String> {
+        if !self.is_healthy().await {
+            return Err("浏览器未运行;先用 getState/navigate 启动".to_string());
+        }
+        let guard = self.inner.lock().await;
+        let Some(inner) = guard.as_ref() else {
+            return Err("浏览器未就绪".to_string());
+        };
+        let resolved = match tab_id {
+            Some(id) => id.to_string(),
+            None => inner
+                .active_tab
+                .clone()
+                .ok_or_else(|| "没有打开的 tab".to_string())?,
+        };
+        let info = inner
+            .tabs
+            .get(&resolved)
+            .ok_or_else(|| format!("tab {resolved} 不存在"))?;
+        Ok((resolved, info.session_id.clone()))
+    }
+
+    /// CDP 句柄 + 目标 tab session(浏览器须已运行;recon 操作入口)。
+    /// 返回的句柄可跨会话发命令(flatten sessionId 由调用方带)。
+    pub async fn recon_cdp_pair(&self, tab_id: &str) -> Result<(CdpHandle, String), String> {
+        if !self.is_healthy().await {
+            return Err("浏览器未运行;先用 getState/navigate 启动".to_string());
+        }
+        let guard = self.inner.lock().await;
+        let Some(inner) = guard.as_ref() else {
+            return Err("浏览器未就绪".to_string());
+        };
+        let info = inner
+            .tabs
+            .get(tab_id)
+            .ok_or_else(|| format!("tab {tab_id} 不存在"))?;
+        Ok((inner.handle.clone(), info.session_id.clone()))
     }
 
     /// tab 上限:超出按 LRU 关闭最旧的非活跃 tab。
@@ -464,6 +572,8 @@ impl BrowserManager {
         broadcast: tokio::sync::broadcast::Sender<BrowserEvent>,
         pending_dialogs: std::sync::Arc<std::sync::Mutex<HashMap<String, Value>>>,
         network_log: std::sync::Arc<std::sync::Mutex<NetworkLog>>,
+        recon: Arc<ReconStore>,
+        tab_views: std::sync::Arc<std::sync::Mutex<HashMap<String, (String, String)>>>,
     ) {
         while let Some(event) = event_rx.recv().await {
             // flatten 事件带 CDP sessionId;反查成我们的 tabId(会话期间恒定)。
@@ -494,17 +604,6 @@ impl BrowserManager {
                 }
                 // ---- 网络抓包:按 requestId 聚合请求/响应/失败 ----
                 "Network.requestWillBeSent" => {
-                    let _ = std::fs::OpenOptions::new()
-                        .create(true)
-                        .append(true)
-                        .open(std::env::temp_dir().join("denia-net-debug.log"))
-                        .map(|mut file| {
-                            use std::io::Write;
-                            let _ = writeln!(
-                                file,
-                                "reqWillBeSent tab={tab_id}",
-                            );
-                        });
                     let request_id = event
                         .params
                         .get("requestId")
@@ -529,6 +628,8 @@ impl BrowserManager {
                         .pointer("/request/postData")
                         .and_then(Value::as_str)
                         .map(str::to_string);
+                    // 发起者调用栈(逆向定位加密函数的关键,js-reverse initiator 语义)。
+                    let initiator = initiator_summary(event.params.get("initiator"));
                     network_log.lock().unwrap().record(
                         &tab_id,
                         &request_id,
@@ -538,11 +639,38 @@ impl BrowserManager {
                             "method": method,
                             "requestHeaders": headers,
                             "postData": post_data,
+                            "initiator": initiator,
                             "status": Value::Null,
                             "responseHeaders": Value::Null,
                             "mimeType": Value::Null,
                             "failed": Value::Null,
                         }),
+                    );
+                }
+                // 真实请求头(含最终 Cookie:HttpOnly 页内读不到,只能这里拿)。
+                "Network.requestWillBeSentExtraInfo" => {
+                    let request_id = extra_info_request_id(&event.params);
+                    if request_id.is_empty() || tab_id.is_empty() {
+                        continue;
+                    }
+                    let extra_headers = event.params.get("headers").cloned().unwrap_or(Value::Null);
+                    network_log.lock().unwrap().record(
+                        &tab_id,
+                        &request_id,
+                        json!({ "requestId": request_id, "extraRequestHeaders": extra_headers }),
+                    );
+                }
+                // 真实响应头(含 Set-Cookie,含 HttpOnly)。
+                "Network.responseReceivedExtraInfo" => {
+                    let request_id = extra_info_request_id(&event.params);
+                    if request_id.is_empty() || tab_id.is_empty() {
+                        continue;
+                    }
+                    let extra_headers = event.params.get("headers").cloned().unwrap_or(Value::Null);
+                    network_log.lock().unwrap().record(
+                        &tab_id,
+                        &request_id,
+                        json!({ "requestId": request_id, "extraResponseHeaders": extra_headers }),
                     );
                 }
                 "Network.responseReceived" => {
@@ -686,6 +814,13 @@ impl BrowserManager {
                         .unwrap_or_default()
                         .to_string();
                     if !url.is_empty() && !tab_id.is_empty() {
+                        // 事件路径只更新 url(title 等命令路径的 state_after 回写)。
+                        tab_views
+                            .lock()
+                            .unwrap()
+                            .entry(tab_id.clone())
+                            .or_insert_with(|| (String::new(), String::new()))
+                            .0 = url.clone();
                         let _ = broadcast.send(BrowserEvent::Navigated {
                             tab_id,
                             url,
@@ -693,9 +828,24 @@ impl BrowserManager {
                         });
                     }
                 }
+                // ---- JS 逆向侦察:脚本表/断点暂停/控制台(状态存 ReconStore,广播暂停) ----
+                "Debugger.scriptParsed"
+                | "Debugger.paused"
+                | "Debugger.resumed"
+                | "Runtime.consoleAPICalled"
+                | "Runtime.exceptionThrown" => {
+                    if !tab_id.is_empty() {
+                        for revent in recon.on_event(&tab_id, &event.method, &event.params) {
+                            let _ = broadcast.send(revent);
+                        }
+                    }
+                }
                 _ => {}
             }
         }
+        // 浏览器退出:侦察状态全部失效(新实例 scriptId/断点重来)。
+        recon.clear_all();
+        tab_views.lock().unwrap().clear();
         let _ = broadcast.send(BrowserEvent::Exited);
     }
 
@@ -714,10 +864,14 @@ impl BrowserManager {
             .tabs
             .values()
             .map(|info| {
+                // 合并导航视图:命令/事件更新过的 url/title 优先(启动时值只作兜底)。
+                let (url, title) = self
+                    .tab_view(&info.tab_id)
+                    .unwrap_or_else(|| (info.url.clone(), info.title.clone()));
                 json!({
                     "tabId": info.tab_id,
-                    "url": info.url,
-                    "title": info.title,
+                    "url": url,
+                    "title": title,
                     "active": Some(&info.tab_id) == inner.active_tab.as_ref(),
                 })
             })
@@ -753,6 +907,49 @@ pub(crate) fn now_ms() -> u64 {    std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0)
+}
+
+/// requestWillBeSent 的 initiator → 精简摘要(类型 + 发起脚本 + 最内 8 帧调用栈)。
+fn initiator_summary(initiator: Option<&Value>) -> Value {
+    let Some(initiator) = initiator else {
+        return Value::Null;
+    };
+    let r#type = initiator.get("type").and_then(Value::as_str).unwrap_or("");
+    let frames: Vec<Value> = initiator
+        .pointer("/stack/callFrames")
+        .and_then(Value::as_array)
+        .map(|frames| {
+            frames
+                .iter()
+                .rev()
+                .take(8)
+                .rev()
+                .map(|frame| {
+                    json!({
+                        "functionName": frame.get("functionName").and_then(Value::as_str).unwrap_or(""),
+                        "url": frame.get("url").and_then(Value::as_str).unwrap_or(""),
+                        "lineNumber": frame.get("lineNumber").and_then(Value::as_i64).unwrap_or(0),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    json!({
+        "type": r#type,
+        "url": initiator.get("url").and_then(Value::as_str).unwrap_or(""),
+        "functionName": initiator.get("functionName").and_then(Value::as_str).unwrap_or(""),
+        "stack": frames,
+    })
+}
+
+/// extraInfo 事件的 requestId(新协议叫 responseId,兼容两者)。
+fn extra_info_request_id(params: &Value) -> String {
+    params
+        .get("requestId")
+        .or_else(|| params.get("responseId"))
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string()
 }
 
 pub(crate) fn elapsed(started: &Instant) -> u64 {

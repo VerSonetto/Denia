@@ -9,6 +9,7 @@ use denia_system_prompt::{
 };
 
 use crate::browser::BrowserHub;
+use crate::recon::ReconHub;
 use crate::shell;
 use crate::{Tool, ToolRegistry};
 
@@ -147,6 +148,25 @@ pub fn default_shipped_with_browser(hub: Option<BrowserHub>) -> (SystemPrompt, T
     (prompt, tools)
 }
 
+/// Shipped pair + browser + recon(JS 逆向)。prompt schemas 同步追加两者。
+/// `SystemPrompt::tools` 是追加语义,依次 push provider,模型可见全部 schema。
+pub fn default_shipped_with_browser_and_recon(
+    browser_hub: Option<BrowserHub>,
+    recon_hub: Option<ReconHub>,
+) -> (SystemPrompt, ToolRegistry) {
+    let (mut prompt, mut registry) = default_shipped_with_browser(browser_hub);
+    if let Some(hub) = recon_hub {
+        let tool = Arc::new(crate::ReconTool::new(hub));
+        let schema = tool.schema().clone();
+        prompt.tools(move |_| ToolProviderResult {
+            schemas: vec![schema.clone()],
+            known_names: None,
+        });
+        registry.register(tool);
+    }
+    (prompt, registry)
+}
+
 /// 自定义系统提示词正文 + 同一套 shipped 工具与工具纪律段(不含单独的 harness:identity)。
 pub fn shipped_with_persona(persona_text: String) -> (SystemPrompt, ToolRegistry) {
     let tools = crate::default_registry();
@@ -166,15 +186,34 @@ pub fn shipped_with_persona_and_browser(
     persona_text: String,
     hub: BrowserHub,
 ) -> (SystemPrompt, ToolRegistry) {
-    let (mut prompt, tools) = shipped_with_persona(persona_text);
-    let tool = Arc::new(crate::BrowserTool::new(hub));
-    let schema = tool.schema().clone();
-    prompt.tools(move |_| ToolProviderResult {
-        schemas: vec![schema.clone()],
-        known_names: None,
-    });
-    let mut registry = tools;
-    registry.register(tool);
+    shipped_with_persona_and_browser_and_recon(persona_text, Some(hub), None)
+}
+
+/// `shipped_with_persona_and_browser` + recon 工具(schema 追加,registry 注册)。
+pub fn shipped_with_persona_and_browser_and_recon(
+    persona_text: String,
+    hub: Option<BrowserHub>,
+    recon_hub: Option<ReconHub>,
+) -> (SystemPrompt, ToolRegistry) {
+    let (mut prompt, mut registry) = shipped_with_persona(persona_text);
+    if let Some(hub) = hub {
+        let tool = Arc::new(crate::BrowserTool::new(hub));
+        let schema = tool.schema().clone();
+        prompt.tools(move |_| ToolProviderResult {
+            schemas: vec![schema.clone()],
+            known_names: None,
+        });
+        registry.register(tool);
+    }
+    if let Some(hub) = recon_hub {
+        let tool = Arc::new(crate::ReconTool::new(hub));
+        let schema = tool.schema().clone();
+        prompt.tools(move |_| ToolProviderResult {
+            schemas: vec![schema.clone()],
+            known_names: None,
+        });
+        registry.register(tool);
+    }
     (prompt, registry)
 }
 

@@ -12,6 +12,7 @@ mod files;
 pub mod glob;
 pub mod grep;
 pub mod prompt;
+pub mod recon;
 pub mod shell;
 
 use std::path::{Component, Path, PathBuf};
@@ -29,9 +30,11 @@ pub use files::{ReadFileTool, WriteFileTool};
 pub use glob::GlobTool;
 pub use grep::GrepTool;
 pub use prompt::{
-    default_shipped, default_shipped_with_browser, register_shipped_prompt,
-    shipped_with_persona, shipped_with_persona_and_browser,
+    default_shipped, default_shipped_with_browser, default_shipped_with_browser_and_recon,
+    register_shipped_prompt, shipped_with_persona, shipped_with_persona_and_browser,
+    shipped_with_persona_and_browser_and_recon,
 };
+pub use recon::{ReconExecute, ReconHub, ReconTool};
 pub use todo::TodoWriteTool;
 
 pub mod permission;
@@ -136,6 +139,18 @@ pub fn default_registry_with_browser(hub: Option<BrowserHub>) -> ToolRegistry {
     let mut registry = default_registry();
     if let Some(hub) = hub {
         registry.register(Arc::new(BrowserTool::new(hub)));
+    }
+    registry
+}
+
+/// Shipped tool set + browser + recon(JS 逆向;两个 hub 同源同一 BrowserManager)。
+pub fn default_registry_with_browser_and_recon(
+    browser_hub: Option<BrowserHub>,
+    recon_hub: Option<ReconHub>,
+) -> ToolRegistry {
+    let mut registry = default_registry_with_browser(browser_hub);
+    if let Some(hub) = recon_hub {
+        registry.register(Arc::new(ReconTool::new(hub)));
     }
     registry
 }

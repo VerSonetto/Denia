@@ -608,28 +608,41 @@ impl SessionDriver {
                 session
                     .flush()
                     .map_err(|error| LlmFailure::new(codes::UNKNOWN, format!("log flush before dispatch failed: {error}")))?;
-                let mut stream = match self
-                    .registry
-                    .stream(&selection.provider, &request, retry_sink.clone())
-                    .await
-                {
-                    Ok(stream) => stream,
-                    Err(error) => {
-                        let failure = error.failure.clone();
+                // 请求建立期同样响应取消:网关/代理黑洞挂起(连接已发出、
+                // 响应头迟迟不来,或 setup 重试退避中)时,适配器内部总超时
+                // 要 60-120s 才报错,期间点停止必须立刻能断。select 放弃
+                // 卡死的建立 future,直接闭合为 aborted。
+                let stream_setup = self.registry.stream(&selection.provider, &request, retry_sink.clone());
+                tokio::pin!(stream_setup);
+                let mut stream = tokio::select! {
+                    biased;
+                    _ = cancel.cancelled() => {
                         append(session, &emit, SessionEvent::StepEnd { turn, step })?;
-                        if feedback_eligible(&failure.code) && feedback < MAX_FEEDBACK {
-                            feedback += 1;
-                            append(
-                                session,
-                                &emit,
-                                SessionEvent::UserMessage { text: feedback_text(&failure), injected: true, images: Vec::new() },
-                            )?;
-                            continue 'step_loop;
-                        }
-                        let reason = TurnEndReason::Error { failure };
+                        let reason = TurnEndReason::Aborted {
+                            cause: Some(AbortCause::User),
+                        };
                         append(session, &emit, SessionEvent::TurnEnd { turn, reason: reason.clone() })?;
                         return Ok(reason);
                     }
+                    result = &mut stream_setup => match result {
+                        Ok(stream) => stream,
+                        Err(error) => {
+                            let failure = error.failure.clone();
+                            append(session, &emit, SessionEvent::StepEnd { turn, step })?;
+                            if feedback_eligible(&failure.code) && feedback < MAX_FEEDBACK {
+                                feedback += 1;
+                                append(
+                                    session,
+                                    &emit,
+                                    SessionEvent::UserMessage { text: feedback_text(&failure), injected: true, images: Vec::new() },
+                                )?;
+                                continue 'step_loop;
+                            }
+                            let reason = TurnEndReason::Error { failure };
+                            append(session, &emit, SessionEvent::TurnEnd { turn, reason: reason.clone() })?;
+                            return Ok(reason);
+                        }
+                    },
                 };
 
                 blocks = Vec::new();
@@ -958,7 +971,21 @@ impl SessionDriver {
                             permission_mode: current_mode,
                             permission_override,
                         };
-                        tool.execute(&call.arguments, &context).await
+                        // 工具执行必须可中断:glob/grep/bash 内部已响应 ctx.cancel,
+                        // 但 files/edit/browser/recon 等无取消意识的实现可能在慢盘、
+                        // CDP、网络调用上无限挂起。select 取消令牌兜底:放弃卡死的
+                        // 执行 future(其内部 await 随 drop 中止,spawn_blocking 句柄
+                        // 不再阻塞轮次),保证任何情况下点停止都能立即结束轮次。
+                        let execute = tool.execute(&call.arguments, &context);
+                        tokio::pin!(execute);
+                        tokio::select! {
+                            biased;
+                            _ = cancel.cancelled() => denia_tools::ToolOutput {
+                                content: "工具执行被中断".to_string(),
+                                is_error: true,
+                            },
+                            output = &mut execute => output,
+                        }
                     }
                 } else {
                     denia_tools::ToolOutput {

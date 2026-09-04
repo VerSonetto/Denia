@@ -297,10 +297,14 @@ pub(crate) async fn dispatch(
                 .tabs
                 .values()
                 .map(|info| {
+                    let (url, title) = ctx
+                        .manager
+                        .tab_view(&info.tab_id)
+                        .unwrap_or_else(|| (info.url.clone(), info.title.clone()));
                     json!({
                         "tabId": info.tab_id,
-                        "url": info.url,
-                        "title": info.title,
+                        "url": url,
+                        "title": title,
                         "active": ctx.inner.active_tab.as_deref() == Some(info.tab_id.as_str()),
                     })
                 })
@@ -312,6 +316,7 @@ pub(crate) async fn dispatch(
             match tab(&mut ctx, tab_id.as_deref()).await {
                 Ok(id) => {
                     if let Some(info) = ctx.inner.tabs.remove(&id) {
+                        ctx.manager.forget_tab_view(&id);
                         let _ = ctx
                             .inner
                             .handle
@@ -434,7 +439,15 @@ async fn state_after(ctx: &mut Ctx<'_>, tab_id: &str, started: std::time::Instan
     // url/title/canGoBack/scrollZ 引擎态一次拿齐(ZCode `readState` + Tj 脚本等价物)
     let expression = r#"(function(){return JSON.stringify({url:location.href,title:document.title,canGoBack:history.length>1,scrollX:window.scrollX||0,scrollY:window.scrollY||0,viewportWidth:window.innerWidth||0,viewportHeight:window.innerHeight||0});})()"#;
     match ctx.eval_json(tab_id, expression).await {
-        Ok(state) => CommandOutcome { state: Some(state), ..CommandOutcome::ok_value(Value::Null, elapsed(&started)) },
+        Ok(state) => {
+            // 回写导航视图:tab 栏/地址栏的 url+title 即时刷新(事件路径只补 url)。
+            let url = state.get("url").and_then(Value::as_str).unwrap_or("");
+            let title = state.get("title").and_then(Value::as_str).unwrap_or("");
+            if !url.is_empty() {
+                ctx.manager.update_tab_view(tab_id, url, title);
+            }
+            CommandOutcome { state: Some(state), ..CommandOutcome::ok_value(Value::Null, elapsed(&started)) }
+        }
         Err(_) => CommandOutcome::ok_value(Value::Null, elapsed(&started)),
     }
 }

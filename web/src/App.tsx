@@ -63,7 +63,8 @@ export default function App() {
 
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [browserOpen, setBrowserOpen] = useState(false)
-  // ZCode 式自动展开:AI 调 browser 产生画面帧/状态变化时右侧视图自动出现;用户手动收起后本轮不再弹。
+  // ZCode 式自动展开:AI 调 browser 产生画面帧/状态变化时右侧视图自动出现。
+  // 用户手动收起只挡当轮:新一轮 AI 轮次开始后重新允许自动展开。
   const browserAutoDismissedRef = useRef(false)
   useEffect(() => {
     const close = subscribeBrowserEvents((event) => {
@@ -73,6 +74,12 @@ export default function App() {
     })
     return close
   }, [])
+  const prevRunningRef = useRef<Record<string, boolean>>({})
+  useEffect(() => {
+    const freshRun = Object.keys(runningIds).some((id) => !prevRunningRef.current[id])
+    prevRunningRef.current = runningIds
+    if (freshRun) browserAutoDismissedRef.current = false
+  }, [runningIds])
   const [sidebarSearchOpen, setSidebarSearchOpen] = useState(false)
   const [sidebarExpandAllTick, setSidebarExpandAllTick] = useState(0)
   const [sidebarAllExpanded, setSidebarAllExpanded] = useState(false)

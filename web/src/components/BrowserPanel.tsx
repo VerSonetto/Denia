@@ -6,6 +6,7 @@ import {
 } from '../browserApi'
 import type { BrowserState, BrowserOutcome, BrowserEventFrame } from '../types'
 import { t } from '../i18n'
+import ReconPanel from './ReconPanel'
 
 /**
  * 内嵌浏览器面板:实时画面(screencast 帧)+ tab 栏 + 地址栏。
@@ -197,6 +198,7 @@ export default function BrowserPanel() {
         )}
         {notice && <div className="browser-notice">{notice}</div>}
       </div>
+      {state?.running && state.activeTabId && <ReconPanel tabId={state.activeTabId} />}
     </div>
   )
 }

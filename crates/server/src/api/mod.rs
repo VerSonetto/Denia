@@ -2,6 +2,7 @@
 //! test, and the SSE push channel.
 
 mod browser;
+mod browser_recon;
 mod credentials;
 mod events;
 mod fs;
@@ -22,6 +23,7 @@ pub fn router() -> Router<Arc<AppState>> {
     Router::new()
         .merge(settings::router())
         .merge(browser::router())
+        .merge(browser_recon::router())
         .merge(credentials::router())
         .merge(llm::router())
         .merge(sessions::router())

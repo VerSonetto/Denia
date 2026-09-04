@@ -18,16 +18,22 @@ pub struct SystemPromptState {
     current: Arc<ArcSwap<SystemPrompt>>,
     home: PathBuf,
     browser_hub: Option<denia_tools::BrowserHub>,
+    recon_hub: Option<denia_tools::ReconHub>,
 }
 
 impl SystemPromptState {
     /// 启动时从磁盘加载;空或缺失则沿用出厂 persona。
-    pub fn load(home: &Path, browser_hub: Option<denia_tools::BrowserHub>) -> Self {
-        let prompt = build_prompt(read_file_text(home), browser_hub.clone());
+    pub fn load(
+        home: &Path,
+        browser_hub: Option<denia_tools::BrowserHub>,
+        recon_hub: Option<denia_tools::ReconHub>,
+    ) -> Self {
+        let prompt = build_prompt(read_file_text(home), browser_hub.clone(), recon_hub.clone());
         Self {
             current: Arc::new(ArcSwap::from_pointee(prompt)),
             home: home.to_path_buf(),
             browser_hub,
+            recon_hub,
         }
     }
 
@@ -70,7 +76,11 @@ impl SystemPromptState {
     }
 
     fn reload(&self) {
-        let prompt = build_prompt(read_file_text(&self.home), self.browser_hub.clone());
+        let prompt = build_prompt(
+            read_file_text(&self.home),
+            self.browser_hub.clone(),
+            self.recon_hub.clone(),
+        );
         self.current.store(Arc::new(prompt));
     }
 
@@ -135,11 +145,19 @@ fn read_file_text(home: &Path) -> Option<String> {
     }
 }
 
-fn build_prompt(text: Option<String>, browser_hub: Option<denia_tools::BrowserHub>) -> SystemPrompt {
+fn build_prompt(
+    text: Option<String>,
+    browser_hub: Option<denia_tools::BrowserHub>,
+    recon_hub: Option<denia_tools::ReconHub>,
+) -> SystemPrompt {
     match (text, browser_hub) {
-        (Some(persona), Some(hub)) => denia_tools::shipped_with_persona_and_browser(persona, hub).0,
+        (Some(persona), Some(hub)) => {
+            denia_tools::shipped_with_persona_and_browser_and_recon(persona, Some(hub), recon_hub).0
+        }
         (Some(persona), None) => denia_tools::shipped_with_persona(persona).0,
-        (None, Some(hub)) => denia_tools::default_shipped_with_browser(Some(hub)).0,
+        (None, Some(hub)) => {
+            denia_tools::default_shipped_with_browser_and_recon(Some(hub), recon_hub).0
+        }
         (None, None) => denia_tools::default_shipped().0,
     }
 }

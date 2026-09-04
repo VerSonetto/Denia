@@ -431,7 +431,10 @@ async fn cancel_session(
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, ApiError> {
     let live = state.live.get_or_load(&state.sessions, &id).map_err(ApiError::from_session)?;
-    if let Some(token) = live.cancel.lock().unwrap().take() {
+    // 幂等取消:保留 token(不 take),轮次结束由 RunningGuard 清空;
+    // 若首次点击时 turn 恰好卡在无取消意识的等待上,后续再点仍能生效,
+    // 不会出现"点了一次之后再点就没反应"。
+    if let Some(token) = live.cancel.lock().unwrap().as_ref() {
         token.cancel();
     }
     // 顺带结算挂起的审批,driver 的 select 也能通过 cancel token 退出。

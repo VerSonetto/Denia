@@ -337,4 +337,66 @@ export type BrowserEventFrame =
   | { type: 'dialog-opened'; tabId: string; kind: string; message: string }
   | { type: 'dialog-closed'; tabId: string }
   | { type: 'navigated'; tabId: string; url: string; title: string }
+  | { type: 'debugger-paused'; tabId: string; reason: string; frames: ReconPausedFrameLite[] }
+  | { type: 'debugger-resumed'; tabId: string }
   | { type: 'exited' }
+
+/* ---- JS 逆向工作台(与 Rust recon 模块对齐) ---- */
+
+/** 脚本表条目(Debugger.scriptParsed)。 */
+export interface ReconScript {
+  scriptId: string
+  url: string
+  length: number
+  startLine: number
+  isModule: boolean
+  hash: string
+}
+
+/** 检索命中行。 */
+export interface ReconMatch {
+  scriptId: string
+  url: string
+  /** 0-based。 */
+  lineNumber: number
+  lineContent: string
+}
+
+export interface ReconBreakpoint {
+  breakpointId: string
+  url: string
+  /** 0-based。 */
+  lineNumber: number
+  condition?: string
+}
+
+/** 暂停事件的帧摘要(轻量)。 */
+export interface ReconPausedFrameLite {
+  callFrameId: string
+  functionName: string
+  url: string
+  lineNumber: number
+  columnNumber: number
+}
+
+/** 暂停详情的完整帧。 */
+export interface ReconPausedFrame extends ReconPausedFrameLite {
+  scopeNames: string[]
+}
+
+export interface ReconPaused {
+  tabId: string
+  reason: string
+  frames: ReconPausedFrame[]
+  hitBreakpoints: string[]
+  atMs: number
+}
+
+export interface ReconConsoleEntry {
+  seq: number
+  level: string
+  text: string
+  url: string
+  line: number
+  atMs: number
+}

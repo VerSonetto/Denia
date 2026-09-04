@@ -9,6 +9,7 @@ pub mod cdp;
 pub mod commands;
 pub mod launch;
 pub mod manager;
+pub mod recon;
 pub mod scripts;
 
 pub use manager::{BrowserEvent, BrowserManager};
@@ -143,6 +144,46 @@ impl CommandOutcome {
             tabs: None,
             dialog: None,
             elapsed_ms,
+        }
+    }
+}
+
+impl BrowserCommand {
+    /// 返回命令的显式目标 tab(无 tab 字段或未给时返回 None;execute 层用于
+    /// 断点暂停自动恢复的判定)。
+    pub fn tab_id_probe(&self) -> Option<&str> {
+        match self {
+            BrowserCommand::Navigate { tab_id, .. }
+            | BrowserCommand::Back { tab_id }
+            | BrowserCommand::Forward { tab_id }
+            | BrowserCommand::Reload { tab_id }
+            | BrowserCommand::GetState { tab_id }
+            | BrowserCommand::Snapshot { tab_id, .. }
+            | BrowserCommand::Screenshot { tab_id, .. }
+            | BrowserCommand::Click { tab_id, .. }
+            | BrowserCommand::Fill { tab_id, .. }
+            | BrowserCommand::Type { tab_id, .. }
+            | BrowserCommand::Press { tab_id, .. }
+            | BrowserCommand::Scroll { tab_id, .. }
+            | BrowserCommand::Hover { tab_id, .. }
+            | BrowserCommand::Select { tab_id, .. }
+            | BrowserCommand::Check { tab_id, .. }
+            | BrowserCommand::Drag { tab_id, .. }
+            | BrowserCommand::ElementInfo { tab_id, .. }
+            | BrowserCommand::Evaluate { tab_id, .. }
+            | BrowserCommand::WaitFor { tab_id, .. }
+            | BrowserCommand::GetDialog { tab_id }
+            | BrowserCommand::HandleDialog { tab_id, .. }
+            | BrowserCommand::Close { tab_id }
+            | BrowserCommand::ViewportSet { tab_id, .. }
+            | BrowserCommand::ViewportReset { tab_id }
+            | BrowserCommand::NetworkList { tab_id, .. }
+            | BrowserCommand::NetworkGetBody { tab_id, .. }
+            | BrowserCommand::StartScreencast { tab_id }
+            | BrowserCommand::StopScreencast { tab_id } => tab_id.as_deref(),
+            BrowserCommand::NewTab { .. }
+            | BrowserCommand::List
+            | BrowserCommand::Activate { .. } => None,
         }
     }
 }
