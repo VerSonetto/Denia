@@ -1,4 +1,4 @@
-﻿import type {
+import type {
   CredentialInfo,
   DiscoveredModel,
   ModelCatalog,
@@ -25,9 +25,9 @@ export class ApiError extends Error {
 /** 非 follow 型请求的默认超时:15s(挂死的请求不能卡住 UI)。 */
 const DEFAULT_TIMEOUT_MS = 15_000
 
-async function http<T>(path: string, init?: RequestInit): Promise<T> {
+async function http<T>(path: string, init?: RequestInit, timeoutMs = DEFAULT_TIMEOUT_MS): Promise<T> {
   const timeout = new AbortController()
-  const timer = window.setTimeout(() => timeout.abort(), DEFAULT_TIMEOUT_MS)
+  const timer = window.setTimeout(() => timeout.abort(), timeoutMs)
   try {
     const response = await fetch(path, {
       headers: { 'content-type': 'application/json' },
@@ -495,6 +495,28 @@ export interface ContextBreakdownResponse {
 
 export function contextBreakdown(id: string): Promise<ContextBreakdownResponse> {
   return http(`/api/sessions/${encodeURIComponent(id)}/context-breakdown`)
+}
+
+/** 手动压缩结果(上下文面板按钮;摘要调用可能持续数十秒)。 */
+export interface ManualCompactOutcome {
+  replacesFrom: number
+  replacesTo: number
+  keepFrom: number
+  preTokens: number
+  postTokens: number
+  savedTokens: number
+}
+
+export interface ManualCompactResponse {
+  ok: boolean
+  outcome?: ManualCompactOutcome
+  /** `nothing-to-compact`:无可压缩区间(历史太短)。 */
+  reason?: string
+}
+
+/** 手动压缩:恢复最近一次请求形态执行总结压缩;超时放宽到 5 分钟。 */
+export function compactSession(id: string): Promise<ManualCompactResponse> {
+  return http(`/api/sessions/${encodeURIComponent(id)}/compact`, { method: 'POST' }, 300_000)
 }
 
 export interface SystemPromptView {

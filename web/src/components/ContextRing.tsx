@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import * as api from '../api'
 import type { ContextBreakdown, ContextPressure } from '../api'
 import { t } from '../i18n'
 
@@ -50,16 +51,53 @@ function formatTokens(value: number): string {
 export function ContextRing({
   pressure,
   breakdown,
+  sessionId,
+  running,
+  onCompacted,
 }: {
   /** 服务端 `contextPressure` 投影(锚点 + 表面增量 + 路由容量)。 */
   pressure?: ContextPressure
   /** 服务端启发式拆分(系统提示词 / 工具 / 消息)。 */
   breakdown?: ContextBreakdown
+  /** 会话 id:存在时才可手动压缩。 */
+  sessionId?: string
+  /** 会话是否在运行中:运行中禁用压缩按钮(服务端同样拒绝)。 */
+  running?: boolean
+  /** 压缩成功后的回调(父组件刷新占用数据)。 */
+  onCompacted?: () => void
 }) {
   const [open, setOpen] = useState(false)
+  const [compressing, setCompressing] = useState(false)
+  const [note, setNote] = useState<string | null>(null)
   const rootRef = useRef<HTMLSpanElement | null>(null)
   const context = contextOccupancy(pressure)
   const available = context !== null
+
+  // 反馈提示 8 秒后自动消退,不占用面板常驻空间。
+  useEffect(() => {
+    if (note === null) return
+    const timer = window.setTimeout(() => setNote(null), 8_000)
+    return () => window.clearTimeout(timer)
+  }, [note])
+
+  const handleCompact = async (): Promise<void> => {
+    if (!sessionId || compressing || running) return
+    setCompressing(true)
+    setNote(null)
+    try {
+      const result = await api.compactSession(sessionId)
+      if (result.ok && result.outcome) {
+        setNote(t('contextCompactDone', { saved: formatTokens(result.outcome.savedTokens) }))
+        onCompacted?.()
+      } else {
+        setNote(t('contextCompactNothing'))
+      }
+    } catch (error) {
+      setNote(error instanceof api.ApiError ? error.message : t('contextCompactFailed'))
+    } finally {
+      setCompressing(false)
+    }
+  }
 
   // 模型切换可能暂时移除容量而本组件仍挂载:面板随之关闭,不留陈旧 UI。
   useEffect(() => {
@@ -181,6 +219,16 @@ export function ContextRing({
               <p className="cm-note">
                 {calibrated ? t('contextNoteAnchored') : t('contextNoteEstimated')}
               </p>
+              <button
+                type="button"
+                className="cm-compact"
+                disabled={!sessionId || compressing || running}
+                title={running ? t('contextCompactBusy') : undefined}
+                onClick={() => void handleCompact()}
+              >
+                {compressing ? t('contextCompactRunning') : t('contextCompactNow')}
+              </button>
+              {note !== null && <p className="cm-note cm-note-result">{note}</p>}
             </>
           )}
         </div>

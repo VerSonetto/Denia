@@ -1497,6 +1497,57 @@ button {
   color: var(--warn);
 }
 
+/* LLM 总结压缩的边界标记(学 Claude Code compact boundary):整行按钮
+   折叠摘要,meta 行展示 token 前后对比(超长时省略号截断)。 */
+.compaction-row {
+  align-self: stretch;
+  margin: 6px 0;
+  border: 1px solid var(--border-l1);
+  border-radius: var(--r-sm);
+  background: var(--accent-soft);
+  overflow: hidden;
+}
+
+.compaction-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 10px;
+  border: none;
+  background: transparent;
+  font-size: 12px;
+  color: var(--label-secondary);
+  text-align: left;
+  cursor: pointer;
+}
+
+.compaction-header:hover {
+  background: var(--hover-fill);
+}
+
+.compaction-meta {
+  flex: 1;
+  min-width: 0;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--label-secondary);
+}
+
+.compaction-header .chevron {
+  color: var(--label-tertiary);
+  font-size: 11px;
+}
+
+.compaction-body {
+  padding: 8px 10px 10px;
+  border-top: 1px solid var(--border-l1);
+  font-size: 13px;
+  color: var(--label-primary);
+}
+
 .usage-pill {
   display: inline-flex;
   align-items: center;
@@ -4003,6 +4054,32 @@ button.btn.form-action {
   font-size: 11px;
   line-height: 16px;
   color: var(--label-tertiary);
+}
+
+.cm-note-result {
+  color: var(--accent);
+}
+
+.cm-compact {
+  display: block;
+  width: 100%;
+  margin-top: 10px;
+  padding: 5px 0;
+  border: 1px solid var(--border-l1);
+  border-radius: 6px;
+  background: var(--accent-soft);
+  font-size: 12px;
+  color: var(--label-primary);
+  cursor: pointer;
+}
+
+.cm-compact:hover:not(:disabled) {
+  background: var(--accent-tint);
+}
+
+.cm-compact:disabled {
+  opacity: 0.5;
+  cursor: default;
 }
 
 .cm-swatch {

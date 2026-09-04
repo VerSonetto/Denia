@@ -1,4 +1,4 @@
-﻿import { useCallback, useEffect, useRef, useState, type ClipboardEvent, type KeyboardEvent, type WheelEvent } from 'react'
+import { useCallback, useEffect, useRef, useState, type ClipboardEvent, type KeyboardEvent, type WheelEvent } from 'react'
 import * as api from '../api'
 import { optimizePromptText } from '../promptOptimizer'
 import {
@@ -1130,7 +1130,13 @@ export default function SessionsPage({
               <IconSparkles size={16} />
             )}
           </button>
-          <ContextRing pressure={context?.pressure} breakdown={context?.breakdown} />
+          <ContextRing
+            pressure={context?.pressure}
+            breakdown={context?.breakdown}
+            sessionId={activeId ?? undefined}
+            running={running}
+            onCompacted={refreshContextBreakdown}
+          />
           {primaryStops ? (
             <button
               type="button"
