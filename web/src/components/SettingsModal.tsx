@@ -1,4 +1,4 @@
-﻿import { useCallback, useEffect, useState, type ReactNode } from 'react'
+import { useCallback, useEffect, useState, type ReactNode } from 'react'
 import * as api from '../api'
 import { t } from '../i18n'
 import type { Notify } from '../App'
@@ -259,13 +259,12 @@ export function SettingsModal({ notify, onClose }: { notify: Notify; onClose: ()
   }
 
   return (
-    <div className="setm-backdrop" onClick={onClose}>
+    <div className="setm-backdrop">
       <div
         className="setm-shell"
         role="dialog"
         aria-modal="true"
         aria-label={t('settingsModalTitle')}
-        onClick={(event) => event.stopPropagation()}
       >
         <aside className="setm-rail">
           <div className="setm-rail-head">
@@ -292,10 +291,6 @@ export function SettingsModal({ notify, onClose }: { notify: Notify; onClose: ()
             ))}
           </nav>
 
-          <button type="button" className="setm-rail-close" onClick={onClose}>
-            <IconClose size={15} />
-            <span>{t('close')}</span>
-          </button>
         </aside>
 
         <main className="setm-panel">

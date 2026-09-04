@@ -4099,8 +4099,8 @@ button.btn.form-action {
   align-items: center;
   justify-content: center;
   padding: 28px 20px;
-  background: rgba(0, 0, 0, 0.72);
-  backdrop-filter: blur(10px);
+  background: rgba(0, 0, 0, 0.15);
+  backdrop-filter: blur(2px);
 }
 
 .setm-shell {
@@ -4261,28 +4261,6 @@ button.btn.form-action {
 
 .setm-nav-item.active .setm-nav-desc {
   color: var(--label-tertiary);
-}
-
-.setm-rail-close {
-  margin-top: 12px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 8px;
-  width: 100%;
-  padding: 10px 12px;
-  border: 1px solid var(--border-l1);
-  border-radius: 10px;
-  background: transparent;
-  color: var(--label-tertiary);
-  font-size: 12.5px;
-  cursor: pointer;
-  transition: background 0.15s var(--ease), color 0.15s var(--ease);
-}
-
-.setm-rail-close:hover {
-  background: var(--setm-inset-hover);
-  color: var(--label-primary);
 }
 
 .setm-panel {
@@ -4789,10 +4767,6 @@ button.btn.form-action {
   }
 
   .setm-nav-desc {
-    display: none;
-  }
-
-  .setm-rail-close {
     display: none;
   }
 
