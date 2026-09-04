@@ -4741,28 +4741,36 @@ button.btn.form-action {
 
 /* ---------- browser panel (brw) ---------- */
 
-.brw-backdrop {
-  position: fixed;
-  inset: 0;
-  z-index: 60;
+/* 常驻侧栏形态(ZCode 式):聊天区缩窄,右侧并排实时画面 */
+.main-row {
   display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 28px 20px;
-  background: rgba(0, 0, 0, 0.72);
-  backdrop-filter: blur(10px);
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
 }
 
-.brw-shell {
-  width: min(1080px, 100%);
-  height: min(760px, 90vh);
+.main-row .page-pane {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.browser-sidebar {
+  flex: 0 0 min(560px, 46vw);
+  min-width: 380px;
   display: flex;
   flex-direction: column;
-  border: 1px solid var(--border-l2);
-  border-radius: 16px;
-  overflow: hidden;
-  box-shadow: var(--shadow-float);
+  border-left: 1px solid var(--border-l2);
   background: var(--bg-layer-1);
+  overflow: hidden;
+}
+
+.browser-sidebar .brw-head {
+  flex: 0 0 auto;
+}
+
+.browser-sidebar .brw-body {
+  flex: 1;
+  min-height: 0;
 }
 
 .brw-head {

@@ -480,26 +480,41 @@ export default function App() {
         </nav>
       </aside>
       <main className="main">
-        <div className="page-pane">
-          <SessionsPage
-            key={activeId ?? 'draft'}
-            activeId={activeId}
-            locked={locked}
-            hasStarted={activeId ? !!startedIds[activeId] : false}
-            onSelectWorkspace={(ws) => {
-              // 首条消息前可切换;已发消息则锁死(dsh 交互)。
-              if (locked) {
-                notify('err', t('lockedWorkspace'))
-                return
-              }
-              connectWorkspace(ws)
-            }}
-            onOpenPicker={() => {
-              if (workspaces.length === 0) openDirectoryFlow()
-              else setPickerOpen(true)
-            }}
-            onAddWorkspace={openDirectoryFlow}
-          />
+        <div className="main-row">
+          <div className="page-pane">
+            <SessionsPage
+              key={activeId ?? 'draft'}
+              activeId={activeId}
+              locked={locked}
+              hasStarted={activeId ? !!startedIds[activeId] : false}
+              onSelectWorkspace={(ws) => {
+                // 发消息前可切;已发消息后锁定(dsh 语义)。
+                if (locked) {
+                  notify('err', t('lockedWorkspace'))
+                  return
+                }
+                connectWorkspace(ws)
+              }}
+              onOpenPicker={() => {
+                if (workspaces.length === 0) openDirectoryFlow()
+                else setPickerOpen(true)
+              }}
+              onAddWorkspace={openDirectoryFlow}
+            />
+          </div>
+          {browserOpen && (
+            <aside className="browser-sidebar">
+              <div className="brw-head">
+                <span>{t('navBrowser')}</span>
+                <button type="button" className="icon-btn" onClick={() => setBrowserOpen(false)}>
+                  <IconClose size={16} />
+                </button>
+              </div>
+              <div className="brw-body">
+                <BrowserPanel />
+              </div>
+            </aside>
+          )}
         </div>
       </main>
       {browserOpen && (
