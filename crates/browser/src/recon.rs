@@ -15,10 +15,10 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use serde::Serialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
-use crate::manager::BrowserManager;
 use crate::BrowserEvent;
+use crate::manager::BrowserManager;
 
 /// 单 tab 脚本表上限(超出丢最旧,防长期运行膨胀)。
 const SCRIPTS_CAP: usize = 300;
@@ -216,14 +216,25 @@ impl ReconStore {
         if script_id.is_empty() {
             return;
         }
-        let url = params.get("url").and_then(Value::as_str).unwrap_or("").to_string();
+        let url = params
+            .get("url")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
         let info = ScriptInfo {
             script_id: script_id.to_string(),
             url,
             length: params.get("length").and_then(Value::as_u64).unwrap_or(0),
             start_line: params.get("startLine").and_then(Value::as_i64).unwrap_or(0),
-            is_module: params.get("isModule").and_then(Value::as_bool).unwrap_or(false),
-            hash: params.get("hash").and_then(Value::as_str).unwrap_or("").to_string(),
+            is_module: params
+                .get("isModule")
+                .and_then(Value::as_bool)
+                .unwrap_or(false),
+            hash: params
+                .get("hash")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string(),
         };
         self.by_script
             .lock()
@@ -231,7 +242,10 @@ impl ReconStore {
             .insert(script_id.to_string(), tab_id.to_string());
         let mut map = self.scripts.lock().unwrap();
         let list = map.entry(tab_id.to_string()).or_default();
-        if list.iter().any(|existing| existing.script_id == info.script_id) {
+        if list
+            .iter()
+            .any(|existing| existing.script_id == info.script_id)
+        {
             // 同 scriptId 重复解析(导航重载后同 URL 新 scriptId,旧条目保留无害)。
             return;
         }
@@ -302,8 +316,14 @@ impl ReconStore {
                         function_name
                     },
                     url,
-                    line_number: location.get("lineNumber").and_then(Value::as_i64).unwrap_or(0),
-                    column_number: location.get("columnNumber").and_then(Value::as_i64).unwrap_or(0),
+                    line_number: location
+                        .get("lineNumber")
+                        .and_then(Value::as_i64)
+                        .unwrap_or(0),
+                    column_number: location
+                        .get("columnNumber")
+                        .and_then(Value::as_i64)
+                        .unwrap_or(0),
                     scope_names,
                 });
             }
@@ -329,12 +349,7 @@ impl ReconStore {
         let args: Vec<String> = params
             .get("args")
             .and_then(Value::as_array)
-            .map(|list| {
-                list.iter()
-                    .take(8)
-                    .map(remote_object_text)
-                    .collect()
-            })
+            .map(|list| list.iter().take(8).map(remote_object_text).collect())
             .unwrap_or_default();
         let text = if args.is_empty() {
             "(无参数)".to_string()
@@ -370,7 +385,10 @@ impl ReconStore {
             .and_then(Value::as_str)
             .unwrap_or("")
             .to_string();
-        let line = details.get("lineNumber").and_then(Value::as_i64).unwrap_or(0);
+        let line = details
+            .get("lineNumber")
+            .and_then(Value::as_i64)
+            .unwrap_or(0);
         Some(ConsoleEntry {
             seq: 0,
             level: "error".to_string(),
@@ -410,7 +428,10 @@ impl ReconStore {
     }
 
     pub fn console_list(&self, tab_id: &str, max: usize) -> Vec<ConsoleEntry> {
-        self.console.lock().unwrap().list(tab_id, max.clamp(1, CONSOLE_CAP))
+        self.console
+            .lock()
+            .unwrap()
+            .list(tab_id, max.clamp(1, CONSOLE_CAP))
     }
 
     pub fn clear(&self, tab_id: &str) {
@@ -486,7 +507,9 @@ impl ReconStore {
                     Some(&session),
                 )
                 .await
-                .map_err(|error| format!("检索 {}({}) 失败: {error}", script.url, script.script_id))?;
+                .map_err(|error| {
+                    format!("检索 {}({}) 失败: {error}", script.url, script.script_id)
+                })?;
             if let Some(found) = result.get("result").and_then(Value::as_array) {
                 for hit in found {
                     if matches.len() >= max_results {
@@ -533,7 +556,11 @@ impl ReconStore {
             (id, Some(url.to_string()))
         };
         let result = handle
-            .send_with_session("Debugger.getScriptSource", json!({ "scriptId": target_id }), Some(&session))
+            .send_with_session(
+                "Debugger.getScriptSource",
+                json!({ "scriptId": target_id }),
+                Some(&session),
+            )
             .await
             .map_err(|error| format!("取源码失败: {error}"))?;
         let mut source = result
@@ -609,11 +636,7 @@ impl ReconStore {
             params["condition"] = Value::String(condition_text.to_string());
         }
         let result = handle
-            .send_with_session(
-                "Debugger.setBreakpointByUrl",
-                params,
-                Some(&session),
-            )
+            .send_with_session("Debugger.setBreakpointByUrl", params, Some(&session))
             .await
             .map_err(|error| format!("设断点失败({url}:{}): {error}", hit.line_number))?;
         let breakpoint_id = result
@@ -640,7 +663,10 @@ impl ReconStore {
     ) -> Result<bool, String> {
         let removed = {
             let mut guard = self.breakpoints.lock().unwrap();
-            let Some(index) = guard.iter().position(|bp| bp.breakpoint_id == breakpoint_id) else {
+            let Some(index) = guard
+                .iter()
+                .position(|bp| bp.breakpoint_id == breakpoint_id)
+            else {
                 return Ok(false);
             };
             guard.remove(index)
@@ -700,7 +726,9 @@ impl ReconStore {
                 .unwrap_or("表达式抛异常");
             return Err(message.to_string());
         }
-        Ok(remote_object_value(result.get("result").unwrap_or(&Value::Null)))
+        Ok(remote_object_value(
+            result.get("result").unwrap_or(&Value::Null),
+        ))
     }
 
     /// 单步:over/into/out。
@@ -768,11 +796,16 @@ fn remote_object_text(object: &Value) -> String {
         }
     }
     match object.get("subtype").and_then(Value::as_str) {
-        Some("error") => {
-            object.get("description").and_then(Value::as_str).unwrap_or("[Error]").to_string()
-        }
+        Some("error") => object
+            .get("description")
+            .and_then(Value::as_str)
+            .unwrap_or("[Error]")
+            .to_string(),
         Some("array" | "object" | "map" | "set" | "regexp" | "date" | "node") => {
-            let description = object.get("description").and_then(Value::as_str).unwrap_or("");
+            let description = object
+                .get("description")
+                .and_then(Value::as_str)
+                .unwrap_or("");
             if description.is_empty() {
                 let preview: Vec<String> = object
                     .pointer("/preview/properties")
@@ -782,7 +815,8 @@ fn remote_object_text(object: &Value) -> String {
                             .iter()
                             .filter_map(|prop| {
                                 let name = prop.get("name").and_then(Value::as_str)?;
-                                let value = prop.get("value").and_then(Value::as_str).unwrap_or("?");
+                                let value =
+                                    prop.get("value").and_then(Value::as_str).unwrap_or("?");
                                 Some(format!("{name}: {value}"))
                             })
                             .collect()
@@ -794,7 +828,10 @@ fn remote_object_text(object: &Value) -> String {
             }
         }
         _ => {
-            let description = object.get("description").and_then(Value::as_str).unwrap_or("");
+            let description = object
+                .get("description")
+                .and_then(Value::as_str)
+                .unwrap_or("");
             if description.is_empty() {
                 "[值]".to_string()
             } else {
@@ -841,7 +878,11 @@ fn stack_location(stack: Option<&Value>) -> (String, i64) {
         return (String::new(), 0);
     };
     (
-        first.get("url").and_then(Value::as_str).unwrap_or("").to_string(),
+        first
+            .get("url")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string(),
         first.get("lineNumber").and_then(Value::as_i64).unwrap_or(0),
     )
 }

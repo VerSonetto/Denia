@@ -83,13 +83,19 @@ impl Tool for BashTool {
             }
         };
         let timeout = Duration::from_millis(
-            args.timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS).min(MAX_TIMEOUT_MS),
+            args.timeout_ms
+                .unwrap_or(DEFAULT_TIMEOUT_MS)
+                .min(MAX_TIMEOUT_MS),
         );
 
         let effective = ctx.effective_permission();
         if effective == PermissionMode::ReadOnly && bash_may_write(&args.command) {
             return ToolOutput {
-                content: format!("{}\n{}", denial_marker(effective), escalation_hint("command")),
+                content: format!(
+                    "{}\n{}",
+                    denial_marker(effective),
+                    escalation_hint("command")
+                ),
                 is_error: true,
             };
         }
@@ -211,9 +217,7 @@ mod tests {
     async fn echoes_and_reports_exit_code() {
         let dir = std::env::temp_dir();
         let tool = BashTool::new();
-        let ok = tool
-            .execute(r#"{"command":"echo hi"}"#, &ctx(&dir))
-            .await;
+        let ok = tool.execute(r#"{"command":"echo hi"}"#, &ctx(&dir)).await;
         assert!(!ok.is_error);
         assert!(ok.content.starts_with("exit code: 0"));
         assert!(ok.content.contains("hi"));

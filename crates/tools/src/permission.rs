@@ -28,8 +28,13 @@ pub fn validate_escalation_args(
     justification: Option<&str>,
 ) -> Result<(), String> {
     match (sandbox_permissions, justification) {
-        (Some(_), None) => Err("invalid escalation: sandbox_permissions requires a justification".to_string()),
-        (None, Some(_)) => Err("invalid escalation: justification is only valid together with sandbox_permissions".to_string()),
+        (Some(_), None) => {
+            Err("invalid escalation: sandbox_permissions requires a justification".to_string())
+        }
+        (None, Some(_)) => Err(
+            "invalid escalation: justification is only valid together with sandbox_permissions"
+                .to_string(),
+        ),
         (Some(_), Some(reason)) if reason.trim().is_empty() => {
             Err("invalid justification: expected a non-empty sentence".to_string())
         }
@@ -40,7 +45,10 @@ pub fn validate_escalation_args(
 /// 请求的模式是否严格宽于当前模式(抄 dsh WIDER_MODES)。
 pub fn is_strictly_wider(current: PermissionMode, requested: PermissionMode) -> bool {
     match current {
-        PermissionMode::ReadOnly => matches!(requested, PermissionMode::WorkspaceWrite | PermissionMode::DangerFullAccess),
+        PermissionMode::ReadOnly => matches!(
+            requested,
+            PermissionMode::WorkspaceWrite | PermissionMode::DangerFullAccess
+        ),
         PermissionMode::WorkspaceWrite => matches!(requested, PermissionMode::DangerFullAccess),
         PermissionMode::DangerFullAccess => false,
     }
@@ -65,10 +73,25 @@ pub fn parse_permission_mode(value: &str) -> Option<PermissionMode> {
 pub fn bash_may_write(command: &str) -> bool {
     let lower = command.to_ascii_lowercase();
     let markers = [
-        " > ", " >> ", " 2> ", " &> ", ">|",
-        "rm ", "rmdir ", "mv ", "cp ", "mkdir ",
-        "touch ", "tee ", "sed -i", "perl -i", "truncate ",
-        "install ", "ln -", "chmod ", "chown ",
+        " > ",
+        " >> ",
+        " 2> ",
+        " &> ",
+        ">|",
+        "rm ",
+        "rmdir ",
+        "mv ",
+        "cp ",
+        "mkdir ",
+        "touch ",
+        "tee ",
+        "sed -i",
+        "perl -i",
+        "truncate ",
+        "install ",
+        "ln -",
+        "chmod ",
+        "chown ",
     ];
     markers.iter().any(|marker| lower.contains(marker))
 }
@@ -79,11 +102,26 @@ mod tests {
 
     #[test]
     fn widening_ladder_is_closed() {
-        assert!(is_strictly_wider(PermissionMode::ReadOnly, PermissionMode::WorkspaceWrite));
-        assert!(is_strictly_wider(PermissionMode::ReadOnly, PermissionMode::DangerFullAccess));
-        assert!(is_strictly_wider(PermissionMode::WorkspaceWrite, PermissionMode::DangerFullAccess));
-        assert!(!is_strictly_wider(PermissionMode::WorkspaceWrite, PermissionMode::ReadOnly));
-        assert!(!is_strictly_wider(PermissionMode::DangerFullAccess, PermissionMode::DangerFullAccess));
+        assert!(is_strictly_wider(
+            PermissionMode::ReadOnly,
+            PermissionMode::WorkspaceWrite
+        ));
+        assert!(is_strictly_wider(
+            PermissionMode::ReadOnly,
+            PermissionMode::DangerFullAccess
+        ));
+        assert!(is_strictly_wider(
+            PermissionMode::WorkspaceWrite,
+            PermissionMode::DangerFullAccess
+        ));
+        assert!(!is_strictly_wider(
+            PermissionMode::WorkspaceWrite,
+            PermissionMode::ReadOnly
+        ));
+        assert!(!is_strictly_wider(
+            PermissionMode::DangerFullAccess,
+            PermissionMode::DangerFullAccess
+        ));
     }
 
     #[test]

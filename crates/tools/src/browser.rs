@@ -149,10 +149,9 @@ fn render_outcome(outcome: CommandOutcome, ctx: &ToolContext, screenshot: bool) 
     // 截图 → 视觉注入(read_file 同款约定)。
     if screenshot && outcome.ok {
         if let Some(image) = &outcome.image {
-            if let Ok(data) = base64::Engine::decode(
-                &base64::engine::general_purpose::STANDARD,
-                &image.base64,
-            ) {
+            if let Ok(data) =
+                base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &image.base64)
+            {
                 if ctx.vision_supported {
                     if let Some(sink) = &ctx.emit_event {
                         sink(denia_core::session::SessionEvent::UserMessage {

@@ -91,17 +91,34 @@ impl Tool for GlobTool {
     async fn execute(&self, arguments: &str, ctx: &ToolContext) -> ToolOutput {
         let args: GlobArgs = match parse_args_lenient(arguments) {
             Ok(args) => args,
-            Err(error) => return ToolOutput { content: format!("invalid arguments: {error}"), is_error: true },
+            Err(error) => {
+                return ToolOutput {
+                    content: format!("invalid arguments: {error}"),
+                    is_error: true,
+                };
+            }
         };
         if args.pattern.trim().is_empty() {
-            return ToolOutput { content: "pattern must be a non-empty string".to_string(), is_error: true };
+            return ToolOutput {
+                content: "pattern must be a non-empty string".to_string(),
+                is_error: true,
+            };
         }
-        let root = match resolve_within(&ctx.cwd, args.path.as_deref().unwrap_or("."), ctx.confined) {
+        let root = match resolve_within(&ctx.cwd, args.path.as_deref().unwrap_or("."), ctx.confined)
+        {
             Ok(path) => path,
-            Err(message) => return ToolOutput { content: message, is_error: true },
+            Err(message) => {
+                return ToolOutput {
+                    content: message,
+                    is_error: true,
+                };
+            }
         };
         if !root.is_dir() {
-            return ToolOutput { content: format!("path '{}' is not a directory", root.display()), is_error: true };
+            return ToolOutput {
+                content: format!("path '{}' is not a directory", root.display()),
+                is_error: true,
+            };
         }
         let max = args
             .max_results
@@ -145,7 +162,9 @@ impl Tool for GlobTool {
                     if cancel.is_cancelled() {
                         return ignore::WalkState::Quit;
                     }
-                    let Ok(entry) = entry else { return ignore::WalkState::Continue };
+                    let Ok(entry) = entry else {
+                        return ignore::WalkState::Continue;
+                    };
                     let Some(file_type) = entry.file_type() else {
                         return ignore::WalkState::Continue;
                     };
@@ -185,7 +204,10 @@ impl Tool for GlobTool {
         match result {
             Ok(Ok((paths, overflow))) => {
                 if paths.is_empty() {
-                    return ToolOutput { content: "No files found".to_string(), is_error: false };
+                    return ToolOutput {
+                        content: "No files found".to_string(),
+                        is_error: false,
+                    };
                 }
                 let shown = &paths[..paths.len().min(max)];
                 let mut output = shown.join("\n");
@@ -199,10 +221,19 @@ impl Tool for GlobTool {
                 if overflow {
                     output.push_str("\n\n(collection capped; results may be incomplete)");
                 }
-                ToolOutput { content: output, is_error: false }
+                ToolOutput {
+                    content: output,
+                    is_error: false,
+                }
             }
-            Ok(Err(message)) => ToolOutput { content: message, is_error: true },
-            Err(join_error) => ToolOutput { content: format!("glob worker failed: {join_error}"), is_error: true },
+            Ok(Err(message)) => ToolOutput {
+                content: message,
+                is_error: true,
+            },
+            Err(join_error) => ToolOutput {
+                content: format!("glob worker failed: {join_error}"),
+                is_error: true,
+            },
         }
     }
 }

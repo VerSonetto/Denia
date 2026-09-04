@@ -3,7 +3,7 @@
 
 use std::time::Duration;
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::manager::Ctx;
 use crate::scripts;
@@ -20,7 +20,9 @@ pub(crate) async fn dispatch(
 ) -> CommandOutcome {
     let mut ctx = Ctx { manager, inner };
     match command {
-        BrowserCommand::Navigate { url, tab_id } => navigate(&mut ctx, &url, tab_id.as_deref()).await,
+        BrowserCommand::Navigate { url, tab_id } => {
+            navigate(&mut ctx, &url, tab_id.as_deref()).await
+        }
         BrowserCommand::Back { tab_id } => {
             let started = std::time::Instant::now();
             match tab(&mut ctx, tab_id.as_deref()).await {
@@ -51,7 +53,9 @@ pub(crate) async fn dispatch(
             let started = std::time::Instant::now();
             match tab(&mut ctx, tab_id.as_deref()).await {
                 Ok(id) => {
-                    let _ = ctx.cdp(&id, "Page.reload", json!({"ignoreCache": false})).await;
+                    let _ = ctx
+                        .cdp(&id, "Page.reload", json!({"ignoreCache": false}))
+                        .await;
                     state_after(&mut ctx, &id, started).await
                 }
                 Err(e) => e,
@@ -64,7 +68,11 @@ pub(crate) async fn dispatch(
                 Err(e) => e,
             }
         }
-        BrowserCommand::Snapshot { tab_id, max_elements, include_hidden } => {
+        BrowserCommand::Snapshot {
+            tab_id,
+            max_elements,
+            include_hidden,
+        } => {
             let started = std::time::Instant::now();
             match tab(&mut ctx, tab_id.as_deref()).await {
                 Ok(id) => {
@@ -87,10 +95,19 @@ pub(crate) async fn dispatch(
                 Err(e) => e,
             }
         }
-        BrowserCommand::Screenshot { tab_id, full_page, clip } => {
-            screenshot(&mut ctx, tab_id.as_deref(), full_page, clip).await
-        }
-        BrowserCommand::Click { tab_id, r#ref, x, y, button, double_click } => {
+        BrowserCommand::Screenshot {
+            tab_id,
+            full_page,
+            clip,
+        } => screenshot(&mut ctx, tab_id.as_deref(), full_page, clip).await,
+        BrowserCommand::Click {
+            tab_id,
+            r#ref,
+            x,
+            y,
+            button,
+            double_click,
+        } => {
             let started = std::time::Instant::now();
             match tab(&mut ctx, tab_id.as_deref()).await {
                 Ok(id) => {
@@ -100,7 +117,9 @@ pub(crate) async fn dispatch(
                     };
                     let button = button.unwrap_or_else(|| "left".into());
                     let click_count = if double_click.unwrap_or(false) { 2 } else { 1 };
-                    if let Err(e) = dispatch_click(&mut ctx, &id, point.0, point.1, &button, click_count).await {
+                    if let Err(e) =
+                        dispatch_click(&mut ctx, &id, point.0, point.1, &button, click_count).await
+                    {
                         return e;
                     }
                     state_after(&mut ctx, &id, started).await
@@ -108,10 +127,16 @@ pub(crate) async fn dispatch(
                 Err(e) => e,
             }
         }
-        BrowserCommand::Type { tab_id, r#ref, text } => {
-            type_text(&mut ctx, tab_id.as_deref(), r#ref.as_deref(), &text).await
-        }
-        BrowserCommand::Fill { tab_id, r#ref, value } => {
+        BrowserCommand::Type {
+            tab_id,
+            r#ref,
+            text,
+        } => type_text(&mut ctx, tab_id.as_deref(), r#ref.as_deref(), &text).await,
+        BrowserCommand::Fill {
+            tab_id,
+            r#ref,
+            value,
+        } => {
             // fill = 点中 ref 后整体替换内容(点击 → 全选 → 粘贴)
             let started = std::time::Instant::now();
             match tab(&mut ctx, tab_id.as_deref()).await {
@@ -120,7 +145,8 @@ pub(crate) async fn dispatch(
                         Ok(point) => point,
                         Err(e) => return e,
                     };
-                    if let Err(e) = dispatch_click(&mut ctx, &id, point.0, point.1, "left", 1).await {
+                    if let Err(e) = dispatch_click(&mut ctx, &id, point.0, point.1, "left", 1).await
+                    {
                         return e;
                     }
                     if let Err(e) = select_all(&mut ctx, &id).await {
@@ -143,7 +169,9 @@ pub(crate) async fn dispatch(
                             Ok(point) => point,
                             Err(e) => return e,
                         };
-                        if let Err(e) = dispatch_click(&mut ctx, &id, point.0, point.1, "left", 1).await {
+                        if let Err(e) =
+                            dispatch_click(&mut ctx, &id, point.0, point.1, "left", 1).await
+                        {
                             return e;
                         }
                     }
@@ -155,11 +183,17 @@ pub(crate) async fn dispatch(
                 Err(e) => e,
             }
         }
-        BrowserCommand::Scroll { tab_id, r#ref, x, y } => {
+        BrowserCommand::Scroll {
+            tab_id,
+            r#ref,
+            x,
+            y,
+        } => {
             let started = std::time::Instant::now();
             match tab(&mut ctx, tab_id.as_deref()).await {
                 Ok(id) => {
-                    let (px, py) = match resolve_point(&mut ctx, &id, r#ref.as_deref(), x, y).await {
+                    let (px, py) = match resolve_point(&mut ctx, &id, r#ref.as_deref(), x, y).await
+                    {
                         Ok(point) => point,
                         Err(e) => return e,
                     };
@@ -172,18 +206,28 @@ pub(crate) async fn dispatch(
                 Err(e) => e,
             }
         }
-        BrowserCommand::Hover { tab_id, r#ref, x, y } => {
+        BrowserCommand::Hover {
+            tab_id,
+            r#ref,
+            x,
+            y,
+        } => {
             let started = std::time::Instant::now();
             match tab(&mut ctx, tab_id.as_deref()).await {
                 Ok(id) => {
-                    let (px, py) = match resolve_point(&mut ctx, &id, r#ref.as_deref(), x, y).await {
+                    let (px, py) = match resolve_point(&mut ctx, &id, r#ref.as_deref(), x, y).await
+                    {
                         Ok(point) => point,
                         Err(e) => return e,
                     };
                     if let Err(e) = ctx
-                        .cdp(&id, "Input.dispatchMouseEvent", json!({
-                            "type": "mouseMoved", "x": px, "y": py,
-                        }))
+                        .cdp(
+                            &id,
+                            "Input.dispatchMouseEvent",
+                            json!({
+                                "type": "mouseMoved", "x": px, "y": py,
+                            }),
+                        )
                         .await
                     {
                         return e;
@@ -193,21 +237,47 @@ pub(crate) async fn dispatch(
                 Err(e) => e,
             }
         }
-        BrowserCommand::Select { tab_id, r#ref, values } => {
-            select_option(&mut ctx, tab_id.as_deref(), &r#ref, &values).await
-        }
-        BrowserCommand::Check { tab_id, r#ref, checked } => {
-            check_element(&mut ctx, tab_id.as_deref(), &r#ref, checked).await
-        }
-        BrowserCommand::Drag { tab_id, from_ref, to_ref, from, to } => {
+        BrowserCommand::Select {
+            tab_id,
+            r#ref,
+            values,
+        } => select_option(&mut ctx, tab_id.as_deref(), &r#ref, &values).await,
+        BrowserCommand::Check {
+            tab_id,
+            r#ref,
+            checked,
+        } => check_element(&mut ctx, tab_id.as_deref(), &r#ref, checked).await,
+        BrowserCommand::Drag {
+            tab_id,
+            from_ref,
+            to_ref,
+            from,
+            to,
+        } => {
             let started = std::time::Instant::now();
             match tab(&mut ctx, tab_id.as_deref()).await {
                 Ok(id) => {
-                    let start = match resolve_point(&mut ctx, &id, from_ref.as_deref(), from.map(|p| p.x), from.map(|p| p.y)).await {
+                    let start = match resolve_point(
+                        &mut ctx,
+                        &id,
+                        from_ref.as_deref(),
+                        from.map(|p| p.x),
+                        from.map(|p| p.y),
+                    )
+                    .await
+                    {
                         Ok(point) => point,
                         Err(e) => return e,
                     };
-                    let end = match resolve_point(&mut ctx, &id, to_ref.as_deref(), to.map(|p| p.x), to.map(|p| p.y)).await {
+                    let end = match resolve_point(
+                        &mut ctx,
+                        &id,
+                        to_ref.as_deref(),
+                        to.map(|p| p.x),
+                        to.map(|p| p.y),
+                    )
+                    .await
+                    {
                         Ok(point) => point,
                         Err(e) => return e,
                     };
@@ -245,12 +315,19 @@ pub(crate) async fn dispatch(
                                     .get("message")
                                     .and_then(Value::as_str)
                                     .unwrap_or("evaluate error");
-                                return CommandOutcome::err("execution_error", message, elapsed(&started));
+                                return CommandOutcome::err(
+                                    "execution_error",
+                                    message,
+                                    elapsed(&started),
+                                );
                             }
                             let data = value
                                 .get("data")
                                 .cloned()
-                                .map(|raw| serde_json::from_str::<Value>(raw.as_str().unwrap_or("null")).unwrap_or(raw))
+                                .map(|raw| {
+                                    serde_json::from_str::<Value>(raw.as_str().unwrap_or("null"))
+                                        .unwrap_or(raw)
+                                })
                                 .unwrap_or(Value::Null);
                             CommandOutcome::ok_value(data, elapsed(&started))
                         }
@@ -260,8 +337,22 @@ pub(crate) async fn dispatch(
                 Err(e) => e,
             }
         }
-        BrowserCommand::WaitFor { tab_id, selector, text, text_gone, timeout_ms } => {
-            wait_for(&mut ctx, tab_id.as_deref(), selector.as_deref(), text.as_deref(), text_gone.as_deref(), timeout_ms).await
+        BrowserCommand::WaitFor {
+            tab_id,
+            selector,
+            text,
+            text_gone,
+            timeout_ms,
+        } => {
+            wait_for(
+                &mut ctx,
+                tab_id.as_deref(),
+                selector.as_deref(),
+                text.as_deref(),
+                text_gone.as_deref(),
+                timeout_ms,
+            )
+            .await
         }
         BrowserCommand::GetDialog { tab_id } => {
             let started = std::time::Instant::now();
@@ -276,12 +367,16 @@ pub(crate) async fn dispatch(
                 Err(e) => e,
             }
         }
-        BrowserCommand::HandleDialog { tab_id, accept, prompt_text } => {
-            handle_dialog(&mut ctx, tab_id.as_deref(), accept, prompt_text.as_deref()).await
-        }
+        BrowserCommand::HandleDialog {
+            tab_id,
+            accept,
+            prompt_text,
+        } => handle_dialog(&mut ctx, tab_id.as_deref(), accept, prompt_text.as_deref()).await,
         BrowserCommand::NewTab { url } => {
             let started = std::time::Instant::now();
-            match crate::manager::BrowserManager::create_tab_inner(&mut ctx.inner, url.as_deref()).await {
+            match crate::manager::BrowserManager::create_tab_inner(&mut ctx.inner, url.as_deref())
+                .await
+            {
                 Ok(id) => {
                     ctx.set_active(&id);
                     ctx.broadcast_tabs_changed();
@@ -337,14 +432,16 @@ pub(crate) async fn dispatch(
             let started = std::time::Instant::now();
             if ctx.inner.tabs.contains_key(&tab_id) {
                 ctx.set_active(&tab_id);
-                let _ = ctx
-                    .cdp(&tab_id, "Page.bringToFront", json!({}))
-                    .await;
+                let _ = ctx.cdp(&tab_id, "Page.bringToFront", json!({})).await;
                 ctx.broadcast_tabs_changed();
             }
             CommandOutcome::ok_value(json!({"activated": true}), elapsed(&started))
         }
-        BrowserCommand::ViewportSet { tab_id, width, height } => {
+        BrowserCommand::ViewportSet {
+            tab_id,
+            width,
+            height,
+        } => {
             let started = std::time::Instant::now();
             match tab(&mut ctx, tab_id.as_deref()).await {
                 Ok(id) => {
@@ -357,7 +454,10 @@ pub(crate) async fn dispatch(
                         return e;
                     }
                     ctx.inner.viewport.insert(id, (width, height));
-                    CommandOutcome::ok_value(json!({"width": width, "height": height}), elapsed(&started))
+                    CommandOutcome::ok_value(
+                        json!({"width": width, "height": height}),
+                        elapsed(&started),
+                    )
                 }
                 Err(e) => e,
             }
@@ -375,13 +475,19 @@ pub(crate) async fn dispatch(
                 Err(e) => e,
             }
         }
-        BrowserCommand::NetworkList { tab_id, url_filter, max } => {
+        BrowserCommand::NetworkList {
+            tab_id,
+            url_filter,
+            max,
+        } => {
             let started = std::time::Instant::now();
             match tab(&mut ctx, tab_id.as_deref()).await {
                 Ok(id) => {
-                    let entries = ctx
-                        .manager
-                        .network_list(&id, url_filter.as_deref(), max.unwrap_or(50).min(200));
+                    let entries = ctx.manager.network_list(
+                        &id,
+                        url_filter.as_deref(),
+                        max.unwrap_or(50).min(200),
+                    );
                     CommandOutcome::ok_value(
                         json!({ "requests": entries, "count": entries.len() }),
                         elapsed(&started),
@@ -390,7 +496,11 @@ pub(crate) async fn dispatch(
                 Err(e) => e,
             }
         }
-        BrowserCommand::NetworkGetBody { tab_id, request_id, body_kind } => {
+        BrowserCommand::NetworkGetBody {
+            tab_id,
+            request_id,
+            body_kind,
+        } => {
             let want_request = body_kind.as_deref() == Some("request");
             network_get_body(&mut ctx, tab_id.as_deref(), &request_id, want_request).await
         }
@@ -399,13 +509,17 @@ pub(crate) async fn dispatch(
             match tab(&mut ctx, tab_id.as_deref()).await {
                 Ok(id) => {
                     let _ = ctx
-                        .cdp(&id, "Page.startScreencast", json!({
-                            "format": "jpeg",
-                            "quality": 60,
-                            "maxWidth": 1280,
-                            "maxHeight": 800,
-                            "everyNthFrame": 1,
-                        }))
+                        .cdp(
+                            &id,
+                            "Page.startScreencast",
+                            json!({
+                                "format": "jpeg",
+                                "quality": 60,
+                                "maxWidth": 1280,
+                                "maxHeight": 800,
+                                "everyNthFrame": 1,
+                            }),
+                        )
                         .await;
                     CommandOutcome::ok_value(json!({"streaming": true}), elapsed(&started))
                 }
@@ -435,7 +549,11 @@ fn elapsed(started: &std::time::Instant) -> u64 {
     started.elapsed().as_millis() as u64
 }
 
-async fn state_after(ctx: &mut Ctx<'_>, tab_id: &str, started: std::time::Instant) -> CommandOutcome {
+async fn state_after(
+    ctx: &mut Ctx<'_>,
+    tab_id: &str,
+    started: std::time::Instant,
+) -> CommandOutcome {
     // url/title/canGoBack/scrollZ 引擎态一次拿齐(ZCode `readState` + Tj 脚本等价物)
     let expression = r#"(function(){return JSON.stringify({url:location.href,title:document.title,canGoBack:history.length>1,scrollX:window.scrollX||0,scrollY:window.scrollY||0,viewportWidth:window.innerWidth||0,viewportHeight:window.innerHeight||0});})()"#;
     match ctx.eval_json(tab_id, expression).await {
@@ -446,7 +564,10 @@ async fn state_after(ctx: &mut Ctx<'_>, tab_id: &str, started: std::time::Instan
             if !url.is_empty() {
                 ctx.manager.update_tab_view(tab_id, url, title);
             }
-            CommandOutcome { state: Some(state), ..CommandOutcome::ok_value(Value::Null, elapsed(&started)) }
+            CommandOutcome {
+                state: Some(state),
+                ..CommandOutcome::ok_value(Value::Null, elapsed(&started))
+            }
         }
         Err(_) => CommandOutcome::ok_value(Value::Null, elapsed(&started)),
     }
@@ -473,10 +594,7 @@ async fn navigate(ctx: &mut Ctx<'_>, url: &str, tab_id: Option<&str>) -> Command
             elapsed(&started),
         );
     }
-    if let Err(e) = ctx
-        .cdp(&id, "Page.navigate", json!({"url": url}))
-        .await
-    {
+    if let Err(e) = ctx.cdp(&id, "Page.navigate", json!({"url": url})).await {
         return e;
     }
     // settle:等 loadEventFired 轮询 document.readyState(与 ZCode settle 等价)
@@ -556,17 +674,32 @@ async fn dispatch_click(
     button: &str,
     click_count: i32,
 ) -> Result<(), CommandOutcome> {
-    ctx.cdp(tab_id, "Input.dispatchMouseEvent", json!({
-        "type": "mouseMoved", "x": x, "y": y,
-    })).await?;
-    ctx.cdp(tab_id, "Input.dispatchMouseEvent", json!({
-        "type": "mousePressed", "x": x, "y": y,
-        "button": button, "clickCount": click_count,
-    })).await?;
-    ctx.cdp(tab_id, "Input.dispatchMouseEvent", json!({
-        "type": "mouseReleased", "x": x, "y": y,
-        "button": button, "clickCount": click_count,
-    })).await?;
+    ctx.cdp(
+        tab_id,
+        "Input.dispatchMouseEvent",
+        json!({
+            "type": "mouseMoved", "x": x, "y": y,
+        }),
+    )
+    .await?;
+    ctx.cdp(
+        tab_id,
+        "Input.dispatchMouseEvent",
+        json!({
+            "type": "mousePressed", "x": x, "y": y,
+            "button": button, "clickCount": click_count,
+        }),
+    )
+    .await?;
+    ctx.cdp(
+        tab_id,
+        "Input.dispatchMouseEvent",
+        json!({
+            "type": "mouseReleased", "x": x, "y": y,
+            "button": button, "clickCount": click_count,
+        }),
+    )
+    .await?;
     Ok(())
 }
 
@@ -621,33 +754,64 @@ async fn dispatch_wheel(
     delta_x: f64,
     delta_y: f64,
 ) -> Result<(), CommandOutcome> {
-    ctx.cdp(tab_id, "Input.dispatchMouseEvent", json!({
-        "type": "mouseWheel", "x": x, "y": y,
-        "deltaX": delta_x, "deltaY": delta_y,
-    })).await.map(|_| ())
+    ctx.cdp(
+        tab_id,
+        "Input.dispatchMouseEvent",
+        json!({
+            "type": "mouseWheel", "x": x, "y": y,
+            "deltaX": delta_x, "deltaY": delta_y,
+        }),
+    )
+    .await
+    .map(|_| ())
 }
 
 /// 拖拽:10 步插值(ZCode `dispatchDrag` 同款)。
-async fn dispatch_drag(ctx: &mut Ctx<'_>, tab_id: &str, from: (f64, f64), to: (f64, f64)) -> Result<(), CommandOutcome> {
-    ctx.cdp(tab_id, "Input.dispatchMouseEvent", json!({
-        "type": "mouseMoved", "x": from.0, "y": from.1,
-    })).await?;
-    ctx.cdp(tab_id, "Input.dispatchMouseEvent", json!({
-        "type": "mousePressed", "x": from.0, "y": from.1,
-        "button": "left", "clickCount": 1,
-    })).await?;
+async fn dispatch_drag(
+    ctx: &mut Ctx<'_>,
+    tab_id: &str,
+    from: (f64, f64),
+    to: (f64, f64),
+) -> Result<(), CommandOutcome> {
+    ctx.cdp(
+        tab_id,
+        "Input.dispatchMouseEvent",
+        json!({
+            "type": "mouseMoved", "x": from.0, "y": from.1,
+        }),
+    )
+    .await?;
+    ctx.cdp(
+        tab_id,
+        "Input.dispatchMouseEvent",
+        json!({
+            "type": "mousePressed", "x": from.0, "y": from.1,
+            "button": "left", "clickCount": 1,
+        }),
+    )
+    .await?;
     let steps = 10;
     for step in 1..=steps {
         let x = from.0 + (to.0 - from.0) * step as f64 / steps as f64;
         let y = from.1 + (to.1 - from.1) * step as f64 / steps as f64;
-        ctx.cdp(tab_id, "Input.dispatchMouseEvent", json!({
-            "type": "mouseMoved", "x": x, "y": y, "button": "left", "buttons": 1,
-        })).await?;
+        ctx.cdp(
+            tab_id,
+            "Input.dispatchMouseEvent",
+            json!({
+                "type": "mouseMoved", "x": x, "y": y, "button": "left", "buttons": 1,
+            }),
+        )
+        .await?;
     }
-    ctx.cdp(tab_id, "Input.dispatchMouseEvent", json!({
-        "type": "mouseReleased", "x": to.0, "y": to.1,
-        "button": "left", "clickCount": 1,
-    })).await?;
+    ctx.cdp(
+        tab_id,
+        "Input.dispatchMouseEvent",
+        json!({
+            "type": "mouseReleased", "x": to.0, "y": to.1,
+            "button": "left", "clickCount": 1,
+        }),
+    )
+    .await?;
     Ok(())
 }
 
@@ -665,7 +829,9 @@ async fn select_all(ctx: &mut Ctx<'_>, tab_id: &str) -> Result<(), CommandOutcom
     up["key"] = Value::String("a".into());
     up["code"] = Value::String("KeyA".into());
     up["windowsVirtualKeyCode"] = json!(65);
-    ctx.cdp(tab_id, "Input.dispatchKeyEvent", up).await.map(|_| ())
+    ctx.cdp(tab_id, "Input.dispatchKeyEvent", up)
+        .await
+        .map(|_| ())
 }
 
 async fn paste(ctx: &mut Ctx<'_>, tab_id: &str, text: &str) -> Result<(), CommandOutcome> {
@@ -739,7 +905,10 @@ return JSON.stringify({{ok:true}});
             state_after(ctx, &id, started).await
         }
         Ok(value) => {
-            let message = value.get("error").and_then(Value::as_str).unwrap_or("select failed");
+            let message = value
+                .get("error")
+                .and_then(Value::as_str)
+                .unwrap_or("select failed");
             CommandOutcome::err("execution_error", message, elapsed(&started))
         }
         Err(e) => e,
@@ -757,7 +926,9 @@ async fn check_element(
         Ok(id) => id,
         Err(e) => return e,
     };
-    let want = checked.map(|b| b.to_string()).unwrap_or_else(|| "null".into());
+    let want = checked
+        .map(|b| b.to_string())
+        .unwrap_or_else(|| "null".into());
     let expression = format!(
         r#"(function(){{
 var ref={ref_json};var want={want};
@@ -776,7 +947,10 @@ return JSON.stringify({{ok:true,checked:el.checked}});
             state_after(ctx, &id, started).await
         }
         Ok(value) => {
-            let message = value.get("error").and_then(Value::as_str).unwrap_or("check failed");
+            let message = value
+                .get("error")
+                .and_then(Value::as_str)
+                .unwrap_or("check failed");
             CommandOutcome::err("execution_error", message, elapsed(&started))
         }
         Err(e) => e,
@@ -832,7 +1006,11 @@ catch(e){{return JSON.stringify({{hit:false,error:'bad_selector'}});}}}})()"#,
             return CommandOutcome::ok_value(json!({"waited": true}), elapsed(&started));
         }
         if tokio::time::Instant::now() >= deadline {
-            return CommandOutcome::err("timeout", format!("等待条件超时({timeout}ms)"), elapsed(&started));
+            return CommandOutcome::err(
+                "timeout",
+                format!("等待条件超时({timeout}ms)"),
+                elapsed(&started),
+            );
         }
         tokio::time::sleep(Duration::from_millis(WAIT_POLL_MS)).await;
     }
@@ -871,7 +1049,11 @@ async fn screenshot(
                 .unwrap_or_default()
                 .to_string();
             if data.is_empty() {
-                return CommandOutcome::err("execution_error", "screenshot returned empty data", elapsed(&started));
+                return CommandOutcome::err(
+                    "execution_error",
+                    "screenshot returned empty data",
+                    elapsed(&started),
+                );
             }
             CommandOutcome {
                 image: Some(crate::ImagePayload {
@@ -922,7 +1104,9 @@ mod url {
                 .chars()
                 .next()
                 .is_some_and(|c| c.is_ascii_alphabetic())
-            || !scheme.chars().all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '-' || c == '.')
+            || !scheme
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '-' || c == '.')
         {
             return None;
         }
@@ -962,7 +1146,11 @@ async fn network_get_body(
             );
         }
         let truncated = post.len() > 60_000;
-        let content = if truncated { post[..60_000].to_string() } else { post.to_string() };
+        let content = if truncated {
+            post[..60_000].to_string()
+        } else {
+            post.to_string()
+        };
         return CommandOutcome::ok_value(
             json!({
                 "requestId": request_id,
@@ -974,17 +1162,36 @@ async fn network_get_body(
         );
     }
     let body = match ctx
-        .cdp(&id, "Network.getResponseBody", json!({ "requestId": request_id }))
+        .cdp(
+            &id,
+            "Network.getResponseBody",
+            json!({ "requestId": request_id }),
+        )
         .await
     {
         Ok(body) => body,
         Err(e) => return e,
     };
-    let base64_encoded = body.get("base64Encoded").and_then(Value::as_bool).unwrap_or(false);
-    let raw_body = body.get("body").and_then(Value::as_str).unwrap_or("").to_string();
-    let mime = entry.get("mimeType").and_then(Value::as_str).unwrap_or("").to_string();
+    let base64_encoded = body
+        .get("base64Encoded")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let raw_body = body
+        .get("body")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let mime = entry
+        .get("mimeType")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
     let truncated = raw_body.len() > 60_000;
-    let content = if truncated { raw_body[..60_000].to_string() } else { raw_body };
+    let content = if truncated {
+        raw_body[..60_000].to_string()
+    } else {
+        raw_body
+    };
     CommandOutcome::ok_value(
         json!({
             "requestId": request_id,

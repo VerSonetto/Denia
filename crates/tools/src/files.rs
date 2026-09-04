@@ -61,11 +61,14 @@ fn sniff_image(data: &[u8]) -> Option<(&'static str, Option<u32>, Option<u32>)> 
                             continue;
                         }
                         let seg_len =
-                            u16::from_be_bytes(data[offset + 2..offset + 4].try_into().ok()?) as usize;
+                            u16::from_be_bytes(data[offset + 2..offset + 4].try_into().ok()?)
+                                as usize;
                         if marker == 0xC0 || marker == 0xC2 {
                             size = (
-                                u16::from_be_bytes(data[offset + 7..offset + 9].try_into().ok()?) as u32,
-                                u16::from_be_bytes(data[offset + 5..offset + 7].try_into().ok()?) as u32,
+                                u16::from_be_bytes(data[offset + 7..offset + 9].try_into().ok()?)
+                                    as u32,
+                                u16::from_be_bytes(data[offset + 5..offset + 7].try_into().ok()?)
+                                    as u32,
                             );
                             break;
                         }
@@ -176,7 +179,12 @@ impl Tool for ReadFileTool {
         }
         let path = match resolve_within(&ctx.cwd, &args.path, ctx.confined) {
             Ok(path) => path,
-            Err(message) => return ToolOutput { content: message, is_error: true },
+            Err(message) => {
+                return ToolOutput {
+                    content: message,
+                    is_error: true,
+                };
+            }
         };
         // 图片文件:不走文本截断,而是作为视觉输入注入会话。
         if let Ok(data) = std::fs::read(&path) {
@@ -185,10 +193,7 @@ impl Tool for ReadFileTool {
                     return ToolOutput {
                         content: format!(
                             "图片需要识图模型:{} 是 {}(尺寸 {:?}x{:?});当前模型未标记为可识图,请切换到支持图片输入的模型后再读取。",
-                            args.path,
-                            mime,
-                            width,
-                            height
+                            args.path, mime, width, height
                         ),
                         is_error: true,
                     };
@@ -263,11 +268,7 @@ impl Tool for ReadFileTool {
         ToolOutput {
             content: format!(
                 "{} 第 {}-{} 行（{} 行）:\n{}",
-                args.path,
-                args.offset,
-                end,
-                count,
-                body
+                args.path, args.offset, end, count, body
             ),
             is_error: false,
         }
@@ -342,7 +343,12 @@ impl Tool for WriteFileTool {
         }
         let path = match resolve_within(&ctx.cwd, &args.path, false) {
             Ok(path) => path,
-            Err(message) => return ToolOutput { content: message, is_error: true },
+            Err(message) => {
+                return ToolOutput {
+                    content: message,
+                    is_error: true,
+                };
+            }
         };
         if effective == PermissionMode::WorkspaceWrite && !path.starts_with(&ctx.cwd) {
             return ToolOutput {
@@ -435,9 +441,7 @@ mod tests {
             )
             .await;
         assert!(!wrote.is_error, "{}", wrote.content);
-        let read = reader
-            .execute(r#"{"path":"notes/hello.txt"}"#, &ctx)
-            .await;
+        let read = reader.execute(r#"{"path":"notes/hello.txt"}"#, &ctx).await;
         assert!(!read.is_error);
         assert!(read.content.contains("hello harness"));
         assert!(read.content.contains("第 1-1 行（1 行）"));
@@ -490,7 +494,13 @@ mod tests {
             .execute(r#"{"path":"a.txt","content":"x"}"#, &ctx)
             .await;
         assert!(denied.is_error, "{}", denied.content);
-        assert!(denied.content.contains("[sandbox: file access denied under read-only mode]"), "{}", denied.content);
+        assert!(
+            denied
+                .content
+                .contains("[sandbox: file access denied under read-only mode]"),
+            "{}",
+            denied.content
+        );
 
         // 一次性升权为完整权限后同一次调用可写。
         ctx.permission_override = Some(PermissionMode::DangerFullAccess);
@@ -521,16 +531,12 @@ mod tests {
     async fn image_read_injects_visual_input_and_dimensions() {
         // 1x1 PNG(真实最小文件)。
         let png = [
-            0x89u8, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A,
-            0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44, 0x52,
-            0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
-            0x08, 0x04, 0x00, 0x00, 0x00, 0xB5, 0x1C, 0x0C,
-            0x02, 0x00, 0x00, 0x00, 0x0B, 0x49, 0x44, 0x41,
-            0x54, 0x78, 0x9C, 0x63, 0xE4, 0x0F, 0x00, 0x00,
-            0x00, 0x00, 0x00, 0xFF, 0xFF, 0x03, 0x00, 0x06,
-            0x00, 0x0A, 0x71, 0xFB, 0xA2, 0x65, 0x00, 0x00,
-            0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42,
-            0x60, 0x82,
+            0x89u8, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48,
+            0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x04, 0x00, 0x00,
+            0x00, 0xB5, 0x1C, 0x0C, 0x02, 0x00, 0x00, 0x00, 0x0B, 0x49, 0x44, 0x41, 0x54, 0x78,
+            0x9C, 0x63, 0xE4, 0x0F, 0x00, 0x00, 0x00, 0x00, 0x00, 0xFF, 0xFF, 0x03, 0x00, 0x06,
+            0x00, 0x0A, 0x71, 0xFB, 0xA2, 0x65, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44,
+            0xAE, 0x42, 0x60, 0x82,
         ];
         let dir = std::env::temp_dir().join(format!(
             "denia-img-{}",
@@ -567,7 +573,11 @@ mod tests {
         let events = emitted.lock().unwrap();
         assert_eq!(events.len(), 1);
         match &events[0] {
-            denia_core::session::SessionEvent::UserMessage { injected: true, images, .. } => {
+            denia_core::session::SessionEvent::UserMessage {
+                injected: true,
+                images,
+                ..
+            } => {
                 assert_eq!(images.len(), 1);
                 assert_eq!(images[0].mime, "image/png");
                 assert!(!images[0].data.is_empty());

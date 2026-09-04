@@ -209,9 +209,7 @@ mod tests {
     use std::sync::{Arc, Mutex};
     use tokio_util::sync::CancellationToken;
 
-    fn ctx_with_sink(
-        collected: Arc<Mutex<Vec<SessionEvent>>>,
-    ) -> ToolContext {
+    fn ctx_with_sink(collected: Arc<Mutex<Vec<SessionEvent>>>) -> ToolContext {
         ToolContext {
             cwd: std::env::temp_dir(),
             cancel: CancellationToken::new(),
@@ -274,7 +272,10 @@ mod tests {
         let tool = TodoWriteTool::default();
         let sink = || ctx_with_sink(Arc::new(Mutex::new(Vec::new())));
         let empty = tool
-            .execute(r#"{"todos":[{"content":"  ","status":"pending"}]}"#, &sink())
+            .execute(
+                r#"{"todos":[{"content":"  ","status":"pending"}]}"#,
+                &sink(),
+            )
             .await;
         assert!(empty.is_error && empty.content.contains("non-empty"));
         let dup = tool
@@ -311,7 +312,10 @@ mod tests {
     async fn rejects_caller_without_session() {
         let tool = TodoWriteTool::default();
         let out = tool
-            .execute(r#"{"todos":[{"content":"a","status":"pending"}]}"#, &ctx_without_sink())
+            .execute(
+                r#"{"todos":[{"content":"a","status":"pending"}]}"#,
+                &ctx_without_sink(),
+            )
             .await;
         assert!(out.is_error);
         assert!(out.content.contains("owning agent session"));

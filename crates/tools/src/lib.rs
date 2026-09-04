@@ -110,7 +110,10 @@ impl ToolRegistry {
 
     /// Model-facing schemas in registration order.
     pub fn schemas(&self) -> Vec<ToolSchema> {
-        self.tools.iter().map(|tool| tool.schema().clone()).collect()
+        self.tools
+            .iter()
+            .map(|tool| tool.schema().clone())
+            .collect()
     }
 
     pub fn get(&self, name: &str) -> Option<Arc<dyn Tool>> {
@@ -184,16 +187,16 @@ pub(crate) fn resolve_within(cwd: &Path, raw: &str, confined: bool) -> Result<Pa
         }
     }
     if confined && !out.starts_with(cwd) {
-        return Err(format!("path '{raw}' escapes the session workspace (sandbox on)"));
+        return Err(format!(
+            "path '{raw}' escapes the session workspace (sandbox on)"
+        ));
     }
     Ok(out)
 }
 
 /// 宽容参数解析:只取第一个 JSON 值,忽略尾部垃圾。
 /// 模型偶尔在参数后吐多余字符,硬失败会浪费一整步。
-pub(crate) fn parse_args_lenient<T: serde::de::DeserializeOwned>(
-    raw: &str,
-) -> Result<T, String> {
+pub(crate) fn parse_args_lenient<T: serde::de::DeserializeOwned>(raw: &str) -> Result<T, String> {
     let mut iter = serde_json::Deserializer::from_str(raw.trim()).into_iter::<T>();
     match iter.next() {
         Some(Ok(value)) => Ok(value),

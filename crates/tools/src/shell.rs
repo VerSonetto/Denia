@@ -230,7 +230,9 @@ fn default_profile_commandline(settings: &serde_json::Value) -> Option<String> {
 
 #[cfg(windows)]
 fn normalize_guid(guid: &str) -> String {
-    guid.trim_matches('{').trim_matches('}').to_ascii_lowercase()
+    guid.trim_matches('{')
+        .trim_matches('}')
+        .to_ascii_lowercase()
 }
 
 #[cfg(windows)]

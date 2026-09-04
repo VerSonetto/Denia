@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use futures::{SinkExt, StreamExt};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tokio::sync::{mpsc, oneshot};
 use tokio_tungstenite::tungstenite::Message;
 
@@ -169,8 +169,6 @@ impl CdpHandle {
             }
         }
     }
-
-
 
     /// 连接是否已断开。
     pub fn is_closed(&self) -> bool {

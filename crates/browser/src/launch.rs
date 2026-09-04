@@ -24,9 +24,7 @@ pub fn locate_browser_executable() -> Option<PathBuf> {
 
 fn locate_windows_browser(executable: &str) -> Option<PathBuf> {
     // 1) App Paths 注册表(Chrome/Edge 都注册)
-    let key = format!(
-        r"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\{executable}"
-    );
+    let key = format!(r"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\{executable}");
     if let Some(path) = read_registry_default_string(&key) {
         if Path::new(&path).is_file() {
             return Some(PathBuf::from(path));
@@ -123,7 +121,9 @@ pub async fn launch_headless(
     // 读 DevToolsActivePort(Chrome 启动后写入;最多等 15s)。
     // 只认本次启动后新写的 port file:旧实例残留的文件不含新端点。
     let port_file = user_data_dir.join("DevToolsActivePort");
-    let previous_mtime = std::fs::metadata(&port_file).ok().and_then(|meta| meta.modified().ok());
+    let previous_mtime = std::fs::metadata(&port_file)
+        .ok()
+        .and_then(|meta| meta.modified().ok());
     let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
     loop {
         if tokio::time::Instant::now() >= deadline {
@@ -168,8 +168,12 @@ pub async fn write_text(path: &Path, text: &str) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
-    let mut file = tokio::fs::File::create(path).await.map_err(|e| e.to_string())?;
-    file.write_all(text.as_bytes()).await.map_err(|e| e.to_string())?;
+    let mut file = tokio::fs::File::create(path)
+        .await
+        .map_err(|e| e.to_string())?;
+    file.write_all(text.as_bytes())
+        .await
+        .map_err(|e| e.to_string())?;
     Ok(())
 }
 

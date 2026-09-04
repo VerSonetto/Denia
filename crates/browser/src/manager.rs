@@ -5,12 +5,12 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use tokio::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
+use tokio::sync::Mutex;
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::cdp::{CdpEvent, CdpHandle};
 use crate::commands;
@@ -81,13 +81,25 @@ pub enum BrowserEvent {
     /// 某个 tab 的新画面帧(页面 base64 JPEG)。
     Frame { tab_id: String, data: String },
     /// tab 出现 JS dialog。
-    DialogOpened { tab_id: String, kind: String, message: String },
+    DialogOpened {
+        tab_id: String,
+        kind: String,
+        message: String,
+    },
     /// dialog 被处理。
     DialogClosed { tab_id: String },
     /// tab 导航完成(刷新地址栏)。
-    Navigated { tab_id: String, url: String, title: String },
+    Navigated {
+        tab_id: String,
+        url: String,
+        title: String,
+    },
     /// 逆向:调试器暂停(断点命中/异常;frames 为帧摘要数组)。
-    DebuggerPaused { tab_id: String, reason: String, frames: Vec<serde_json::Value> },
+    DebuggerPaused {
+        tab_id: String,
+        reason: String,
+        frames: Vec<serde_json::Value>,
+    },
     /// 逆向:调试器恢复执行。
     DebuggerResumed { tab_id: String },
     /// 浏览器实例退出。
@@ -163,11 +175,18 @@ impl NetworkLog {
             .collect();
         items.sort_by_key(|(seq, _)| *seq);
         let start = items.len().saturating_sub(max as usize);
-        items.into_iter().skip(start).map(|(_, entry)| entry).collect()
+        items
+            .into_iter()
+            .skip(start)
+            .map(|(_, entry)| entry)
+            .collect()
     }
 
     fn get(&self, tab_id: &str, request_id: &str) -> Option<Value> {
-        self.entries.get(tab_id).and_then(|m| m.get(request_id)).cloned()
+        self.entries
+            .get(tab_id)
+            .and_then(|m| m.get(request_id))
+            .cloned()
     }
 
     fn clear(&mut self, tab_id: &str) {
@@ -229,7 +248,10 @@ impl BrowserManager {
 
     /// 网络抓包:列出该 tab 的请求条目(按发生顺序,环形缓冲上限内)。
     pub fn network_list(&self, tab_id: &str, url_filter: Option<&str>, max: u32) -> Vec<Value> {
-        self.network_log.lock().unwrap().list(tab_id, url_filter, max)
+        self.network_log
+            .lock()
+            .unwrap()
+            .list(tab_id, url_filter, max)
     }
 
     /// 网络抓包:取单条条目。
@@ -269,8 +291,10 @@ impl BrowserManager {
         let profile = self.profile_dir();
         let mut launched = launch::launch_headless(&executable, &profile).await?;
         // 有头模式端口监听可能晚于 DevToolsActivePort 落盘:指数退避重试连接。
-        let mut connected_pair: Option<(CdpHandle, tokio::sync::mpsc::UnboundedReceiver<CdpEvent>)> =
-            None;
+        let mut connected_pair: Option<(
+            CdpHandle,
+            tokio::sync::mpsc::UnboundedReceiver<CdpEvent>,
+        )> = None;
         for attempt in 0..5u32 {
             match CdpHandle::connect(&launched.websocket_url).await {
                 Ok(pair) => {
@@ -282,7 +306,10 @@ impl BrowserManager {
                         let _ = launched.process.kill().await;
                         return Err(error);
                     }
-                    tokio::time::sleep(std::time::Duration::from_millis(300 * u64::from(attempt + 1))).await;
+                    tokio::time::sleep(std::time::Duration::from_millis(
+                        300 * u64::from(attempt + 1),
+                    ))
+                    .await;
                 }
             }
         }
@@ -437,7 +464,10 @@ impl BrowserManager {
         Ok(tab_id)
     }
 
-    pub(crate) async fn create_tab_inner(inner: &mut Inner, url: Option<&str>) -> Result<String, String> {
+    pub(crate) async fn create_tab_inner(
+        inner: &mut Inner,
+        url: Option<&str>,
+    ) -> Result<String, String> {
         let created = inner
             .handle
             .send(
@@ -477,7 +507,9 @@ impl BrowserManager {
             let explicit = command.tab_id_probe().map(str::to_string);
             let active = {
                 let inner_guard = self.inner.lock().await;
-                inner_guard.as_ref().and_then(|inner| inner.active_tab.clone())
+                inner_guard
+                    .as_ref()
+                    .and_then(|inner| inner.active_tab.clone())
             };
             let target = explicit.or(active);
             if let (Some(paused_tab), Some(target)) = (self.recon.paused_tab(), target) {
@@ -489,7 +521,11 @@ impl BrowserManager {
         let outcome = {
             let mut guard = self.inner.lock().await;
             let Some(inner) = guard.as_mut() else {
-                return CommandOutcome::err("backend_unavailable", "浏览器未就绪", elapsed(&started));
+                return CommandOutcome::err(
+                    "backend_unavailable",
+                    "浏览器未就绪",
+                    elapsed(&started),
+                );
             };
             commands::dispatch(self, inner, command).await
         };
@@ -499,7 +535,10 @@ impl BrowserManager {
 
     /// 解析目标 tab(缺省 active)并返回 (tab_id, session_id);浏览器未跑报错。
     /// recon REST 端点入口;不拉起浏览器(侦察操作需要浏览器本就运行)。
-    pub async fn recon_resolve_tab(&self, tab_id: Option<&str>) -> Result<(String, String), String> {
+    pub async fn recon_resolve_tab(
+        &self,
+        tab_id: Option<&str>,
+    ) -> Result<(String, String), String> {
         if !self.is_healthy().await {
             return Err("浏览器未运行;先用 getState/navigate 启动".to_string());
         }
@@ -587,7 +626,11 @@ impl BrowserManager {
                         .and_then(Value::as_str)
                         .unwrap_or_default()
                         .to_string();
-                    let ack_id = event.params.get("sessionId").cloned().unwrap_or(Value::Null);
+                    let ack_id = event
+                        .params
+                        .get("sessionId")
+                        .cloned()
+                        .unwrap_or(Value::Null);
                     // 必须回执,否则 Chrome 停发帧。
                     if !tab_id.is_empty() {
                         let _ = handle
@@ -613,18 +656,25 @@ impl BrowserManager {
                     if request_id.is_empty() || tab_id.is_empty() {
                         continue;
                     }
-                    let url = event.params
+                    let url = event
+                        .params
                         .pointer("/request/url")
                         .and_then(Value::as_str)
                         .unwrap_or("")
                         .to_string();
-                    let method = event.params
+                    let method = event
+                        .params
                         .pointer("/request/method")
                         .and_then(Value::as_str)
                         .unwrap_or("")
                         .to_string();
-                    let headers = event.params.pointer("/request/headers").cloned().unwrap_or(Value::Null);
-                    let post_data = event.params
+                    let headers = event
+                        .params
+                        .pointer("/request/headers")
+                        .cloned()
+                        .unwrap_or(Value::Null);
+                    let post_data = event
+                        .params
                         .pointer("/request/postData")
                         .and_then(Value::as_str)
                         .map(str::to_string);
@@ -757,7 +807,11 @@ impl BrowserManager {
                     if ws_id.is_empty() || tab_id.is_empty() {
                         continue;
                     }
-                    let direction = if event.method.ends_with("Sent") { "sent" } else { "received" };
+                    let direction = if event.method.ends_with("Sent") {
+                        "sent"
+                    } else {
+                        "received"
+                    };
                     let payload = event
                         .params
                         .pointer("/response/payloadData")
@@ -776,7 +830,11 @@ impl BrowserManager {
                     if frames.len() < 100 {
                         frames.push(json!({ "dir": direction, "payload": payload }));
                     }
-                    network_log.lock().unwrap().record(&tab_id, &key, json!({ "wsFrames": frames }));
+                    network_log.lock().unwrap().record(
+                        &tab_id,
+                        &key,
+                        json!({ "wsFrames": frames }),
+                    );
                 }
                 "Page.javascriptDialogOpening" => {
                     let kind = event
@@ -791,10 +849,10 @@ impl BrowserManager {
                         .and_then(Value::as_str)
                         .unwrap_or_default()
                         .to_string();
-                    pending_dialogs.lock().unwrap().insert(
-                        tab_id.clone(),
-                        json!({ "type": kind, "message": message }),
-                    );
+                    pending_dialogs
+                        .lock()
+                        .unwrap()
+                        .insert(tab_id.clone(), json!({ "type": kind, "message": message }));
                     let _ = broadcast.send(BrowserEvent::DialogOpened {
                         tab_id: tab_id.clone(),
                         kind,
@@ -903,7 +961,8 @@ impl BrowserManager {
     }
 }
 
-pub(crate) fn now_ms() -> u64 {    std::time::SystemTime::now()
+pub(crate) fn now_ms() -> u64 {
+    std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0)
@@ -956,7 +1015,6 @@ pub(crate) fn elapsed(started: &Instant) -> u64 {
     started.elapsed().as_millis() as u64
 }
 
-
 /// 供 commands.rs 使用的执行上下文。
 pub(crate) struct Ctx<'a> {
     pub manager: &'a BrowserManager,
@@ -969,11 +1027,9 @@ impl<'a> Ctx<'a> {
         let started = Instant::now();
         let tab_id = match tab_id {
             Some(id) => id.to_string(),
-            None => self
-                .inner
-                .active_tab
-                .clone()
-                .ok_or_else(|| CommandOutcome::err("no_tab", "没有打开的 tab", elapsed(&started)))?,
+            None => self.inner.active_tab.clone().ok_or_else(|| {
+                CommandOutcome::err("no_tab", "没有打开的 tab", elapsed(&started))
+            })?,
         };
         if !self.inner.tabs.contains_key(&tab_id) {
             return Err(CommandOutcome::err(
@@ -989,7 +1045,10 @@ impl<'a> Ctx<'a> {
     }
 
     pub(crate) fn session_of(&self, tab_id: &str) -> Option<String> {
-        self.inner.tabs.get(tab_id).map(|info| info.session_id.clone())
+        self.inner
+            .tabs
+            .get(tab_id)
+            .map(|info| info.session_id.clone())
     }
 
     /// 给某个 tab 执行 CDP 命令。
@@ -1047,8 +1106,9 @@ impl<'a> Ctx<'a> {
             .and_then(Value::as_str)
             .unwrap_or("null")
             .to_string();
-        serde_json::from_str(&serialized)
-            .map_err(|error| CommandOutcome::err("execution_error", format!("页面返回非法 JSON: {error}"), 0))
+        serde_json::from_str(&serialized).map_err(|error| {
+            CommandOutcome::err("execution_error", format!("页面返回非法 JSON: {error}"), 0)
+        })
     }
 
     pub(crate) fn set_active(&mut self, tab_id: &str) {

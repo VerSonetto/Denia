@@ -81,31 +81,57 @@ impl Tool for EditTool {
     async fn execute(&self, arguments: &str, ctx: &ToolContext) -> ToolOutput {
         let args: EditArgs = match parse_args_lenient(arguments) {
             Ok(args) => args,
-            Err(error) => return ToolOutput { content: format!("invalid arguments: {error}"), is_error: true },
+            Err(error) => {
+                return ToolOutput {
+                    content: format!("invalid arguments: {error}"),
+                    is_error: true,
+                };
+            }
         };
         if args.old_string.is_empty() {
-            return ToolOutput { content: "old_string must not be empty".to_string(), is_error: true };
+            return ToolOutput {
+                content: "old_string must not be empty".to_string(),
+                is_error: true,
+            };
         }
         let effective = ctx.effective_permission();
         if effective == PermissionMode::ReadOnly {
             return ToolOutput {
-                content: format!("{}\n{}", denial_marker(effective), escalation_hint("operation")),
+                content: format!(
+                    "{}\n{}",
+                    denial_marker(effective),
+                    escalation_hint("operation")
+                ),
                 is_error: true,
             };
         }
         let path = match resolve_within(&ctx.cwd, &args.path, false) {
             Ok(path) => path,
-            Err(message) => return ToolOutput { content: message, is_error: true },
+            Err(message) => {
+                return ToolOutput {
+                    content: message,
+                    is_error: true,
+                };
+            }
         };
         if effective == PermissionMode::WorkspaceWrite && !path.starts_with(&ctx.cwd) {
             return ToolOutput {
-                content: format!("{}\n{}", denial_marker(effective), escalation_hint("operation")),
+                content: format!(
+                    "{}\n{}",
+                    denial_marker(effective),
+                    escalation_hint("operation")
+                ),
                 is_error: true,
             };
         }
         let text = match std::fs::read_to_string(&path) {
             Ok(text) => text,
-            Err(error) => return ToolOutput { content: format!("read failed: {error}"), is_error: true },
+            Err(error) => {
+                return ToolOutput {
+                    content: format!("read failed: {error}"),
+                    is_error: true,
+                };
+            }
         };
 
         // CRLF 容错(对齐 dsh fs-e2b):内容与 old/new 都在 LF 视图上精确匹配,
@@ -153,9 +179,16 @@ impl Tool for EditTool {
             }
         }
         if let Err(error) = std::fs::write(&path, &updated) {
-            return ToolOutput { content: format!("write failed: {error}"), is_error: true };
+            return ToolOutput {
+                content: format!("write failed: {error}"),
+                is_error: true,
+            };
         }
-        let verb = if count > 1 { format!("{count} occurrences") } else { "1 occurrence".to_string() };
+        let verb = if count > 1 {
+            format!("{count} occurrences")
+        } else {
+            "1 occurrence".to_string()
+        };
         ToolOutput {
             content: format!(
                 "Replaced {verb} of {:?} in {} (first replacement on line {})",
@@ -241,7 +274,10 @@ mod tests {
         let ctx = context(root.clone());
         let tool = EditTool::new();
         let out = tool
-            .execute(r#"{"path":"a.txt","old_string":"hello","new_string":"goodbye"}"#, &ctx)
+            .execute(
+                r#"{"path":"a.txt","old_string":"hello","new_string":"goodbye"}"#,
+                &ctx,
+            )
             .await;
         assert!(!out.is_error, "{}", out.content);
         assert!(out.content.contains("line 1"), "{}", out.content);
@@ -257,12 +293,18 @@ mod tests {
         let ctx = context(root.clone());
         let tool = EditTool::new();
         let out = tool
-            .execute(r#"{"path":"a.txt","old_string":"world","new_string":"earth"}"#, &ctx)
+            .execute(
+                r#"{"path":"a.txt","old_string":"world","new_string":"earth"}"#,
+                &ctx,
+            )
             .await;
         assert!(out.is_error);
         assert!(out.content.contains("2 times"), "{}", out.content);
         // 文件未被改动。
-        assert_eq!(std::fs::read_to_string(root.join("a.txt")).unwrap(), "world world\n");
+        assert_eq!(
+            std::fs::read_to_string(root.join("a.txt")).unwrap(),
+            "world world\n"
+        );
         std::fs::remove_dir_all(&ctx.cwd).unwrap();
     }
 
@@ -273,11 +315,17 @@ mod tests {
         let ctx = context(root.clone());
         let tool = EditTool::new();
         let out = tool
-            .execute(r#"{"path":"a.txt","old_string":"x","new_string":"y","replace_all":true}"#, &ctx)
+            .execute(
+                r#"{"path":"a.txt","old_string":"x","new_string":"y","replace_all":true}"#,
+                &ctx,
+            )
             .await;
         assert!(!out.is_error);
         assert!(out.content.contains("3 occurrences"), "{}", out.content);
-        assert_eq!(std::fs::read_to_string(root.join("a.txt")).unwrap(), "y y y\n");
+        assert_eq!(
+            std::fs::read_to_string(root.join("a.txt")).unwrap(),
+            "y y y\n"
+        );
         std::fs::remove_dir_all(&ctx.cwd).unwrap();
     }
 
@@ -288,7 +336,10 @@ mod tests {
         let ctx = context(root.clone());
         let tool = EditTool::new();
         let out = tool
-            .execute(r#"{"path":"a.txt","old_string":"nope","new_string":"y"}"#, &ctx)
+            .execute(
+                r#"{"path":"a.txt","old_string":"nope","new_string":"y"}"#,
+                &ctx,
+            )
             .await;
         assert!(out.is_error);
         assert!(out.content.contains("not found"));

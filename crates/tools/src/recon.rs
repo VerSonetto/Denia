@@ -13,7 +13,7 @@ use async_trait::async_trait;
 use denia_browser::BrowserManager;
 use denia_core::tool::ToolSchema;
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::{Tool, ToolContext, ToolOutput, parse_args_lenient};
 
@@ -158,7 +158,11 @@ impl ReconExecute for BrowserManager {
 }
 
 /// 分发到 BrowserManager.recon() 的对应操作。
-async fn recon_dispatch(manager: &BrowserManager, method: &str, args: &Value) -> Result<Value, String> {
+async fn recon_dispatch(
+    manager: &BrowserManager,
+    method: &str,
+    args: &Value,
+) -> Result<Value, String> {
     let get = |key: &str| args.get(key).cloned().unwrap_or(Value::Null);
     let get_str = |key: &str| get(key).as_str().map(str::to_string);
     let tab_id = get_str("tabId");
@@ -190,7 +194,9 @@ async fn recon_dispatch(manager: &BrowserManager, method: &str, args: &Value) ->
                     max,
                 )
                 .await?;
-            Ok(json!({ "tabId": tab, "matches": matches, "count": matches.len(), "skippedLarge": skipped_large }))
+            Ok(
+                json!({ "tabId": tab, "matches": matches, "count": matches.len(), "skippedLarge": skipped_large }),
+            )
         }
         "source" => {
             recon
@@ -236,7 +242,9 @@ async fn recon_dispatch(manager: &BrowserManager, method: &str, args: &Value) ->
         "eval" => {
             let expression = get_str("expression").ok_or("eval 需要 expression")?;
             let frame_index = get("frameIndex").as_u64().unwrap_or(0) as usize;
-            let value = recon.debug_eval(manager, &tab, frame_index, &expression).await?;
+            let value = recon
+                .debug_eval(manager, &tab, frame_index, &expression)
+                .await?;
             Ok(json!({ "tabId": tab, "value": value }))
         }
         "step" => {

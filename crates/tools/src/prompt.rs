@@ -14,7 +14,10 @@ use crate::shell;
 use crate::{Tool, ToolRegistry};
 
 /// Register tool schemas, tool guidance sections, runtime facts, and variables.
-pub fn register_shipped_prompt(prompt: &mut SystemPrompt, tools: &ToolRegistry) -> Result<(), String> {
+pub fn register_shipped_prompt(
+    prompt: &mut SystemPrompt,
+    tools: &ToolRegistry,
+) -> Result<(), String> {
     prompt.variable("cwd", |context| context.cwd.clone())?;
     prompt.variable("model", |context| context.model.clone())?;
     prompt.variable("provider", |context| context.provider.clone())?;
@@ -121,9 +124,8 @@ pub fn register_shipped_prompt(prompt: &mut SystemPrompt, tools: &ToolRegistry) 
 /// Shipped registry pair: prompt assembly plus executable tools.
 pub fn default_shipped() -> (SystemPrompt, ToolRegistry) {
     let tools = crate::default_registry();
-    let mut prompt = denia_system_prompt::SystemPrompt::new(
-        denia_system_prompt::SystemPromptConfig::default(),
-    );
+    let mut prompt =
+        denia_system_prompt::SystemPrompt::new(denia_system_prompt::SystemPromptConfig::default());
     register_shipped_prompt(&mut prompt, &tools).expect("shipped prompt registrations are valid");
     (prompt, tools)
 }
@@ -266,7 +268,12 @@ mod tests {
                 ..Default::default()
             })
             .unwrap();
-        assert!(!assembly.sections.iter().any(|section| section.name == "harness:identity"));
+        assert!(
+            !assembly
+                .sections
+                .iter()
+                .any(|section| section.name == "harness:identity")
+        );
         let user = render_prompt_for_user(&assembly);
         assert!(user.contains("仅自定义正文"));
         assert!(!user.contains("denia 驱动的"));
@@ -283,7 +290,12 @@ mod tests {
             .unwrap();
         let rendered = render_prompt(&assembly);
         assert!(rendered.contains("自定义 persona /work"));
-        assert!(assembly.sections.iter().any(|section| section.name == "tool:bash"));
+        assert!(
+            assembly
+                .sections
+                .iter()
+                .any(|section| section.name == "tool:bash")
+        );
     }
 
     #[test]
@@ -300,8 +312,18 @@ mod tests {
         let rendered = render_prompt(&assembly);
         assert!(rendered.contains("denia"));
         assert!(rendered.contains("/tmp/ws"));
-        assert!(assembly.sections.iter().any(|section| section.name == "tool:bash"));
-        assert!(assembly.sections.iter().any(|section| section.name == "tool:todo"));
+        assert!(
+            assembly
+                .sections
+                .iter()
+                .any(|section| section.name == "tool:bash")
+        );
+        assert!(
+            assembly
+                .sections
+                .iter()
+                .any(|section| section.name == "tool:todo")
+        );
         assert!(!render_context_snapshot(&assembly).is_empty());
         assert_eq!(assembly.tools.len(), 7);
     }
@@ -330,8 +352,15 @@ mod browser_prompt_tests {
         let assembly = prompt
             .assemble(&denia_system_prompt::AssembleContext::default())
             .expect("assemble");
-        let names: Vec<&str> = assembly.tools.iter().map(|tool| tool.name.as_str()).collect();
-        assert!(names.contains(&"browser"), "browser schema missing from prompt tools: {names:?}");
+        let names: Vec<&str> = assembly
+            .tools
+            .iter()
+            .map(|tool| tool.name.as_str())
+            .collect();
+        assert!(
+            names.contains(&"browser"),
+            "browser schema missing from prompt tools: {names:?}"
+        );
         assert!(registry.get("browser").is_some(), "browser not registered");
     }
 }

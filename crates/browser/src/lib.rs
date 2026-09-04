@@ -23,35 +23,133 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "method", rename_all = "camelCase")]
 pub enum BrowserCommand {
-    Navigate { url: String, tab_id: Option<String> },
-    Back { tab_id: Option<String> },
-    Forward { tab_id: Option<String> },
-    Reload { tab_id: Option<String> },
-    GetState { tab_id: Option<String> },
-    Snapshot { tab_id: Option<String>, max_elements: Option<u32>, include_hidden: Option<bool> },
-    Screenshot { tab_id: Option<String>, full_page: Option<bool>, #[serde(rename = "clip")] clip: Option<ClipRect> },
-    Click { tab_id: Option<String>, r#ref: Option<String>, x: Option<f64>, y: Option<f64>, button: Option<String>, double_click: Option<bool> },
-    Fill { tab_id: Option<String>, r#ref: String, value: String },
-    Type { tab_id: Option<String>, r#ref: Option<String>, text: String },
-    Press { tab_id: Option<String>, key: String, r#ref: Option<String> },
-    Scroll { tab_id: Option<String>, r#ref: Option<String>, x: Option<f64>, y: Option<f64> },
-    Hover { tab_id: Option<String>, r#ref: Option<String>, x: Option<f64>, y: Option<f64> },
-    Select { tab_id: Option<String>, r#ref: String, values: Vec<String> },
-    Check { tab_id: Option<String>, r#ref: String, checked: Option<bool> },
-    Drag { tab_id: Option<String>, from_ref: Option<String>, to_ref: Option<String>, from: Option<Point>, to: Option<Point> },
-    ElementInfo { tab_id: Option<String>, x: f64, y: f64 },
-    Evaluate { tab_id: Option<String>, expression: String },
-    WaitFor { tab_id: Option<String>, selector: Option<String>, text: Option<String>, text_gone: Option<String>, timeout_ms: Option<u64> },
-    GetDialog { tab_id: Option<String> },
-    HandleDialog { tab_id: Option<String>, accept: bool, prompt_text: Option<String> },
-    NewTab { url: Option<String> },
+    Navigate {
+        url: String,
+        tab_id: Option<String>,
+    },
+    Back {
+        tab_id: Option<String>,
+    },
+    Forward {
+        tab_id: Option<String>,
+    },
+    Reload {
+        tab_id: Option<String>,
+    },
+    GetState {
+        tab_id: Option<String>,
+    },
+    Snapshot {
+        tab_id: Option<String>,
+        max_elements: Option<u32>,
+        include_hidden: Option<bool>,
+    },
+    Screenshot {
+        tab_id: Option<String>,
+        full_page: Option<bool>,
+        #[serde(rename = "clip")]
+        clip: Option<ClipRect>,
+    },
+    Click {
+        tab_id: Option<String>,
+        r#ref: Option<String>,
+        x: Option<f64>,
+        y: Option<f64>,
+        button: Option<String>,
+        double_click: Option<bool>,
+    },
+    Fill {
+        tab_id: Option<String>,
+        r#ref: String,
+        value: String,
+    },
+    Type {
+        tab_id: Option<String>,
+        r#ref: Option<String>,
+        text: String,
+    },
+    Press {
+        tab_id: Option<String>,
+        key: String,
+        r#ref: Option<String>,
+    },
+    Scroll {
+        tab_id: Option<String>,
+        r#ref: Option<String>,
+        x: Option<f64>,
+        y: Option<f64>,
+    },
+    Hover {
+        tab_id: Option<String>,
+        r#ref: Option<String>,
+        x: Option<f64>,
+        y: Option<f64>,
+    },
+    Select {
+        tab_id: Option<String>,
+        r#ref: String,
+        values: Vec<String>,
+    },
+    Check {
+        tab_id: Option<String>,
+        r#ref: String,
+        checked: Option<bool>,
+    },
+    Drag {
+        tab_id: Option<String>,
+        from_ref: Option<String>,
+        to_ref: Option<String>,
+        from: Option<Point>,
+        to: Option<Point>,
+    },
+    ElementInfo {
+        tab_id: Option<String>,
+        x: f64,
+        y: f64,
+    },
+    Evaluate {
+        tab_id: Option<String>,
+        expression: String,
+    },
+    WaitFor {
+        tab_id: Option<String>,
+        selector: Option<String>,
+        text: Option<String>,
+        text_gone: Option<String>,
+        timeout_ms: Option<u64>,
+    },
+    GetDialog {
+        tab_id: Option<String>,
+    },
+    HandleDialog {
+        tab_id: Option<String>,
+        accept: bool,
+        prompt_text: Option<String>,
+    },
+    NewTab {
+        url: Option<String>,
+    },
     List,
-    Close { tab_id: Option<String> },
-    Activate { tab_id: String },
-    ViewportSet { tab_id: Option<String>, width: u32, height: u32 },
-    ViewportReset { tab_id: Option<String> },
+    Close {
+        tab_id: Option<String>,
+    },
+    Activate {
+        tab_id: String,
+    },
+    ViewportSet {
+        tab_id: Option<String>,
+        width: u32,
+        height: u32,
+    },
+    ViewportReset {
+        tab_id: Option<String>,
+    },
     /// 网络抓包:列出该 tab 捕获的请求(DevTools Network 等价;环形缓冲)。
-    NetworkList { tab_id: Option<String>, url_filter: Option<String>, max: Option<u32> },
+    NetworkList {
+        tab_id: Option<String>,
+        url_filter: Option<String>,
+        max: Option<u32>,
+    },
     /// 网络抓包:取某请求的响应体(文本或 base64 标记)。
     NetworkGetBody {
         tab_id: Option<String>,
@@ -62,9 +160,13 @@ pub enum BrowserCommand {
         body_kind: Option<String>,
     },
     /// 面板实时画面:开启当前 tab 的 screencast(仅控制台用,模型命令面不含)。
-    StartScreencast { tab_id: Option<String> },
+    StartScreencast {
+        tab_id: Option<String>,
+    },
     /// 停止当前 tab 的 screencast。
-    StopScreencast { tab_id: Option<String> },
+    StopScreencast {
+        tab_id: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize)]

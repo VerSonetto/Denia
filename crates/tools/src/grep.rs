@@ -132,23 +132,45 @@ impl Tool for GrepTool {
     async fn execute(&self, arguments: &str, ctx: &ToolContext) -> ToolOutput {
         let args: GrepArgs = match parse_args_lenient(arguments) {
             Ok(args) => args,
-            Err(error) => return ToolOutput { content: format!("invalid arguments: {error}"), is_error: true },
+            Err(error) => {
+                return ToolOutput {
+                    content: format!("invalid arguments: {error}"),
+                    is_error: true,
+                };
+            }
         };
         if args.pattern.trim().is_empty() {
-            return ToolOutput { content: "pattern must be a non-empty string".to_string(), is_error: true };
+            return ToolOutput {
+                content: "pattern must be a non-empty string".to_string(),
+                is_error: true,
+            };
         }
-        let root = match resolve_within(&ctx.cwd, args.path.as_deref().unwrap_or("."), ctx.confined) {
+        let root = match resolve_within(&ctx.cwd, args.path.as_deref().unwrap_or("."), ctx.confined)
+        {
             Ok(path) => path,
-            Err(message) => return ToolOutput { content: message, is_error: true },
+            Err(message) => {
+                return ToolOutput {
+                    content: message,
+                    is_error: true,
+                };
+            }
         };
         if !root.exists() {
-            return ToolOutput { content: format!("path '{}' does not exist", root.display()), is_error: true };
+            return ToolOutput {
+                content: format!("path '{}' does not exist", root.display()),
+                is_error: true,
+            };
         }
         let mut regex_builder = regex::bytes::RegexBuilder::new(&args.pattern);
         regex_builder.case_insensitive(args.ignore_case);
         let regex = match regex_builder.build() {
             Ok(regex) => regex,
-            Err(error) => return ToolOutput { content: format!("invalid regex: {error}"), is_error: true },
+            Err(error) => {
+                return ToolOutput {
+                    content: format!("invalid regex: {error}"),
+                    is_error: true,
+                };
+            }
         };
         let max = args
             .max_matches
@@ -197,7 +219,9 @@ impl Tool for GrepTool {
                     if stop.load(Ordering::Relaxed) || cancel.is_cancelled() {
                         return ignore::WalkState::Quit;
                     }
-                    let Ok(entry) = entry else { return ignore::WalkState::Continue };
+                    let Ok(entry) = entry else {
+                        return ignore::WalkState::Continue;
+                    };
                     let Some(file_type) = entry.file_type() else {
                         return ignore::WalkState::Continue;
                     };
@@ -205,7 +229,16 @@ impl Tool for GrepTool {
                         return ignore::WalkState::Continue;
                     }
                     let path = entry.path();
-                    if search_file(path, &regex, &cwd_for_display, max, &count, &hits, &stop, &cancel) {
+                    if search_file(
+                        path,
+                        &regex,
+                        &cwd_for_display,
+                        max,
+                        &count,
+                        &hits,
+                        &stop,
+                        &cancel,
+                    ) {
                         ignore::WalkState::Quit
                     } else {
                         ignore::WalkState::Continue
@@ -227,7 +260,10 @@ impl Tool for GrepTool {
         match result {
             Ok(Ok((hits, total))) => {
                 if hits.is_empty() {
-                    return ToolOutput { content: "No matches found".to_string(), is_error: false };
+                    return ToolOutput {
+                        content: "No matches found".to_string(),
+                        is_error: false,
+                    };
                 }
                 let capped = total >= max;
                 let lines: Vec<String> = hits
@@ -236,26 +272,37 @@ impl Tool for GrepTool {
                     .collect();
                 let mut output = format!("{} match(es)\n\n{}", hits.len(), lines.join("\n"));
                 if capped {
-                    output.push_str("\n\n(result capped at max_matches; narrow the pattern to see more)");
+                    output.push_str(
+                        "\n\n(result capped at max_matches; narrow the pattern to see more)",
+                    );
                 }
-                ToolOutput { content: output, is_error: false }
+                ToolOutput {
+                    content: output,
+                    is_error: false,
+                }
             }
-            Ok(Err(message)) => ToolOutput { content: message, is_error: true },
-            Err(join_error) => ToolOutput { content: format!("search worker failed: {join_error}"), is_error: true },
+            Ok(Err(message)) => ToolOutput {
+                content: message,
+                is_error: true,
+            },
+            Err(join_error) => ToolOutput {
+                content: format!("search worker failed: {join_error}"),
+                is_error: true,
+            },
         }
     }
 }
 
 /// 文件 glob 过滤(单个正 glob;内部走 gitignore 语法,无 "/" 匹配任意深度)。
-fn build_overrides(
-    root: &Path,
-    pattern: &str,
-) -> Result<ignore::overrides::Override, String> {
+fn build_overrides(root: &Path, pattern: &str) -> Result<ignore::overrides::Override, String> {
     if pattern.trim().is_empty() {
         return Err("include must be a non-empty glob when given".to_string());
     }
     if pattern.starts_with('!') {
-        return Err("include must be a positive glob filter; negated patterns (\"!…\") are not supported".to_string());
+        return Err(
+            "include must be a positive glob filter; negated patterns (\"!…\") are not supported"
+                .to_string(),
+        );
     }
     // 逗号列表禁止(除花括号组内)。
     let mut brace_depth = 0usize;
@@ -276,7 +323,9 @@ fn build_overrides(
     builder
         .add(pattern)
         .map_err(|error| format!("invalid include glob: {error}"))?;
-    builder.build().map_err(|error| format!("invalid include glob: {error}"))
+    builder
+        .build()
+        .map_err(|error| format!("invalid include glob: {error}"))
 }
 
 /// Searches one file; returns true when the match cap was reached (stop now).
@@ -294,7 +343,8 @@ fn search_file(
         Ok(data) => data,
         Err(_) => return false,
     };
-    { // 二进制嗅探:前 8KB 含 NUL 直接跳过。
+    {
+        // 二进制嗅探:前 8KB 含 NUL 直接跳过。
         let sniff = &data[..data.len().min(BINARY_SNIFF_BYTES)];
         if sniff.contains(&0u8) {
             return false;
@@ -405,7 +455,10 @@ mod tests {
     #[tokio::test]
     async fn matches_lines_with_path_and_line_number() {
         let root = temp_root();
-        write_file(&root.join("src/a.rs"), "fn main() {\n    println!(\"hello\");\n}\n");
+        write_file(
+            &root.join("src/a.rs"),
+            "fn main() {\n    println!(\"hello\");\n}\n",
+        );
         write_file(&root.join("src/b.rs"), "// hello world\nfn helper() {}\n");
         let ctx = context(root);
         let tool = GrepTool::new();
@@ -415,7 +468,11 @@ mod tests {
         assert!(!out.is_error, "{}", out.content);
         assert!(out.content.contains("src/a.rs:2:"), "{}", out.content);
         assert!(out.content.contains("src/b.rs:1:"), "{}", out.content);
-        assert!(out.content.contains("println!(\"hello\")"), "{}", out.content);
+        assert!(
+            out.content.contains("println!(\"hello\")"),
+            "{}",
+            out.content
+        );
         std::fs::remove_dir_all(&ctx.cwd).unwrap();
     }
 
@@ -447,7 +504,9 @@ mod tests {
         write_file(&root.join("b.js"), "needle");
         let ctx = context(root);
         let tool = GrepTool::new();
-        let out = tool.execute(r#"{"pattern":"needle","include":"*.rs"}"#, &ctx).await;
+        let out = tool
+            .execute(r#"{"pattern":"needle","include":"*.rs"}"#, &ctx)
+            .await;
         assert!(!out.is_error);
         assert!(out.content.contains("a.rs"));
         assert!(!out.content.contains("b.js"), "{}", out.content);
@@ -488,7 +547,9 @@ mod tests {
         write_file(&root.join("x.txt"), "hi");
         let ctx = context(root);
         let tool = GrepTool::new();
-        let out = tool.execute(r#"{"pattern":"hi","path":"../outside"}"#, &ctx).await;
+        let out = tool
+            .execute(r#"{"pattern":"hi","path":"../outside"}"#, &ctx)
+            .await;
         assert!(out.is_error);
         std::fs::remove_dir_all(&ctx.cwd).unwrap();
     }
@@ -510,12 +571,21 @@ mod tests {
             .await;
         let elapsed = started.elapsed();
         assert!(!out.is_error, "{}", out.content);
-        eprintln!("grep node_modules (createContext): {elapsed:?} — {} bytes of hits", out.content.len());
+        eprintln!(
+            "grep node_modules (createContext): {elapsed:?} — {} bytes of hits",
+            out.content.len()
+        );
         let started = Instant::now();
         let out = tool
-            .execute(r#"{"pattern":"exports\\.default","respect_ignore":false,"max_matches":50}"#, &ctx)
+            .execute(
+                r#"{"pattern":"exports\\.default","respect_ignore":false,"max_matches":50}"#,
+                &ctx,
+            )
             .await;
         let elapsed = started.elapsed();
-        eprintln!("grep node_modules no-ignore: {elapsed:?} — matches {}", out.content.lines().count());
+        eprintln!(
+            "grep node_modules no-ignore: {elapsed:?} — matches {}",
+            out.content.lines().count()
+        );
     }
 }
