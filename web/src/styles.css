@@ -4915,9 +4915,3 @@ button.btn.form-action {
   font-size: 12px;
   box-shadow: var(--shadow-lv2);
 }
-
-.browser-glyph {
-  display: inline-flex;
-  width: 16px;
-  justify-content: center;
-}

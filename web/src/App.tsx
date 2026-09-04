@@ -39,6 +39,7 @@ import { DirPicker } from './components/DirPicker'
 import { ConfirmDialog } from './components/ConfirmDialog'
 import { SettingsModal } from './components/SettingsModal'
 import BrowserPanel from './components/BrowserPanel'
+import { subscribeBrowserEvents } from './browserApi'
 import { sessionDisplayTitle } from './sessionDisplay'
 import type { SessionSummary, WorkspaceRecord } from './types'
 
@@ -62,6 +63,16 @@ export default function App() {
 
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [browserOpen, setBrowserOpen] = useState(false)
+  // ZCode 式自动展开:AI 调 browser 产生画面帧/状态变化时右侧视图自动出现;用户手动收起后本轮不再弹。
+  const browserAutoDismissedRef = useRef(false)
+  useEffect(() => {
+    const close = subscribeBrowserEvents((event) => {
+      if ((event.type === 'frame' || event.type === 'tabs-changed') && !browserAutoDismissedRef.current) {
+        setBrowserOpen(true)
+      }
+    })
+    return close
+  }, [])
   const [sidebarSearchOpen, setSidebarSearchOpen] = useState(false)
   const [sidebarExpandAllTick, setSidebarExpandAllTick] = useState(0)
   const [sidebarAllExpanded, setSidebarAllExpanded] = useState(false)
@@ -460,15 +471,7 @@ export default function App() {
             onDeleteUngrouped={(items) => void deleteUngrouped(items)}
           />
         </div>
-        <nav className="sidebar-foot" aria-label={t('navBrowser')}>
-          <button
-            type="button"
-            className="sidebar-nav"
-            onClick={() => setBrowserOpen(true)}
-          >
-            <span className="browser-glyph">⌘</span>
-            <span>{t('navBrowser')}</span>
-          </button>
+        <nav className="sidebar-foot" aria-label={t('navSettings')}>
           <button
             type="button"
             className="sidebar-nav"
@@ -506,7 +509,14 @@ export default function App() {
             <aside className="browser-sidebar">
               <div className="brw-head">
                 <span>{t('navBrowser')}</span>
-                <button type="button" className="icon-btn" onClick={() => setBrowserOpen(false)}>
+                <button
+                  type="button"
+                  className="icon-btn"
+                  onClick={() => {
+                    browserAutoDismissedRef.current = true
+                    setBrowserOpen(false)
+                  }}
+                >
                   <IconClose size={16} />
                 </button>
               </div>
@@ -517,21 +527,6 @@ export default function App() {
           )}
         </div>
       </main>
-      {browserOpen && (
-        <div className="brw-backdrop" onClick={() => setBrowserOpen(false)}>
-          <div className="brw-shell" onClick={(event) => event.stopPropagation()}>
-            <div className="brw-head">
-              <span>{t('navBrowser')}</span>
-              <button type="button" className="icon-btn" onClick={() => setBrowserOpen(false)}>
-                <IconClose size={16} />
-              </button>
-            </div>
-            <div className="brw-body">
-              <BrowserPanel />
-            </div>
-          </div>
-        </div>
-      )}
       {settingsOpen && (
         <SettingsModal
           notify={notify}
