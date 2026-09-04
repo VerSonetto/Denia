@@ -66,9 +66,13 @@ export default function App() {
   // ZCode 式自动展开:AI 调 browser 产生画面帧/状态变化时右侧视图自动出现。
   // 用户手动收起只挡当轮:新一轮 AI 轮次开始后重新允许自动展开。
   const browserAutoDismissedRef = useRef(false)
+  const browserOpenRef = useRef(false)
+  useEffect(() => {
+    browserOpenRef.current = browserOpen
+  }, [browserOpen])
   useEffect(() => {
     const close = subscribeBrowserEvents((event) => {
-      if ((event.type === 'frame' || event.type === 'tabs-changed') && !browserAutoDismissedRef.current) {
+      if ((event.type === 'frame' || event.type === 'tabs-changed') && !browserAutoDismissedRef.current && !browserOpenRef.current) {
         setBrowserOpen(true)
       }
     })
@@ -513,7 +517,7 @@ export default function App() {
             />
           </div>
           {browserOpen && (
-            <aside className="browser-sidebar">
+            <aside className="browser-sidebar" data-open="true">
               <div className="brw-head">
                 <span>{t('navBrowser')}</span>
                 <button

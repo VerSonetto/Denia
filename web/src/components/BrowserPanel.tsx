@@ -24,6 +24,9 @@ export default function BrowserPanel() {
 
   useEffect(() => {
     let disposed = false
+    // 面板挂载即重拉一次状态:侧栏是按 AI 触发(browserOpen)自动展开的,
+    // BrowserPanel 组件此时才挂载;若浏览器已在跑(前面会话留下的实例),
+    // 必须立刻把 tabs/地址栏补齐,否则画面有了、tab 栏却是空的。
     const refreshState = () => {
       void fetchBrowserState()
         .then((next) => {
@@ -32,65 +35,75 @@ export default function BrowserPanel() {
             activeTabRef.current = next.activeTabId ?? null
             const current = next.tabs.find((tab) => tab.tabId === next.activeTabId)
             if (current?.url) setUrlInput((input) => input || current.url)
+            // 状态拉到且浏览器在跑 → 确保 screencast 开着(幂等);
+            // 覆盖"订阅建好前浏览器刚启动,首帧事件被错过"的窗口。
+            if (next.running) {
+              void browserCommand({ method: 'startScreencast' }).catch(() => {})
+            }
           }
         })
         .catch(() => {})
     }
     // 订阅先建立,再开 screencast(否则首帧前的事件会丢)。
-    const close = subscribeBrowserEvents((event: BrowserEventFrame) => {
-      switch (event.type) {
-        case 'frame':
-          // 单实例浏览器:活跃 tab 的帧直接显示,不按 tabId 过滤
-          // (首帧可能早于状态刷新,过滤会永久丢帧)。
-          setFrame(`data:image/jpeg;base64,${event.data}`)
-          break
-        case 'tabs-changed':
-          refreshState()
-          // AI 刚启动浏览器(面板先开/后开都可能):补开 screencast,幂等。
-          void browserCommand({ method: 'startScreencast' }).catch(() => {})
-          break
-        case 'navigated':
-          refreshState()
-          if (event.tabId === activeTabRef.current && event.url) setUrlInput(event.url)
-          break
-        case 'dialog-opened':
-          setNotice(`${t('browserDialog')}:${event.message}`)
-          break
-        case 'dialog-closed':
-          setNotice(null)
-          break
-        case 'exited':
-          setFrame(null)
-          refreshState()
-          break
-        default:
-          break
-      }
-    })
-    // 先拉状态:仅当浏览器已在跑才开 screencast,不因打开面板而自发拉起进程。
-    void (async () => {
-      try {
-        const next = await fetchBrowserState()
-        if (disposed) return
-        setState(next)
-        activeTabRef.current = next.activeTabId ?? null
-        const current = next.tabs.find((tab) => tab.tabId === next.activeTabId)
-        if (current?.url) setUrlInput((input) => input || current.url)
-        if (next.running) await browserCommand({ method: 'startScreencast' })
-      } catch {
-        /* 服务不可达:保持空态 */
-      }
-    })()
+    const close = subscribeBrowserEvents(
+      (event: BrowserEventFrame) => {
+        switch (event.type) {
+          case 'frame':
+            // 单实例浏览器:活跃 tab 的帧直接显示,不按 tabId 过滤
+            // (首帧可能早于状态刷新,过滤会永久丢帧)。
+            setFrame(`data:image/jpeg;base64,${event.data}`)
+            break
+          case 'tabs-changed':
+            refreshState()
+            // AI 刚启动浏览器(面板先开/后开都可能):补开 screencast,幂等。
+            void browserCommand({ method: 'startScreencast' }).catch(() => {})
+            break
+          case 'navigated':
+            refreshState()
+            if (event.tabId === activeTabRef.current && event.url) setUrlInput(event.url)
+            break
+          case 'dialog-opened':
+            setNotice(`${t('browserDialog')}:${event.message}`)
+            break
+          case 'dialog-closed':
+            setNotice(null)
+            break
+          case 'exited':
+            setFrame(null)
+            setState(null)
+            refreshState()
+            break
+          default:
+            break
+        }
+      },
+      () => {
+        // SSE 断线(断线窗口内 frame/tabs-changed 可能丢):重连后立即补一次
+        // 状态对齐 + 重开 screencast,不依赖服务端是否恰好再推一条事件。
+        refreshState()
+      },
+    )
+    refreshState()
     return () => {
       disposed = true
-      void browserCommand({ method: 'stopScreencast' }).catch(() => {})
-      close()
+      // 用保活副本停 screencast:close() 之后再发的命令仍会到达服务端,
+      // 但 disposed 标志不再阻塞本组件的其它清理逻辑。
+      void fetchBrowserState()
+        .then(() => browserCommand({ method: 'stopScreencast' }))
+        .catch(() => {})
+        .finally(() => close())
     }
   }, [])
 
   /** 空态按钮:显式拉起浏览器并开画面。 */
   const startBrowser = async () => {
     await run({ method: 'getState' }) // 首条命令会拉起实例
+    // 拉起后立刻确保 active tab 存在(getState 是被动命令,不建首个 tab
+    // 之外的东西;若上一实例把 tab 全关了,这里补一个空白 tab)。
+    const after = await fetchBrowserState().catch(() => null)
+    if (after && after.running && after.tabs.length === 0) {
+      await run({ method: 'newTab' })
+    }
     await browserCommand({ method: 'startScreencast' }).catch(() => {})
     const next = await fetchBrowserState().catch(() => null)
     if (next) setState(next)

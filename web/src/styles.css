@@ -4768,6 +4768,9 @@ button.btn.form-action {
   border-left: 1px solid var(--border-l2);
   background: var(--bg-layer-1);
   overflow: hidden;
+  /* 挂载即完整尺寸:弹开瞬间不要有 0 高/塌陷的中间帧(先展开后布局会
+     让 screencast 首帧画进一个 0 高容器里,用户看到"侧栏开了但全白")。 */
+  min-height: 0;
 }
 
 .browser-sidebar .brw-head {
@@ -4867,7 +4870,7 @@ button.btn.form-action {
 .browser-frame {
   position: relative;
   flex: 1;
-  min-height: 0;
+  min-height: 120px;
   display: flex;
   align-items: center;
   justify-content: center;

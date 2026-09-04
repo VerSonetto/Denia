@@ -39,22 +39,34 @@ export async function browserCommand(command: Record<string, unknown>): Promise<
   })
 }
 
-/** 订阅浏览器事件流(tabs/frame/dialog/navigated/exited/debugger)。 */
+/** 订阅浏览器事件流(tabs/frame/dialog/navigated/exited/debugger)。
+ *
+ * 断线时回调 onEnd 一次;EventSource 虽会自动重连,但断线窗口里可能错过
+ * frame/tabs-changed 事件 —— 调用方在 onEnd 里自行补一次状态刷新即可对齐。
+ */
 export function subscribeBrowserEvents(
   onEvent: (event: BrowserEventFrame) => void,
   onEnd?: () => void,
 ): () => void {
   const source = new EventSource('/api/browser/stream')
+  // 重连成功:把断线标记复位,保证 onEnd 语义为"每次掉线恰好一次"。
+  let lost = false
+  source.onopen = () => {
+    lost = false
+  }
+  source.onerror = () => {
+    if (!lost) {
+      lost = true
+      onEnd?.()
+    }
+    /* 重连由 EventSource 自动完成 */
+  }
   source.onmessage = (event) => {
     try {
       onEvent(JSON.parse(event.data) as BrowserEventFrame)
     } catch {
       /* 忽略坏帧 */
     }
-  }
-  source.onerror = () => {
-    /* 断线由 EventSource 自动重连 */
-    onEnd?.()
   }
   return () => source.close()
 }

@@ -374,8 +374,7 @@ pub(crate) async fn dispatch(
         } => handle_dialog(&mut ctx, tab_id.as_deref(), accept, prompt_text.as_deref()).await,
         BrowserCommand::NewTab { url } => {
             let started = std::time::Instant::now();
-            match crate::manager::BrowserManager::create_tab_inner(&mut ctx.inner, url.as_deref())
-                .await
+            match crate::manager::BrowserManager::create_tab_inner(ctx.inner, url.as_deref()).await
             {
                 Ok(id) => {
                     ctx.set_active(&id);
@@ -410,18 +409,21 @@ pub(crate) async fn dispatch(
             let started = std::time::Instant::now();
             match tab(&mut ctx, tab_id.as_deref()).await {
                 Ok(id) => {
-                    if let Some(info) = ctx.inner.tabs.remove(&id) {
-                        ctx.manager.forget_tab_view(&id);
-                        let _ = ctx
-                            .inner
-                            .handle
-                            .send("Target.closeTarget", json!({"targetId": info.target_id}))
-                            .await;
-                        ctx.inner.by_target.remove(&info.target_id);
-                        if ctx.inner.active_tab.as_deref() == Some(id.as_str()) {
-                            ctx.inner.active_tab = ctx.inner.tabs.keys().next().cloned();
+                    crate::manager::close_tab_full(ctx.inner, ctx.manager, &id).await;
+                    // 关到最后一个 tab:补一个空白 tab 兜底,面板/工具调用
+                    // 永远有 active tab 可用(否则 resolve_tab 直接报 no_tab)。
+                    if ctx.inner.tabs.is_empty() {
+                        match crate::manager::BrowserManager::create_tab_inner(ctx.inner, None)
+                            .await
+                        {
+                            Ok(new_id) => {
+                                ctx.set_active(&new_id);
+                                ctx.broadcast_tabs_changed();
+                            }
+                            Err(error) => {
+                                tracing::warn!(%error, "重建兜底 tab 失败");
+                            }
                         }
-                        ctx.broadcast_tabs_changed();
                     }
                     CommandOutcome::ok_value(json!({"closed": true}), elapsed(&started))
                 }
@@ -647,8 +649,7 @@ async fn resolve_point(
 async fn resolve_ref(ctx: &mut Ctx<'_>, tab_id: &str, reference: &str) -> ResolveResult {
     let value = ctx
         .eval_json(tab_id, &scripts::resolve_ref_center_js(reference))
-        .await
-        .map_err(|e| e)?;
+        .await?;
     if value.get("found").and_then(Value::as_bool) != Some(true) {
         let reason = value
             .get("reason")
@@ -987,19 +988,17 @@ catch(e){{return JSON.stringify({{hit:false,error:'bad_selector'}});}}}})()"#,
             }
         }
         if satisfied {
-            if let Some(needle) = text {
-                let present = body_contains(ctx, &id, needle).await.unwrap_or(false);
-                if !present {
-                    satisfied = false;
-                }
+            if let Some(needle) = text
+                && !body_contains(ctx, &id, needle).await.unwrap_or(false)
+            {
+                satisfied = false;
             }
         }
         if satisfied {
-            if let Some(needle) = text_gone {
-                let present = body_contains(ctx, &id, needle).await.unwrap_or(true);
-                if present {
-                    satisfied = false;
-                }
+            if let Some(needle) = text_gone
+                && body_contains(ctx, &id, needle).await.unwrap_or(true)
+            {
+                satisfied = false;
             }
         }
         if satisfied {
@@ -1115,7 +1114,6 @@ mod url {
 }
 
 /// 取响应体:Network.getResponseBody;二进制按 base64 标记返回。
-
 async fn network_get_body(
     ctx: &mut Ctx<'_>,
     tab_id: Option<&str>,

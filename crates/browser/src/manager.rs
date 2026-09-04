@@ -57,8 +57,11 @@ pub(crate) struct Inner {
 
 /// 共享管理器:命令入口 + 事件泵控制。
 pub struct BrowserManager {
-    inner: Mutex<Option<Inner>>,
-    home: PathBuf,
+    /// 运行时实例(Arc 包一层:看护任务需要独立持有,收尸时整体取走)。
+    inner: std::sync::Arc<Mutex<Option<Inner>>>,
+    /// 启动互斥:并发 execute 同时发现掉线时,只放一个进 get_or_start,
+    /// 其余等它完成后重查状态(否则会拉起两个 Chrome 抢同一 profile)。
+    starting: tokio::sync::Mutex<()>,
     generation: AtomicU64,
     event_broadcast: tokio::sync::broadcast::Sender<BrowserEvent>,
     /// 挂起 JS dialog(tabId -> {type,message});事件泵写入,getDialog/handleDialog 读写。
@@ -70,6 +73,68 @@ pub struct BrowserManager {
     /// 导航视图(tabId -> (url, title)):事件泵写 url,命令写 url+title;
     /// 快照/列表合并覆盖 TabInfo 的启动时值,保证 tab 栏/地址栏即时刷新。
     tab_views: std::sync::Arc<std::sync::Mutex<HashMap<String, (String, String)>>>,
+    /// 事件泵掉线时置位的信号(watch 通道):通知管理器把 Chrome 进程
+    /// 与 per-tab 残留状态清干净,别等下一次 ensure_running 才收尸。
+    exited_ping: tokio::sync::watch::Sender<bool>,
+    /// 正在/已经收尸(事件泵看护或 Drop 只执行一次)。
+    shutting_down: std::sync::atomic::AtomicBool,
+    /// 启动时暂存的 profile 路径(Drop 收尸用;真实实例的在 Inner 里)。
+    home: PathBuf,
+}
+
+impl Drop for BrowserManager {
+    fn drop(&mut self) {
+        // server 关闭时兜底:同步清掉本 profile 的 Chrome 进程,保证
+        // "所有资源彻底释放"在进程退出路径上也成立(不看护任务的脸色)。
+        // 异步 Inner.process 的 kill_on_drop 仍会处理主进程;这里清子进程。
+        if !self.shutting_down.swap(true, Ordering::SeqCst) {
+            let profile = crate::default_profile_dir(&self.home);
+            launch::shutdown_profile_processes_sync(&profile);
+        }
+    }
+}
+
+impl BrowserManager {
+    /// 事件泵掉线收尾:终止 Chrome 进程树 + 清 per-tab 状态 + 重置 watch。
+    async fn on_pump_exit(&self) {
+        reap_browser_instance(
+            &self.inner,
+            &self.pending_dialogs,
+            &self.network_log,
+            &self.recon,
+            &self.tab_views,
+        )
+        .await;
+        let _ = self.exited_ping.send(true);
+    }
+}
+
+/// 收尸:杀掉该实例的 Chrome 进程树并清空 per-tab 状态(看护任务与
+/// shutdown 共用;幂等,重复调用只清空数据,不会重复杀进程)。
+async fn reap_browser_instance(
+    inner_slot: &std::sync::Arc<Mutex<Option<Inner>>>,
+    pending_dialogs: &std::sync::Arc<std::sync::Mutex<HashMap<String, Value>>>,
+    network_log: &std::sync::Arc<std::sync::Mutex<NetworkLog>>,
+    recon: &Arc<ReconStore>,
+    tab_views: &std::sync::Arc<std::sync::Mutex<HashMap<String, (String, String)>>>,
+) {
+    let exited = { inner_slot.lock().await.take() };
+    if let Some(inner) = exited {
+        // Chrome 是多进程:只 kill 主进程会留下渲染器子进程继续挤占
+        // profile,下次启动即"启动即退出"。按 profile 命令行整组清。
+        let mut process = inner.process;
+        let _ = process.kill().await;
+        let profile = inner.profile_dir.clone();
+        let _ = tokio::task::spawn_blocking(move || {
+            crate::launch::shutdown_profile_processes_sync(&profile)
+        })
+        .await;
+    }
+    // 状态与 CDP 会话一起失效:dialog/网络缓冲/导航视图/侦察全部清掉。
+    pending_dialogs.lock().unwrap().clear();
+    network_log.lock().unwrap().clear_all();
+    tab_views.lock().unwrap().clear();
+    recon.clear_all();
 }
 
 /// 面板订阅的推送事件。
@@ -193,20 +258,29 @@ impl NetworkLog {
         self.order.remove(tab_id);
         self.entries.remove(tab_id);
     }
+
+    /// 浏览器实例退出后全部作废(内存释放)。
+    fn clear_all(&mut self) {
+        self.order.clear();
+        self.entries.clear();
+    }
 }
 
 impl BrowserManager {
     pub fn new(home: PathBuf) -> Self {
         let (event_broadcast, _) = tokio::sync::broadcast::channel(64);
         Self {
-            inner: Mutex::new(None),
-            home,
+            inner: std::sync::Arc::new(Mutex::new(None)),
+            starting: tokio::sync::Mutex::new(()),
             generation: AtomicU64::new(0),
             event_broadcast,
             pending_dialogs: std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
             network_log: std::sync::Arc::new(std::sync::Mutex::new(NetworkLog::default())),
             recon: ReconStore::new(),
             tab_views: std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
+            exited_ping: tokio::sync::watch::channel(false).0,
+            shutting_down: std::sync::atomic::AtomicBool::new(false),
+            home: home.clone(),
         }
     }
 
@@ -282,12 +356,23 @@ impl BrowserManager {
     }
 
     /// (重启)拉起浏览器实例:连接 + 事件泵 + 首个 tab。
+    ///
+    /// `starting` 锁防并发重入:两个命令同时发现掉线时,先到的拉实例,
+    /// 后到的等锁再重查健康位(实例已被前者拉起就直接用,不再启动)。
     pub async fn get_or_start(&self) -> Result<(), String> {
+        if self.is_healthy().await {
+            return Ok(());
+        }
+        let _start_guard = self.starting.lock().await;
+        // 拿到锁后再查一次:等锁期间别的调用方可能已经把实例拉起来了。
         if self.is_healthy().await {
             return Ok(());
         }
         let executable = launch::locate_browser_executable()
             .ok_or_else(|| "未找到 Chrome/Edge,请安装后重试".to_string())?;
+        // 上一次会话可能留了没收的尸(事件泵掉线但看护任务还没跑完,
+        // 或上次启动失败半途):启动前先把旧 Chrome 清干净再拉新的。
+        self.on_pump_exit().await;
         let profile = self.profile_dir();
         let mut launched = launch::launch_headless(&executable, &profile).await?;
         // 有头模式端口监听可能晚于 DevToolsActivePort 落盘:指数退避重试连接。
@@ -351,6 +436,7 @@ impl BrowserManager {
         let network_log = self.network_log.clone();
         let recon = self.recon.clone();
         let tab_views = self.tab_views.clone();
+        let exited_pinger = self.exited_ping.clone();
         tokio::spawn(async move {
             Self::event_pump(
                 handle_for_pump,
@@ -360,6 +446,33 @@ impl BrowserManager {
                 network_log,
                 recon,
                 tab_views,
+                exited_pinger,
+            )
+            .await;
+        });
+        // 看护任务:事件泵退出(浏览器掉线)后立即收尸——杀 Chrome 进程树、
+        // 清 per-tab 状态;不等下一次 ensure_running 才处理。所有需要共享的
+        // 状态(inner/各状态桶)本就是 Arc/Mutex,收尸用独立函数,无需 Arc<Self>。
+        let inner_slot = self.inner.clone();
+        let pending_dialogs = self.pending_dialogs.clone();
+        let network_log = self.network_log.clone();
+        let recon = self.recon.clone();
+        let tab_views = self.tab_views.clone();
+        let mut exited_rx = self.exited_ping.subscribe();
+        tokio::spawn(async move {
+            // borrow_and_update:订阅瞬间若已是退出态(pump 先于本任务退出的
+            // 竞态),立即收尸;否则等下一次置位。
+            if !*exited_rx.borrow_and_update() && exited_rx.changed().await.is_ok() {
+                if !*exited_rx.borrow() {
+                    return;
+                }
+            }
+            reap_browser_instance(
+                &inner_slot,
+                &pending_dialogs,
+                &network_log,
+                &recon,
+                &tab_views,
             )
             .await;
         });
@@ -414,6 +527,11 @@ impl BrowserManager {
         url: String,
         title: String,
     ) -> Result<String, String> {
+        // 同一 target 重连(重启/refresh_targets 重扫)时,先摘掉旧会话记录,
+        // 避免旧 tabId 残留在 tab 表里泄漏(旧 session 已随断线失效)。
+        if let Some(previous) = inner.by_target.remove(&target_id) {
+            inner.tabs.remove(&previous);
+        }
         let attached = inner
             .handle
             .send(
@@ -600,11 +718,17 @@ impl BrowserManager {
                     .await;
                 inner.by_target.remove(&info.target_id);
             }
+            // 驱逐即彻底释放 per-tab 资源:抓包缓冲 + 侦察状态 + 视图 + dialog。
+            self.network_log.lock().unwrap().clear(&tab_id);
+            self.recon.clear(&tab_id);
+            self.tab_views.lock().unwrap().remove(&tab_id);
+            self.pending_dialogs.lock().unwrap().remove(&tab_id);
         }
         let _ = self.event_broadcast.send(BrowserEvent::TabsChanged);
     }
 
     /// 事件泵:消费 CDP 事件,广播给面板。
+    #[allow(clippy::too_many_arguments)]
     async fn event_pump(
         handle: CdpHandle,
         mut event_rx: tokio::sync::mpsc::UnboundedReceiver<CdpEvent>,
@@ -613,6 +737,7 @@ impl BrowserManager {
         network_log: std::sync::Arc<std::sync::Mutex<NetworkLog>>,
         recon: Arc<ReconStore>,
         tab_views: std::sync::Arc<std::sync::Mutex<HashMap<String, (String, String)>>>,
+        exited_ping: tokio::sync::watch::Sender<bool>,
     ) {
         while let Some(event) = event_rx.recv().await {
             // flatten 事件带 CDP sessionId;反查成我们的 tabId(会话期间恒定)。
@@ -901,9 +1026,9 @@ impl BrowserManager {
                 _ => {}
             }
         }
-        // 浏览器退出:侦察状态全部失效(新实例 scriptId/断点重来)。
-        recon.clear_all();
-        tab_views.lock().unwrap().clear();
+        // 浏览器退出:通知管理器收尸(杀进程树 + 清状态),并广播 Exited。
+        // 进程树终止与状态清理由看护任务完成,泵这里只置信号避免重复收尸。
+        let _ = exited_ping.send(true);
         let _ = broadcast.send(BrowserEvent::Exited);
     }
 
@@ -944,6 +1069,13 @@ impl BrowserManager {
 
     pub fn home(&self) -> PathBuf {
         self.home.clone()
+    }
+
+    /// 优雅关闭:终止 Chrome 进程树并清空全部 per-tab 状态(server 退出/
+    /// 面板关闭时调用;幂等)。
+    pub async fn shutdown(&self) {
+        self.on_pump_exit().await;
+        let _ = self.event_broadcast.send(BrowserEvent::Exited);
     }
 }
 
@@ -1015,7 +1147,27 @@ pub(crate) fn elapsed(started: &Instant) -> u64 {
     started.elapsed().as_millis() as u64
 }
 
-/// 供 commands.rs 使用的执行上下文。
+/// tab 关闭的统一清理:摘表 + 关 target + 清 per-tab 资源 + 活跃 tab 迁移。
+pub(crate) async fn close_tab_full(inner: &mut Inner, manager: &BrowserManager, tab_id: &str) {
+    if let Some(info) = inner.tabs.remove(tab_id) {
+        manager.forget_tab_view(tab_id);
+        let _ = inner
+            .handle
+            .send("Target.closeTarget", json!({"targetId": info.target_id}))
+            .await;
+        inner.by_target.remove(&info.target_id);
+        // per-tab 资源彻底释放:抓包/侦察/dialog/viewport。
+        manager.network_log.lock().unwrap().clear(tab_id);
+        manager.recon.clear(tab_id);
+        manager.clear_dialog(tab_id);
+        inner.viewport.remove(tab_id);
+        if inner.active_tab.as_deref() == Some(tab_id) {
+            inner.active_tab = inner.tabs.keys().next().cloned();
+        }
+        manager.broadcast(BrowserEvent::TabsChanged);
+    }
+}
+
 pub(crate) struct Ctx<'a> {
     pub manager: &'a BrowserManager,
     pub inner: &'a mut Inner,

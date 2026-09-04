@@ -114,7 +114,7 @@ pub async fn launch_headless(
         .kill_on_drop(true);
 
     set_no_window(&mut command);
-    let mut process = command
+    let process = command
         .spawn()
         .map_err(|error| format!("启动浏览器失败({}): {error}", executable.display()))?;
 
@@ -125,10 +125,11 @@ pub async fn launch_headless(
         .ok()
         .and_then(|meta| meta.modified().ok());
     let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
-    loop {
+    // 用 Option 包一层:成功分支 take() 走人,失败分支再 kill。
+    let mut process_slot = Some(process);
+    let outcome: Result<LaunchedBrowser, String> = loop {
         if tokio::time::Instant::now() >= deadline {
-            let _ = process.kill().await;
-            return Err("等待浏览器调试端口超时(DevToolsActivePort 未出现)".to_string());
+            break Err("等待浏览器调试端口超时(DevToolsActivePort 未出现)".to_string());
         }
         let metadata_fresh = std::fs::metadata(&port_file)
             .ok()
@@ -148,18 +149,33 @@ pub async fn launch_headless(
                     } else {
                         path.to_string()
                     };
-                    return Ok(LaunchedBrowser {
+                    break Ok(LaunchedBrowser {
                         websocket_url: format!("ws://127.0.0.1:{port}{path}"),
-                        process,
+                        process: process_slot.take().expect("process 只取一次"),
                     });
                 }
             }
         }
         // 进程提前退出 = 启动失败
+        let process = process_slot.as_mut().expect("process 仍在");
         if let Ok(Some(status)) = process.try_wait() {
-            return Err(format!("浏览器启动即退出: {status}"));
+            break Err(format!(
+                "浏览器启动即退出: {status}(常见原因:profile 被其他实例占用,可重试)"
+            ));
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
+    };
+    match outcome {
+        Ok(launched) => Ok(launched),
+        Err(error) => {
+            // 整组清掉:主进程 kill 只是第一层,残留的浏览器子进程仍会
+            // 挤占 profile(下次启动即"启动即退出"),必须按命令行清干净。
+            if let Some(mut process) = process_slot.take() {
+                let _ = process.kill().await;
+            }
+            kill_orphan_browsers(user_data_dir).await;
+            Err(error)
+        }
     }
 }
 
@@ -177,6 +193,32 @@ pub async fn write_text(path: &Path, text: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// 同步版整组清场:供 spawn_blocking / Drop 收尾用(不 await 的路径)。
+/// 与 [`kill_orphan_browsers`](异步版)同一 WQL 过滤,只杀带本 profile
+/// 命令行的进程,不碰用户自己的浏览器。
+pub fn shutdown_profile_processes_sync(user_data_dir: &Path) {
+    let filter = profile_kill_filter(user_data_dir);
+    let script =
+        "Get-CimInstance Win32_Process -Filter $env:DENIA_BROWSER_KILL_FILTER \
+         | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }";
+    let mut command = std::process::Command::new("powershell.exe");
+    command
+        .args(["-NoProfile", "-NonInteractive", "-Command", script])
+        .env("DENIA_BROWSER_KILL_FILTER", &filter)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    set_no_window_std(&mut command);
+    let _ = command.status();
+}
+
+/// 构造清场 WQL 过滤:按命令行匹配本 profile 目录,不碰用户自己的浏览器。
+/// 路径经 WQL LIKE 转义(\ → \\);括号必须保留(WQL AND 优先级高于 OR)。
+fn profile_kill_filter(user_data_dir: &Path) -> String {
+    let profile = user_data_dir.to_string_lossy().replace('\\', "\\\\");
+    format!("(Name='chrome.exe' OR Name='msedge.exe') AND CommandLine LIKE '%{profile}%'")
+}
+
 /// CREATE_NO_WINDOW 的统一入口:tokio Command 与 std Command 都走系统 CommandExt。
 pub fn set_no_window(command: &mut Command) {
     command.creation_flags(CREATE_NO_WINDOW);
@@ -189,20 +231,28 @@ pub fn set_no_window_std(command: &mut std::process::Command) {
 
 /// 清掉占用同一 profile 的残留 Chrome/Edge 进程(server 硬杀后的孤儿)。
 /// 只匹配命令行里带本 profile 目录的进程,不影响用户自己的浏览器。
+///
+/// filter 经环境变量传入,不走 `-Command` 的后续位置参数:PowerShell CLI
+/// 会把 `-Command` 后的第 2 个参数当独立语句解析(报错被 Stdio::null 吞掉),
+/// 导致清场静默失效——遗孤 chrome 挤占 profile,浏览器永远"启动即退出"。
 async fn kill_orphan_browsers(user_data_dir: &Path) {
-    let profile = user_data_dir.to_string_lossy().to_string();
-    let script = format!(
-        "Get-CimInstance Win32_Process -Filter \"Name='chrome.exe' or Name='msedge.exe'\" \
-         | Where-Object {{ $_.CommandLine -like '*{profile}*' }} \
-         | ForEach-Object {{ Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }}",
-        profile = profile.replace('\\', "\\\\")
-    );
+    let filter = profile_kill_filter(user_data_dir);
+    let script =
+        "Get-CimInstance Win32_Process -Filter $env:DENIA_BROWSER_KILL_FILTER \
+         | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }";
     let mut command = tokio::process::Command::new("powershell.exe");
     command
-        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+        .args(["-NoProfile", "-NonInteractive", "-Command", script])
+        .env("DENIA_BROWSER_KILL_FILTER", &filter)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .creation_flags(CREATE_NO_WINDOW);
-    let _ = command.status().await;
+    // 清场限时:WMI 查询在极端负载下可能卡住,不能让它阻塞浏览器启动。
+    if tokio::time::timeout(Duration::from_secs(10), command.status())
+        .await
+        .is_err()
+    {
+        tracing::warn!("清理残留浏览器进程超时,跳过直接启动");
+    }
 }

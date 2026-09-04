@@ -53,12 +53,15 @@ impl CdpHandle {
         let closed_flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
 
         // 写任务:把序列化好的 JSON 文本发进 socket。
+        // 退出时 drop 掉 request_rx:后续 send 会立即拿到 "cdp_writer_closed"
+        // 而不是排队等一个永远不会再消费的通道(僵尸写任务)。
         tokio::spawn(async move {
             while let Some(text) = request_rx.recv().await {
                 if sink.send(Message::Text(text)).await.is_err() {
                     break;
                 }
             }
+            drop(request_rx);
             let _ = sink.close().await;
         });
 
