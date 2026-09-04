@@ -1,8 +1,10 @@
 //! dsh `@deepseek-ai/dsh-token-meter` 三层投影的 Rust 镜像。
 //!
-//! 1. `ContextBreakdown` —— **纯启发式**:固定密度 4 char/token + 块/角色框,
-//!    拆成 system / tools / message 三行。同 dsh:不汇总,也不指望与
-//!    `contextPressure` 相加。
+//! 1. `ContextBreakdown` —— **字符类别密度的启发式拆分** system / tools /
+//!    message 三行,并在存在 provider 锚点时**校准**:固定成本行(系统 /
+//!    工具)原样、每轮稳定,真实总量减去固定成本后的余额归对话消息行,
+//!    三数整数和恒等于 `context_pressure` 的 projected 值 —— 面板不会再
+//!    出现"明细加不出总数",也不会让不变的工具行随缩放漂移。
 //! 2. `TurnTokenUsage` —— **精确**,provider 上报的 usage 累加。`usage`
 //!    缺失或 lifecycle 缺段的轮次不进总和(同 dsh `deriveTurnTokenUsage`:
 //!    任何不完整则整个 Turn 跳过)。
@@ -18,8 +20,10 @@ use denia_core::message::{ChatMessage, ChatRole, ToolCallRef};
 use denia_core::session::{SessionEnvelope, SessionEvent};
 use denia_core::stream::{ContentBlock, TokenUsage};
 
-/// 固定密度启发式:文本按 `len / 4` 向上取整换算 token。
+/// 固定密度启发式:非 CJK 字符按每 4 字符 1 token(ASCII 下字符数 == 字节数)。
 pub const CHARS_PER_TOKEN: u64 = 4;
+/// CJK 字符(表意文字/假名/谚文/全角符号)约每字 1 token。
+pub const CJK_CHARS_PER_TOKEN: u64 = 1;
 /// 内容块结构开销(JSON 框与类型标签)。
 pub const BLOCK_OVERHEAD: u64 = 4;
 /// 每条消息角色框开销。
@@ -65,8 +69,43 @@ pub struct ContextPressure {
     pub projected_tokens: Option<u64>,
 }
 
-fn estimate_text(text: &str) -> u64 {
-    (text.len() as u64).div_ceil(CHARS_PER_TOKEN)
+/// 判断 CJK 类字符(表意文字/假名/谚文/全角符号)—— 按 Unicode code point。
+pub fn is_cjk_char(ch: char) -> bool {
+    let code = ch as u32;
+    (0x2e80..=0x2fff).contains(&code) // 部首、笔画、CJK 符号
+        || (0x3000..=0x30ff).contains(&code) // CJK 标点 + 假名
+        || (0x3400..=0x4dbf).contains(&code) // 扩展 A
+        || (0x4e00..=0x9fff).contains(&code) // 统一表意
+        || (0xac00..=0xd7af).contains(&code) // 谚文音节
+        || (0xf900..=0xfaff).contains(&code) // 兼容表意
+        || (0xff00..=0xffef).contains(&code) // 全角形式
+        || (0x20000..=0x2ffff).contains(&code) // 扩展 B 及以后
+}
+
+/// 字符类别密度估算:CJK 字符每字 1 token,其他字符每 4 字符 1 token
+/// (UTF-8 下 ASCII 字符 = 1 字节,与旧字节密度一致;汉字从字节/4 的
+/// 0.75 token/字修正为 1 token/字,贴近主流 BPE 词表的真实密度)。
+pub fn estimate_text(text: &str) -> u64 {
+    let mut cjk = 0u64;
+    let mut other = 0u64;
+    for ch in text.chars() {
+        if is_cjk_char(ch) {
+            cjk = cjk.saturating_add(1);
+        } else {
+            other = other.saturating_add(1);
+        }
+    }
+    cjk.div_ceil(CJK_CHARS_PER_TOKEN).saturating_add(other.div_ceil(CHARS_PER_TOKEN))
+}
+
+/// 系统提示词估算(与消息同一密度;`ROLE_OVERHEAD` 是角色框开销)。
+pub fn estimate_system_tokens(text: &str) -> u64 {
+    ROLE_OVERHEAD.saturating_add(estimate_text(text))
+}
+
+/// 工具 schema JSON 估算(与消息同一密度;`BLOCK_OVERHEAD` 是结构框开销)。
+pub fn estimate_tools_tokens(json: &str) -> u64 {
+    BLOCK_OVERHEAD.saturating_add(estimate_text(json))
 }
 
 fn estimate_tool_calls(calls: &[ToolCallRef]) -> u64 {
@@ -81,7 +120,9 @@ fn estimate_tool_calls(calls: &[ToolCallRef]) -> u64 {
     tokens
 }
 
-fn estimate_message(message: &ChatMessage) -> u64 {
+/// 单条模型可见消息的估算(角色框 + 字符类别密度 + 块开销;与压缩决策
+/// `rough_tokens` 同口径,agent-loop 直接复用本函数)。
+pub fn estimate_message(message: &ChatMessage) -> u64 {
     let mut tokens = ROLE_OVERHEAD;
     tokens = tokens.saturating_add(estimate_text(&message.content));
     if matches!(message.role, ChatRole::Tool) {
@@ -276,6 +317,67 @@ pub struct ContextMeter {
     context_window: Option<u64>,
 }
 
+/// 把固定成本行(system / tools)与动态行(message)对到锚定总量上的校准。
+///
+/// 余额法:固定成本直接显示估算值(工具集不变时每轮稳定,语义为"工具
+/// 声明成本"),`target` 减去固定成本后的**余额**全部记给对话消息行 ——
+/// 它是动态最大、占绝对大头、理应吸收所有估算误差的那部分。三数之和
+/// 恒等于 `target`(即 `projectedTokens`),且固定行不再随缩放比漂移。
+///
+/// 防御退化:若 `target` 居然小于固定成本之和(provider 报的总量低于
+/// 固定估算,现实几乎不可能),按最大余数法把三数一起缩放到 `target`,
+/// 保证不变量在任何输入下成立。
+fn calibrate_breakdown(system: u64, tools: u64, message: u64, target: u64) -> ContextBreakdown {
+    let fixed = system.saturating_add(tools);
+    let total = fixed.saturating_add(message);
+    if total == 0 {
+        return ContextBreakdown {
+            system_tokens: 0,
+            tools_tokens: 0,
+            message_tokens: target,
+        };
+    }
+    if message > 0 && total > fixed && target >= fixed {
+        // 常态:余额全部归对话消息,固定行原样。
+        return ContextBreakdown {
+            system_tokens: system,
+            tools_tokens: tools,
+            message_tokens: target - fixed,
+        };
+    }
+    // 全零份额或退化(总量 ≥ 固定行但 target 低于固定成本):按估算占比
+    // 缩放,保证三数整数和恰好为 target。
+    // token 数远小于 2^53,f64 缩放精度足够;只用于决定分配比例。
+    let scaled = [
+        system as f64 * target as f64 / total as f64,
+        tools as f64 * target as f64 / total as f64,
+        message as f64 * target as f64 / total as f64,
+    ];
+    let mut allocated = [
+        scaled[0].floor() as u64,
+        scaled[1].floor() as u64,
+        scaled[2].floor() as u64,
+    ];
+    let mut remainder = target - allocated[0] - allocated[1] - allocated[2];
+    let mut order = [0usize, 1, 2];
+    order.sort_by(|&a, &b| {
+        let frac_a = scaled[a] - allocated[a] as f64;
+        let frac_b = scaled[b] - allocated[b] as f64;
+        frac_b.partial_cmp(&frac_a).unwrap_or(std::cmp::Ordering::Equal)
+    });
+    let mut index = 0usize;
+    while remainder > 0 {
+        allocated[order[index % 3]] = allocated[order[index % 3]].saturating_add(1);
+        remainder -= 1;
+        index += 1;
+    }
+    ContextBreakdown {
+        system_tokens: allocated[0],
+        tools_tokens: allocated[1],
+        message_tokens: allocated[2],
+    }
+}
+
 impl ContextMeter {
     pub fn new() -> Self {
         Self {
@@ -400,13 +502,25 @@ impl ContextMeter {
         self.surface_nodes.insert(seq, tokens);
     }
 
-    /// 读当前快照(纯启发式拆分;message = 表面运行总量,不因锚点重置)。
+    /// 读当前快照:校准后的组成拆分(系统提示词 / 工具 / 对话消息)。
+    ///
+    /// 有 provider 锚点(`pressure_tokens` + 采样表面)时,固定成本行
+    /// (系统/工具)原样显示、每轮稳定,真实总量减去固定成本后的**余额**
+    /// 归对话消息行 —— 三数整数和恒等于 [`Self::context_pressure`] 的
+    /// projected 值,与面板顶部显示一致;无锚点时即原始启发式估算(此时
+    /// 目标本就和值相等,行为一致)。
     pub fn breakdown(&self) -> ContextBreakdown {
-        ContextBreakdown {
+        let raw = ContextBreakdown {
             system_tokens: self.system_tokens,
             tools_tokens: self.tools_tokens,
             message_tokens: self.surface_tokens,
-        }
+        };
+        let (Some(pressure), Some(sampled)) = (self.pressure_tokens, self.sampled_surface_tokens)
+        else {
+            return raw;
+        };
+        let target = pressure.saturating_add(self.surface_tokens.saturating_sub(sampled));
+        calibrate_breakdown(self.system_tokens, self.tools_tokens, self.surface_tokens, target)
     }
 
     /// 读当前精确 usage 累计。
@@ -639,10 +753,15 @@ mod tests {
         meter.fold(&events);
         // 锚点 = input + cache_read = 120;锚点在本消息入表前盖章,所以
         // projected = 120 + 本消息启发式(dsh 语义:回答下一次请求规模)。
+        // breakdown 三数按锚点校准后,整数和恒等于 projected。
         let p = meter.context_pressure();
         assert_eq!(p.pressure_tokens, Some(120));
-        let assistant_tokens = meter.breakdown().message_tokens;
-        assert_eq!(p.projected_tokens, Some(120 + assistant_tokens));
+        let b = meter.breakdown();
+        assert_eq!(p.projected_tokens, Some(125));
+        assert_eq!(
+            b.system_tokens + b.tools_tokens + b.message_tokens,
+            p.projected_tokens.unwrap()
+        );
         // 锚点之后多发一条 user 消息:projected 继续增长,锚点不动。
         meter.apply_one(&envelope(
             6,
@@ -655,9 +774,12 @@ mod tests {
         let p2 = meter.context_pressure();
         assert_eq!(p2.pressure_tokens, Some(120));
         assert!(p2.projected_tokens.unwrap() > p.projected_tokens.unwrap());
-        // breakdown 的 message_tokens 是表面运行总量,与 projected 的表面
-        // 部分一致。
-        assert!(meter.breakdown().message_tokens > assistant_tokens);
+        // 校准后的 breakdown 依然与 projected 严格相等(三数之和)。
+        let b2 = meter.breakdown();
+        assert_eq!(
+            b2.system_tokens + b2.tools_tokens + b2.message_tokens,
+            p2.projected_tokens.unwrap()
+        );
     }
 
     #[test]
@@ -750,6 +872,53 @@ mod tests {
         let user_tokens = estimate_message(&ChatMessage::user("hi"));
         let assistant_tokens = estimate_message(&ChatMessage::assistant("ok", None, Vec::new()));
         assert_eq!(p.projected_tokens, Some(1_000 + assistant_tokens));
-        assert_eq!(meter.breakdown().message_tokens, user_tokens + assistant_tokens);
+        // 原始表面 = user + assistant;校准后三数之和 == projected。
+        assert_eq!(user_tokens + assistant_tokens, 10);
+        let b = meter.breakdown();
+        assert_eq!(
+            b.system_tokens + b.tools_tokens + b.message_tokens,
+            p.projected_tokens.unwrap()
+        );
+    }
+
+    #[test]
+    fn estimate_text_uses_character_classes() {
+        // ASCII 仍按 4 字符 1 token,CJK 每字 1 token(全角标点计入 CJK)。
+        assert_eq!(estimate_text("hello"), 2);
+        assert_eq!(estimate_text("你好"), 2);
+        assert_eq!(estimate_text("你好，世界"), 5);
+        assert_eq!(estimate_system_tokens("上下文计量"), 9); // 5 字 + 4 角色框
+    }
+
+    #[test]
+    fn calibrate_breakdown_balances_message_on_top_of_fixed_cost() {
+        // 常态:固定行(系统/工具)原样,余额全部归对话消息行。
+        assert_eq!(
+            calibrate_breakdown(10, 20, 70, 200),
+            ContextBreakdown { system_tokens: 10, tools_tokens: 20, message_tokens: 170 }
+        );
+        assert_eq!(
+            calibrate_breakdown(10, 20, 70, 100),
+            ContextBreakdown { system_tokens: 10, tools_tokens: 20, message_tokens: 70 }
+        );
+        assert_eq!(
+            calibrate_breakdown(10, 20, 70, 90),
+            ContextBreakdown { system_tokens: 10, tools_tokens: 20, message_tokens: 60 }
+        );
+        // 退化:target 低于固定成本之和(现实几乎不可能),按占比缩放
+        // 仍保证整数和恰好 == target。
+        assert_eq!(
+            calibrate_breakdown(10, 20, 70, 25),
+            ContextBreakdown { system_tokens: 3, tools_tokens: 5, message_tokens: 17 }
+        );
+        // 全零份额:target 全额给 message 兜底。
+        assert_eq!(
+            calibrate_breakdown(0, 0, 0, 5),
+            ContextBreakdown { system_tokens: 0, tools_tokens: 0, message_tokens: 5 }
+        );
+        assert_eq!(
+            calibrate_breakdown(1, 2, 3, 0),
+            ContextBreakdown { system_tokens: 0, tools_tokens: 0, message_tokens: 0 }
+        );
     }
 }
