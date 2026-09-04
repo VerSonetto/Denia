@@ -227,6 +227,21 @@ export type SessionEnvelope =
   | {
       seq: number
       time: number
+      type: 'compaction-summary'
+      turn: number
+      step: number
+      summary: string
+      /** 被压缩的事件 seq 区间(含);区间内的消息不再进入模型历史。 */
+      replaces_from: number
+      replaces_to: number
+      /** 压缩后保留窗口的起始事件 seq。 */
+      keep_from: number
+      pre_tokens?: number
+      post_tokens?: number
+    }
+  | {
+      seq: number
+      time: number
       type: 'todo-write'
       todos: TodoItem[]
     }

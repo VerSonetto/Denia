@@ -151,8 +151,57 @@ const NodeView = memo(function NodeView({
       return <TurnChrome node={node} />
     case 'tool':
       return <ToolRow node={node} />
+    case 'compaction':
+      return <CompactionRow node={node} />
   }
 })
+
+/**
+ * LLM 总结压缩的边界标记(学 Claude Code compact boundary):显示摘要、
+ * 被压缩的事件区间与 token 前后对比。摘要内部折叠,点击展开。
+ */
+function CompactionRow({ node }: { node: Extract<TranscriptNode, { kind: 'compaction' }> }) {
+  const [open, setOpen] = useState(false)
+  const pre = node.preTokens ?? 0
+  const post = node.postTokens ?? 0
+  const saved = pre > post ? pre - post : 0
+  return (
+    <div className="compaction-row">
+      <button
+        type="button"
+        className="compaction-header"
+        onClick={() => setOpen((v) => !v)}
+        title={`replaces ${node.replacesFrom}..${node.replacesTo}, keep ${node.keepFrom}`}
+      >
+        <span className="badge">{t('contextCompacted')}</span>
+        <span className="compaction-meta">
+          {pre > 0 && post > 0
+            ? t('contextCompactionTokens', { pre, post, saved })
+            : t('contextCompactionRange', {
+                from: node.replacesFrom,
+                to: node.replacesTo,
+              })}
+        </span>
+        <span className="chevron">{open ? '▾' : '▸'}</span>
+      </button>
+      {open && (
+        <div className="compaction-body prose">
+          <MarkdownText
+            text={node.summary}
+            streaming={false}
+            labels={useMemo<MarkdownLabels>(
+              () => ({
+                code: { copyLabel: t('copy'), copiedLabel: t('copied') },
+                footnotes: t('footnotes'),
+              }),
+              [localeRevision()],
+            )}
+          />
+        </div>
+      )}
+    </div>
+  )
+}
 
 function AssistantNode({
   node,

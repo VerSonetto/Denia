@@ -47,6 +47,18 @@ export type TranscriptNode =
       reason: TurnEndReason
       usage?: TokenUsage
     }
+  | {
+      kind: 'compaction'
+      turn: number
+      step: number
+      summary: string
+      replacesFrom: number
+      replacesTo: number
+      keepFrom: number
+      preTokens?: number
+      postTokens?: number
+      seq: number
+    }
 
 function toUiBlock(block: ContentBlock): UiBlock {
   switch (block.type) {
@@ -258,6 +270,22 @@ export function foldEvents(events: SessionEnvelope[]): TranscriptNode[] {
         }
         break
       }
+      case 'compaction-summary': {
+        closeOpen()
+        nodes.push({
+          kind: 'compaction',
+          turn: event.turn,
+          step: event.step,
+          summary: event.summary,
+          replacesFrom: event.replaces_from,
+          replacesTo: event.replaces_to,
+          keepFrom: event.keep_from,
+          preTokens: event.pre_tokens,
+          postTokens: event.post_tokens,
+          seq: event.seq,
+        })
+        break
+      }
       case 'turn-end':
         closeOpen()
         nodes.push({
@@ -377,6 +405,22 @@ export function applyEnvelope(
       return [
         ...nodes,
         { kind: 'tool', callId: event.call_id, name: event.name, args: event.arguments, seq: event.seq },
+      ]
+    case 'compaction-summary':
+      return [
+        ...nodes,
+        {
+          kind: 'compaction',
+          turn: event.turn,
+          step: event.step,
+          summary: event.summary,
+          replacesFrom: event.replaces_from,
+          replacesTo: event.replaces_to,
+          keepFrom: event.keep_from,
+          preTokens: event.pre_tokens,
+          postTokens: event.post_tokens,
+          seq: event.seq,
+        },
       ]
     case 'tool-result': {
       for (let i = nodes.length - 1; i >= 0; i--) {

@@ -143,6 +143,8 @@ function headLine(envelope: SessionEnvelope): string {
       return `approval-asked · tool=${envelope.tool}`
     case 'approval-decided':
       return `approval-decided · ${envelope.outcome}`
+    case 'compaction-summary':
+      return `compaction-summary · turn=${envelope.turn} step=${envelope.step} · replaces ${envelope.replaces_from}..${envelope.replaces_to}`
   }
 }
 
@@ -303,6 +305,19 @@ function eventBody(envelope: SessionEnvelope): string {
       lines.push(`- request_id: \`${envelope.request_id}\``)
       lines.push(`- outcome: \`${envelope.outcome}\``)
       return lines.join('\n')
+    case 'compaction-summary': {
+      lines.push(`- replaces_from: ${envelope.replaces_from}`)
+      lines.push(`- replaces_to: ${envelope.replaces_to}`)
+      lines.push(`- keep_from: ${envelope.keep_from}`)
+      if (envelope.pre_tokens !== undefined) lines.push(`- pre_tokens: ${envelope.pre_tokens}`)
+      if (envelope.post_tokens !== undefined) lines.push(`- post_tokens: ${envelope.post_tokens}`)
+      lines.push(`- summary(${envelope.summary.length} 字):`)
+      lines.push('')
+      lines.push('```')
+      lines.push(fenceSafe(envelope.summary))
+      lines.push('```')
+      return lines.join('\n')
+    }
   }
 }
 
