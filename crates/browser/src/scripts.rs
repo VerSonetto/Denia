@@ -148,6 +148,11 @@ pub fn paste_text_js(text: &str) -> String {
         r#"(async function(){{
 var text={payload};
 var el=document.activeElement;
+// activeElement 不可编辑时向上找 contenteditable 祖先(B 站等站点输入框是
+// 嵌套结构,焦点常落在外层 div 或内层占位元素上)。
+if(el&&!(el.isContentEditable||el instanceof HTMLInputElement||el instanceof HTMLTextAreaElement)){{
+  el=el.closest('[contenteditable="true"],[contenteditable=""],input,textarea')||el;
+}}
 if(!el||!(el instanceof HTMLElement))return JSON.stringify({{ok:false,error:'no_focused_input'}});
 var dt;
 try{{dt=new DataTransfer();}}catch(e){{return JSON.stringify({{ok:false,error:'no_data_transfer'}});}}

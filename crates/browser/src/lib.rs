@@ -49,6 +49,17 @@ pub enum BrowserCommand {
     Activate { tab_id: String },
     ViewportSet { tab_id: Option<String>, width: u32, height: u32 },
     ViewportReset { tab_id: Option<String> },
+    /// 网络抓包:列出该 tab 捕获的请求(DevTools Network 等价;环形缓冲)。
+    NetworkList { tab_id: Option<String>, url_filter: Option<String>, max: Option<u32> },
+    /// 网络抓包:取某请求的响应体(文本或 base64 标记)。
+    NetworkGetBody {
+        tab_id: Option<String>,
+        #[serde(alias = "requestId")]
+        request_id: String,
+        /// "response"(默认)取响应体;"request" 取请求体 postData。
+        #[serde(default)]
+        body_kind: Option<String>,
+    },
     /// 面板实时画面:开启当前 tab 的 screencast(仅控制台用,模型命令面不含)。
     StartScreencast { tab_id: Option<String> },
     /// 停止当前 tab 的 screencast。

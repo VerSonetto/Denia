@@ -22,7 +22,8 @@ const TOOL_DESCRIPTION: &str = r#"控制内嵌浏览器(headless Chrome),可导�
 - 执行:evaluate{expression}(页面 JS,返回 JSON)
 - tab:newTab{url?}、list{}、activate{tabId}、close{tabId?}(缺省 tabId = 当前 tab)
 - 视口:viewportSet{width,height}、viewportReset{}
-典型流程:snapshot 拿 ref → 用 ref 交互 → 需要视觉时 screenshot。snapshot 过期(ref 失效)时重新 snapshot。"#;
+- 网络抓包:networkList{urlFilter?, max?}(该 tab 捕获的请求:URL/方法/状态码/请求响应头/postData;环形缓冲约 200 条)、networkGetBody{requestId, bodyKind?}(bodyKind 缺省 "response" 取响应体;传 "request" 取 POST 请求体;文本直出,二进制返回 base64 标记)
+典型流程:snapshot 拿 ref → 用 ref 交互 → 需要视觉时 screenshot。snapshot 过期(ref 失效)时重新 snapshot。要分析页面背后的 API 调用时先 networkList。"#;
 
 #[derive(Deserialize)]
 #[allow(dead_code)]
@@ -63,7 +64,8 @@ impl BrowserTool {
                                 "elementInfo", "evaluate", "waitFor",
                                 "getDialog", "handleDialog",
                                 "newTab", "list", "activate", "close",
-                                "viewportSet", "viewportReset"
+                                "viewportSet", "viewportReset",
+                                "networkList", "networkGetBody"
                             ],
                             "description": "命令名"
                         },
@@ -96,7 +98,11 @@ impl BrowserTool {
                         "accept": { "type": "boolean", "description": "handleDialog:接受还是取消" },
                         "fromRef": { "type": "string" }, "toRef": { "type": "string" },
                         "from": { "type": "object", "properties": { "x": { "type": "number" }, "y": { "type": "number" } } },
-                        "to": { "type": "object", "properties": { "x": { "type": "number" }, "y": { "type": "number" } } }
+                        "to": { "type": "object", "properties": { "x": { "type": "number" }, "y": { "type": "number" } } },
+                        "urlFilter": { "type": "string", "description": "networkList:按 URL 子串过滤" },
+                        "max": { "type": "integer", "description": "networkList:最多返回条数(默认 50,上限 200)" },
+                        "requestId": { "type": "string", "description": "networkGetBody:networkList 给出的请求 ID" },
+                        "bodyKind": { "type": "string", "enum": ["response", "request"], "description": "networkGetBody:缺省取响应体;request 取 POST 请求体" }
                     },
                     "required": ["method"]
                 }),

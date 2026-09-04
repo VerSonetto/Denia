@@ -370,6 +370,25 @@ pub(crate) async fn dispatch(
                 Err(e) => e,
             }
         }
+        BrowserCommand::NetworkList { tab_id, url_filter, max } => {
+            let started = std::time::Instant::now();
+            match tab(&mut ctx, tab_id.as_deref()).await {
+                Ok(id) => {
+                    let entries = ctx
+                        .manager
+                        .network_list(&id, url_filter.as_deref(), max.unwrap_or(50).min(200));
+                    CommandOutcome::ok_value(
+                        json!({ "requests": entries, "count": entries.len() }),
+                        elapsed(&started),
+                    )
+                }
+                Err(e) => e,
+            }
+        }
+        BrowserCommand::NetworkGetBody { tab_id, request_id, body_kind } => {
+            let want_request = body_kind.as_deref() == Some("request");
+            network_get_body(&mut ctx, tab_id.as_deref(), &request_id, want_request).await
+        }
         BrowserCommand::StartScreencast { tab_id } => {
             let started = std::time::Instant::now();
             match tab(&mut ctx, tab_id.as_deref()).await {
@@ -896,4 +915,72 @@ mod url {
         }
         Some(scheme)
     }
+}
+
+/// 取响应体:Network.getResponseBody;二进制按 base64 标记返回。
+
+async fn network_get_body(
+    ctx: &mut Ctx<'_>,
+    tab_id: Option<&str>,
+    request_id: &str,
+    want_request: bool,
+) -> CommandOutcome {
+    let started = std::time::Instant::now();
+    let id = match tab(ctx, tab_id).await {
+        Ok(id) => id,
+        Err(e) => return e,
+    };
+    // 条目必须在缓冲里(拿 mime/postData 判断)。
+    let Some(entry) = ctx.manager.network_entry(&id, request_id) else {
+        return CommandOutcome::err(
+            "not_found",
+            format!("requestId {request_id} 不在网络缓冲里(可能已被环形淘汰;重新 networkList)"),
+            elapsed(&started),
+        );
+    };
+    // 请求体:直接用缓冲里记录的 postData(原样文本,不含 base64)。
+    if want_request {
+        let post = entry.get("postData").and_then(Value::as_str).unwrap_or("");
+        if post.is_empty() {
+            return CommandOutcome::err(
+                "no_post_data",
+                format!("请求 {request_id} 没有 POST body(GET 或浏览器未上报)"),
+                elapsed(&started),
+            );
+        }
+        let truncated = post.len() > 60_000;
+        let content = if truncated { post[..60_000].to_string() } else { post.to_string() };
+        return CommandOutcome::ok_value(
+            json!({
+                "requestId": request_id,
+                "kind": "request",
+                "truncated": truncated,
+                "body": content,
+            }),
+            elapsed(&started),
+        );
+    }
+    let body = match ctx
+        .cdp(&id, "Network.getResponseBody", json!({ "requestId": request_id }))
+        .await
+    {
+        Ok(body) => body,
+        Err(e) => return e,
+    };
+    let base64_encoded = body.get("base64Encoded").and_then(Value::as_bool).unwrap_or(false);
+    let raw_body = body.get("body").and_then(Value::as_str).unwrap_or("").to_string();
+    let mime = entry.get("mimeType").and_then(Value::as_str).unwrap_or("").to_string();
+    let truncated = raw_body.len() > 60_000;
+    let content = if truncated { raw_body[..60_000].to_string() } else { raw_body };
+    CommandOutcome::ok_value(
+        json!({
+            "requestId": request_id,
+            "kind": "response",
+            "mimeType": mime,
+            "base64Encoded": base64_encoded,
+            "truncated": truncated,
+            "body": content,
+        }),
+        elapsed(&started),
+    )
 }

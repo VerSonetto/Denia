@@ -13,3 +13,7 @@
 
 # agent 本地工作约定(不入库)
 /AGENTS.md
+
+# AI 测试落盘的临时脚本
+/chunk*.js
+/turnstile.js

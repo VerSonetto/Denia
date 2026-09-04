@@ -87,6 +87,9 @@ pub async fn launch_headless(
 ) -> Result<LaunchedBrowser, String> {
     std::fs::create_dir_all(user_data_dir)
         .map_err(|error| format!("创建浏览器 profile 目录失败: {error}"))?;
+    // 孤儿清理:server 进程被硬杀时 kill_on_drop 不触发,旧 Chrome 仍占用
+    // profile(新实例会单例转发后立即退出)。启动前按 profile 路径清场。
+    kill_orphan_browsers(user_data_dir).await;
 
     let mut command = Command::new(executable);
     command
@@ -177,4 +180,24 @@ pub fn set_no_window(command: &mut Command) {
 pub fn set_no_window_std(command: &mut std::process::Command) {
     use std::os::windows::process::CommandExt;
     command.creation_flags(CREATE_NO_WINDOW);
+}
+
+/// 清掉占用同一 profile 的残留 Chrome/Edge 进程(server 硬杀后的孤儿)。
+/// 只匹配命令行里带本 profile 目录的进程,不影响用户自己的浏览器。
+async fn kill_orphan_browsers(user_data_dir: &Path) {
+    let profile = user_data_dir.to_string_lossy().to_string();
+    let script = format!(
+        "Get-CimInstance Win32_Process -Filter \"Name='chrome.exe' or Name='msedge.exe'\" \
+         | Where-Object {{ $_.CommandLine -like '*{profile}*' }} \
+         | ForEach-Object {{ Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }}",
+        profile = profile.replace('\\', "\\\\")
+    );
+    let mut command = tokio::process::Command::new("powershell.exe");
+    command
+        .args(["-NoProfile", "-NonInteractive", "-Command", &script])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .creation_flags(CREATE_NO_WINDOW);
+    let _ = command.status().await;
 }

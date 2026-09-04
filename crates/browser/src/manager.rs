@@ -44,6 +44,7 @@ pub(crate) struct Inner {
     /// targetId -> tabId(事件反查)。
     #[allow(dead_code)]
     pub(crate) by_target: HashMap<String, String>,
+    /// CDP flatten sessionId -> tabId(事件回流反查;sessionId ≠ tabId)。
     /// 挂起的 JS dialog(tabId -> {type,message})。
     pub(crate) dialogs: HashMap<String, Value>,
     /// viewport 覆盖(tabId -> {width,height})。
@@ -60,6 +61,8 @@ pub struct BrowserManager {
     event_broadcast: tokio::sync::broadcast::Sender<BrowserEvent>,
     /// 挂起 JS dialog(tabId -> {type,message});事件泵写入,getDialog/handleDialog 读写。
     pending_dialogs: std::sync::Arc<std::sync::Mutex<HashMap<String, Value>>>,
+    /// 网络抓包缓冲(事件泵写入,networkList/GetBody 读取)。
+    network_log: std::sync::Arc<std::sync::Mutex<NetworkLog>>,
 }
 
 /// 面板订阅的推送事件。
@@ -82,6 +85,86 @@ pub enum BrowserEvent {
 
 const TAB_LIMIT: usize = 32;
 
+/// 每 tab 保留的最大网络条目(环形,超出丢最旧)。
+const NETWORK_LOG_CAP: usize = 200;
+
+/// 网络抓包缓冲:tabId -> (插入序, requestId -> 条目)。
+#[derive(Default)]
+pub struct NetworkLog {
+    /// tabId -> 有序 requestId(便于按时间列出与截断)。
+    order: HashMap<String, Vec<(String, u64)>>,
+    /// tabId -> requestId -> 条目。
+    entries: HashMap<String, HashMap<String, Value>>,
+    /// 全局单调序号(排序用)。
+    counter: u64,
+}
+
+impl NetworkLog {
+    fn record(&mut self, tab_id: &str, request_id: &str, entry: Value) {
+        let order = self.order.entry(tab_id.to_string()).or_default();
+        let is_new = !order.iter().any(|(id, _)| id == request_id);
+        if is_new {
+            self.counter += 1;
+            order.push((request_id.to_string(), self.counter));
+        }
+        // merge:同一请求的多个事件(requestWillBeSent → responseReceived → loadingFailed)
+        // 按字段合并,新值非 null 才覆盖,保留既有字段。
+        let map = self.entries.entry(tab_id.to_string()).or_default();
+        let slot = map
+            .entry(request_id.to_string())
+            .or_insert_with(|| entry.clone());
+        if let (Some(existing), Some(incoming)) = (slot.as_object_mut(), entry.as_object()) {
+            for (key, value) in incoming {
+                if !value.is_null() {
+                    existing.insert(key.clone(), value.clone());
+                }
+            }
+        }
+        // 环形截断。
+        if order.len() > NETWORK_LOG_CAP {
+            let excess = order.len() - NETWORK_LOG_CAP;
+            let evicted: Vec<String> = order.drain(..excess).map(|(id, _)| id).collect();
+            if let Some(map) = self.entries.get_mut(tab_id) {
+                for id in evicted {
+                    map.remove(&id);
+                }
+            }
+        }
+    }
+
+    fn list(&self, tab_id: &str, url_filter: Option<&str>, max: u32) -> Vec<Value> {
+        let Some(order) = self.order.get(tab_id) else {
+            return Vec::new();
+        };
+        let map = self.entries.get(tab_id);
+        let mut items: Vec<(u64, Value)> = order
+            .iter()
+            .filter_map(|(id, seq)| {
+                let entry = map.and_then(|m| m.get(id))?;
+                if let Some(filter) = url_filter {
+                    let url = entry.get("url").and_then(Value::as_str).unwrap_or("");
+                    if !url.contains(filter) {
+                        return None;
+                    }
+                }
+                Some((*seq, entry.clone()))
+            })
+            .collect();
+        items.sort_by_key(|(seq, _)| *seq);
+        let start = items.len().saturating_sub(max as usize);
+        items.into_iter().skip(start).map(|(_, entry)| entry).collect()
+    }
+
+    fn get(&self, tab_id: &str, request_id: &str) -> Option<Value> {
+        self.entries.get(tab_id).and_then(|m| m.get(request_id)).cloned()
+    }
+
+    fn clear(&mut self, tab_id: &str) {
+        self.order.remove(tab_id);
+        self.entries.remove(tab_id);
+    }
+}
+
 impl BrowserManager {
     pub fn new(home: PathBuf) -> Self {
         let (event_broadcast, _) = tokio::sync::broadcast::channel(64);
@@ -91,6 +174,7 @@ impl BrowserManager {
             generation: AtomicU64::new(0),
             event_broadcast,
             pending_dialogs: std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
+            network_log: std::sync::Arc::new(std::sync::Mutex::new(NetworkLog::default())),
         }
     }
 
@@ -105,6 +189,21 @@ impl BrowserManager {
 
     pub fn clear_dialog(&self, tab_id: &str) {
         self.pending_dialogs.lock().unwrap().remove(tab_id);
+    }
+
+    /// 网络抓包:列出该 tab 的请求条目(按发生顺序,环形缓冲上限内)。
+    pub fn network_list(&self, tab_id: &str, url_filter: Option<&str>, max: u32) -> Vec<Value> {
+        self.network_log.lock().unwrap().list(tab_id, url_filter, max)
+    }
+
+    /// 网络抓包:取单条条目。
+    pub fn network_entry(&self, tab_id: &str, request_id: &str) -> Option<Value> {
+        self.network_log.lock().unwrap().get(tab_id, request_id)
+    }
+
+    /// 网络抓包:清空某 tab 的缓冲。
+    pub fn network_clear(&self, tab_id: &str) {
+        self.network_log.lock().unwrap().clear(tab_id);
     }
 
     fn profile_dir(&self) -> PathBuf {
@@ -185,8 +284,11 @@ impl BrowserManager {
             *guard = Some(inner);
         }
         // 事件泵:掉线→广播 Exited;dialog/screencast/导航→广播。
+        let pending_dialogs = self.pending_dialogs.clone();
+        let network_log = self.network_log.clone();
         tokio::spawn(async move {
-            Self::event_pump(handle_for_pump, inner_event_rx, event_broadcast).await;
+            Self::event_pump(handle_for_pump, inner_event_rx, event_broadcast, pending_dialogs, network_log)
+                .await;
         });
         let _ = self.event_broadcast.send(BrowserEvent::TabsChanged);
         Ok(())
@@ -216,7 +318,6 @@ impl BrowserManager {
             if target_id.is_empty() || inner.by_target.contains_key(&target_id) {
                 continue;
             }
-            let tab_id = format!("t{}", short_id());
             let url = info
                 .get("url")
                 .and_then(Value::as_str)
@@ -227,21 +328,19 @@ impl BrowserManager {
                 .and_then(Value::as_str)
                 .unwrap_or_default()
                 .to_string();
-            if Self::attach_session(inner, tab_id, target_id.clone(), url, title).await.is_ok() {
-                inner.by_target.insert(target_id, String::new());
-            }
+            let _ = Self::attach_session(inner, target_id.clone(), url, title).await;
         }
         Ok(())
     }
 
-    /// 给 target 建 flatten session 并登记。
+    /// 给 target 建 flatten session 并登记。tabId 直接采用 CDP flatten sessionId:
+    /// 事件回流天然匹配(避免 pump 里再反查),且会话期间稳定。
     async fn attach_session(
         inner: &mut Inner,
-        tab_id: String,
         target_id: String,
         url: String,
         title: String,
-    ) -> Result<(), String> {
+    ) -> Result<String, String> {
         let attached = inner
             .handle
             .send(
@@ -254,6 +353,7 @@ impl BrowserManager {
             .and_then(Value::as_str)
             .ok_or("attachToTarget 未返回 sessionId")?
             .to_string();
+        let tab_id = session_id.clone();
         let _ = inner
             .handle
             .send_with_session("Page.enable", json!({}), Some(&session_id))
@@ -262,19 +362,27 @@ impl BrowserManager {
             .handle
             .send_with_session("Runtime.enable", json!({}), Some(&session_id))
             .await;
+        let _ = inner
+            .handle
+            .send_with_session(
+                "Network.enable",
+                json!({"maxTotalBufferSize": 10_000_000, "maxResourceBufferSize": 5_000_000}),
+                Some(&session_id),
+            )
+            .await;
         inner.tabs.insert(
             tab_id.clone(),
             TabInfo {
                 tab_id: tab_id.clone(),
                 target_id: target_id.clone(),
-                session_id,
+                session_id: session_id.clone(),
                 url,
                 title,
                 last_activity_ms: now_ms(),
             },
         );
-        inner.by_target.insert(target_id, tab_id);
-        Ok(())
+        inner.by_target.insert(target_id, tab_id.clone());
+        Ok(tab_id)
     }
 
     pub(crate) async fn create_tab_inner(inner: &mut Inner, url: Option<&str>) -> Result<String, String> {
@@ -290,16 +398,13 @@ impl BrowserManager {
             .and_then(Value::as_str)
             .ok_or("createTarget 未返回 targetId")?
             .to_string();
-        let tab_id = format!("t{}", short_id());
         Self::attach_session(
             inner,
-            tab_id.clone(),
             target_id,
             url.unwrap_or("about:blank").to_string(),
             String::new(),
         )
-        .await?;
-        Ok(tab_id)
+        .await
     }
 
     /// 命令执行入口(工具与 REST API 共用)。
@@ -357,10 +462,13 @@ impl BrowserManager {
         handle: CdpHandle,
         mut event_rx: tokio::sync::mpsc::UnboundedReceiver<CdpEvent>,
         broadcast: tokio::sync::broadcast::Sender<BrowserEvent>,
+        pending_dialogs: std::sync::Arc<std::sync::Mutex<HashMap<String, Value>>>,
+        network_log: std::sync::Arc<std::sync::Mutex<NetworkLog>>,
     ) {
         while let Some(event) = event_rx.recv().await {
-            // flatten 模式下事件带 sessionId(即我们登记的 tabId)。
-            let tab_id = event.session_id.clone().unwrap_or_default();
+            // flatten 事件带 CDP sessionId;反查成我们的 tabId(会话期间恒定)。
+            let session_id = event.session_id.clone().unwrap_or_default();
+            let tab_id = session_id.clone();
             match event.method.as_str() {
                 "Page.screencastFrame" => {
                     let data = event
@@ -384,6 +492,164 @@ impl BrowserManager {
                         }
                     }
                 }
+                // ---- 网络抓包:按 requestId 聚合请求/响应/失败 ----
+                "Network.requestWillBeSent" => {
+                    let _ = std::fs::OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(std::env::temp_dir().join("denia-net-debug.log"))
+                        .map(|mut file| {
+                            use std::io::Write;
+                            let _ = writeln!(
+                                file,
+                                "reqWillBeSent tab={tab_id}",
+                            );
+                        });
+                    let request_id = event
+                        .params
+                        .get("requestId")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_string();
+                    if request_id.is_empty() || tab_id.is_empty() {
+                        continue;
+                    }
+                    let url = event.params
+                        .pointer("/request/url")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_string();
+                    let method = event.params
+                        .pointer("/request/method")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_string();
+                    let headers = event.params.pointer("/request/headers").cloned().unwrap_or(Value::Null);
+                    let post_data = event.params
+                        .pointer("/request/postData")
+                        .and_then(Value::as_str)
+                        .map(str::to_string);
+                    network_log.lock().unwrap().record(
+                        &tab_id,
+                        &request_id,
+                        json!({
+                            "requestId": request_id,
+                            "url": url,
+                            "method": method,
+                            "requestHeaders": headers,
+                            "postData": post_data,
+                            "status": Value::Null,
+                            "responseHeaders": Value::Null,
+                            "mimeType": Value::Null,
+                            "failed": Value::Null,
+                        }),
+                    );
+                }
+                "Network.responseReceived" => {
+                    let request_id = event
+                        .params
+                        .get("requestId")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_string();
+                    if request_id.is_empty() || tab_id.is_empty() {
+                        continue;
+                    }
+                    network_log.lock().unwrap().record(
+                        &tab_id,
+                        &request_id,
+                        json!({
+                            "requestId": request_id,
+                            "status": event.params.pointer("/response/status").cloned().unwrap_or(Value::Null),
+                            "statusText": event.params.pointer("/response/statusText").cloned().unwrap_or(Value::Null),
+                            "responseHeaders": event.params.pointer("/response/headers").cloned().unwrap_or(Value::Null),
+                            "mimeType": event.params.pointer("/response/mimeType").cloned().unwrap_or(Value::Null),
+                        }),
+                    );
+                }
+                "Network.loadingFailed" => {
+                    let request_id = event
+                        .params
+                        .get("requestId")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_string();
+                    if request_id.is_empty() || tab_id.is_empty() {
+                        continue;
+                    }
+                    let error_text = event
+                        .params
+                        .get("errorText")
+                        .and_then(Value::as_str)
+                        .unwrap_or("failed")
+                        .to_string();
+                    network_log.lock().unwrap().record(
+                        &tab_id,
+                        &request_id,
+                        json!({ "requestId": request_id, "failed": error_text }),
+                    );
+                }
+                // WebSocket 帧:按 ws 会话聚合到 networkLog(requestId=ws:<id>)。
+                "Network.webSocketCreated" => {
+                    let ws_id = event
+                        .params
+                        .get("requestId")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_string();
+                    if ws_id.is_empty() || tab_id.is_empty() {
+                        continue;
+                    }
+                    let url = event
+                        .params
+                        .get("url")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_string();
+                    network_log.lock().unwrap().record(
+                        &tab_id,
+                        &format!("ws:{ws_id}"),
+                        json!({
+                            "requestId": format!("ws:{ws_id}"),
+                            "url": url,
+                            "method": "WS",
+                            "status": 101,
+                            "mimeType": "websocket",
+                            "wsFrames": [],
+                        }),
+                    );
+                }
+                "Network.webSocketFrameReceived" | "Network.webSocketFrameSent" => {
+                    let ws_id = event
+                        .params
+                        .get("requestId")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_string();
+                    if ws_id.is_empty() || tab_id.is_empty() {
+                        continue;
+                    }
+                    let direction = if event.method.ends_with("Sent") { "sent" } else { "received" };
+                    let payload = event
+                        .params
+                        .pointer("/response/payloadData")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_string();
+                    let key = format!("ws:{ws_id}");
+                    let Some(entry) = network_log.lock().unwrap().get(&tab_id, &key) else {
+                        continue;
+                    };
+                    let mut frames = entry
+                        .get("wsFrames")
+                        .and_then(Value::as_array)
+                        .cloned()
+                        .unwrap_or_default();
+                    if frames.len() < 100 {
+                        frames.push(json!({ "dir": direction, "payload": payload }));
+                    }
+                    network_log.lock().unwrap().record(&tab_id, &key, json!({ "wsFrames": frames }));
+                }
                 "Page.javascriptDialogOpening" => {
                     let kind = event
                         .params
@@ -397,11 +663,19 @@ impl BrowserManager {
                         .and_then(Value::as_str)
                         .unwrap_or_default()
                         .to_string();
+                    pending_dialogs.lock().unwrap().insert(
+                        tab_id.clone(),
+                        json!({ "type": kind, "message": message }),
+                    );
                     let _ = broadcast.send(BrowserEvent::DialogOpened {
                         tab_id: tab_id.clone(),
                         kind,
                         message,
                     });
+                }
+                "Page.javascriptDialogClosed" => {
+                    pending_dialogs.lock().unwrap().remove(&tab_id);
+                    let _ = broadcast.send(BrowserEvent::DialogClosed { tab_id });
                 }
                 "Page.frameNavigated" | "Page.navigatedWithinDocument" => {
                     let url = event
@@ -485,10 +759,6 @@ pub(crate) fn elapsed(started: &Instant) -> u64 {
     started.elapsed().as_millis() as u64
 }
 
-pub(crate) fn short_id() -> String {
-    let bytes: [u8; 4] = rand::random();
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
-}
 
 /// 供 commands.rs 使用的执行上下文。
 pub(crate) struct Ctx<'a> {
