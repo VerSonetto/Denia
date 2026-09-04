@@ -190,6 +190,48 @@ pub struct ToolFailureIdentity {
     pub code: String,
 }
 
+/// 工具结果剪枝配置(对齐 dsh `compaction-tool-result-pruner` 默认值)。
+/// 既用于会话侧落盘剪枝(legacy `prune_tool_results`),也用于模型历史的
+/// 投影剪枝(`derive_messages_projected`)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ToolResultPruneConfig {
+    /// 超过该字符数(Unicode code point)的工具结果才剪。
+    pub threshold_chars: usize,
+    /// 剪枝后保留的头部字符数。
+    pub head_chars: usize,
+    /// 剪枝后保留的尾部字符数。
+    pub tail_chars: usize,
+}
+
+impl Default for ToolResultPruneConfig {
+    fn default() -> Self {
+        Self {
+            threshold_chars: 8_192,
+            head_chars: 4_096,
+            tail_chars: 1_024,
+        }
+    }
+}
+
+/// 剪枝替换的中间省略标记(原样抄 dsh `PRUNE_MARKER`)。
+pub const PRUNE_MARKER: &str = "\n\n[... tool result middle pruned ...]\n\n";
+
+/// 按 Unicode code point 对工具结果做 head + marker + tail 剪枝(对齐 dsh
+/// `pruneContent`)。未超过阈值返回 `None`。
+pub fn prune_text(content: &str, config: &ToolResultPruneConfig) -> Option<String> {
+    let chars: Vec<char> = content.chars().collect();
+    let total = chars.len();
+    if total <= config.threshold_chars {
+        return None;
+    }
+    let head_end = config.head_chars.min(total);
+    let tail_start = total.saturating_sub(config.tail_chars).max(head_end);
+    let mut out: String = chars[..head_end].iter().collect();
+    out.push_str(PRUNE_MARKER);
+    out.extend(chars[tail_start..].iter());
+    Some(out)
+}
+
 /// The durable event vocabulary, internally tagged on `type`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "kebab-case")]
@@ -268,6 +310,26 @@ pub enum SessionEvent {
         /// `tool/result` 的 `surfaceOp.replace`)。None = 普通追加。
         #[serde(default, skip_serializing_if = "Option::is_none")]
         replaces: Option<u64>,
+    },
+    /// LLM 总结压缩(对齐 Claude Code compact 设计):把 `replaces_from..=
+    /// replaces_to` 的事件区间折叠成一条摘要消息,保留窗口从 `keep_from`
+    /// 开始。日志保持 append-only:区间内旧事件仍在磁盘上,只是不再进入
+    /// 派生历史与 token-meter 表面。
+    CompactionSummary {
+        turn: u32,
+        step: u32,
+        /// 压缩后插入的摘要文本(模型可见,user role)。
+        summary: String,
+        /// 被压缩的事件 seq 区间(含)。区间内的消息不再进入派生历史。
+        replaces_from: u64,
+        replaces_to: u64,
+        /// 压缩后保留窗口的起始事件 seq。
+        keep_from: u64,
+        /// 压缩前/后的启发式 token 估算(调试与 UI 展示用)。
+        #[serde(default)]
+        pre_tokens: u64,
+        #[serde(default)]
+        post_tokens: u64,
     },
     /// Whole-list todo snapshot; latest write wins on replay. Log-only UI
     /// state — never part of the derived model history.
@@ -380,7 +442,49 @@ pub fn fork_cut_index(events: &[SessionEnvelope], at_seq: Option<u64>) -> Option
 /// Tool-result pruning replacements (`tool-result` with `replaces`) fold the
 /// surface: the replacement takes the original node's position and the old
 /// content no longer reaches the model (对齐 dsh `surfaceOp.replace`)。
+/// 派生模型可见历史(无投影:工具结果原文直出)。
 pub fn derive_messages(events: &[SessionEnvelope]) -> Vec<ChatMessage> {
+    derive_messages_projected(events, None)
+}
+
+/// 一条派生 surface 消息及其来源事件 seq。压缩器用它把消息切回事件区间。
+#[derive(Debug, Clone)]
+pub struct SurfaceMessage {
+    pub seq: u64,
+    pub message: ChatMessage,
+}
+
+/// 派生模型可见历史,带事件 seq(投影 + 压缩折叠同 [`derive_messages_projected`])。
+pub fn derive_surface(
+    events: &[SessionEnvelope],
+    projection: Option<&ToolResultPruneConfig>,
+) -> Vec<SurfaceMessage> {
+    derive_surface_inner(events, projection)
+}
+
+/// 派生模型可见历史,带可选的工具结果投影剪枝与 LLM 压缩折叠。
+///
+/// - `projection`:压力闸门开启时的 head/marker/tail 投影(日志不改,
+///   仅本次派生的历史被剪)——低压力传 `None`,请求内容与日志逐字一致,
+///   provider 前缀缓存持续命中;
+/// - `CompactionSummary` 事件在折叠时把其 `replaces_from..=replaces_to`
+///   区间内的事件从 surface 移除,并把摘要消息插到保留窗口(`keep_from`)
+///   之前(对齐 Claude Code compact boundary 语义)。
+pub fn derive_messages_projected(
+    events: &[SessionEnvelope],
+    projection: Option<&ToolResultPruneConfig>,
+) -> Vec<ChatMessage> {
+    derive_surface_inner(events, projection)
+        .into_iter()
+        .map(|item| item.message)
+        .collect()
+}
+
+/// [`derive_surface`] 的实现;派生细节见 [`derive_messages_projected`]。
+fn derive_surface_inner(
+    events: &[SessionEnvelope],
+    projection: Option<&ToolResultPruneConfig>,
+) -> Vec<SurfaceMessage> {
     /// 当前模型可见 surface 节点(仅 user/assistant/tool-result 三类有消息)。
     struct SurfaceItem {
         seq: u64,
@@ -389,6 +493,13 @@ pub fn derive_messages(events: &[SessionEnvelope]) -> Vec<ChatMessage> {
 
     let mut surface: Vec<SurfaceItem> = Vec::new();
     let mut unanswered: Vec<String> = Vec::new();
+    // 压缩折叠:被压缩的区间变成摘要消息,插在保留窗口之前。
+    #[derive(Clone)]
+    struct PendingSummary {
+        keep_from: u64,
+        text: String,
+    }
+    let mut summaries: Vec<PendingSummary> = Vec::new();
     // 在等 tool-result 期间注入的带图用户消息(如 browser 截图):不能插在
     // tool-call 与 tool-result 中间——多数 provider 校验二者必须相邻
     // (MiniMax: "tool call result does not follow tool call")。图片暂存,
@@ -410,6 +521,20 @@ pub fn derive_messages(events: &[SessionEnvelope]) -> Vec<ChatMessage> {
                     ChatMessage::user_with_images(text, images.clone())
                 };
                 surface.push(SurfaceItem { seq, message });
+            }
+            SessionEvent::CompactionSummary {
+                summary,
+                replaces_from,
+                replaces_to,
+                keep_from,
+                ..
+            } => {
+                // 区间内的事件不再进入模型历史(日志保持 append-only)。
+                surface.retain(|item| item.seq < *replaces_from || item.seq > *replaces_to);
+                summaries.push(PendingSummary {
+                    keep_from: *keep_from,
+                    text: summary.clone(),
+                });
             }
             SessionEvent::AssistantMessage { blocks, .. } => {
                 let text: String = blocks
@@ -454,9 +579,14 @@ pub fn derive_messages(events: &[SessionEnvelope]) -> Vec<ChatMessage> {
                 ..
             } => {
                 unanswered.retain(|id| id != call_id);
+                // 投影剪枝:超预算结果替换为 head/marker/tail(仅本次派生)。
+                let content = match projection {
+                    Some(config) => prune_text(content, config).unwrap_or_else(|| content.clone()),
+                    None => content.clone(),
+                };
                 if let Some(replaced_seq) = replaces {
                     if let Some(item) = surface.iter_mut().find(|item| item.seq == *replaced_seq) {
-                        item.message = ChatMessage::tool_result(call_id.clone(), content.clone());
+                        item.message = ChatMessage::tool_result(call_id.clone(), content);
                         continue;
                     }
                 }
@@ -469,7 +599,7 @@ pub fn derive_messages(events: &[SessionEnvelope]) -> Vec<ChatMessage> {
                     // 带图合并:截图等工具图片挂到本条 tool-result 上,
                     // wire 层把 content 升级为 text+image_url 多模态数组。
                     let images = std::mem::take(&mut pending_tool_images);
-                    let mut merged = content.clone();
+                    let mut merged = content;
                     merged.push_str("\n[附:工具产生的截图已附在本条结果]");
                     let mut message = ChatMessage::tool_result(call_id, merged);
                     message.images = images;
@@ -480,9 +610,36 @@ pub fn derive_messages(events: &[SessionEnvelope]) -> Vec<ChatMessage> {
         }
     }
 
-    let mut messages: Vec<ChatMessage> = surface.into_iter().map(|item| item.message).collect();
+    // 摘要消息插到保留窗口之前(对齐 compact boundary 语义:摘要代表被
+    // 压缩的旧历史,随后是保留窗口,最后是压缩后新追加的消息)。
+    // 摘要项 seq 取 keep_from-1:保证排在保留窗口之前,且后续摘要的
+    // keep_from 单调不减时不会被 position 查找误命中。
+    for summary in summaries {
+        let pos = surface
+            .iter()
+            .position(|item| item.seq >= summary.keep_from)
+            .unwrap_or(surface.len());
+        surface.insert(
+            pos,
+            SurfaceItem {
+                seq: summary.keep_from.saturating_sub(1),
+                message: ChatMessage::user(summary.text),
+            },
+        );
+    }
+
+    let mut messages: Vec<SurfaceMessage> = surface
+        .into_iter()
+        .map(|item| SurfaceMessage {
+            seq: item.seq,
+            message: item.message,
+        })
+        .collect();
     for call_id in unanswered {
-        messages.push(ChatMessage::tool_result(call_id, INTERRUPTED_TOOL_RESULT));
+        messages.push(SurfaceMessage {
+            seq: u64::MAX - messages.len() as u64,
+            message: ChatMessage::tool_result(call_id, INTERRUPTED_TOOL_RESULT),
+        });
     }
     messages
 }
@@ -1057,5 +1214,110 @@ mod tests {
         // 锚点越过末尾:回退到最后一个 turn-end,仍没有 → None。
         assert_eq!(fork_cut_index(&events, Some(99)), None);
         assert_eq!(fork_cut_index(&[], None), None);
+    }
+
+    #[test]
+    fn derive_projection_trims_over_budget_tool_results_only() {
+        // 合法预算:head + marker + tail 必须 ≤ threshold(dsh 校验语义);
+        // 原文 96 > threshold 70,剪后 head24 + marker33 + tail8 = 65。
+        let config = ToolResultPruneConfig {
+            threshold_chars: 70,
+            head_chars: 24,
+            tail_chars: 8,
+        };
+        let long = "A".repeat(96);
+        let events = vec![
+            envelope(1, SessionEvent::UserMessage { text: "hi".into(), injected: false, images: Vec::new() }),
+            envelope(
+                2,
+                SessionEvent::AssistantMessage {
+                    turn: 1,
+                    step: 1,
+                    blocks: vec![ContentBlock::ToolCall {
+                        id: "c1".into(),
+                        name: "bash".into(),
+                        arguments: "{}".into(),
+                    }],
+                    usage: None,
+                    interrupted: false,
+                    source_event_seqs: Vec::new(),
+                },
+            ),
+            envelope(
+                3,
+                SessionEvent::ToolResult {
+                    turn: 1,
+                    step: 1,
+                    call_id: "c1".into(),
+                    content: long.clone(),
+                    is_error: false,
+                    error: None,
+                    error_identity: None,
+                    meta: None,
+                    replaces: None,
+                },
+            ),
+        ];
+        // 无投影:原文直出(低压力,prefix 稳定)。
+        let plain = derive_messages(&events);
+        assert_eq!(plain[2].content, long);
+        // 有投影:head + marker + tail。无投影时一字不改。
+        let projected = derive_messages_projected(&events, Some(&config));
+        assert_eq!(projected[2].content.chars().count(), 65);
+        assert!(projected[2].content.starts_with(&"A".repeat(24)));
+        assert!(projected[2].content.contains(PRUNE_MARKER));
+        assert!(projected[2].content.ends_with(&"A".repeat(8)));
+        // marker 只出现一次。
+        assert_eq!(projected[2].content.matches(PRUNE_MARKER).count(), 1);
+    }
+
+    #[test]
+    fn derive_folds_compaction_summary_into_keep_window_order() {
+        let events = vec![
+            envelope(1, SessionEvent::UserMessage { text: "old request".into(), injected: false, images: Vec::new() }),
+            envelope(
+                2,
+                SessionEvent::AssistantMessage {
+                    turn: 1,
+                    step: 1,
+                    blocks: vec![ContentBlock::Text { text: "old work".into() }],
+                    usage: None,
+                    interrupted: false,
+                    source_event_seqs: Vec::new(),
+                },
+            ),
+            // 压缩:事件 1..=2 被折叠成摘要,保留窗口从 3 开始。
+            envelope(
+                3,
+                SessionEvent::CompactionSummary {
+                    turn: 1,
+                    step: 2,
+                    summary: "previous work summarized".into(),
+                    replaces_from: 1,
+                    replaces_to: 2,
+                    keep_from: 4,
+                    pre_tokens: 100,
+                    post_tokens: 10,
+                },
+            ),
+            envelope(4, SessionEvent::UserMessage { text: "now this".into(), injected: false, images: Vec::new() }),
+            envelope(
+                5,
+                SessionEvent::AssistantMessage {
+                    turn: 1,
+                    step: 3,
+                    blocks: vec![ContentBlock::Text { text: "fresh reply".into() }],
+                    usage: None,
+                    interrupted: false,
+                    source_event_seqs: Vec::new(),
+                },
+            ),
+        ];
+        let messages = derive_messages(&events);
+        // 摘要、保留窗口、新消息,顺序正确;被压缩的旧消息不再出现。
+        assert_eq!(messages.len(), 3);
+        assert!(messages[0].content.contains("previous work summarized"));
+        assert_eq!(messages[1].content, "now this");
+        assert_eq!(messages[2].content, "fresh reply");
     }
 }
