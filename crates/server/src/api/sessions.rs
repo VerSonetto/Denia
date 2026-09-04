@@ -38,6 +38,7 @@ pub fn router() -> Router<Arc<AppState>> {
             "/api/sessions/{id}",
             get(get_session).delete(delete_session),
         )
+        .route("/api/sessions/{id}/events", get(get_session_events))
         .route("/api/sessions/{id}/prompt", post(prompt_session))
         .route("/api/sessions/{id}/cancel", post(cancel_session))
         .route("/api/sessions/{id}/permission", axum::routing::put(set_session_permission))
@@ -159,6 +160,46 @@ async fn get_session(
     Ok(Json(json!({
         "header": session.header(),
         "events": session.events(),
+    })))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SessionPageQuery {
+    /// 只取该 seq 之前的事件;缺省取日志尾部。
+    #[serde(default)]
+    before: Option<u64>,
+    #[serde(default = "default_session_page_limit")]
+    limit: usize,
+}
+
+fn default_session_page_limit() -> usize {
+    500
+}
+
+/// 分页读取会话事件:流式扫描文件,只返回一个有限窗口,不把完整历史
+/// 加载到服务端常驻内存(打开长会话时前端不再依赖全量快照)。
+async fn get_session_events(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Query(query): Query<SessionPageQuery>,
+) -> Result<impl IntoResponse, ApiError> {
+    let sessions = state.sessions.clone();
+    let page = tokio::task::spawn_blocking(move || sessions.read_page(&id, query.before, query.limit))
+        .await
+        .map_err(|error| {
+            ApiError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "task/join",
+                error.to_string(),
+            )
+        })?
+        .map_err(ApiError::from_session)?;
+    Ok(Json(json!({
+        "header": page.header,
+        "events": page.events,
+        "total": page.total,
+        "hasMoreBefore": page.has_more_before,
     })))
 }
 

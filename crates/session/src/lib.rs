@@ -22,6 +22,7 @@
 
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, BufWriter, Read, Write};
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -837,11 +838,23 @@ pub struct SessionSummary {
     pub parent_session: Option<String>,
 }
 
+/// 一次分页读取的会话事件窗口:只保留 `limit` 条,后端不驻留全量历史。
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SessionPage {
+    pub header: SessionHeader,
+    pub events: Vec<SessionEnvelope>,
+    pub total: u64,
+    pub has_more_before: bool,
+}
+
 /// 索引条目:启动/失效时从文件摘要得到,list 只读它。
 #[derive(Debug, Clone)]
 struct IndexEntry {
     meta: SessionMeta,
     stamp: FileStamp,
+    /// 该条目何时进入内存索引;列表节流后用于对“刚创建/刚加载”的会话
+    /// 仍做一次 stat,避免创建后立刻刷新列表时摘要滞后。
+    indexed_at: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -861,6 +874,8 @@ pub struct SessionStore {
     /// 活跃(已加载)会话的弱引用:list 优先从内存读摘要,
     /// 不依赖文件落盘状态,首条用户消息即刻可见。
     active: Mutex<std::collections::HashMap<String, std::sync::Weak<Session>>>,
+    /// 上次对目录做完整校验的 epoch ms;列表高频刷新时避免 O(会话数) stat。
+    last_scan_ms: Mutex<u64>,
 }
 
 impl SessionStore {
@@ -871,6 +886,7 @@ impl SessionStore {
             root,
             index: Mutex::new(std::collections::HashMap::new()),
             active: Mutex::new(std::collections::HashMap::new()),
+            last_scan_ms: Mutex::new(0),
         };
         store.rescan_index()?;
         Ok(store)
@@ -891,10 +907,11 @@ impl SessionStore {
                 continue;
             }
             if let Some((meta, stamp)) = read_summary(&file) {
-                fresh.insert(meta.id.clone(), IndexEntry { meta, stamp });
+                fresh.insert(meta.id.clone(), IndexEntry { meta, stamp, indexed_at: now_millis() });
             }
         }
         *self.index.lock().unwrap_or_else(|p| p.into_inner()) = fresh;
+        *self.last_scan_ms.lock().unwrap_or_else(|p| p.into_inner()) = now_millis();
         Ok(())
     }
 
@@ -934,6 +951,7 @@ impl SessionStore {
             .insert(meta.id.clone(), IndexEntry {
                 meta,
                 stamp: file_stamp(session.file()).unwrap_or(FileStamp { size: 0, mtime_ms: 0 }),
+                indexed_at: now_millis(),
             });
         Ok(session)
     }
@@ -951,8 +969,72 @@ impl SessionStore {
             .insert(meta.id.clone(), IndexEntry {
                 meta,
                 stamp: file_stamp(session.file()).unwrap_or(FileStamp { size: 0, mtime_ms: 0 }),
+                indexed_at: now_millis(),
             });
         Ok(session)
+    }
+
+    /// 直接按文件流式读取一个事件窗口,不构造/驻留完整 `Session`。
+    ///
+    /// - `before = None`:取日志尾部最近 `limit` 条。
+    /// - `before = Some(seq)`:取 `seq` 之前最近 `limit` 条(供前端向上翻页)。
+    /// - 内存只保留一个 `limit` 大小的滑窗,`total` 为文件有效事件总数。
+    pub fn read_page(
+        &self,
+        id: &str,
+        before: Option<u64>,
+        limit: usize,
+    ) -> Result<SessionPage, SessionError> {
+        let file = self.file_for(id)?;
+        if !file.exists() {
+            return Err(SessionError::NotFound(id.to_string()));
+        }
+        let limit = limit.clamp(1, 1000);
+        let mut reader = BufReader::new(File::open(&file)?);
+        let mut header: Option<SessionHeader> = None;
+        let mut total = 0u64;
+        let mut before_count = 0u64;
+        let mut window: VecDeque<SessionEnvelope> = VecDeque::with_capacity(limit);
+        let mut line = String::new();
+        let mut line_no = 0usize;
+        loop {
+            line.clear();
+            let read = reader.read_line(&mut line)?;
+            if read == 0 {
+                break;
+            }
+            line_no += 1;
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            if line_no == 1 {
+                header = Some(serde_json::from_str(trimmed).map_err(|e| {
+                    SessionError::Corrupt(format!("bad header: {e}"))
+                })?);
+                continue;
+            }
+            let envelope: SessionEnvelope = match serde_json::from_str(trimmed) {
+                Ok(envelope) => envelope,
+                Err(_) => continue,
+            };
+            total += 1;
+            let eligible = before.map_or(true, |seq| envelope.seq < seq);
+            if eligible {
+                before_count += 1;
+                if window.len() == limit {
+                    window.pop_front();
+                }
+                window.push_back(envelope);
+            }
+        }
+        let header = header.ok_or_else(|| SessionError::Corrupt("missing header".into()))?;
+        Ok(SessionPage {
+            header,
+            events: window.into_iter().collect(),
+            total,
+            has_more_before: before_count > limit as u64,
+        })
     }
 
     /// 登记一个被 `Arc` 持有的会话:list 优先从内存读摘要,
@@ -965,6 +1047,7 @@ impl SessionStore {
             .insert(meta.id.clone(), IndexEntry {
                 meta,
                 stamp: FileStamp { size: 0, mtime_ms: 0 },
+                indexed_at: now_millis(),
             });
         self.active
             .lock()
@@ -1001,52 +1084,106 @@ impl SessionStore {
             }
         }
 
-        // 2) 目录差集:新出现的会话文件补进索引(外部写入/脚本生成)。
+        // 2) 目录校验节流:进程内 create/load/delete 都会直接维护索引,
+        //    列表高频刷新不需要每次都对全部文件做 stat;外部直接写文件时,
+        //    最多延迟 2 秒被下次全量扫描发现。
+        let last_scan_value = {
+            let mut last = self.last_scan_ms.lock().unwrap_or_else(|p| p.into_inner());
+            let now = now_millis();
+            let value = *last;
+            if now.saturating_sub(value) >= 2000 {
+                *last = now;
+                value
+            } else {
+                value
+            }
+        };
+        let should_scan = now_millis().saturating_sub(last_scan_value) >= 2000;
+
         {
             let mut index = self.index.lock().unwrap_or_else(|p| p.into_inner());
-            let indexed: std::collections::HashSet<String> = index.keys().cloned().collect();
-            let mut discovered = Vec::new();
-            for entry in std::fs::read_dir(&self.root)? {
-                let entry = entry?;
-                let file = entry.path().join("session.jsonl");
-                if !file.is_file() {
-                    continue;
-                }
-                let id = entry.file_name().to_string_lossy().to_string();
-                if indexed.contains(&id) {
-                    continue;
-                }
-                if summaries.iter().any(|s| s.id == id) {
-                    continue;
-                }
-                if let Some((meta, stamp)) = read_summary(&file) {
-                    discovered.push(IndexEntry { meta, stamp });
-                }
-            }
-            for entry in discovered {
-                index.insert(entry.meta.id.clone(), entry);
-            }
-
-            // 3) 索引条目 stat 失效检测。
-            let ids: Vec<String> = index
-                .keys()
-                .filter(|id| !summaries.iter().any(|s| &s.id == *id))
-                .cloned()
-                .collect();
-            for id in ids {
-                let file = self.root.join(&id).join("session.jsonl");
-                let current = file_stamp(&file);
-                let entry = index.get(&id);
-                let dirty = match (entry, current) {
-                    (Some(entry), Some(current)) => entry.stamp != current,
-                    (_, None) => true,
-                    (None, _) => false,
-                };
-                if dirty {
+            if should_scan {
+                let indexed: std::collections::HashSet<String> =
+                    index.keys().cloned().collect();
+                let mut discovered = Vec::new();
+                for entry in std::fs::read_dir(&self.root)? {
+                    let entry = entry?;
+                    let file = entry.path().join("session.jsonl");
+                    if !file.is_file() {
+                        continue;
+                    }
+                    let id = entry.file_name().to_string_lossy().to_string();
+                    if indexed.contains(&id) {
+                        continue;
+                    }
+                    if summaries.iter().any(|s| s.id == id) {
+                        continue;
+                    }
                     if let Some((meta, stamp)) = read_summary(&file) {
-                        index.insert(id, IndexEntry { meta, stamp });
-                    } else {
-                        index.remove(&id);
+                        discovered.push(IndexEntry {
+                            meta,
+                            stamp,
+                            indexed_at: now_millis(),
+                        });
+                    }
+                }
+                for entry in discovered {
+                    index.insert(entry.meta.id.clone(), entry);
+                }
+
+                // 索引条目 stat 失效检测。
+                let ids: Vec<String> = index
+                    .keys()
+                    .filter(|id| !summaries.iter().any(|s| &s.id == *id))
+                    .cloned()
+                    .collect();
+                for id in ids {
+                    let file = self.root.join(&id).join("session.jsonl");
+                    let current = file_stamp(&file);
+                    let entry = index.get(&id);
+                    let dirty = match (entry, current) {
+                        (Some(entry), Some(current)) => entry.stamp != current,
+                        (_, None) => true,
+                        (None, _) => false,
+                    };
+                    if dirty {
+                        if let Some((meta, stamp)) = read_summary(&file) {
+                            index.insert(id, IndexEntry {
+                                meta,
+                                stamp,
+                                indexed_at: now_millis(),
+                            });
+                        } else {
+                            index.remove(&id);
+                        }
+                    }
+                }
+            } else {
+                // 刚创建/加载的条目还没经过一次全量校验:单独 stat 一次,
+                // 保证“创建后立刻 append 再刷新列表”也能看到最新摘要。
+                let recent_ids: Vec<String> = index
+                    .iter()
+                    .filter(|(_, entry)| entry.indexed_at > last_scan_value)
+                    .map(|(id, _)| id.clone())
+                    .collect();
+                for id in recent_ids {
+                    let file = self.root.join(&id).join("session.jsonl");
+                    let current = file_stamp(&file);
+                    let dirty = match (index.get(&id), current) {
+                        (Some(entry), Some(current)) => entry.stamp != current,
+                        (_, None) => true,
+                        (None, _) => false,
+                    };
+                    if dirty {
+                        if let Some((meta, stamp)) = read_summary(&file) {
+                            index.insert(id, IndexEntry {
+                                meta,
+                                stamp,
+                                indexed_at: now_millis(),
+                            });
+                        } else {
+                            index.remove(&id);
+                        }
                     }
                 }
             }
@@ -1244,6 +1381,49 @@ mod tests {
         store.delete(&id).unwrap();
         assert!(matches!(
             store.load(&id),
+            Err(SessionError::NotFound(_))
+        ));
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn read_page_streams_tail_and_before_without_full_load() {
+        let root = temp_root();
+        let store = SessionStore::open(&root).unwrap();
+        let cwd = root.join("work");
+        std::fs::create_dir_all(&cwd).unwrap();
+
+        let session = store.create(&cwd, true).unwrap();
+        let id = session.id().to_string();
+        for i in 1..=12u64 {
+            session
+                .append(SessionEvent::UserMessage {
+                    text: format!("message {i}"),
+                    injected: false,
+                    images: Vec::new(),
+                })
+                .unwrap();
+        }
+        drop(session);
+
+        let tail = store.read_page(&id, None, 5).unwrap();
+        assert_eq!(tail.total, 12);
+        assert_eq!(tail.events.len(), 5);
+        assert_eq!(tail.events.last().unwrap().seq, 12);
+        assert!(tail.has_more_before);
+
+        let before = store.read_page(&id, Some(7), 3).unwrap();
+        assert_eq!(before.events.len(), 3);
+        assert_eq!(before.events.first().unwrap().seq, 4);
+        assert_eq!(before.events.last().unwrap().seq, 6);
+        assert!(before.has_more_before);
+
+        let head = store.read_page(&id, Some(4), 5).unwrap();
+        assert_eq!(head.events.len(), 3);
+        assert!(!head.has_more_before);
+
+        assert!(matches!(
+            store.read_page("00000000-0000-4000-8000-000000000000", None, 5),
             Err(SessionError::NotFound(_))
         ));
         std::fs::remove_dir_all(&root).unwrap();

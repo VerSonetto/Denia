@@ -234,9 +234,26 @@ pub struct LiveSession {
 /// - 后台淘汰任务(见 [`spawn_live_evictor`])周期清理:非运行中、
 ///   无 SSE 订阅者、且超过 `idle_after` 未使用的会话被卸载,事件内存
 ///   随之释放;下次访问按日志重新加载。运行中的会话永不淘汰。
-#[derive(Default)]
 pub struct LiveSessions {
     inner: std::sync::Mutex<HashMap<String, Arc<LiveSession>>>,
+    /// 最多同时驻留的完整会话数。超出后按 LRU 淘汰非运行、无订阅者会话,
+    /// 防止连续打开长会话把后端常驻内存撑到 O(全部历史)。
+    max_resident: usize,
+}
+
+impl Default for LiveSessions {
+    fn default() -> Self {
+        Self::new(32)
+    }
+}
+
+impl LiveSessions {
+    pub fn new(max_resident: usize) -> Self {
+        Self {
+            inner: std::sync::Mutex::new(HashMap::new()),
+            max_resident: max_resident.max(1),
+        }
+    }
 }
 
 fn now_millis() -> u64 {
@@ -269,7 +286,41 @@ impl LiveSessions {
             pending_approvals: std::sync::Mutex::new(HashMap::new()),
         });
         map.insert(id.to_string(), live.clone());
+        self.trim_capacity_locked(&mut map);
         Ok(live)
+    }
+
+    /// 在已持锁的 map 上执行容量裁剪:超过上限时,按 last_touch 从旧到新
+    /// 淘汰“非运行、无订阅者”的会话。运行中的会话绝不卸载。
+    fn trim_capacity_locked(&self, map: &mut HashMap<String, Arc<LiveSession>>) {
+        let max = self.max_resident;
+        if map.len() <= max {
+            return;
+        }
+        let mut candidates: Vec<(String, u64)> = map
+            .iter()
+            .filter(|(_, live)| {
+                !live.running.load(std::sync::atomic::Ordering::SeqCst)
+                    && live.followers.receiver_count() == 0
+            })
+            .map(|(id, live)| {
+                (
+                    id.clone(),
+                    live.last_touch.load(std::sync::atomic::Ordering::Relaxed),
+                )
+            })
+            .collect();
+        candidates.sort_by_key(|(_, touched)| *touched);
+        let remove_count = map.len() - max;
+        for (id, _) in candidates.into_iter().take(remove_count) {
+            if let Some(live) = map.get(&id) {
+                if !live.running.load(std::sync::atomic::Ordering::SeqCst)
+                    && live.followers.receiver_count() == 0
+                {
+                    map.remove(&id);
+                }
+            }
+        }
     }
 
     /// 读取已加载的 live 会话(不触发磁盘加载)。
