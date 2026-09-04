@@ -30,6 +30,7 @@ use denia_system_prompt::{
     AssembleContext, SystemPrompt, frame_system_prompt_for_model, render_prompt,
     render_prompt_for_user,
 };
+use denia_token_meter::{estimate_system_tokens, estimate_tools_tokens};
 use denia_tools::permission::{
     is_strictly_wider, parse_permission_mode, validate_escalation_args,
 };
@@ -256,11 +257,6 @@ fn should_log_system_prompt(session: &Session, step: u32, text: &str) -> bool {
     // O(1):Session 在 append 时维护最近一次系统提示词,不再遍历日志。
     // fold 留 UI 副本(无框架);meter 由 driver 单独喂 framed 版本。
     session.last_system_prompt().as_deref() != Some(text)
-}
-
-/// 与 dsh `estimate_system_tokens` 同口径:系统提示词的 token 估算。
-fn estimate_system_tokens(text: &str) -> u64 {
-    4 + (text.len() as u64).div_ceil(4)
 }
 
 impl SessionDriver {
@@ -640,7 +636,7 @@ impl SessionDriver {
                 }
             };
             let tools_tokens = serde_json::to_string(&assembly.tools)
-                .map(|json| (json.len() as u64).div_ceil(4).saturating_add(4))
+                .map(|json| estimate_tools_tokens(&json))
                 .unwrap_or(0);
             session.set_tools_tokens(tools_tokens);
 

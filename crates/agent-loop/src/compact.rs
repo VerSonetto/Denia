@@ -14,7 +14,7 @@
 
 use denia_core::message::{ChatMessage, ChatRole};
 use denia_core::session::{SurfaceMessage, ToolResultPruneConfig};
-use denia_token_meter::ContextPressure;
+use denia_token_meter::{estimate_message, ContextPressure};
 
 /// 层叠压缩/剪枝配置。默认值对齐 dsh base 装配(threshold 8192)与
 /// Claude Code auto-compact 的缓冲语义(有效窗口 = 窗口 - 输出预留 - buffer,
@@ -95,17 +95,10 @@ pub fn should_compact(pressure: &ContextPressure, settings: &CompactionSettings)
     pressure_ratio(pressure).is_some_and(|ratio| ratio >= settings.compact_ratio)
 }
 
-/// 与 token-meter 同口径的启发式 token 估算(4 char/token + 角色/块开销)。
+/// 与 token-meter 完全同口径的启发式 token 估算(角色/块开销 + 字符类别
+/// 密度);压缩保留窗口的 token 预算与表面计量用同一把尺子。
 pub fn rough_tokens(message: &ChatMessage) -> u64 {
-    let mut tokens = 4u64.saturating_add((message.content.len() as u64).div_ceil(4));
-    for call in &message.tool_calls {
-        tokens = tokens
-            .saturating_add(4)
-            .saturating_add((call.id.len() as u64).div_ceil(4))
-            .saturating_add((call.name.len() as u64).div_ceil(4))
-            .saturating_add((call.arguments.len() as u64).div_ceil(4));
-    }
-    tokens
+    estimate_message(message)
 }
 
 /// 选择保留窗口起点(消息下标):从尾部(最新)向前累计 token,直到满足
