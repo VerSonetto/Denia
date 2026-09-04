@@ -93,10 +93,11 @@ pub async fn launch_headless(
 
     let mut command = Command::new(executable);
     command
+        .arg("--headless=new")
         .arg("--remote-debugging-port=0")
-        // 有头但移出屏幕:headless 会自动 dismiss JS dialog,
-        // 有头才能触发 Page.javascriptDialogOpening(与 ZCode 拦截 dialog 的前提一致)。
-        .arg("--window-position=-32000,-32000")
+        // headless=new:无任务栏图标、无可见窗口(对齐 ZCode);
+        // 画面走 CDP screencast 流。代价:页面 JS dialog 被静默 dismiss,
+        // getDialog/handleDialog 在 headless 下拿不到事件(可接受)。
         .arg(format!("--user-data-dir={}", user_data_dir.display()))
         .arg("--no-first-run")
         .arg("--no-default-browser-check")

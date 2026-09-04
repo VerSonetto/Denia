@@ -39,12 +39,14 @@ export default function BrowserPanel() {
     const close = subscribeBrowserEvents((event: BrowserEventFrame) => {
       switch (event.type) {
         case 'frame':
-          if (event.tabId === activeTabRef.current) {
-            setFrame(`data:image/jpeg;base64,${event.data}`)
-          }
+          // 单实例浏览器:活跃 tab 的帧直接显示,不按 tabId 过滤
+          // (首帧可能早于状态刷新,过滤会永久丢帧)。
+          setFrame(`data:image/jpeg;base64,${event.data}`)
           break
         case 'tabs-changed':
           refreshState()
+          // AI 刚启动浏览器(面板先开/后开都可能):补开 screencast,幂等。
+          void browserCommand({ method: 'startScreencast' }).catch(() => {})
           break
         case 'navigated':
           refreshState()
