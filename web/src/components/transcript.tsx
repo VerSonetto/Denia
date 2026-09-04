@@ -165,6 +165,15 @@ function CompactionRow({ node }: { node: Extract<TranscriptNode, { kind: 'compac
   const pre = node.preTokens ?? 0
   const post = node.postTokens ?? 0
   const saved = pre > post ? pre - post : 0
+  // Hook 必须常驻组件顶层:放在条件 JSX 内会在展开/收起时改变 hook 数量,
+  // 触发 React #310(Rendered more hooks than during the previous render)。
+  const labels = useMemo<MarkdownLabels>(
+    () => ({
+      code: { copyLabel: t('copy'), copiedLabel: t('copied') },
+      footnotes: t('footnotes'),
+    }),
+    [localeRevision()],
+  )
   return (
     <div className="compaction-row">
       <button
@@ -186,17 +195,7 @@ function CompactionRow({ node }: { node: Extract<TranscriptNode, { kind: 'compac
       </button>
       {open && (
         <div className="compaction-body prose">
-          <MarkdownText
-            text={node.summary}
-            streaming={false}
-            labels={useMemo<MarkdownLabels>(
-              () => ({
-                code: { copyLabel: t('copy'), copiedLabel: t('copied') },
-                footnotes: t('footnotes'),
-              }),
-              [localeRevision()],
-            )}
-          />
+          <MarkdownText text={node.summary} streaming={false} labels={labels} />
         </div>
       )}
     </div>
