@@ -439,6 +439,52 @@ impl SessionDriver {
         }))
     }
 
+    /// 手动压缩(上下文面板按钮):从日志最近一次请求头部恢复请求形态
+    /// (模型 / 系统提示 / 工具集),执行与自动路径完全相同的总结压缩。
+    /// 绕过压力闸门 —— 用户主动触发,不要求压力 ≥ `compact_ratio`。
+    ///
+    /// 调用方负责:运行位占用与 cancel 生命周期、提前拒绝无请求历史的
+    /// 会话、以及 `CompactionSummary` 事件落盘与广播。
+    pub async fn compact_manually(
+        &self,
+        session: &Arc<Session>,
+        cancel: CancellationToken,
+    ) -> Result<Option<CompactOutcome>, LlmFailure> {
+        let header = session
+            .events()
+            .iter()
+            .rev()
+            .find_map(|item| match &item.event {
+                SessionEvent::RequestHeader { header, .. } => Some(header.clone()),
+                _ => None,
+            })
+            .ok_or_else(|| {
+                LlmFailure::new(
+                    codes::UNKNOWN,
+                    "session has no request header to restore".to_string(),
+                )
+            })?;
+        let selection = ModelSelection {
+            provider: header.config.provider.clone(),
+            model: header.config.model.clone(),
+            reasoning_effort: header.config.reasoning_effort.clone(),
+        };
+        let framed_system = header.system.clone().unwrap_or_default();
+        // 压缩的是已发生的历史:事件归属于日志中最后一次出现的轮次,step 0
+        // 表示轮次外的合成步骤(与自动压缩一样仅作元数据)。
+        let turn = session
+            .events()
+            .iter()
+            .rev()
+            .find_map(|item| match item.event {
+                SessionEvent::TurnStart { turn } => Some(turn),
+                _ => None,
+            })
+            .unwrap_or(0);
+        self.compact_context(session, &selection, &framed_system, &header.tools, turn, 0, &cancel)
+            .await
+    }
+
     /// 启用文件历史:回退功能依赖此提供者。
     pub fn with_file_history(mut self, provider: Arc<dyn FileHistoryProvider>) -> Self {
         self.file_history = Some(provider);

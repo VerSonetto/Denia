@@ -45,6 +45,7 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/api/sessions/{id}/fork", post(fork_session))
         .route("/api/sessions/{id}/follow", get(follow_session))
         .route("/api/sessions/{id}/context-breakdown", get(context_breakdown))
+        .route("/api/sessions/{id}/compact", post(compact_session))
         .route("/api/sessions/{id}/checkpoints", get(list_checkpoints))
         .route(
             "/api/sessions/{id}/checkpoints/{seq}/diff",
@@ -701,6 +702,103 @@ async fn context_breakdown(
         "pressure": pressure,
         "usage": usage,
     })))
+}
+
+/// 日志中最后一次出现的轮次号(手动压缩事件归属的轮次;空日志为 0)。
+fn last_turn_of(session: &denia_session::Session) -> u32 {
+    session
+        .events()
+        .iter()
+        .rev()
+        .find_map(|item| match item.event {
+            SessionEvent::TurnStart { turn } => Some(turn),
+            _ => None,
+        })
+        .unwrap_or(0)
+}
+
+/// 手动压缩(上下文面板按钮):占用运行位(压缩期间会话不可发消息),
+/// 从最近一次请求头部恢复模型/系统提示/工具集,同步等待摘要调用完成;
+/// 压缩行经 followers 广播展示。失败/无物可压给可读响应,不阻塞会话。
+async fn compact_session(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<impl IntoResponse, ApiError> {
+    let live = state
+        .live
+        .get_or_load(&state.sessions, &id)
+        .map_err(ApiError::from_session)?;
+    if live
+        .running
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return Err(ApiError::new(
+            StatusCode::CONFLICT,
+            "session/running",
+            "会话正在运行中,无法手动压缩",
+        ));
+    }
+    // RAII:函数返回(含错误)自动复位运行位、清 cancel、广播结束。
+    let _guard = RunningGuard::new(live.clone(), state.events.clone());
+    if !crate::state::console_settings(&state.settings)
+        .compaction
+        .compact_enabled
+    {
+        return Err(ApiError::bad_request(
+            "compaction/disabled",
+            "上下文压缩已在设置中关闭",
+        ));
+    }
+    if !live
+        .session
+        .events()
+        .iter()
+        .any(|item| matches!(item.event, SessionEvent::RequestHeader { .. }))
+    {
+        return Err(ApiError::bad_request(
+            "session/no-request",
+            "该会话还没有发起过模型请求,暂无可压缩内容",
+        ));
+    }
+    // cancel 挂到会话槽:前端取消按钮可随时中止摘要调用。
+    let token = CancellationToken::new();
+    *live.cancel.lock().unwrap() = Some(token.clone());
+    match state.driver.compact_manually(&live.session, token).await {
+        Ok(Some(outcome)) => {
+            let envelope = live
+                .session
+                .append(SessionEvent::CompactionSummary {
+                    turn: last_turn_of(&live.session),
+                    step: 0,
+                    summary: outcome.summary,
+                    replaces_from: outcome.replaces_from,
+                    replaces_to: outcome.replaces_to,
+                    keep_from: outcome.keep_from,
+                    pre_tokens: outcome.pre_tokens,
+                    post_tokens: outcome.post_tokens,
+                })
+                .map_err(ApiError::from_session)?;
+            let _ = live.followers.send(envelope);
+            Ok(Json(json!({
+                "ok": true,
+                "outcome": {
+                    "replacesFrom": outcome.replaces_from,
+                    "replacesTo": outcome.replaces_to,
+                    "keepFrom": outcome.keep_from,
+                    "preTokens": outcome.pre_tokens,
+                    "postTokens": outcome.post_tokens,
+                    "savedTokens": outcome.pre_tokens.saturating_sub(outcome.post_tokens),
+                },
+            })))
+        }
+        Ok(None) => Ok(Json(json!({ "ok": false, "reason": "nothing-to-compact" }))),
+        Err(failure) => Err(ApiError::new(
+            StatusCode::BAD_REQUEST,
+            failure.code,
+            failure.message,
+        )),
+    }
 }
 
 /// SSE: replays persisted envelopes with `seq > after`, then live frames.
