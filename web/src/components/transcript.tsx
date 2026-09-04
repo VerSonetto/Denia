@@ -1,4 +1,4 @@
-import { memo, useEffect, useMemo, useState } from 'react'
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import { localeRevision, t } from '../i18n'
 import { groupTranscript, type OverviewRow, type TranscriptNode } from '../fold'
@@ -275,6 +275,33 @@ function ThinkRow({
   useEffect(() => {
     setOpen(streaming)
   }, [streaming])
+  // 内部滚动跟随:思考内容长在 240px 内部滚动框里,外层对话容器不撑高。
+  // 流式期间框内吸底(新行出现即滚到最新);在框内手动向上滚即打断,
+  // 滚回底部自动恢复跟随 —— 语义与外层对话流的贴底跟随一致。
+  const preRef = useRef<HTMLPreElement | null>(null)
+  const pinnedRef = useRef(true)
+  const handleInnerScroll = useCallback(() => {
+    const el = preRef.current
+    if (el === null) return
+    pinnedRef.current = el.scrollHeight - el.scrollTop - el.clientHeight <= 24
+  }, [])
+  useEffect(() => {
+    if (!streaming || !open) return
+    // 重新展开 = 全新视角,默认吸到最新;用户随后仍可在框内滚开打断。
+    pinnedRef.current = true
+    let raf = 0
+    let lastHeight = -1
+    const tick = () => {
+      const el = preRef.current
+      if (el !== null && el.scrollHeight !== lastHeight) {
+        lastHeight = el.scrollHeight
+        if (pinnedRef.current) el.scrollTop = el.scrollHeight
+      }
+      raf = requestAnimationFrame(tick)
+    }
+    raf = requestAnimationFrame(tick)
+    return () => cancelAnimationFrame(raf)
+  }, [streaming, open])
   const summary = firstLine(text, 80)
   return (
     <div className={`disc-row${open ? ' open' : ''}`}>
@@ -301,7 +328,15 @@ function ThinkRow({
       {open && (
         <div className="disc-body">
           <div className="code-card">
-            <pre style={{ color: 'var(--label-tertiary)' }}>{text}</pre>
+            {/* 跟随滚动发生在 240px 内部框自己身上,外层不撑高。 */}
+            <pre
+              ref={preRef}
+              className={streaming ? 'think-streaming' : undefined}
+              onScroll={handleInnerScroll}
+              style={{ color: 'var(--label-tertiary)' }}
+            >
+              {text}
+            </pre>
           </div>
         </div>
       )}

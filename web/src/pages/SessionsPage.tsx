@@ -530,8 +530,15 @@ export default function SessionsPage({
 
   const followIfPinned = useCallback(() => {
     if (!atBottomRef.current) return
-    snapToBottom()
-  }, [snapToBottom])
+    // rAF 延后到本帧 DOM 提交之后量高:流式 chunk 刚改了 React 树,同步读
+    // scrollHeight 拿到的是旧布局,跟随会慢一拍。回调里复检贴底:用户在这
+    // 一帧内手动滚开(handleScroll 同步触发)则放弃本次跟随。
+    requestAnimationFrame(() => {
+      const el = scrollRef.current
+      if (el === null || !atBottomRef.current) return
+      el.scrollTop = el.scrollHeight
+    })
+  }, [])
 
   const handleScroll = useCallback(() => {
     const el = scrollRef.current

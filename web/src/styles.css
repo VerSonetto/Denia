@@ -1368,6 +1368,12 @@ button {
   overflow-y: auto;
 }
 
+/* 思考流式输出:跟随滚动发生在 240px 内部框自己身上(外层对话容器不撑高)。
+   流式期间框内吸底,在框内手动滚动即打断,滚回底部自动恢复跟随。 */
+.code-card pre.think-streaming {
+  scroll-behavior: auto;
+}
+
 .code-card pre.err {
   color: var(--error);
 }

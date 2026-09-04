@@ -73,8 +73,22 @@ function toUiBlock(block: ContentBlock): UiBlock {
  */
 function applyChunk(blocks: UiBlock[], chunk: StreamChunk): UiBlock[] {
   switch (chunk.type) {
-    case 'block-start':
+    case 'block-start': {
+      // 正常流:delta 携带的 index 与已打开块数一致。异常流(网络错误重试,
+      // 模型从头重新生成)会重发同 index 的 block-start,而后续 delta 仍按
+      // 原 index 路由 —— 原样追加会造出一个永远收不到内容的空块(并且旧块
+      // 还会串进重试后的 delta)。把 index 规范化为"当前块数"并跳过对已
+      // 存在块的重复开启,两条路径(冷历史/实时流)才与 settle 后的权威块
+      // (重试尝试整体重建、无重复块)保持一致。
+      const existing = blocks[chunk.index]
+      if (
+        existing !== undefined &&
+        (chunk.index !== blocks.length || existing.kind === chunk.block_type)
+      ) {
+        return blocks
+      }
       return [...blocks, { kind: chunk.block_type, text: '' }]
+    }
     case 'text-delta':
     case 'reasoning-delta': {
       const kind = chunk.type === 'reasoning-delta' ? 'reasoning' as const : 'text' as const
