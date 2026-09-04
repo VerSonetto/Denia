@@ -17,3 +17,5 @@
 # AI 测试落盘的临时脚本
 /chunk*.js
 /turnstile.js
+
+/tmp_chunks/
