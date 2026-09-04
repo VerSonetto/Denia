@@ -3998,6 +3998,13 @@ button.btn.form-action {
   font-variant-numeric: tabular-nums;
 }
 
+.cm-note {
+  margin: 8px 0 0;
+  font-size: 11px;
+  line-height: 16px;
+  color: var(--label-tertiary);
+}
+
 .cm-swatch {
   width: 8px;
   height: 8px;

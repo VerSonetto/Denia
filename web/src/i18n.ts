@@ -402,6 +402,8 @@ const zh = {
   contextSystem: '系统提示词',
   contextTools: '工具',
   contextMessages: '对话消息',
+  contextNoteAnchored: '系统与工具为固定估算，对话消息已按真实用量校准',
+  contextNoteEstimated: '暂无模型用量上报，三行均为估算',
   numberThousand: '{value}K',
   numberMillion: '{value}M',
 }
@@ -805,6 +807,8 @@ const en: typeof zh = {
   contextSystem: 'System prompt',
   contextTools: 'Tools',
   contextMessages: 'Messages',
+  contextNoteAnchored: 'Tools and system prompt are fixed estimates; messages are calibrated against real usage',
+  contextNoteEstimated: 'No provider usage reported yet; all rows are estimates',
   numberThousand: '{value}K',
   numberMillion: '{value}M',
 }

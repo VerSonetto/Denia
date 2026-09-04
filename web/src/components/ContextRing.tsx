@@ -91,6 +91,14 @@ export function ContextRing({
     .split(READING_SLOT)
     .map((part) => part.trim())
 
+  // 明细由服务端按 provider 锚点校准:三数之和 == 顶部的 projected 值。
+  // 只有手上数据真的对上了才宣称"已校准",避免旧数据源呈现误导性说明。
+  const calibrated =
+    breakdown !== undefined &&
+    pressure?.projectedTokens !== undefined &&
+    breakdown.systemTokens + breakdown.toolsTokens + breakdown.messageTokens ===
+      pressure.projectedTokens
+
   // 分段条总长保持 provider 精确百分比;启发式拆分只决定彩色部分的配比。
   // 零宽段直接丢弃:.segment 的 min-width 会让 0% 占用也画出满条。
   const breakdownTotal =
@@ -158,17 +166,22 @@ export function ContextRing({
             ))}
           </div>
           {breakdown !== undefined && (
-            <dl className="cm-rows">
-              {ROWS.map((row) => (
-                <div key={row.key} className="cm-row">
-                  <dt>
-                    <span className={`cm-swatch ${row.color}`} aria-hidden />
-                    {t(row.label)}
-                  </dt>
-                  <dd>{`~${formatTokens(breakdown[row.key])}`}</dd>
-                </div>
-              ))}
-            </dl>
+            <>
+              <dl className="cm-rows">
+                {ROWS.map((row) => (
+                  <div key={row.key} className="cm-row">
+                    <dt>
+                      <span className={`cm-swatch ${row.color}`} aria-hidden />
+                      {t(row.label)}
+                    </dt>
+                    <dd>{`~${formatTokens(breakdown[row.key])}`}</dd>
+                  </div>
+                ))}
+              </dl>
+              <p className="cm-note">
+                {calibrated ? t('contextNoteAnchored') : t('contextNoteEstimated')}
+              </p>
+            </>
           )}
         </div>
       )}
