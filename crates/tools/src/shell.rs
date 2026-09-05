@@ -132,12 +132,16 @@ pub fn shell_command(command: &str) -> Command {
     if cfg!(windows) {
         let program = windows_shell_executable();
         let mut child = Command::new(program);
+        // PowerShell 重定向输出默认走系统 OEM 代码页(中文系统为 GBK),服务端
+        // 统一按 UTF-8 解码;先注入输出编码前缀,避免中文输出整体乱码。
         child.args([
             "-NoLogo",
             "-NoProfile",
             "-NonInteractive",
             "-Command",
-            command,
+            &format!(
+                "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; {command}"
+            ),
         ]);
         child
     } else {
