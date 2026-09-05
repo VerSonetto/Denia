@@ -92,6 +92,9 @@ struct Inner {
     selections: Mutex<HashMap<String, ModelSelection>>,
     wakes: Mutex<HashMap<String, usize>>,
     paused: Mutex<HashSet<String>>,
+    // 已加载技能正文(session → 技能名 → (来源, SKILL.md 正文))；
+    // 正文经上下文注入通道进入模型视野，不随 skill load 工具结果返回。
+    active_skills: Mutex<HashMap<String, BTreeMap<String, (String, String)>>>,
     admission: tokio::sync::Mutex<()>,
     reserved: Mutex<HashSet<String>>,
     registry: Arc<denia_llm::LlmRegistry>,
@@ -153,6 +156,7 @@ impl Runtime {
                 selections: Mutex::new(HashMap::new()),
                 wakes: Mutex::new(HashMap::new()),
                 paused: Mutex::new(HashSet::new()),
+                active_skills: Mutex::new(HashMap::new()),
                 admission: tokio::sync::Mutex::new(()),
                 reserved: Mutex::new(HashSet::new()),
                 registry,
@@ -937,8 +941,28 @@ impl AgentRuntime for Runtime {
                     .map_err(|e| e.to_string())?
                 }
                 "load" => {
-                    self.load_skill(ctx.cwd.clone(), string(&args, "name")?, false)
-                        .await
+                    let name = string(&args, "name")?;
+                    let value = self
+                        .load_skill(ctx.cwd.clone(), name.clone(), false)
+                        .await?;
+                    // 注入式加载：SKILL.md 正文进入上下文注入通道，随后续请求
+                    // 自动注入；工具结果只回元信息，避免模型再用文件工具读一遍。
+                    let source = value["skill"]["source"].as_str().unwrap_or("").to_string();
+                    let body = value["body"]
+                        .as_str()
+                        .ok_or_else(|| format!("技能 {name} 正文缺失"))?
+                        .to_string();
+                    self.inner
+                        .active_skills
+                        .lock()
+                        .unwrap()
+                        .entry(owner.to_string())
+                        .or_default()
+                        .insert(name, (source, body));
+                    let mut result = value;
+                    result["body"] = json!(null);
+                    result["injected"] = json!(true);
+                    Ok(result)
                 }
                 _ => Err("未知技能操作".into()),
             },
@@ -1035,10 +1059,22 @@ impl AgentRuntime for Runtime {
             .unwrap()
             .get(session)
             .map(|c| c.parent_id.clone());
-        Ok(vec![format!(
-            "[denia 能力上下文]\n始终使用简体中文回复，除非用户明确要求其他语言。\n当前代理：{session}；父代理：{}。独立任务可用 spawn_agent/fork_agent 委派；send_message 仅允许直接父子通信。后台任务用 job_start 启动，job_output 领取，job_kill 停止。技能需先加载完整正文再执行；相对资源按 resourceBase 解析，技能不授予额外权限。\n可由模型调用的技能：\n{catalog}",
+        let active = self
+            .inner
+            .active_skills
+            .lock()
+            .unwrap()
+            .get(session)
+            .cloned()
+            .unwrap_or_default();
+        let mut parts = vec![format!(
+            "[denia 能力上下文]\n始终使用简体中文回复，除非用户明确要求其他语言。\n当前代理：{session}；父代理：{}。独立任务可用 spawn_agent/fork_agent 委派；send_message 仅允许直接父子通信。后台任务用 job_start 启动，job_output 领取，job_kill 停止。技能分全局技能（用户数据目录 skills/，跨项目复用）与项目技能（项目 .denia/skills 等目录，随项目走），同名项目技能优先；skill load 加载后 SKILL.md 正文会注入本上下文，无需再用文件读取工具读 SKILL.md；references/scripts 等其余文件用 skill resource 按 resourceBase 相对路径读取，技能不授予额外权限。\n可由模型调用的技能：\n{catalog}",
             parent.as_deref().unwrap_or("无")
-        )])
+        )];
+        for (name, (source, body)) in active {
+            parts.push(format!("[技能正文 {name}（来源：{source}）]\n{body}"));
+        }
+        Ok(parts)
     }
     async fn drain(&self, session: &str) -> Result<Vec<String>, String> {
         let live = self.live(session).await?;
@@ -1500,6 +1536,17 @@ mod tests {
                 .unwrap()
                 .iter()
                 .any(|s| s["name"] == "runtime-test")
+        );
+        // 注入式加载：skill load 后 SKILL.md 正文应出现在能力上下文，而非等模型读文件。
+        let injected = state
+            .runtime
+            .context(id, &state.home)
+            .await
+            .unwrap()
+            .join("\n");
+        assert!(
+            injected.contains("读取并验证运行时结果。"),
+            "SKILL.md 正文应经上下文注入：{injected}"
         );
         server.abort();
     }

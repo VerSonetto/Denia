@@ -76,7 +76,7 @@ pub fn schemas() -> Vec<ToolSchema> {
         ),
         (
             "skill",
-            "按需读取技能完整指令。先用 action=list 发现，action=load 携带 name 加载；相对资源路径以返回的 resourceBase 为准；用 action=resource、name、path 读取技能目录内的参考文件。",
+            "技能按作用域分为全局技能与项目技能：全局技能位于用户数据目录 skills/（跨项目复用），项目技能位于项目 .denia/skills 等目录（随项目走），同名时项目技能优先，来源见返回的 source。先用 action=list 发现可用技能；action=load 按 name 加载后，SKILL.md 正文会自动注入后续上下文，无需再用文件读取工具读 SKILL.md；其余参考资料与脚本用 action=resource、name、path 按返回的 resourceBase 相对路径读取，禁止越界。",
             json!({"action":{"type":"string","enum":["list","load","resource"]},"name":{"type":"string"},"path":{"type":"string"}}),
             vec!["action"],
         ),
