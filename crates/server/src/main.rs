@@ -1,8 +1,11 @@
 //! axum HTTP API + SSE push + console hosting. Binary: `denia`.
 
+mod agent_runtime;
 mod api;
 mod error;
 mod file_history;
+mod jobs;
+mod skills;
 mod state;
 mod system_prompt_store;
 mod web_assets;
@@ -74,9 +77,7 @@ fn main() {
         let listener = tokio::net::TcpListener::bind(addr)
             .await
             .unwrap_or_else(|error| panic!("bind {addr}: {error}"));
-        axum::serve(listener, router)
-            .await
-            .expect("server runs");
+        axum::serve(listener, router).await.expect("server runs");
     });
 }
 

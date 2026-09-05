@@ -7,6 +7,7 @@
 
 mod bash;
 mod browser;
+pub mod capabilities;
 mod edit;
 mod files;
 pub mod glob;
@@ -53,7 +54,11 @@ pub trait FileHistoryBackend: Send + Sync {
 }
 
 /// Execution context handed to every tool call.
+#[derive(Clone)]
 pub struct ToolContext {
+    /// 宿主授予的会话身份，绝不从模型参数接收。
+    pub session_id: Option<String>,
+    pub selection: Option<denia_core::config::ModelSelection>,
     /// The session's working directory; relative paths anchor here.
     pub cwd: PathBuf,
     /// Cancels the running call when the turn is aborted.
@@ -104,6 +109,17 @@ pub struct ToolRegistry {
 }
 
 impl ToolRegistry {
+    pub fn replace(&mut self, tool: Arc<dyn Tool>) {
+        if let Some(existing) = self
+            .tools
+            .iter_mut()
+            .find(|t| t.schema().name == tool.schema().name)
+        {
+            *existing = tool;
+        } else {
+            self.register(tool);
+        }
+    }
     pub fn register(&mut self, tool: Arc<dyn Tool>) {
         self.tools.push(tool);
     }

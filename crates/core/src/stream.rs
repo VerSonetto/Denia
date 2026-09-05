@@ -20,9 +20,17 @@ pub enum BlockType {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "kebab-case")]
 pub enum ContentBlock {
-    Text { text: String },
-    Reasoning { text: String },
-    ToolCall { id: String, name: String, arguments: String },
+    Text {
+        text: String,
+    },
+    Reasoning {
+        text: String,
+    },
+    ToolCall {
+        id: String,
+        name: String,
+        arguments: String,
+    },
 }
 
 /// Token accounting; cache reads are disjoint from `input_tokens`.

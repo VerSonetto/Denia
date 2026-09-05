@@ -41,7 +41,13 @@ async fn describe_namespace(
         .describe()
         .into_iter()
         .find(|view| view.ns == ns)
-        .ok_or_else(|| ApiError::new(StatusCode::NOT_FOUND, "settings/unknown-namespace", format!("unknown settings namespace: {ns}")))?;
+        .ok_or_else(|| {
+            ApiError::new(
+                StatusCode::NOT_FOUND,
+                "settings/unknown-namespace",
+                format!("unknown settings namespace: {ns}"),
+            )
+        })?;
     Ok(Json(view))
 }
 

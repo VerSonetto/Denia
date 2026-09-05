@@ -30,14 +30,16 @@ pub use catalog::{
     ReasoningInfo, build_model_catalog,
 };
 pub use deepseek::{
-    DEEPSEEK_PROVIDER, DEEPSEEK_SETTINGS_NS, DeepSeekAdapter, DeepSeekCatalogModel, DeepSeekSection,
-    ReasoningEffort, ThinkingMode,
+    DEEPSEEK_PROVIDER, DEEPSEEK_SETTINGS_NS, DeepSeekAdapter, DeepSeekCatalogModel,
+    DeepSeekSection, ReasoningEffort, ThinkingMode,
 };
 pub use openai::{
     OPENAI_SETTINGS_NS, OpenAiCatalogModel, OpenAiCompatAdapter, OpenAiProfile, OpenAiSection,
     discover_models,
 };
-pub use protocols::{AnthropicStream, CompletionsStream, EventTranslator, ResponsesStream, WireProtocol};
+pub use protocols::{
+    AnthropicStream, CompletionsStream, EventTranslator, ResponsesStream, WireProtocol,
+};
 pub use request::GenerateRequest;
 pub use retry::{RetryAttempt, RetryPolicy, with_retry};
 
@@ -140,7 +142,12 @@ impl LlmRegistry {
     /// Replaces this adapter's route set with exactly `providers`: new
     /// routes register, absent ones drop, and routes owned by other adapters
     /// are untouched.
-    pub fn sync_routes(&self, providers: &[String], adapter: Arc<dyn LlmAdapter>, retry: RetryPolicy) {
+    pub fn sync_routes(
+        &self,
+        providers: &[String],
+        adapter: Arc<dyn LlmAdapter>,
+        retry: RetryPolicy,
+    ) {
         let mut state = self.state.write().unwrap();
         let owned_by_this = |entry: &RouteEntry| Arc::ptr_eq(&entry.adapter, &adapter);
         let RegistryState {
@@ -192,7 +199,10 @@ impl LlmRegistry {
     /// Direct adapter access for catalog building.
     pub fn adapter_for(&self, provider: &str) -> Option<Arc<dyn LlmAdapter>> {
         let state = self.state.read().unwrap();
-        state.routes.get(provider).map(|entry| entry.adapter.clone())
+        state
+            .routes
+            .get(provider)
+            .map(|entry| entry.adapter.clone())
     }
 
     /// One streaming attempt against one route, retried per its policy.
@@ -212,15 +222,19 @@ impl LlmRegistry {
                     return Err(LlmError::new(
                         codes::NO_ADAPTER,
                         format!("no adapter registered for provider '{provider}'"),
-                    ))
+                    ));
                 }
             }
         };
-        with_retry(&policy, |attempt| {
-            if let Some(sink) = &retry_sink {
-                sink(attempt);
-            }
-        }, || adapter.stream(provider, request))
+        with_retry(
+            &policy,
+            |attempt| {
+                if let Some(sink) = &retry_sink {
+                    sink(attempt);
+                }
+            },
+            || adapter.stream(provider, request),
+        )
         .await
     }
 
@@ -240,7 +254,7 @@ impl LlmRegistry {
                     return Err(LlmError::new(
                         codes::NO_ADAPTER,
                         format!("no adapter registered for provider '{provider}'"),
-                    ))
+                    ));
                 }
             }
         };
@@ -250,9 +264,7 @@ impl LlmRegistry {
                 if !reasoning.efforts.iter().any(|e| e.id == effort) {
                     return Err(LlmError::new(
                         codes::UNSUPPORTED_REASONING_EFFORT,
-                        format!(
-                            "reasoning effort '{effort}' is not supported by model '{model}'"
-                        ),
+                        format!("reasoning effort '{effort}' is not supported by model '{model}'"),
                     ));
                 }
             }

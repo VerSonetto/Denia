@@ -4,10 +4,10 @@ use std::convert::Infallible;
 use std::sync::Arc;
 use std::time::Duration;
 
+use axum::Router;
 use axum::extract::State;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::routing::get;
-use axum::Router;
 use futures::StreamExt;
 use tokio_stream::wrappers::BroadcastStream;
 
@@ -23,8 +23,9 @@ async fn events_stream(
     let receiver = state.events.subscribe();
     let stream = BroadcastStream::new(receiver).filter_map(|result| async move {
         match result {
-            Ok(event) => Some(Ok(Event::default()
-                .data(serde_json::to_string(&event).unwrap_or_default()))),
+            Ok(event) => Some(Ok(
+                Event::default().data(serde_json::to_string(&event).unwrap_or_default())
+            )),
             // Lagged receivers skip the missed batch; the next state read
             // resynchronizes the console.
             Err(_) => None,

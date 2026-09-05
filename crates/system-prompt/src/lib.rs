@@ -184,15 +184,20 @@ pub struct SystemPrompt {
     config: SystemPromptConfig,
     sections: HashMap<String, PromptSection>,
     contexts: HashMap<String, PromptContext>,
-    tool_providers: Vec<std::sync::Arc<dyn Fn(&AssembleContext) -> ToolProviderResult + Send + Sync>>,
-    variables: HashMap<String, std::sync::Arc<dyn Fn(&AssembleContext) -> Option<String> + Send + Sync>>,
+    tool_providers:
+        Vec<std::sync::Arc<dyn Fn(&AssembleContext) -> ToolProviderResult + Send + Sync>>,
+    variables:
+        HashMap<String, std::sync::Arc<dyn Fn(&AssembleContext) -> Option<String> + Send + Sync>>,
     runtime_context_suppressed: bool,
 }
 
 impl SystemPrompt {
     /// Create an empty registry with validated config defaults.
     pub fn new(config: SystemPromptConfig) -> Self {
-        let tool_order = config.tool_order.clone().map(|order| validate_tool_order(&order));
+        let tool_order = config
+            .tool_order
+            .clone()
+            .map(|order| validate_tool_order(&order));
         let mut prompt = Self {
             config: SystemPromptConfig {
                 tool_order,
@@ -208,9 +213,7 @@ impl SystemPrompt {
             let _ = prompt.section(PromptSection {
                 name: "harness:identity".to_string(),
                 order: SectionOrder::HarnessIdentity.value(),
-                text: PromptText::Static(
-                    "你是由 denia 驱动的 AI 编码 agent。".to_string(),
-                ),
+                text: PromptText::Static("你是由 denia 驱动的 AI 编码 agent。".to_string()),
                 complete: false,
                 // 身份块对用户可见(展示"你被告知的身份")。
                 audience: SectionAudience::User,
@@ -249,7 +252,10 @@ impl SystemPrompt {
     /// Register an ordered prompt section. Duplicate names within one registry fail.
     pub fn section(&mut self, section: PromptSection) -> Result<(), String> {
         if self.sections.contains_key(&section.name) {
-            return Err(format!("prompt section \"{}\" is already registered", section.name));
+            return Err(format!(
+                "prompt section \"{}\" is already registered",
+                section.name
+            ));
         }
         self.sections.insert(section.name.clone(), section);
         Ok(())
@@ -258,7 +264,10 @@ impl SystemPrompt {
     /// Register ordered dynamic runtime context.
     pub fn context(&mut self, context: PromptContext) -> Result<(), String> {
         if self.contexts.contains_key(&context.name) {
-            return Err(format!("prompt context \"{}\" is already registered", context.name));
+            return Err(format!(
+                "prompt context \"{}\" is already registered",
+                context.name
+            ));
         }
         self.contexts.insert(context.name.clone(), context);
         Ok(())
@@ -274,8 +283,7 @@ impl SystemPrompt {
         &mut self,
         provider: impl Fn(&AssembleContext) -> ToolProviderResult + Send + Sync + 'static,
     ) {
-        self.tool_providers
-            .push(std::sync::Arc::new(provider));
+        self.tool_providers.push(std::sync::Arc::new(provider));
     }
 
     /// Register a prompt variable referenced as `{{name}}` during render.
@@ -370,11 +378,7 @@ impl SystemPrompt {
             known_names.extend(accepted);
         }
 
-        let tools = order_tools(
-            collected,
-            self.config.tool_order.as_deref(),
-            &known_names,
-        )?;
+        let tools = order_tools(collected, self.config.tool_order.as_deref(), &known_names)?;
 
         let mut assembly = PromptAssembly {
             sections,
@@ -406,7 +410,9 @@ fn is_valid_variable_name(name: &str) -> bool {
         return false;
     };
     first.is_ascii_lowercase()
-        && name.chars().all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '_')
+        && name
+            .chars()
+            .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '_')
 }
 
 fn validate_tool_order(tool_order: &[String]) -> Vec<String> {
@@ -510,10 +516,18 @@ mod tests {
             })
             .unwrap();
         assert_eq!(
-            assembly.sections.first().map(|section| section.name.as_str()),
+            assembly
+                .sections
+                .first()
+                .map(|section| section.name.as_str()),
             Some(PERSONA_SECTION)
         );
-        assert!(!assembly.sections.iter().any(|section| section.name == "harness:identity"));
+        assert!(
+            !assembly
+                .sections
+                .iter()
+                .any(|section| section.name == "harness:identity")
+        );
         assert!(render_prompt(&assembly).contains("denia 驱动的"));
         assert!(render_prompt(&assembly).contains("/tmp/ws"));
         assert_eq!(assembly.tools.len(), 1);
@@ -522,7 +536,8 @@ mod tests {
     #[test]
     fn with_persona_text_replaces_deployment_persona() {
         let custom = "你是自定义 agent,工作目录 {{cwd}}。".to_string();
-        let mut prompt = SystemPrompt::new_with_persona(SystemPromptConfig::default(), custom.clone());
+        let mut prompt =
+            SystemPrompt::new_with_persona(SystemPromptConfig::default(), custom.clone());
         prompt
             .variable("cwd", |_| Some("/tmp/custom".to_string()))
             .unwrap();
@@ -532,7 +547,12 @@ mod tests {
                 ..Default::default()
             })
             .unwrap();
-        assert!(!assembly.sections.iter().any(|section| section.name == "harness:identity"));
+        assert!(
+            !assembly
+                .sections
+                .iter()
+                .any(|section| section.name == "harness:identity")
+        );
         let persona = assembly
             .sections
             .iter()

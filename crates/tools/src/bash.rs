@@ -25,6 +25,7 @@ struct BashArgs {
 /// Runs one shell command in the session workspace.
 pub struct BashTool {
     schema: ToolSchema,
+    runtime: Option<std::sync::Arc<dyn crate::capabilities::AgentRuntime>>,
 }
 
 impl BashTool {
@@ -32,6 +33,7 @@ impl BashTool {
         let runtime = shell::shell_runtime();
         let command_description = shell::bash_command_param_description(&runtime);
         Self {
+            runtime: None,
             schema: ToolSchema {
                 name: "bash".to_string(),
                 description: shell::bash_tool_description(&runtime),
@@ -58,6 +60,15 @@ impl BashTool {
             },
         }
     }
+
+    pub fn with_runtime(
+        mut self,
+        runtime: std::sync::Arc<dyn crate::capabilities::AgentRuntime>,
+    ) -> Self {
+        self.runtime = Some(runtime);
+        self.schema.parameters["properties"]["run_in_background"] = serde_json::json!({"type":"boolean","description":"后台执行并立即返回任务 id；用 job_output 读取输出、job_kill 停止。"});
+        self
+    }
 }
 
 impl Default for BashTool {
@@ -73,6 +84,24 @@ impl Tool for BashTool {
     }
 
     async fn execute(&self, arguments: &str, ctx: &ToolContext) -> ToolOutput {
+        if let Ok(value) = parse_args_lenient::<serde_json::Value>(arguments) {
+            if value["run_in_background"].as_bool() == Some(true) {
+                let result = match &self.runtime {
+                    Some(runtime) => runtime.execute("job_start", value, ctx).await,
+                    None => Err("当前部署未启用后台任务".into()),
+                };
+                return match result {
+                    Ok(value) => ToolOutput {
+                        content: value.to_string(),
+                        is_error: false,
+                    },
+                    Err(content) => ToolOutput {
+                        content,
+                        is_error: true,
+                    },
+                };
+            }
+        }
         let args: BashArgs = match parse_args_lenient(arguments) {
             Ok(args) => args,
             Err(error) => {
@@ -170,6 +199,8 @@ mod tests {
 
     fn ctx(dir: &std::path::Path) -> ToolContext {
         ToolContext {
+            session_id: None,
+            selection: None,
             cwd: dir.to_path_buf(),
             cancel: CancellationToken::new(),
             confined: true,
@@ -260,6 +291,8 @@ mod tests {
         let tool = BashTool::new();
         let cancel = CancellationToken::new();
         let context = ToolContext {
+            session_id: None,
+            selection: None,
             cwd: dir.clone(),
             cancel: cancel.clone(),
             confined: true,

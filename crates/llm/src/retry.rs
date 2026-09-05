@@ -77,8 +77,8 @@ impl RetryPolicy {
         let exponential = (self.initial_delay_ms as u128)
             .saturating_mul(1u128 << shift)
             .min(self.max_delay_ms as u128) as u64;
-        let jitter =
-            1.0 - self.jitter_ratio + 2.0 * self.jitter_ratio * rand::thread_rng().gen_range(0.0..1.0);
+        let jitter = 1.0 - self.jitter_ratio
+            + 2.0 * self.jitter_ratio * rand::thread_rng().gen_range(0.0..1.0);
         Some(((exponential as f64) * jitter).min(self.max_delay_ms as f64) as u64)
     }
 }

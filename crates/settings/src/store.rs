@@ -128,7 +128,10 @@ impl SettingsStore {
         let inner = self.inner.read().unwrap();
         let mut names: Vec<&String> = inner.namespaces.keys().collect();
         names.sort();
-        names.iter().map(|ns| view_of(ns, &inner.namespaces[*ns])).collect()
+        names
+            .iter()
+            .map(|ns| view_of(ns, &inner.namespaces[*ns]))
+            .collect()
     }
 
     /// Merges `patch` into the user section with optimistic concurrency.
@@ -283,8 +286,8 @@ impl SettingsStore {
 }
 
 fn persist(store: &SettingsStore, inner: &Inner) -> Result<(), SettingsError> {
-    let mut doc = serde_yaml::to_string(&inner.document)
-        .map_err(|e| SettingsError::Parse(e.to_string()))?;
+    let mut doc =
+        serde_yaml::to_string(&inner.document).map_err(|e| SettingsError::Parse(e.to_string()))?;
     if !doc.ends_with('\n') {
         doc.push('\n');
     }
@@ -321,7 +324,7 @@ fn parse_document(text: &str) -> Result<SettingsStoreDocument, SettingsError> {
         _ => {
             return Err(SettingsError::Parse(
                 "settings root must be a mapping".to_string(),
-            ))
+            ));
         }
     };
     let mut sections: Map<String, Value> = Map::new();

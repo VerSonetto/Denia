@@ -14,8 +14,12 @@ use crate::error::ApiError;
 use crate::state::AppState;
 
 pub fn router() -> Router<Arc<AppState>> {
-    Router::new()
-        .route("/api/system-prompt", get(get_system_prompt).put(put_system_prompt).delete(delete_system_prompt))
+    Router::new().route(
+        "/api/system-prompt",
+        get(get_system_prompt)
+            .put(put_system_prompt)
+            .delete(delete_system_prompt),
+    )
 }
 
 #[derive(Debug, Serialize)]
@@ -44,10 +48,13 @@ async fn put_system_prompt(
     State(state): State<Arc<AppState>>,
     Json(body): Json<PutBody>,
 ) -> Result<impl IntoResponse, ApiError> {
-    state
-        .system_prompt
-        .write(&body.text)
-        .map_err(|error| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "system-prompt/io", error.to_string()))?;
+    state.system_prompt.write(&body.text).map_err(|error| {
+        ApiError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "system-prompt/io",
+            error.to_string(),
+        )
+    })?;
     let (text, source) = state.system_prompt.text_and_source();
     Ok(Json(SystemPromptView {
         text,
@@ -56,11 +63,16 @@ async fn put_system_prompt(
     }))
 }
 
-async fn delete_system_prompt(State(state): State<Arc<AppState>>) -> Result<impl IntoResponse, ApiError> {
-    state
-        .system_prompt
-        .reset()
-        .map_err(|error| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "system-prompt/io", error.to_string()))?;
+async fn delete_system_prompt(
+    State(state): State<Arc<AppState>>,
+) -> Result<impl IntoResponse, ApiError> {
+    state.system_prompt.reset().map_err(|error| {
+        ApiError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "system-prompt/io",
+            error.to_string(),
+        )
+    })?;
     Ok(Json(json!({
         "text": "",
         "source": "default",

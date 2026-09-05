@@ -53,6 +53,8 @@ pub enum BrowserCommand {
     Click {
         tab_id: Option<String>,
         r#ref: Option<String>,
+        /// 稳定定位器：CSS 选择器、#id、[aria-label=...] 或文本匹配。
+        locator: Option<String>,
         x: Option<f64>,
         y: Option<f64>,
         button: Option<String>,

@@ -33,7 +33,12 @@ async fn describe_credentials(
     State(state): State<Arc<AppState>>,
     Query(query): Query<DescribeQuery>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let refs: Vec<&str> = query.refs.split(',').map(str::trim).filter(|s| !s.is_empty()).collect();
+    let refs: Vec<&str> = query
+        .refs
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect();
     if refs.len() > MAX_DESCRIBE_REFS {
         return Err(ApiError::bad_request(
             "credential/too-many-refs",

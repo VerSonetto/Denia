@@ -198,8 +198,7 @@ pub async fn write_text(path: &Path, text: &str) -> Result<(), String> {
 /// 命令行的进程,不碰用户自己的浏览器。
 pub fn shutdown_profile_processes_sync(user_data_dir: &Path) {
     let filter = profile_kill_filter(user_data_dir);
-    let script =
-        "Get-CimInstance Win32_Process -Filter $env:DENIA_BROWSER_KILL_FILTER \
+    let script = "Get-CimInstance Win32_Process -Filter $env:DENIA_BROWSER_KILL_FILTER \
          | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }";
     let mut command = std::process::Command::new("powershell.exe");
     command
@@ -237,8 +236,7 @@ pub fn set_no_window_std(command: &mut std::process::Command) {
 /// 导致清场静默失效——遗孤 chrome 挤占 profile,浏览器永远"启动即退出"。
 async fn kill_orphan_browsers(user_data_dir: &Path) {
     let filter = profile_kill_filter(user_data_dir);
-    let script =
-        "Get-CimInstance Win32_Process -Filter $env:DENIA_BROWSER_KILL_FILTER \
+    let script = "Get-CimInstance Win32_Process -Filter $env:DENIA_BROWSER_KILL_FILTER \
          | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }";
     let mut command = tokio::process::Command::new("powershell.exe");
     command

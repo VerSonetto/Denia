@@ -43,7 +43,10 @@ async fn upload_attachment(
     Json(body): Json<UploadBody>,
 ) -> Result<impl IntoResponse, ApiError> {
     let Ok(session_id) = sanitize_id(&body.session_id) else {
-        return Err(ApiError::bad_request("attachment/bad-session", "session id is not usable"));
+        return Err(ApiError::bad_request(
+            "attachment/bad-session",
+            "session id is not usable",
+        ));
     };
     // 会话必须已存在(上传只属于真实会话)。
     if !state.sessions.load(&session_id).is_ok() {
@@ -64,7 +67,9 @@ async fn upload_attachment(
         &base64::engine::general_purpose::STANDARD,
         body.data.as_bytes(),
     )
-    .map_err(|_| ApiError::bad_request("attachment/bad-base64", "file payload is not valid base64"))?;
+    .map_err(|_| {
+        ApiError::bad_request("attachment/bad-base64", "file payload is not valid base64")
+    })?;
     if bytes.len() > MAX_FILE_BYTES {
         return Err(ApiError::bad_request(
             "attachment/too-large",
@@ -75,7 +80,11 @@ async fn upload_attachment(
     let file_name = sanitize_name(&body.name);
     let target_dir = state.home.join("uploads").join(&session_id);
     std::fs::create_dir_all(&target_dir).map_err(|error| {
-        ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "attachment/io", format!("create upload dir: {error}"))
+        ApiError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "attachment/io",
+            format!("create upload dir: {error}"),
+        )
     })?;
 
     // 同名冲突:追加数字后缀,绝不覆盖。
@@ -87,7 +96,11 @@ async fn upload_attachment(
         counter += 1;
     }
     std::fs::write(&target, &bytes).map_err(|error| {
-        ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "attachment/io", format!("write upload: {error}"))
+        ApiError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "attachment/io",
+            format!("write upload: {error}"),
+        )
     })?;
 
     Ok((
@@ -102,7 +115,11 @@ async fn upload_attachment(
 
 fn sanitize_id(id: &str) -> Result<String, String> {
     let valid = !id.is_empty() && id.chars().all(|c| c.is_ascii_hexdigit() || c == '-');
-    if valid { Ok(id.to_string()) } else { Err("invalid id".to_string()) }
+    if valid {
+        Ok(id.to_string())
+    } else {
+        Err("invalid id".to_string())
+    }
 }
 
 /// 取 basename、去路径分隔符与非法字符,防路径注入与目录穿越。
@@ -113,11 +130,20 @@ fn sanitize_name(name: &str) -> String {
         .unwrap_or_else(|| "upload.bin".to_string());
     let cleaned: String = base
         .chars()
-        .filter(|ch| !matches!(ch, '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*' | '\0'))
+        .filter(|ch| {
+            !matches!(
+                ch,
+                '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*' | '\0'
+            )
+        })
         .take(MAX_NAME_CHARS)
         .collect();
     let cleaned = cleaned.trim().to_string();
-    if cleaned.is_empty() { "upload.bin".to_string() } else { cleaned }
+    if cleaned.is_empty() {
+        "upload.bin".to_string()
+    } else {
+        cleaned
+    }
 }
 
 #[cfg(test)]

@@ -26,6 +26,7 @@ tokio-util = { workspace = true }
 futures = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+serde_yaml = { workspace = true }
 axum = { workspace = true }
 http = { workspace = true }
 reqwest = { workspace = true }

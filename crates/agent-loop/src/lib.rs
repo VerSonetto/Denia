@@ -11,8 +11,8 @@ mod compact;
 mod runtime_context;
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use arc_swap::ArcSwap;
 use async_trait::async_trait;
@@ -31,9 +31,7 @@ use denia_system_prompt::{
     render_prompt_for_user,
 };
 use denia_token_meter::{estimate_system_tokens, estimate_tools_tokens};
-use denia_tools::permission::{
-    is_strictly_wider, parse_permission_mode, validate_escalation_args,
-};
+use denia_tools::permission::{is_strictly_wider, parse_permission_mode, validate_escalation_args};
 use denia_tools::{FileHistoryBackend, ToolContext, ToolRegistry};
 use futures::StreamExt;
 use runtime_context::RuntimeContextProjection;
@@ -230,15 +228,12 @@ fn rescue_fake_tool_calls(text: &str) -> Option<Vec<RescuedCall>> {
         });
         from = block_end + "</tool_call>".len();
     }
-    if calls.is_empty() {
-        None
-    } else {
-        Some(calls)
-    }
+    if calls.is_empty() { None } else { Some(calls) }
 }
 
 /// Drives user turns on one session at a time.
 pub struct SessionDriver {
+    runtime: Option<Arc<dyn denia_tools::capabilities::AgentRuntime>>,
     registry: Arc<LlmRegistry>,
     tools: Arc<ToolRegistry>,
     system_prompt: Arc<ArcSwap<SystemPrompt>>,
@@ -267,6 +262,7 @@ impl SessionDriver {
     ) -> Self {
         Self {
             registry,
+            runtime: None,
             tools,
             system_prompt,
             file_history: None,
@@ -274,6 +270,14 @@ impl SessionDriver {
             compaction: CompactionSettings::default(),
             compact_failures: AtomicU32::new(0),
         }
+    }
+
+    pub fn with_runtime(
+        mut self,
+        runtime: Arc<dyn denia_tools::capabilities::AgentRuntime>,
+    ) -> Self {
+        self.runtime = Some(runtime);
+        self
     }
 
     /// 覆盖层叠上下文管理配置(投影闸门 + LLM 压缩;默认值见
@@ -314,12 +318,12 @@ impl SessionDriver {
             return Ok(None);
         };
         let (compressed, kept) = surface.split_at(keep_start);
-        let pre_tokens = compressed
-            .iter()
-            .fold(0u64, |acc, item| acc.saturating_add(rough_tokens(&item.message)));
-        let post_tokens = kept
-            .iter()
-            .fold(0u64, |acc, item| acc.saturating_add(rough_tokens(&item.message)));
+        let pre_tokens = compressed.iter().fold(0u64, |acc, item| {
+            acc.saturating_add(rough_tokens(&item.message))
+        });
+        let post_tokens = kept.iter().fold(0u64, |acc, item| {
+            acc.saturating_add(rough_tokens(&item.message))
+        });
 
         let mut attempt = 0u32;
         let mut messages = build_summary_messages(compressed, "");
@@ -481,8 +485,16 @@ impl SessionDriver {
                 _ => None,
             })
             .unwrap_or(0);
-        self.compact_context(session, &selection, &framed_system, &header.tools, turn, 0, &cancel)
-            .await
+        self.compact_context(
+            session,
+            &selection,
+            &framed_system,
+            &header.tools,
+            turn,
+            0,
+            &cancel,
+        )
+        .await
     }
 
     /// 启用文件历史:回退功能依赖此提供者。
@@ -548,7 +560,17 @@ impl SessionDriver {
         emit: Arc<dyn Fn(&SessionEnvelope) + Send + Sync>,
     ) -> TurnEndReason {
         match self
-            .run_turn_inner(session, selection, prompt, images, files, quoted, vision_supported, cancel, emit)
+            .run_turn_inner(
+                session,
+                selection,
+                prompt,
+                images,
+                files,
+                quoted,
+                vision_supported,
+                cancel,
+                emit,
+            )
             .await
         {
             Ok(reason) => reason,
@@ -586,7 +608,9 @@ impl SessionDriver {
                 session,
                 &emit,
                 SessionEvent::UserMessage {
-                    text: format!("[harness] 用户上传了文件:\n{list}\n这些文件已保存,可随时用工具读取。"),
+                    text: format!(
+                        "[harness] 用户上传了文件:\n{list}\n这些文件已保存,可随时用工具读取。"
+                    ),
                     injected: true,
                     images: Vec::new(),
                 },
@@ -612,30 +636,41 @@ impl SessionDriver {
                 },
             )?;
         }
-        let user_envelope = append(
-            session,
-            &emit,
-            SessionEvent::UserMessage {
-                text: prompt.to_string(),
-                injected: false,
-                images,
-            },
-        )?;
-        if let Some(provider) = &self.file_history {
-            if let Err(error) = provider
-                .snapshot(session.id(), &cwd, user_envelope.seq)
-                .await
-            {
-                // 快照失败不阻断本轮对话;但该回退点会缺失文件历史,记录日志便于排查。
-                tracing::warn!(
-                    session_id = session.id(),
-                    seq = user_envelope.seq,
-                    error = %error,
-                    "file history snapshot failed"
-                );
+        if !prompt.is_empty() {
+            let user_envelope = append(
+                session,
+                &emit,
+                SessionEvent::UserMessage {
+                    text: prompt.to_string(),
+                    injected: false,
+                    images,
+                },
+            )?;
+            if let Some(provider) = &self.file_history {
+                if let Err(error) = provider
+                    .snapshot(session.id(), &cwd, user_envelope.seq)
+                    .await
+                {
+                    // 快照失败不阻断本轮对话;但该回退点会缺失文件历史,记录日志便于排查。
+                    tracing::warn!(
+                        session_id = session.id(),
+                        seq = user_envelope.seq,
+                        error = %error,
+                        "file history snapshot failed"
+                    );
+                }
             }
         }
         append(session, &emit, SessionEvent::TurnStart { turn })?;
+
+        let mut capability_context = session.events().iter().rev().find_map(|e| match &e.event {
+            SessionEvent::UserMessage {
+                text,
+                injected: true,
+                ..
+            } if text.starts_with("[denia 能力上下文]") => Some(text.clone()),
+            _ => None,
+        });
 
         let mut step: u32 = 0;
         let mut feedback: u32 = 0;
@@ -651,36 +686,92 @@ impl SessionDriver {
         // 解析一次路由容量;失败不影响主流程(日志记录尽力而为)。
         let context_window = self
             .registry
-            .resolve_call(&selection.provider, &selection.model, selection.reasoning_effort.as_deref())
+            .resolve_call(
+                &selection.provider,
+                &selection.model,
+                selection.reasoning_effort.as_deref(),
+            )
             .await
             .ok()
             .and_then(|resolved| resolved.context_window);
         'step_loop: loop {
+            if let Some(runtime) = &self.runtime {
+                let context = match runtime.context(session.id(), &cwd).await {
+                    Ok(parts) => parts.join("\n"),
+                    Err(error) => format!(
+                        "[denia 能力上下文]\n技能目录读取失败：{error}。请修复技能定义后重试 skill 工具。"
+                    ),
+                };
+                if capability_context.as_deref() != Some(&context) {
+                    append(
+                        session,
+                        &emit,
+                        SessionEvent::UserMessage {
+                            text: context.clone(),
+                            injected: true,
+                            images: Vec::new(),
+                        },
+                    )?;
+                    capability_context = Some(context);
+                }
+                runtime
+                    .drain(session.id())
+                    .await
+                    .map_err(|e| LlmFailure::new(codes::UNKNOWN, e))?;
+            }
             step += 1;
             append(session, &emit, SessionEvent::StepStart { turn, step })?;
 
             let cwd = session.header().cwd.clone();
-            let assembly = match self
-                .system_prompt
-                .load()
-                .assemble(&AssembleContext {
-                    cwd: Some(cwd.clone()),
-                    model: Some(selection.model.clone()),
-                    provider: Some(selection.provider.clone()),
-                    permission_mode: Some(session.permission_mode().as_str().to_string()),
-                    approval_policy: Some(session.approval_policy().as_str().to_string()),
-                }) {
+            let mut assembly = match self.system_prompt.load().assemble(&AssembleContext {
+                cwd: Some(cwd.clone()),
+                model: Some(selection.model.clone()),
+                provider: Some(selection.provider.clone()),
+                permission_mode: Some(session.permission_mode().as_str().to_string()),
+                approval_policy: Some(session.approval_policy().as_str().to_string()),
+            }) {
                 Ok(assembly) => assembly,
                 Err(error) => {
                     // 日志平衡:step 已开,补 step-end + turn-end(对齐 dsh
                     // 的 finally 配对语义;不再让轮次裸开等 load 合成)。
                     let failure = LlmFailure::new(codes::UNKNOWN, error);
                     append(session, &emit, SessionEvent::StepEnd { turn, step })?;
-                    let reason = TurnEndReason::Error { failure: failure.clone() };
+                    let reason = TurnEndReason::Error {
+                        failure: failure.clone(),
+                    };
                     append(session, &emit, SessionEvent::TurnEnd { turn, reason })?;
                     return Ok(TurnEndReason::Error { failure });
                 }
             };
+            // 扩展工具随实际注册表装配，自定义 SYSTEM.md 热更新不会丢失能力。
+            if self.runtime.is_some() {
+                if let (Some(schema), Some(tool)) = (
+                    assembly.tools.iter_mut().find(|s| s.name == "bash"),
+                    self.tools.get("bash"),
+                ) {
+                    *schema = tool.schema().clone();
+                }
+                for schema in denia_tools::capabilities::schemas() {
+                    if !assembly.tools.iter().any(|s| s.name == schema.name) {
+                        assembly.tools.push(schema);
+                    }
+                }
+            }
+            if let Some(child) = &session.header().subagent {
+                if let Some(persona) = &child.persona {
+                    if let Some(section) = assembly
+                        .sections
+                        .iter_mut()
+                        .find(|s| s.name == "deployment:persona")
+                    {
+                        section.text =
+                            format!("{persona}\n始终使用简体中文回复，除非用户明确要求其他语言。");
+                    }
+                }
+                if let Some(allowed) = &child.allowed_tools {
+                    assembly.tools.retain(|s| allowed.contains(&s.name));
+                }
+            }
             let tools_tokens = serde_json::to_string(&assembly.tools)
                 .map(|json| estimate_tools_tokens(&json))
                 .unwrap_or(0);
@@ -690,7 +781,11 @@ impl SessionDriver {
                 append(
                     session,
                     &emit,
-                    SessionEvent::UserMessage { text: snapshot, injected: true, images: Vec::new() },
+                    SessionEvent::UserMessage {
+                        text: snapshot,
+                        injected: true,
+                        images: Vec::new(),
+                    },
                 )?;
             }
 
@@ -777,7 +872,15 @@ impl SessionDriver {
                 && self.compact_failures.load(Ordering::SeqCst) < self.compaction.max_attempts
             {
                 match self
-                    .compact_context(&session, &selection, &framed_system, &assembly.tools, turn, step, &cancel)
+                    .compact_context(
+                        &session,
+                        &selection,
+                        &framed_system,
+                        &assembly.tools,
+                        turn,
+                        step,
+                        &cancel,
+                    )
                     .await
                 {
                     Ok(Some(outcome)) => {
@@ -877,14 +980,19 @@ impl SessionDriver {
             'attempts: loop {
                 // 请求前检查点(对齐 dsh checkpoint-policy):请求前缀刷盘
                 // 成功才派发;失败 fail-closed(不发出请求)。
-                session
-                    .flush()
-                    .map_err(|error| LlmFailure::new(codes::UNKNOWN, format!("log flush before dispatch failed: {error}")))?;
+                session.flush().map_err(|error| {
+                    LlmFailure::new(
+                        codes::UNKNOWN,
+                        format!("log flush before dispatch failed: {error}"),
+                    )
+                })?;
                 // 请求建立期同样响应取消:网关/代理黑洞挂起(连接已发出、
                 // 响应头迟迟不来,或 setup 重试退避中)时,适配器内部总超时
                 // 要 60-120s 才报错,期间点停止必须立刻能断。select 放弃
                 // 卡死的建立 future,直接闭合为 aborted。
-                let stream_setup = self.registry.stream(&selection.provider, &request, retry_sink.clone());
+                let stream_setup =
+                    self.registry
+                        .stream(&selection.provider, &request, retry_sink.clone());
                 tokio::pin!(stream_setup);
                 let mut stream = tokio::select! {
                     biased;
@@ -946,7 +1054,9 @@ impl SessionDriver {
                             source_event_seqs.push(envelope.seq);
                             match chunk {
                                 StreamChunk::BlockEnd { block, .. } => blocks.push(block),
-                                StreamChunk::Usage { usage: next_usage } => usage = Some(next_usage),
+                                StreamChunk::Usage { usage: next_usage } => {
+                                    usage = Some(next_usage)
+                                }
                                 StreamChunk::Finish { reason } => finish = Some(reason),
                                 _ => {}
                             }
@@ -984,9 +1094,8 @@ impl SessionDriver {
 
                 // 错误统一分流:流错误 或 finish { Error | Aborted }。
                 let failure = stream_error.clone().or_else(|| match &finish {
-                    Some(FinishReason::Error { failure }) | Some(FinishReason::Aborted { failure }) => {
-                        Some(failure.clone())
-                    }
+                    Some(FinishReason::Error { failure })
+                    | Some(FinishReason::Aborted { failure }) => Some(failure.clone()),
                     _ => None,
                 });
                 if let Some(failure) = failure {
@@ -1059,12 +1168,23 @@ impl SessionDriver {
                         append(
                             session,
                             &emit,
-                            SessionEvent::UserMessage { text: feedback_text(&failure), injected: true, images: Vec::new() },
+                            SessionEvent::UserMessage {
+                                text: feedback_text(&failure),
+                                injected: true,
+                                images: Vec::new(),
+                            },
                         )?;
                         continue 'step_loop;
                     }
                     let reason = TurnEndReason::Error { failure };
-                    append(session, &emit, SessionEvent::TurnEnd { turn, reason: reason.clone() })?;
+                    append(
+                        session,
+                        &emit,
+                        SessionEvent::TurnEnd {
+                            turn,
+                            reason: reason.clone(),
+                        },
+                    )?;
                     return Ok(reason);
                 }
                 break 'attempts;
@@ -1163,7 +1283,14 @@ impl SessionDriver {
                     } else {
                         TurnEndReason::Completed
                     };
-                    append(session, &emit, SessionEvent::TurnEnd { turn, reason: reason.clone() })?;
+                    append(
+                        session,
+                        &emit,
+                        SessionEvent::TurnEnd {
+                            turn,
+                            reason: reason.clone(),
+                        },
+                    )?;
                     return Ok(reason);
                 }
             }
@@ -1188,14 +1315,22 @@ impl SessionDriver {
                         content: "aborted before dispatch".to_string(),
                         is_error: true,
                     }
+                } else if session
+                    .header()
+                    .subagent
+                    .as_ref()
+                    .and_then(|s| s.allowed_tools.as_ref())
+                    .is_some_and(|allowed| !allowed.contains(&call.name))
+                {
+                    denia_tools::ToolOutput {
+                        content: "该工具不在当前子代理允许的工具集合中".into(),
+                        is_error: true,
+                    }
                 } else if let Some(tool) = self.tools.get(&call.name) {
                     let current_mode = session.permission_mode();
                     let mut permission_override = None;
                     let mut approval_failure = None;
-                    let can_escalate = matches!(
-                        call.name.as_str(),
-                        "bash" | "write_file" | "edit"
-                    );
+                    let can_escalate = matches!(call.name.as_str(), "bash" | "write_file" | "edit");
                     if can_escalate {
                         if let Some((requested_raw, justification)) =
                             escalation_fields(&call.arguments)
@@ -1229,6 +1364,8 @@ impl SessionDriver {
                         let sink_session = session.clone();
                         let sink_emit = emit.clone();
                         let context = ToolContext {
+                            session_id: Some(session.id().to_string()),
+                            selection: Some(selection.clone()),
                             cwd: cwd.clone(),
                             cancel: cancel.child_token(),
                             // 完整权限关闭路径沙箱;其他档位沿用会话头 sandbox。
@@ -1421,9 +1558,9 @@ mod tests {
     }
 
     use async_trait::async_trait;
+    use denia_core::error::LlmError;
     use denia_core::stream::{BlockType, FinishReason};
     use denia_core::tool::ToolSchema;
-    use denia_core::error::LlmError;
     use denia_llm::{ChunkStream, LlmAdapter, LlmModelInfo, LlmResolvedModelInfo, ProviderInfo};
     use std::collections::VecDeque;
     use std::sync::Mutex;
@@ -1487,13 +1624,13 @@ mod tests {
                 Some(MockScript::Fail(failure)) => {
                     Err(denia_core::error::LlmError::from_failure(failure))
                 }
-                Some(MockScript::Chunks(chunks)) => Ok(Box::pin(
-                    futures::stream::iter(chunks.into_iter().map(Ok)),
-                )),
+                Some(MockScript::Chunks(chunks)) => {
+                    Ok(Box::pin(futures::stream::iter(chunks.into_iter().map(Ok))))
+                }
                 Some(MockScript::ChunksThenFail(chunks, failure)) => Ok(Box::pin(
-                    futures::stream::iter(chunks.into_iter().map(Ok)).chain(
-                        futures::stream::once(async move { Err::<StreamChunk, LlmFailure>(failure) }),
-                    ),
+                    futures::stream::iter(chunks.into_iter().map(Ok)).chain(futures::stream::once(
+                        async move { Err::<StreamChunk, LlmFailure>(failure) },
+                    )),
                 )),
                 None => Ok(Box::pin(futures::stream::empty())),
             }
@@ -1522,15 +1659,18 @@ mod tests {
     }
 
     /// 一条 finish-error 流:模拟网关空响应(EMPTY_RESPONSE 以 finish 错误产出)。
-fn error_finish_script() -> Vec<StreamChunk> {
-    vec![StreamChunk::Finish {
-        reason: FinishReason::Error {
-            failure: LlmFailure::new(denia_core::error::codes::EMPTY_RESPONSE, "empty response"),
-        },
-    }]
-}
+    fn error_finish_script() -> Vec<StreamChunk> {
+        vec![StreamChunk::Finish {
+            reason: FinishReason::Error {
+                failure: LlmFailure::new(
+                    denia_core::error::codes::EMPTY_RESPONSE,
+                    "empty response",
+                ),
+            },
+        }]
+    }
 
-fn text_script(text: &str) -> Vec<StreamChunk> {
+    fn text_script(text: &str) -> Vec<StreamChunk> {
         vec![
             StreamChunk::BlockStart {
                 index: 0,
@@ -1608,9 +1748,15 @@ fn text_script(text: &str) -> Vec<StreamChunk> {
             schemas: schemas.clone(),
             known_names: None,
         });
-        prompt.variable("cwd", |context| context.cwd.clone()).unwrap();
-        prompt.variable("model", |context| context.model.clone()).unwrap();
-        prompt.variable("provider", |context| context.provider.clone()).unwrap();
+        prompt
+            .variable("cwd", |context| context.cwd.clone())
+            .unwrap();
+        prompt
+            .variable("model", |context| context.model.clone())
+            .unwrap();
+        prompt
+            .variable("provider", |context| context.provider.clone())
+            .unwrap();
         (
             SessionDriver::new(
                 registry.clone(),
@@ -1649,7 +1795,17 @@ fn text_script(text: &str) -> Vec<StreamChunk> {
         let (driver, _registry) = driver(vec![MockScript::Chunks(text_script("done!"))]);
         let session = temp_session();
         let reason = driver
-            .run_turn(&session, &selection(), "hello", Vec::new(), Vec::new(), Vec::new(), true, CancellationToken::new(), noop_emit())
+            .run_turn(
+                &session,
+                &selection(),
+                "hello",
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                true,
+                CancellationToken::new(),
+                noop_emit(),
+            )
             .await;
         assert_eq!(reason, TurnEndReason::Completed);
 
@@ -1687,10 +1843,23 @@ fn text_script(text: &str) -> Vec<StreamChunk> {
 
     #[tokio::test]
     async fn tool_call_continues_to_second_step() {
-        let (driver, _registry) = driver(vec![MockScript::Chunks(tool_script()), MockScript::Chunks(text_script("after tool"))]);
+        let (driver, _registry) = driver(vec![
+            MockScript::Chunks(tool_script()),
+            MockScript::Chunks(text_script("after tool")),
+        ]);
         let session = temp_session();
         let reason = driver
-            .run_turn(&session, &selection(), "use the tool", Vec::new(), Vec::new(), Vec::new(), true, CancellationToken::new(), noop_emit())
+            .run_turn(
+                &session,
+                &selection(),
+                "use the tool",
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                true,
+                CancellationToken::new(),
+                noop_emit(),
+            )
             .await;
         assert_eq!(reason, TurnEndReason::Completed);
 
@@ -1711,7 +1880,11 @@ fn text_script(text: &str) -> Vec<StreamChunk> {
 
         // The second request saw the tool result in derived history.
         let messages = session.derive_messages();
-        assert!(messages.iter().any(|m| m.role == denia_core::message::ChatRole::Tool));
+        assert!(
+            messages
+                .iter()
+                .any(|m| m.role == denia_core::message::ChatRole::Tool)
+        );
     }
 
     #[tokio::test]
@@ -1724,18 +1897,34 @@ fn text_script(text: &str) -> Vec<StreamChunk> {
                 arguments: "{}".to_string(),
             };
         }
-        let (driver, _registry) = driver(vec![MockScript::Chunks(unknown), MockScript::Chunks(text_script("ok"))]);
+        let (driver, _registry) = driver(vec![
+            MockScript::Chunks(unknown),
+            MockScript::Chunks(text_script("ok")),
+        ]);
         let session = temp_session();
         let reason = driver
-            .run_turn(&session, &selection(), "go", Vec::new(), Vec::new(), Vec::new(), true, CancellationToken::new(), noop_emit())
+            .run_turn(
+                &session,
+                &selection(),
+                "go",
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                true,
+                CancellationToken::new(),
+                noop_emit(),
+            )
             .await;
         assert_eq!(reason, TurnEndReason::Completed);
-        let result = session.events().iter().find_map(|envelope| match &envelope.event {
-            SessionEvent::ToolResult { content, is_error, .. } => {
-                Some((content.clone(), *is_error))
-            }
-            _ => None,
-        });
+        let result = session
+            .events()
+            .iter()
+            .find_map(|envelope| match &envelope.event {
+                SessionEvent::ToolResult {
+                    content, is_error, ..
+                } => Some((content.clone(), *is_error)),
+                _ => None,
+            });
         let (content, is_error) = result.unwrap();
         assert!(is_error);
         assert!(content.contains("unknown tool: nope"));
@@ -1755,7 +1944,11 @@ fn text_script(text: &str) -> Vec<StreamChunk> {
             async fn list_models(&self, _p: &str) -> Result<Vec<LlmModelInfo>, LlmError> {
                 Ok(Vec::new())
             }
-            async fn resolve_model(&self, p: &str, m: &str) -> Result<LlmResolvedModelInfo, LlmError> {
+            async fn resolve_model(
+                &self,
+                p: &str,
+                m: &str,
+            ) -> Result<LlmResolvedModelInfo, LlmError> {
                 Ok(LlmResolvedModelInfo {
                     info: LlmModelInfo {
                         provider: p.to_string(),
@@ -1769,21 +1962,35 @@ fn text_script(text: &str) -> Vec<StreamChunk> {
                     reasoning: None,
                 })
             }
-            async fn stream(&self, _p: &str, _r: &GenerateRequest) -> Result<ChunkStream, LlmError> {
+            async fn stream(
+                &self,
+                _p: &str,
+                _r: &GenerateRequest,
+            ) -> Result<ChunkStream, LlmError> {
                 Ok(Box::pin(futures::stream::pending()))
             }
         }
         let registry = Arc::new(LlmRegistry::new());
         registry
-            .register(&["mock".to_string()], Arc::new(PendingAdapter), denia_llm::RetryPolicy::default())
+            .register(
+                &["mock".to_string()],
+                Arc::new(PendingAdapter),
+                denia_llm::RetryPolicy::default(),
+            )
             .unwrap();
         let mut prompt = SystemPrompt::new(denia_system_prompt::SystemPromptConfig {
             include_runtime_context: false,
             ..Default::default()
         });
-        prompt.variable("cwd", |context| context.cwd.clone()).unwrap();
-        prompt.variable("model", |context| context.model.clone()).unwrap();
-        prompt.variable("provider", |context| context.provider.clone()).unwrap();
+        prompt
+            .variable("cwd", |context| context.cwd.clone())
+            .unwrap();
+        prompt
+            .variable("model", |context| context.model.clone())
+            .unwrap();
+        prompt
+            .variable("provider", |context| context.provider.clone())
+            .unwrap();
         let driver = SessionDriver::new(
             registry,
             Arc::new(ToolRegistry::default()),
@@ -1797,7 +2004,17 @@ fn text_script(text: &str) -> Vec<StreamChunk> {
             cancel_clone.cancel();
         });
         let reason = driver
-            .run_turn(&session, &selection(), "go", Vec::new(), Vec::new(), Vec::new(), true, cancel, noop_emit())
+            .run_turn(
+                &session,
+                &selection(),
+                "go",
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                true,
+                cancel,
+                noop_emit(),
+            )
             .await;
         assert_eq!(
             reason,
@@ -1808,7 +2025,10 @@ fn text_script(text: &str) -> Vec<StreamChunk> {
         let has_interrupted = session.events().iter().any(|envelope| {
             matches!(
                 &envelope.event,
-                SessionEvent::AssistantMessage { interrupted: true, .. }
+                SessionEvent::AssistantMessage {
+                    interrupted: true,
+                    ..
+                }
             )
         });
         assert!(has_interrupted);
@@ -1823,19 +2043,28 @@ fn text_script(text: &str) -> Vec<StreamChunk> {
         assert_eq!(calls[0].name, "edit");
         assert_eq!(calls[0].arguments["path"], "src/lib.rs");
         // 值本身是合法 JSON(对象)时原样保留,不是一律字符串。
-        assert_eq!(calls[0].arguments["old_string"], serde_json::json!({"a": 1}));
+        assert_eq!(
+            calls[0].arguments["old_string"],
+            serde_json::json!({"a": 1})
+        );
         assert_eq!(calls[1].name, "bash");
         assert_eq!(calls[1].arguments["command"], "Get-ChildItem");
         // 大小写不敏感,函数名归一为小写。
-        let upper = rescue_fake_tool_calls("<TOOL_CALL><FUNCTION=Echo><PARAMETER=text>x</PARAMETER></FUNCTION></TOOL_CALL>")
-            .expect("upper-case tags must parse");
+        let upper = rescue_fake_tool_calls(
+            "<TOOL_CALL><FUNCTION=Echo><PARAMETER=text>x</PARAMETER></FUNCTION></TOOL_CALL>",
+        )
+        .expect("upper-case tags must parse");
         assert_eq!(upper[0].name, "echo");
         // 纯正文 → None。
         assert!(rescue_fake_tool_calls("普通文本,没有工具标签").is_none());
         // 未闭合的 parameter 块 → 整体放弃。
-        assert!(rescue_fake_tool_calls("<tool_call><function=bash><parameter=command>x</tool_call>").is_none());
+        assert!(
+            rescue_fake_tool_calls("<tool_call><function=bash><parameter=command>x</tool_call>")
+                .is_none()
+        );
         // 无参数调用也能救(空对象)。
-        let bare = rescue_fake_tool_calls("<tool_call><function=baseline></tool_call>").expect("bare call must parse");
+        let bare = rescue_fake_tool_calls("<tool_call><function=baseline></tool_call>")
+            .expect("bare call must parse");
         assert_eq!(bare[0].arguments, serde_json::json!({}));
     }
 
@@ -1851,25 +2080,52 @@ fn text_script(text: &str) -> Vec<StreamChunk> {
         ]);
         let session = temp_session();
         let reason = driver
-            .run_turn(&session, &selection(), "分析项目", Vec::new(), Vec::new(), Vec::new(), true, CancellationToken::new(), noop_emit())
+            .run_turn(
+                &session,
+                &selection(),
+                "分析项目",
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                true,
+                CancellationToken::new(),
+                noop_emit(),
+            )
             .await;
         assert_eq!(reason, TurnEndReason::Completed);
         // 工具被执行,且结果进了派生历史(模型下一步看得到)。
         let result = session.events().iter().find_map(|e| match &e.event {
-            SessionEvent::ToolResult { content, is_error, .. } => Some((content.clone(), *is_error)),
+            SessionEvent::ToolResult {
+                content, is_error, ..
+            } => Some((content.clone(), *is_error)),
             _ => None,
         });
         let (content, is_error) = result.expect("rescued call must be dispatched");
         assert!(!is_error);
         assert!(content.contains("hello"));
         let messages = session.derive_messages();
-        assert!(messages.iter().any(|m| m.role == denia_core::message::ChatRole::Tool));
+        assert!(
+            messages
+                .iter()
+                .any(|m| m.role == denia_core::message::ChatRole::Tool)
+        );
         // 自纠注入未发生(救援成功,无需反馈)。
-        let injected = session.events().iter().filter_map(|e| match &e.event {
-            SessionEvent::UserMessage { text, injected: true, .. } => Some(text.clone()),
-            _ => None,
-        }).collect::<Vec<_>>();
-        assert!(injected.is_empty(), "no feedback needed when rescue succeeded");
+        let injected = session
+            .events()
+            .iter()
+            .filter_map(|e| match &e.event {
+                SessionEvent::UserMessage {
+                    text,
+                    injected: true,
+                    ..
+                } => Some(text.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            injected.is_empty(),
+            "no feedback needed when rescue succeeded"
+        );
     }
 
     #[tokio::test]
@@ -1883,13 +2139,23 @@ fn text_script(text: &str) -> Vec<StreamChunk> {
         ]);
         let session = temp_session();
         let reason = driver
-            .run_turn(&session, &selection(), "go", Vec::new(), Vec::new(), Vec::new(), true, CancellationToken::new(), noop_emit())
+            .run_turn(
+                &session,
+                &selection(),
+                "go",
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                true,
+                CancellationToken::new(),
+                noop_emit(),
+            )
             .await;
         assert_eq!(reason, TurnEndReason::Completed);
         let result = session.events().iter().find_map(|e| match &e.event {
-            SessionEvent::ToolResult { content, is_error, .. } => {
-                Some((content.clone(), *is_error))
-            }
+            SessionEvent::ToolResult {
+                content, is_error, ..
+            } => Some((content.clone(), *is_error)),
             _ => None,
         });
         let (content, is_error) = result.unwrap();
@@ -1937,22 +2203,44 @@ fn text_script(text: &str) -> Vec<StreamChunk> {
         ]);
         let session = temp_session();
         let reason = driver
-            .run_turn(&session, &selection(), "优化模型选择框", Vec::new(), Vec::new(), Vec::new(), true, CancellationToken::new(), noop_emit())
+            .run_turn(
+                &session,
+                &selection(),
+                "优化模型选择框",
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                true,
+                CancellationToken::new(),
+                noop_emit(),
+            )
             .await;
         assert_eq!(reason, TurnEndReason::Completed);
         // 注入的纠错提示恰一条,且点名了伪调用函数。
-        let injected = session.events().iter().filter_map(|e| match &e.event {
-            SessionEvent::UserMessage { text, injected: true, .. } => Some(text.clone()),
-            _ => None,
-        }).collect::<Vec<_>>();
+        let injected = session
+            .events()
+            .iter()
+            .filter_map(|e| match &e.event {
+                SessionEvent::UserMessage {
+                    text,
+                    injected: true,
+                    ..
+                } => Some(text.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
         assert_eq!(injected.len(), 1, "one self-correction injection expected");
         assert!(injected[0].contains("原生 tool_calls"));
         assert!(injected[0].contains("echo()"));
         // 模型随后真的发了原生调用,工具被执行。
-        let has_call = session.events().iter().any(|e| {
-            matches!(&e.event, SessionEvent::ToolCall { name, .. } if name == "echo")
-        });
-        assert!(has_call, "recovered step must dispatch the native tool call");
+        let has_call = session
+            .events()
+            .iter()
+            .any(|e| matches!(&e.event, SessionEvent::ToolCall { name, .. } if name == "echo"));
+        assert!(
+            has_call,
+            "recovered step must dispatch the native tool call"
+        );
     }
 
     #[tokio::test]
@@ -1967,19 +2255,49 @@ fn text_script(text: &str) -> Vec<StreamChunk> {
         ]);
         let session = temp_session();
         let reason = driver
-            .run_turn(&session, &selection(), "go", Vec::new(), Vec::new(), Vec::new(), true, CancellationToken::new(), noop_emit())
+            .run_turn(
+                &session,
+                &selection(),
+                "go",
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                true,
+                CancellationToken::new(),
+                noop_emit(),
+            )
             .await;
         assert_eq!(reason, TurnEndReason::Completed);
-        let injected = session.events().iter().filter_map(|e| match &e.event {
-            SessionEvent::UserMessage { text, injected: true, .. } => Some(text.clone()),
-            _ => None,
-        }).collect::<Vec<_>>();
+        let injected = session
+            .events()
+            .iter()
+            .filter_map(|e| match &e.event {
+                SessionEvent::UserMessage {
+                    text,
+                    injected: true,
+                    ..
+                } => Some(text.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
         assert_eq!(injected.len(), 2, "feedback quota must cap at MAX_FEEDBACK");
-        let calls = session.events().iter().filter(|e| matches!(e.event, SessionEvent::ToolCall { .. })).count();
+        let calls = session
+            .events()
+            .iter()
+            .filter(|e| matches!(e.event, SessionEvent::ToolCall { .. }))
+            .count();
         assert_eq!(calls, 0, "no native tool call ever arrived");
         // 日志平衡:step 数与 step-end 数一致。
-        let step_starts = session.events().iter().filter(|e| matches!(e.event, SessionEvent::StepStart { .. })).count();
-        let step_ends = session.events().iter().filter(|e| matches!(e.event, SessionEvent::StepEnd { .. })).count();
+        let step_starts = session
+            .events()
+            .iter()
+            .filter(|e| matches!(e.event, SessionEvent::StepStart { .. }))
+            .count();
+        let step_ends = session
+            .events()
+            .iter()
+            .filter(|e| matches!(e.event, SessionEvent::StepEnd { .. }))
+            .count();
         assert_eq!(step_starts, step_ends);
     }
 
@@ -1992,14 +2310,28 @@ fn text_script(text: &str) -> Vec<StreamChunk> {
         ]);
         let session = temp_session();
         let reason = driver
-            .run_turn(&session, &selection(), "go", Vec::new(), Vec::new(), Vec::new(), true, CancellationToken::new(), noop_emit())
+            .run_turn(
+                &session,
+                &selection(),
+                "go",
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                true,
+                CancellationToken::new(),
+                noop_emit(),
+            )
             .await;
         assert_eq!(reason, TurnEndReason::Completed);
         // 纠错提示以 injected 用户消息落日志,模型看得见。
-        let injected = session.events().iter().filter_map(|e| match &e.event {
-            SessionEvent::UserMessage { text, injected, .. } if *injected => Some(text.clone()),
-            _ => None,
-        }).collect::<Vec<_>>();
+        let injected = session
+            .events()
+            .iter()
+            .filter_map(|e| match &e.event {
+                SessionEvent::UserMessage { text, injected, .. } if *injected => Some(text.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
         assert_eq!(injected.len(), 1, "feedback-injected message must exist");
         assert!(injected[0].contains("MALFORMED_RESPONSE"));
     }
@@ -2007,13 +2339,21 @@ fn text_script(text: &str) -> Vec<StreamChunk> {
     #[tokio::test]
     async fn provider_failure_terminates_without_feedback_waste() {
         // AUTH:不可重试、不可自纠 → 直接 error 终止,不注入反馈(不烧配额)。
-        let (driver, _registry) = driver(vec![MockScript::Fail(LlmFailure::new(
-            "AUTH",
-            "bad key",
-        ))]);
+        let (driver, _registry) =
+            driver(vec![MockScript::Fail(LlmFailure::new("AUTH", "bad key"))]);
         let session = temp_session();
         let reason = driver
-            .run_turn(&session, &selection(), "go", Vec::new(), Vec::new(), Vec::new(), true, CancellationToken::new(), noop_emit())
+            .run_turn(
+                &session,
+                &selection(),
+                "go",
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                true,
+                CancellationToken::new(),
+                noop_emit(),
+            )
             .await;
         assert_eq!(
             reason,
@@ -2021,14 +2361,29 @@ fn text_script(text: &str) -> Vec<StreamChunk> {
                 failure: LlmFailure::new("AUTH", "bad key")
             }
         );
-        let injected = session.events().iter().filter_map(|e| match &e.event {
-            SessionEvent::UserMessage { text, injected, .. } if *injected => Some(text.clone()),
-            _ => None,
-        }).collect::<Vec<_>>();
-        assert!(injected.is_empty(), "AUTH must not waste the feedback quota");
+        let injected = session
+            .events()
+            .iter()
+            .filter_map(|e| match &e.event {
+                SessionEvent::UserMessage { text, injected, .. } if *injected => Some(text.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            injected.is_empty(),
+            "AUTH must not waste the feedback quota"
+        );
         // 日志平衡:step-end 与 turn-end 都已落盘。
-        let step_starts = session.events().iter().filter(|e| matches!(e.event, SessionEvent::StepStart { .. })).count();
-        let step_ends = session.events().iter().filter(|e| matches!(e.event, SessionEvent::StepEnd { .. })).count();
+        let step_starts = session
+            .events()
+            .iter()
+            .filter(|e| matches!(e.event, SessionEvent::StepStart { .. }))
+            .count();
+        let step_ends = session
+            .events()
+            .iter()
+            .filter(|e| matches!(e.event, SessionEvent::StepEnd { .. }))
+            .count();
         assert_eq!(step_starts, step_ends);
     }
 
@@ -2042,21 +2397,45 @@ fn text_script(text: &str) -> Vec<StreamChunk> {
         ]);
         let session = temp_session();
         let reason = driver
-            .run_turn(&session, &selection(), "go", Vec::new(), Vec::new(), Vec::new(), true, CancellationToken::new(), noop_emit())
+            .run_turn(
+                &session,
+                &selection(),
+                "go",
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                true,
+                CancellationToken::new(),
+                noop_emit(),
+            )
             .await;
         assert_eq!(reason, TurnEndReason::Completed);
         // 两次失败 → 两次 retry-attempt 落盘(带退避与错误信息)。
-        let attempts = session.events().iter().filter_map(|e| match &e.event {
-            SessionEvent::RetryAttempt { attempt, code, delay_ms, .. } => {
-                Some((*attempt, code.clone(), *delay_ms))
-            }
-            _ => None,
-        }).collect::<Vec<_>>();
+        let attempts = session
+            .events()
+            .iter()
+            .filter_map(|e| match &e.event {
+                SessionEvent::RetryAttempt {
+                    attempt,
+                    code,
+                    delay_ms,
+                    ..
+                } => Some((*attempt, code.clone(), *delay_ms)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
         assert_eq!(attempts.len(), 2);
         assert_eq!(attempts[0].0, 1);
         assert_eq!(attempts[1].0, 2);
-        assert!(attempts.iter().all(|(_, code, _)| code == "INVALID_REQUEST"));
-        assert!(attempts[0].2 >= 400 && attempts[1].2 >= 800, "backoff must grow");
+        assert!(
+            attempts
+                .iter()
+                .all(|(_, code, _)| code == "INVALID_REQUEST")
+        );
+        assert!(
+            attempts[0].2 >= 400 && attempts[1].2 >= 800,
+            "backoff must grow"
+        );
     }
 
     #[tokio::test]
@@ -2069,14 +2448,28 @@ fn text_script(text: &str) -> Vec<StreamChunk> {
         ]);
         let session = temp_session();
         let reason = driver
-            .run_turn(&session, &selection(), "go", Vec::new(), Vec::new(), Vec::new(), true, CancellationToken::new(), noop_emit())
+            .run_turn(
+                &session,
+                &selection(),
+                "go",
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                true,
+                CancellationToken::new(),
+                noop_emit(),
+            )
             .await;
         assert_eq!(reason, TurnEndReason::Completed);
         // step 内重试轨迹:1 条 retry-attempt(EMPTY_RESPONSE)。
-        let attempts = session.events().iter().filter_map(|e| match &e.event {
-            SessionEvent::RetryAttempt { code, .. } => Some(code.clone()),
-            _ => None,
-        }).collect::<Vec<_>>();
+        let attempts = session
+            .events()
+            .iter()
+            .filter_map(|e| match &e.event {
+                SessionEvent::RetryAttempt { code, .. } => Some(code.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
         assert_eq!(attempts, vec!["EMPTY_RESPONSE".to_string()]);
     }
 
@@ -2097,31 +2490,54 @@ fn text_script(text: &str) -> Vec<StreamChunk> {
                         text: "partial".to_string(),
                     },
                 ],
-                LlmFailure::new(denia_core::error::codes::STREAM_CLOSED, "stream ended before the [DONE] marker"),
+                LlmFailure::new(
+                    denia_core::error::codes::STREAM_CLOSED,
+                    "stream ended before the [DONE] marker",
+                ),
             ),
             MockScript::Chunks(text_script("recovered")),
         ]);
         let session = temp_session();
         let reason = driver
-            .run_turn(&session, &selection(), "go", Vec::new(), Vec::new(), Vec::new(), true, CancellationToken::new(), noop_emit())
+            .run_turn(
+                &session,
+                &selection(),
+                "go",
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                true,
+                CancellationToken::new(),
+                noop_emit(),
+            )
             .await;
         assert_eq!(reason, TurnEndReason::Completed);
         // 重试轨迹:1 条 STREAM_CLOSED。
-        let attempts = session.events().iter().filter_map(|e| match &e.event {
-            SessionEvent::RetryAttempt { code, .. } => Some(code.clone()),
-            _ => None,
-        }).collect::<Vec<_>>();
+        let attempts = session
+            .events()
+            .iter()
+            .filter_map(|e| match &e.event {
+                SessionEvent::RetryAttempt { code, .. } => Some(code.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
         assert_eq!(attempts, vec!["STREAM_CLOSED".to_string()]);
         // 最终 assistant-message 的 source_event_seqs 只引用第二次尝试的 chunk
         // (partial 尝试的 chunk 不在序列内)——重放未污染派生历史。
         let final_msg = session.events().iter().find_map(|e| match &e.event {
-            SessionEvent::AssistantMessage { interrupted, source_event_seqs, .. } if !interrupted => {
-                Some(source_event_seqs.clone())
-            }
+            SessionEvent::AssistantMessage {
+                interrupted,
+                source_event_seqs,
+                ..
+            } if !interrupted => Some(source_event_seqs.clone()),
             _ => None,
         });
         let seqs = final_msg.expect("final assistant-message must exist");
-        assert_eq!(seqs.len(), 5, "source seqs must cover only the recovered attempt");
+        assert_eq!(
+            seqs.len(),
+            5,
+            "source seqs must cover only the recovered attempt"
+        );
     }
 
     #[tokio::test]
@@ -2129,7 +2545,17 @@ fn text_script(text: &str) -> Vec<StreamChunk> {
         let (driver, _registry) = driver(vec![MockScript::Chunks(text_script("hi"))]);
         let session = temp_session();
         let reason = driver
-            .run_turn(&session, &selection(), "go", Vec::new(), Vec::new(), Vec::new(), true, CancellationToken::new(), noop_emit())
+            .run_turn(
+                &session,
+                &selection(),
+                "go",
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                true,
+                CancellationToken::new(),
+                noop_emit(),
+            )
             .await;
         assert_eq!(reason, TurnEndReason::Completed);
 
@@ -2145,11 +2571,13 @@ fn text_script(text: &str) -> Vec<StreamChunk> {
         assert_eq!(*header_reason, RequestHeaderReason::Initial);
         assert_eq!(snapshot.config.provider, "mock");
         assert_eq!(snapshot.config.model, "mock-1");
-        assert!(snapshot
-            .system
-            .as_deref()
-            .unwrap_or("")
-            .contains("你是由 denia 驱动的"));
+        assert!(
+            snapshot
+                .system
+                .as_deref()
+                .unwrap_or("")
+                .contains("你是由 denia 驱动的")
+        );
         assert!(!snapshot.tools.is_empty());
         // 注册路由后只写一次:同一 step 循环的下一请求不会重复落盘(snapshot 相同)。
         let header_count = events
@@ -2162,9 +2590,12 @@ fn text_script(text: &str) -> Vec<StreamChunk> {
         events
             .iter()
             .find_map(|envelope| match &envelope.event {
-                SessionEvent::RequestContext { provider, model, context_window, .. } => {
-                    Some((provider, model, context_window))
-                }
+                SessionEvent::RequestContext {
+                    provider,
+                    model,
+                    context_window,
+                    ..
+                } => Some((provider, model, context_window)),
                 _ => None,
             })
             .map(|(provider, model, window)| {
@@ -2178,7 +2609,9 @@ fn text_script(text: &str) -> Vec<StreamChunk> {
         let seqs = events
             .iter()
             .find_map(|envelope| match &envelope.event {
-                SessionEvent::AssistantMessage { source_event_seqs, .. } => Some(source_event_seqs),
+                SessionEvent::AssistantMessage {
+                    source_event_seqs, ..
+                } => Some(source_event_seqs),
                 _ => None,
             })
             .expect("assistant-message must exist");
@@ -2192,4 +2625,3 @@ fn text_script(text: &str) -> Vec<StreamChunk> {
         assert_eq!(chunk_seqs, *seqs);
     }
 }
-

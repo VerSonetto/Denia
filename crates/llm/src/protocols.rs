@@ -1,4 +1,4 @@
-﻿//! Wire protocols a custom gateway route may speak, and their translation
+//! Wire protocols a custom gateway route may speak, and their translation
 //! into the harness chunk protocol.
 //!
 //! Three protocols, one adapter: `openai-completions` (POST {base}/chat/
@@ -127,7 +127,11 @@ pub(crate) fn build_openai_body(request: &GenerateRequest) -> serde_json::Value 
         "stream": true,
         "stream_options": { "include_usage": true },
     });
-    if let Some(effort) = request.reasoning_effort.as_deref().filter(|effort| *effort != "off") {
+    if let Some(effort) = request
+        .reasoning_effort
+        .as_deref()
+        .filter(|effort| *effort != "off")
+    {
         body["reasoning_effort"] = serde_json::json!(effort);
     }
     if let Some(temperature) = request.temperature {
@@ -212,7 +216,11 @@ pub(crate) fn build_responses_body(request: &GenerateRequest) -> serde_json::Val
     if let Some(system) = request.system.as_deref().filter(|s| !s.is_empty()) {
         body["instructions"] = serde_json::json!(system);
     }
-    if let Some(effort) = request.reasoning_effort.as_deref().filter(|effort| *effort != "off") {
+    if let Some(effort) = request
+        .reasoning_effort
+        .as_deref()
+        .filter(|effort| *effort != "off")
+    {
         body["reasoning"] = serde_json::json!({ "effort": effort });
     }
     if let Some(temperature) = request.temperature {
@@ -260,7 +268,9 @@ pub(crate) fn build_anthropic_body(
     max_tokens: u64,
 ) -> serde_json::Value {
     let mut messages: Vec<(ChatRole, Vec<serde_json::Value>)> = Vec::new();
-    let push_block = |role: ChatRole, block: serde_json::Value, messages: &mut Vec<(ChatRole, Vec<serde_json::Value>)>| {
+    let push_block = |role: ChatRole,
+                      block: serde_json::Value,
+                      messages: &mut Vec<(ChatRole, Vec<serde_json::Value>)>| {
         match messages.last_mut() {
             Some((last_role, blocks)) if *last_role == role => blocks.push(block),
             _ => messages.push((role, vec![block])),
@@ -334,7 +344,11 @@ pub(crate) fn build_anthropic_body(
     let wire_messages: Vec<serde_json::Value> = messages
         .into_iter()
         .map(|(role, content)| {
-            let role = if role == ChatRole::User { "user" } else { "assistant" };
+            let role = if role == ChatRole::User {
+                "user"
+            } else {
+                "assistant"
+            };
             serde_json::json!({ "role": role, "content": content })
         })
         .collect();
@@ -461,7 +475,10 @@ struct CallState {
 }
 
 fn malformed(detail: impl std::fmt::Display) -> LlmFailure {
-    LlmFailure::new(codes::MALFORMED_RESPONSE, format!("malformed SSE payload: {detail}"))
+    LlmFailure::new(
+        codes::MALFORMED_RESPONSE,
+        format!("malformed SSE payload: {detail}"),
+    )
 }
 
 /// OpenAI Responses SSE → chunks. Text/reasoning blocks stream via delta
@@ -554,8 +571,7 @@ impl ResponsesStream {
 
 impl EventTranslator for ResponsesStream {
     fn feed(&mut self, data: &str) -> Result<Vec<StreamChunk>, LlmFailure> {
-        let value: serde_json::Value = serde_json::from_str(data.trim())
-            .map_err(malformed)?;
+        let value: serde_json::Value = serde_json::from_str(data.trim()).map_err(malformed)?;
         let event_type = value["type"].as_str().unwrap_or_default().to_string();
         let mut out = Vec::new();
         match event_type.as_str() {
@@ -704,7 +720,10 @@ impl EventTranslator for ResponsesStream {
                     .as_str()
                     .unwrap_or("PROVIDER_ERROR")
                     .to_string();
-                let message = value["message"].as_str().unwrap_or("provider error").to_string();
+                let message = value["message"]
+                    .as_str()
+                    .unwrap_or("provider error")
+                    .to_string();
                 return Err(LlmFailure::new(code, message));
             }
             _ => {}
@@ -772,10 +791,7 @@ impl AnthropicStream {
         }
         let index = self.take_index();
         self.saw_block = true;
-        out.push(StreamChunk::BlockStart {
-            index,
-            block_type,
-        });
+        out.push(StreamChunk::BlockStart { index, block_type });
         self.blocks.insert(
             anthropic_index,
             OpenBlock {
@@ -827,8 +843,7 @@ impl AnthropicStream {
 
 impl EventTranslator for AnthropicStream {
     fn feed(&mut self, data: &str) -> Result<Vec<StreamChunk>, LlmFailure> {
-        let value: serde_json::Value =
-            serde_json::from_str(data.trim()).map_err(malformed)?;
+        let value: serde_json::Value = serde_json::from_str(data.trim()).map_err(malformed)?;
         let event_type = value["type"].as_str().unwrap_or_default().to_string();
         let mut out = Vec::new();
         match event_type.as_str() {
@@ -1128,7 +1143,10 @@ mod tests {
             "https://gateway.example/v1/messages"
         );
         assert_eq!(
-            listing_url(WireProtocol::AnthropicMessages, "https://gateway.example/v1"),
+            listing_url(
+                WireProtocol::AnthropicMessages,
+                "https://gateway.example/v1"
+            ),
             "https://gateway.example/v1/models?limit=1000"
         );
         assert_eq!(
@@ -1174,12 +1192,24 @@ mod tests {
             .collect();
         assert_eq!(
             kinds,
-            vec!["start", "reasoning", "end", "start", "text", "text", "end", "usage", "finish"]
+            vec![
+                "start",
+                "reasoning",
+                "end",
+                "start",
+                "text",
+                "text",
+                "end",
+                "usage",
+                "finish"
+            ]
         );
         let finish = chunks.last().unwrap();
         assert!(matches!(
             finish,
-            StreamChunk::Finish { reason: FinishReason::Stop }
+            StreamChunk::Finish {
+                reason: FinishReason::Stop
+            }
         ));
         let usage = chunks
             .iter()
@@ -1214,7 +1244,11 @@ mod tests {
             })
             .unwrap();
         match end {
-            ContentBlock::ToolCall { id, name, arguments } => {
+            ContentBlock::ToolCall {
+                id,
+                name,
+                arguments,
+            } => {
                 assert_eq!(id, "call_1");
                 assert_eq!(name, "bash");
                 // done 的最终 arguments 校准 delta 累积值。
@@ -1225,7 +1259,9 @@ mod tests {
         let finish = chunks.last().unwrap();
         assert!(matches!(
             finish,
-            StreamChunk::Finish { reason: FinishReason::ToolCalls }
+            StreamChunk::Finish {
+                reason: FinishReason::ToolCalls
+            }
         ));
     }
 
@@ -1292,7 +1328,16 @@ mod tests {
             .collect();
         assert_eq!(
             kinds,
-            vec!["start", "reasoning", "end", "start", "text", "end", "usage", "finish"]
+            vec![
+                "start",
+                "reasoning",
+                "end",
+                "start",
+                "text",
+                "end",
+                "usage",
+                "finish"
+            ]
         );
         let reasoning_end = &chunks[2];
         match reasoning_end {
@@ -1314,7 +1359,9 @@ mod tests {
         assert_eq!(usage.output_tokens, 6);
         assert!(matches!(
             chunks.last().unwrap(),
-            StreamChunk::Finish { reason: FinishReason::Stop }
+            StreamChunk::Finish {
+                reason: FinishReason::Stop
+            }
         ));
     }
 
@@ -1347,7 +1394,9 @@ mod tests {
         }
         assert!(matches!(
             chunks.last().unwrap(),
-            StreamChunk::Finish { reason: FinishReason::ToolCalls }
+            StreamChunk::Finish {
+                reason: FinishReason::ToolCalls
+            }
         ));
     }
 
@@ -1376,7 +1425,9 @@ mod tests {
         let chunks = translator.finish().unwrap();
         assert!(matches!(
             chunks.last().unwrap(),
-            StreamChunk::Finish { reason: FinishReason::Stop }
+            StreamChunk::Finish {
+                reason: FinishReason::Stop
+            }
         ));
     }
 }

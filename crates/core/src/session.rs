@@ -31,6 +31,22 @@ pub struct SessionHeader {
     /// 旧日志/普通会话无此字段。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_session: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subagent: Option<SubagentDescriptor>,
+}
+
+/// 子代理身份与恢复配置随会话头持久化；普通用户分支没有此描述符。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SubagentDescriptor {
+    pub label: String,
+    pub depth: usize,
+    pub mode: String,
+    pub selection: crate::config::ModelSelection,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub persona: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allowed_tools: Option<Vec<String>>,
 }
 
 fn default_true() -> bool {
@@ -54,7 +70,9 @@ pub enum TurnEndReason {
         cause: Option<AbortCause>,
     },
     MaxTokens,
-    Error { failure: LlmFailure },
+    Error {
+        failure: LlmFailure,
+    },
     /// 崩溃孤儿轮次的合成闭合(对齐 dsh `interrupted`;仅加载时生成,loop 不发射)。
     Interrupted,
 }
@@ -236,6 +254,18 @@ pub fn prune_text(content: &str, config: &ToolResultPruneConfig) -> Option<Strin
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "kebab-case")]
 pub enum SessionEvent {
+    /// 已准入但尚未在模型步边界领取的代理/任务通知。
+    AgentInbox {
+        id: String,
+        text: String,
+        source: String,
+    },
+    /// 与文本投影一起原子落盘的领取记录，重启不会重复领取。
+    AgentDelivery {
+        id: String,
+        text: String,
+        source: String,
+    },
     TurnStart {
         turn: u32,
     },
@@ -333,12 +363,18 @@ pub enum SessionEvent {
     },
     /// Whole-list todo snapshot; latest write wins on replay. Log-only UI
     /// state — never part of the derived model history.
-    TodoWrite { todos: Vec<TodoItem> },
+    TodoWrite {
+        todos: Vec<TodoItem>,
+    },
     /// 会话权限模式切换(抄 dsh sandbox/mode):日志持久、可回放,
     /// 不进入模型历史;driver 读 fold 后的当前值做策略判断。
-    PermissionMode { mode: PermissionMode },
+    PermissionMode {
+        mode: PermissionMode,
+    },
     /// 会话审批策略切换(抄 dsh approval/policy);与权限模式一起由预设写。
-    ApprovalPolicy { policy: ApprovalPolicy },
+    ApprovalPolicy {
+        policy: ApprovalPolicy,
+    },
     /// 一次待审批的工具调用(抄 dsh approval/asked):driver 阻塞等待
     /// 用户通过 REST 决策,审批期间 UI 依据该事件弹窗。
     ApprovalAsked {
@@ -509,6 +545,12 @@ fn derive_surface_inner(
     for envelope in events {
         let seq = envelope.seq;
         match &envelope.event {
+            SessionEvent::AgentDelivery { text, .. } => {
+                surface.push(SurfaceItem {
+                    seq,
+                    message: ChatMessage::user(text),
+                });
+            }
             SessionEvent::UserMessage { text, images, .. } => {
                 if !unanswered.is_empty() && !images.is_empty() {
                     pending_tool_images.extend(images.clone());
@@ -667,13 +709,17 @@ mod tests {
             cwd: "/tmp/work".to_string(),
             sandbox: true,
             parent_session: None,
+            subagent: None,
         };
         let json = serde_json::to_string(&header).unwrap();
         assert_eq!(
             json,
             r#"{"type":"session","version":0,"id":"0f8c","created_at":1700000000000,"cwd":"/tmp/work","sandbox":true}"#
         );
-        assert_eq!(serde_json::from_str::<SessionHeader>(&json).unwrap(), header);
+        assert_eq!(
+            serde_json::from_str::<SessionHeader>(&json).unwrap(),
+            header
+        );
     }
 
     #[test]
@@ -692,7 +738,7 @@ mod tests {
         );
     }
 
-#[test]
+    #[test]
     fn derive_messages_merges_tool_time_images_into_tool_result() {
         let events = vec![
             envelope(
@@ -749,7 +795,11 @@ mod tests {
         // 期望: user → assistant(tool_call) → tool(带图) — injected 消息不再插队
         assert_eq!(messages.len(), 3, "{messages:?}");
         assert_eq!(messages[2].role, crate::message::ChatRole::Tool);
-        assert_eq!(messages[2].images.len(), 1, "截图应并入 tool-result: {messages:?}");
+        assert_eq!(
+            messages[2].images.len(),
+            1,
+            "截图应并入 tool-result: {messages:?}"
+        );
         assert!(messages[2].content.contains("截图"));
     }
 
@@ -803,7 +853,14 @@ mod tests {
     fn derive_projects_user_assistant_and_tool() {
         let events = vec![
             envelope(1, SessionEvent::TurnStart { turn: 1 }),
-            envelope(2, SessionEvent::UserMessage { text: "hi".into(), injected: false, images: Vec::new() }),
+            envelope(
+                2,
+                SessionEvent::UserMessage {
+                    text: "hi".into(),
+                    injected: false,
+                    images: Vec::new(),
+                },
+            ),
             envelope(3, SessionEvent::StepStart { turn: 1, step: 1 }),
             envelope(
                 4,
@@ -812,7 +869,9 @@ mod tests {
                     step: 1,
                     blocks: vec![
                         ContentBlock::Reasoning { text: "hmm".into() },
-                        ContentBlock::Text { text: "running".into() },
+                        ContentBlock::Text {
+                            text: "running".into(),
+                        },
                         ContentBlock::ToolCall {
                             id: "c1".into(),
                             name: "bash".into(),
@@ -853,7 +912,9 @@ mod tests {
                 SessionEvent::AssistantMessage {
                     turn: 1,
                     step: 2,
-                    blocks: vec![ContentBlock::Text { text: "done".into() }],
+                    blocks: vec![ContentBlock::Text {
+                        text: "done".into(),
+                    }],
                     usage: Some(TokenUsage {
                         input_tokens: 1,
                         output_tokens: 1,
@@ -879,10 +940,7 @@ mod tests {
         assert_eq!(assistant.content, "running");
         assert_eq!(assistant.reasoning_content.as_deref(), None);
         assert_eq!(assistant.tool_calls.len(), 1);
-        assert_eq!(
-            messages[2],
-            ChatMessage::tool_result("c1", "exit code: 0")
-        );
+        assert_eq!(messages[2], ChatMessage::tool_result("c1", "exit code: 0"));
         assert_eq!(messages[3].content, "done");
     }
 
@@ -890,7 +948,14 @@ mod tests {
     fn derive_folds_tool_result_replacement() {
         let events = vec![
             envelope(1, SessionEvent::TurnStart { turn: 1 }),
-            envelope(2, SessionEvent::UserMessage { text: "hi".into(), injected: false, images: Vec::new() }),
+            envelope(
+                2,
+                SessionEvent::UserMessage {
+                    text: "hi".into(),
+                    injected: false,
+                    images: Vec::new(),
+                },
+            ),
             envelope(
                 3,
                 SessionEvent::AssistantMessage {
@@ -953,7 +1018,14 @@ mod tests {
     #[test]
     fn derive_skips_empty_assistant_and_synthesizes_missing_results() {
         let events = vec![
-            envelope(1, SessionEvent::UserMessage { text: "go".into(), injected: false, images: Vec::new() }),
+            envelope(
+                1,
+                SessionEvent::UserMessage {
+                    text: "go".into(),
+                    injected: false,
+                    images: Vec::new(),
+                },
+            ),
             envelope(
                 2,
                 SessionEvent::AssistantMessage {
@@ -1016,12 +1088,12 @@ mod tests {
         );
         // 旧日志:{"kind":"aborted"} 无 cause → 兼容加载为 None。
         let legacy = serde_json::from_str::<TurnEndReason>(r#"{"kind":"aborted"}"#).unwrap();
-        assert_eq!(
-            legacy,
-            TurnEndReason::Aborted { cause: None }
-        );
+        assert_eq!(legacy, TurnEndReason::Aborted { cause: None });
         // 输出保持旧形状(无 cause 不写字段)。
-        assert_eq!(serde_json::to_string(&legacy).unwrap(), r#"{"kind":"aborted"}"#);
+        assert_eq!(
+            serde_json::to_string(&legacy).unwrap(),
+            r#"{"kind":"aborted"}"#
+        );
     }
 
     #[test]
@@ -1069,10 +1141,7 @@ mod tests {
         assert!(json.contains(r#""provider":"cat""#));
         assert!(json.contains(r#""reason":"initial""#));
         assert!(!json.contains("startsSeries"));
-        assert_eq!(
-            serde_json::from_str::<SessionEnvelope>(&json).unwrap(),
-            env
-        );
+        assert_eq!(serde_json::from_str::<SessionEnvelope>(&json).unwrap(), env);
 
         let ctx = envelope(
             4,
@@ -1114,10 +1183,7 @@ mod tests {
         let json = serde_json::to_string(&env).unwrap();
         assert!(json.contains(r#""error_identity":{"name":"bash","code":"SANDBOX_DENIED"}"#));
         assert!(json.contains(r#""meta":{"diff":"…"}"#));
-        assert_eq!(
-            serde_json::from_str::<SessionEnvelope>(&json).unwrap(),
-            env
-        );
+        assert_eq!(serde_json::from_str::<SessionEnvelope>(&json).unwrap(), env);
     }
 
     /// 两轮完整对话:1 turn-start, 2 user, 3 assistant, 4 turn-end,
@@ -1125,7 +1191,14 @@ mod tests {
     fn two_turn_log() -> Vec<SessionEnvelope> {
         let mut events = vec![
             envelope(1, SessionEvent::TurnStart { turn: 1 }),
-            envelope(2, SessionEvent::UserMessage { text: "first".into(), injected: false, images: Vec::new() }),
+            envelope(
+                2,
+                SessionEvent::UserMessage {
+                    text: "first".into(),
+                    injected: false,
+                    images: Vec::new(),
+                },
+            ),
             envelope(
                 3,
                 SessionEvent::AssistantMessage {
@@ -1137,21 +1210,42 @@ mod tests {
                     source_event_seqs: Vec::new(),
                 },
             ),
-            envelope(4, SessionEvent::TurnEnd { turn: 1, reason: TurnEndReason::Completed }),
+            envelope(
+                4,
+                SessionEvent::TurnEnd {
+                    turn: 1,
+                    reason: TurnEndReason::Completed,
+                },
+            ),
             envelope(5, SessionEvent::TurnStart { turn: 2 }),
-            envelope(6, SessionEvent::UserMessage { text: "second".into(), injected: false, images: Vec::new() }),
+            envelope(
+                6,
+                SessionEvent::UserMessage {
+                    text: "second".into(),
+                    injected: false,
+                    images: Vec::new(),
+                },
+            ),
             envelope(
                 7,
                 SessionEvent::AssistantMessage {
                     turn: 2,
                     step: 1,
-                    blocks: vec![ContentBlock::Text { text: "done".into() }],
+                    blocks: vec![ContentBlock::Text {
+                        text: "done".into(),
+                    }],
                     usage: None,
                     interrupted: false,
                     source_event_seqs: Vec::new(),
                 },
             ),
-            envelope(8, SessionEvent::TurnEnd { turn: 2, reason: TurnEndReason::Completed }),
+            envelope(
+                8,
+                SessionEvent::TurnEnd {
+                    turn: 2,
+                    reason: TurnEndReason::Completed,
+                },
+            ),
         ];
         for (index, envelope) in events.iter_mut().enumerate() {
             envelope.seq = index as u64 + 1;
@@ -1191,7 +1285,14 @@ mod tests {
         let mut events = two_turn_log();
         events.insert(
             4,
-            envelope(0, SessionEvent::UserMessage { text: "next turn prompt".into(), injected: false, images: Vec::new() }),
+            envelope(
+                0,
+                SessionEvent::UserMessage {
+                    text: "next turn prompt".into(),
+                    injected: false,
+                    images: Vec::new(),
+                },
+            ),
         );
         for (index, envelope) in events.iter_mut().enumerate() {
             envelope.seq = index as u64 + 1;
@@ -1206,7 +1307,14 @@ mod tests {
     fn fork_cut_without_any_completed_turn_is_unavailable() {
         let events = vec![
             envelope(1, SessionEvent::TurnStart { turn: 1 }),
-            envelope(2, SessionEvent::UserMessage { text: "hi".into(), injected: false, images: Vec::new() }),
+            envelope(
+                2,
+                SessionEvent::UserMessage {
+                    text: "hi".into(),
+                    injected: false,
+                    images: Vec::new(),
+                },
+            ),
         ];
         assert_eq!(fork_cut_index(&events, None), None);
         // 锚点在未完成轮次内且不越过末尾:无边界 → None(dsh fork-unavailable)。
@@ -1227,7 +1335,14 @@ mod tests {
         };
         let long = "A".repeat(96);
         let events = vec![
-            envelope(1, SessionEvent::UserMessage { text: "hi".into(), injected: false, images: Vec::new() }),
+            envelope(
+                1,
+                SessionEvent::UserMessage {
+                    text: "hi".into(),
+                    injected: false,
+                    images: Vec::new(),
+                },
+            ),
             envelope(
                 2,
                 SessionEvent::AssistantMessage {
@@ -1274,13 +1389,22 @@ mod tests {
     #[test]
     fn derive_folds_compaction_summary_into_keep_window_order() {
         let events = vec![
-            envelope(1, SessionEvent::UserMessage { text: "old request".into(), injected: false, images: Vec::new() }),
+            envelope(
+                1,
+                SessionEvent::UserMessage {
+                    text: "old request".into(),
+                    injected: false,
+                    images: Vec::new(),
+                },
+            ),
             envelope(
                 2,
                 SessionEvent::AssistantMessage {
                     turn: 1,
                     step: 1,
-                    blocks: vec![ContentBlock::Text { text: "old work".into() }],
+                    blocks: vec![ContentBlock::Text {
+                        text: "old work".into(),
+                    }],
                     usage: None,
                     interrupted: false,
                     source_event_seqs: Vec::new(),
@@ -1300,13 +1424,22 @@ mod tests {
                     post_tokens: 10,
                 },
             ),
-            envelope(4, SessionEvent::UserMessage { text: "now this".into(), injected: false, images: Vec::new() }),
+            envelope(
+                4,
+                SessionEvent::UserMessage {
+                    text: "now this".into(),
+                    injected: false,
+                    images: Vec::new(),
+                },
+            ),
             envelope(
                 5,
                 SessionEvent::AssistantMessage {
                     turn: 1,
                     step: 3,
-                    blocks: vec![ContentBlock::Text { text: "fresh reply".into() }],
+                    blocks: vec![ContentBlock::Text {
+                        text: "fresh reply".into(),
+                    }],
                     usage: None,
                     interrupted: false,
                     source_event_seqs: Vec::new(),

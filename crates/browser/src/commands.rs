@@ -103,6 +103,7 @@ pub(crate) async fn dispatch(
         BrowserCommand::Click {
             tab_id,
             r#ref,
+            locator,
             x,
             y,
             button,
@@ -111,7 +112,16 @@ pub(crate) async fn dispatch(
             let started = std::time::Instant::now();
             match tab(&mut ctx, tab_id.as_deref()).await {
                 Ok(id) => {
-                    let point = match resolve_point(&mut ctx, &id, r#ref.as_deref(), x, y).await {
+                    let reference = if let Some(locator) = locator.as_deref() {
+                        match resolve_locator(&mut ctx, &id, locator).await {
+                            Ok(value) => Some(value),
+                            Err(error) => return error,
+                        }
+                    } else {
+                        r#ref
+                    };
+                    let point = match resolve_point(&mut ctx, &id, reference.as_deref(), x, y).await
+                    {
                         Ok(point) => point,
                         Err(e) => return e,
                     };
@@ -410,21 +420,8 @@ pub(crate) async fn dispatch(
             match tab(&mut ctx, tab_id.as_deref()).await {
                 Ok(id) => {
                     crate::manager::close_tab_full(ctx.inner, ctx.manager, &id).await;
-                    // 关到最后一个 tab:补一个空白 tab 兜底,面板/工具调用
-                    // 永远有 active tab 可用(否则 resolve_tab 直接报 no_tab)。
-                    if ctx.inner.tabs.is_empty() {
-                        match crate::manager::BrowserManager::create_tab_inner(ctx.inner, None)
-                            .await
-                        {
-                            Ok(new_id) => {
-                                ctx.set_active(&new_id);
-                                ctx.broadcast_tabs_changed();
-                            }
-                            Err(error) => {
-                                tracing::warn!(%error, "重建兜底 tab 失败");
-                            }
-                        }
-                    }
+                    // 最后一个 tab 关闭后保持真正的空实例；管理器会立即回收
+                    // CDP、Chrome 进程和 profile 锁，避免后台残留挤占资源。
                     CommandOutcome::ok_value(json!({"closed": true}), elapsed(&started))
                 }
                 Err(e) => e,
@@ -651,6 +648,19 @@ async fn resolve_ref(ctx: &mut Ctx<'_>, tab_id: &str, reference: &str) -> Resolv
         .eval_json(tab_id, &scripts::resolve_ref_center_js(reference))
         .await?;
     if value.get("found").and_then(Value::as_bool) != Some(true) {
+        // 页面可能刚完成导航或 React 重绘：自动刷新一次快照并重解析，
+        // 把短暂的 stale ref 转换为稳定定位，而不是要求模型重复调用。
+        let _ = ctx
+            .eval_json(tab_id, &scripts::snapshot_js(300, 300, false))
+            .await;
+        let refreshed = ctx
+            .eval_json(tab_id, &scripts::resolve_ref_center_js(reference))
+            .await?;
+        if refreshed.get("found").and_then(Value::as_bool) == Some(true) {
+            let cx = refreshed.get("cx").and_then(Value::as_f64).unwrap_or(0.0);
+            let cy = refreshed.get("cy").and_then(Value::as_f64).unwrap_or(0.0);
+            return Ok((cx, cy));
+        }
         let reason = value
             .get("reason")
             .and_then(Value::as_str)
@@ -664,6 +674,25 @@ async fn resolve_ref(ctx: &mut Ctx<'_>, tab_id: &str, reference: &str) -> Resolv
     let cx = value.get("cx").and_then(Value::as_f64).unwrap_or(0.0);
     let cy = value.get("cy").and_then(Value::as_f64).unwrap_or(0.0);
     Ok((cx, cy))
+}
+
+async fn resolve_locator(
+    ctx: &mut Ctx<'_>,
+    tab_id: &str,
+    locator: &str,
+) -> Result<String, CommandOutcome> {
+    let expression = format!(
+        r#"(function(){{var q={};var el=null;try{{el=document.querySelector(q);}}catch(e){{}}if(!el){{var all=Array.from(document.querySelectorAll('*'));el=all.find(function(n){{return (n.getAttribute('aria-label')||n.innerText||n.value||'').trim()===q;}});}}if(!el)return JSON.stringify({{ok:false}});var m=window.__zcodeRefs||new Map();var ref='l'+Date.now();m.set(ref,el);window.__zcodeRefs=m;return JSON.stringify({{ok:true,ref:ref}});}})()"#,
+        serde_json::to_string(locator).unwrap_or_else(|_| "\"\"".into())
+    );
+    let value = ctx.eval_json(tab_id, &expression).await?;
+    value
+        .get("ref")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .ok_or_else(|| {
+            CommandOutcome::err("locator_not_found", format!("未找到元素: {locator}"), 0)
+        })
 }
 
 /// CDP 鼠标三连(ZCode `dispatchClickAt` 同款)。

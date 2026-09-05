@@ -102,7 +102,10 @@ impl SessionFileHistory {
 #[async_trait]
 impl FileHistoryBackend for SessionFileHistory {
     async fn track_before_write(&self, path: &Path) -> Result<(), String> {
-        let mut inner = self.inner.lock().unwrap_or_else(|poison| poison.into_inner());
+        let mut inner = self
+            .inner
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
         let key = self.relative_key(&inner.cwd, path);
         let version = capture_current(&self.root, path, inner.current.get(&key).cloned())?;
         inner.tracked.insert(key.clone());
@@ -132,14 +135,20 @@ impl FileHistoryStore {
     }
 
     fn get_or_create(&self, session_id: &str, cwd: &Path) -> Arc<SessionFileHistory> {
-        let mut map = self.sessions.lock().unwrap_or_else(|poison| poison.into_inner());
+        let mut map = self
+            .sessions
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
         if let Some(session) = map.get(session_id) {
             return session.clone();
         }
         let session = Arc::new(SessionFileHistory::new(session_id, &self.home, cwd));
         // 恢复持久化快照。
         {
-            let mut inner = session.inner.lock().unwrap_or_else(|poison| poison.into_inner());
+            let mut inner = session
+                .inner
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
             inner.snapshots = SessionFileHistory::read_snapshots(&session.root);
             let snapshots = inner.snapshots.clone();
             for snapshot in &snapshots {
@@ -168,7 +177,10 @@ impl FileHistoryStore {
         message_seq: u64,
     ) -> Result<(), String> {
         let session = self.get_or_create(session_id, cwd);
-        let mut inner = session.inner.lock().unwrap_or_else(|poison| poison.into_inner());
+        let mut inner = session
+            .inner
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
         // 先把所有已跟踪文件的磁盘最新状态备份进 current,再让新快照继承。
         // 这样“本消息没改过的文件”也保留当时版本,回退不会误删。
         let keys: Vec<String> = inner.current.keys().cloned().collect();
@@ -194,7 +206,10 @@ impl FileHistoryStore {
         message_seq: u64,
     ) -> Result<Vec<FileDiffEntry>, String> {
         let session = self.get_or_create(session_id, cwd);
-        let inner = session.inner.lock().unwrap_or_else(|poison| poison.into_inner());
+        let inner = session
+            .inner
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
         let target = inner
             .snapshots
             .iter()
@@ -259,7 +274,10 @@ impl FileHistoryStore {
         message_seq: u64,
     ) -> Result<Vec<String>, String> {
         let session = self.get_or_create(session_id, cwd);
-        let mut inner = session.inner.lock().unwrap_or_else(|poison| poison.into_inner());
+        let mut inner = session
+            .inner
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
         let target_index = inner
             .snapshots
             .iter()
@@ -344,9 +362,13 @@ fn capture_current(
         })
     } else {
         match current {
-            Some(FileVersion { backup: None, version }) => {
-                Ok(FileVersion { backup: None, version })
-            }
+            Some(FileVersion {
+                backup: None,
+                version,
+            }) => Ok(FileVersion {
+                backup: None,
+                version,
+            }),
             Some(FileVersion { version, .. }) => Ok(FileVersion {
                 backup: None,
                 version: version + 1,
@@ -361,20 +383,11 @@ fn capture_current(
 
 #[async_trait]
 impl FileHistoryProvider for FileHistoryStore {
-    async fn backend(
-        &self,
-        session_id: &str,
-        cwd: &Path,
-    ) -> Option<Arc<dyn FileHistoryBackend>> {
+    async fn backend(&self, session_id: &str, cwd: &Path) -> Option<Arc<dyn FileHistoryBackend>> {
         Some(self.backend(session_id, cwd))
     }
 
-    async fn snapshot(
-        &self,
-        session_id: &str,
-        cwd: &Path,
-        message_seq: u64,
-    ) -> Result<(), String> {
+    async fn snapshot(&self, session_id: &str, cwd: &Path, message_seq: u64) -> Result<(), String> {
         self.snapshot(session_id, cwd, message_seq).await
     }
 }
@@ -384,10 +397,7 @@ mod tests {
     use super::*;
 
     fn temp_root() -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "denia-file-history-{}",
-            uuid::Uuid::new_v4()
-        ));
+        let dir = std::env::temp_dir().join(format!("denia-file-history-{}", uuid::Uuid::new_v4()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir

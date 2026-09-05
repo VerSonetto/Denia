@@ -256,6 +256,8 @@ mod tests {
 
     fn context(cwd: std::path::PathBuf) -> ToolContext {
         ToolContext {
+            session_id: None,
+            selection: None,
             cwd,
             cancel: CancellationToken::new(),
             confined: true,

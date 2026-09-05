@@ -211,6 +211,8 @@ mod tests {
 
     fn ctx_with_sink(collected: Arc<Mutex<Vec<SessionEvent>>>) -> ToolContext {
         ToolContext {
+            session_id: None,
+            selection: None,
             cwd: std::env::temp_dir(),
             cancel: CancellationToken::new(),
             confined: true,
@@ -226,6 +228,8 @@ mod tests {
 
     fn ctx_without_sink() -> ToolContext {
         ToolContext {
+            session_id: None,
+            selection: None,
             cwd: std::env::temp_dir(),
             cancel: CancellationToken::new(),
             confined: true,

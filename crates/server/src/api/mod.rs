@@ -7,6 +7,7 @@ mod credentials;
 mod events;
 mod fs;
 mod llm;
+mod runtime;
 mod sessions;
 mod settings;
 mod system_prompt;
@@ -27,6 +28,7 @@ pub fn router() -> Router<Arc<AppState>> {
         .merge(credentials::router())
         .merge(llm::router())
         .merge(sessions::router())
+        .merge(runtime::router())
         .merge(workspaces::router())
         .merge(uploads::router())
         .merge(fs::router())

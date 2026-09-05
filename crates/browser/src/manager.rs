@@ -62,6 +62,9 @@ pub struct BrowserManager {
     /// 启动互斥:并发 execute 同时发现掉线时,只放一个进 get_or_start,
     /// 其余等它完成后重查状态(否则会拉起两个 Chrome 抢同一 profile)。
     starting: tokio::sync::Mutex<()>,
+    /// 串行化命令的完整生命周期，避免并发命令在 tab 刚关闭/重连时
+    /// 交叉使用失效的 CDP session。
+    command_gate: tokio::sync::Mutex<()>,
     generation: AtomicU64,
     event_broadcast: tokio::sync::broadcast::Sender<BrowserEvent>,
     /// 挂起 JS dialog(tabId -> {type,message});事件泵写入,getDialog/handleDialog 读写。
@@ -272,6 +275,7 @@ impl BrowserManager {
         Self {
             inner: std::sync::Arc::new(Mutex::new(None)),
             starting: tokio::sync::Mutex::new(()),
+            command_gate: tokio::sync::Mutex::new(()),
             generation: AtomicU64::new(0),
             event_broadcast,
             pending_dialogs: std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
@@ -374,7 +378,18 @@ impl BrowserManager {
         // 或上次启动失败半途):启动前先把旧 Chrome 清干净再拉新的。
         self.on_pump_exit().await;
         let profile = self.profile_dir();
-        let mut launched = launch::launch_headless(&executable, &profile).await?;
+        // 启动失败常见于 Chrome 在退出竞态中仍持有 profile 锁；清场后
+        // 只做一次受控重试，避免把瞬时启动竞态暴露给调用方。
+        let mut launched = match launch::launch_headless(&executable, &profile).await {
+            Ok(value) => value,
+            Err(first_error) => {
+                tracing::warn!(error = %first_error, "浏览器首次启动失败，清场后重试");
+                launch::shutdown_profile_processes_sync(&profile);
+                launch::launch_headless(&executable, &profile)
+                    .await
+                    .map_err(|second_error| format!("{first_error};重试失败: {second_error}"))?
+            }
+        };
         // 有头模式端口监听可能晚于 DevToolsActivePort 落盘:指数退避重试连接。
         let mut connected_pair: Option<(
             CdpHandle,
@@ -613,6 +628,7 @@ impl BrowserManager {
     /// 避免面板打开/关闭就带起一个 Chrome 进程。
     pub async fn execute(&self, command: BrowserCommand) -> CommandOutcome {
         let started = Instant::now();
+        let _command_guard = self.command_gate.lock().await;
         if Self::is_passive(&command) && !self.is_healthy().await {
             return CommandOutcome::err("backend_unavailable", "浏览器未运行", elapsed(&started));
         }
@@ -636,17 +652,46 @@ impl BrowserManager {
                 }
             }
         }
-        let outcome = {
-            let mut guard = self.inner.lock().await;
-            let Some(inner) = guard.as_mut() else {
-                return CommandOutcome::err(
-                    "backend_unavailable",
-                    "浏览器未就绪",
-                    elapsed(&started),
-                );
+        // CDP 在页面崩溃/浏览器更新时可能在命令中途断开。重建实例并
+        // 重放一次命令，避免把瞬时传输错误暴露给上层；业务错误不会重放。
+        let mut attempt = 0u8;
+        let outcome = loop {
+            let outcome = {
+                let mut guard = self.inner.lock().await;
+                let Some(inner) = guard.as_mut() else {
+                    break CommandOutcome::err(
+                        "backend_unavailable",
+                        "浏览器未就绪",
+                        elapsed(&started),
+                    );
+                };
+                commands::dispatch(self, inner, command.clone()).await
             };
-            commands::dispatch(self, inner, command).await
+            let transient = outcome.error.as_ref().is_some_and(|error| {
+                matches!(error.code.as_str(), "cdp_error" | "backend_unavailable")
+                    || error.message.contains("cdp_disconnected")
+                    || error.message.contains("cdp_writer_closed")
+                    || error.message.contains("cdp_timeout")
+            });
+            if !transient || attempt >= 1 {
+                break outcome;
+            }
+            attempt += 1;
+            self.on_pump_exit().await;
+            if self.get_or_start().await.is_err() {
+                break outcome;
+            }
         };
+        // 关闭最后一个 tab 是明确的资源生命周期边界：立即销毁实例，
+        // 使 profile 不再被 Chrome 子进程锁住。下一条主动命令会按需重启。
+        let no_tabs = {
+            let guard = self.inner.lock().await;
+            guard.as_ref().is_some_and(|inner| inner.tabs.is_empty())
+        };
+        if no_tabs {
+            self.on_pump_exit().await;
+            let _ = self.event_broadcast.send(BrowserEvent::Exited);
+        }
         self.maybe_evict_tabs().await;
         outcome
     }

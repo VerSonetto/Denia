@@ -43,6 +43,7 @@ function xpathOf(el){{
   return '/'+parts.join('/');
 }}
 try{{window.__zcodeRefs=new Map();}}catch(e){{window.__zcodeRefs=null;}}
+try{{window.__zcodeRefMeta=new Map();}}catch(e){{window.__zcodeRefMeta=null;}}
 var elRef=(typeof WeakMap!=='undefined')?new WeakMap():null;
 var vw=window.innerWidth||document.documentElement.clientWidth||0;
 var vh=window.innerHeight||document.documentElement.clientHeight||0;
@@ -67,6 +68,7 @@ for(var i=0;i<nodes.length;i++){{
   if(tag==='a'&&el.getAttribute('href'))out.href=el.href;
   if(tag==='select'){{out.options=Array.prototype.slice.call(el.options).slice(0,20).map(function(o){{return o.value;}});}}
   if(el.checked!==undefined)out.checked=!!el.checked;
+  if(window.__zcodeRefMeta)window.__zcodeRefMeta.set(ref,{{selector:out.selector,xpath:out.xpath,role:out.role,name:out.name,tag:tag}});
   elements.push(out);
 }}
 var domCount=0;var domTruncated=false;
@@ -79,11 +81,16 @@ for(var j=0;j<domNodes.length;j++){{
   var txt=(d.innerText||'').trim();
   dom.push({{tag:d.tagName.toLowerCase(),text:txt.length>120?txt.slice(0,120)+'…':txt}});
 }}
+// 轻量 AX 树：优先使用显式 aria 语义，补充可见文本和层级，供模型稳定定位。
+var ax=[];var axCount=0;
+function axRole(el){{return el.getAttribute('role')||({{button:'button',a:'link',input:'textbox',textarea:'textbox',select:'combobox',img:'img',h1:'heading',h2:'heading',h3:'heading',h4:'heading',h5:'heading',h6:'heading'}}[el.tagName.toLowerCase()]||'generic');}}
+function axWalk(el,depth){{if(!el||depth>8||axCount>=DOM_MAX)return;var hidden=isHidden(el);if(hidden&&!INCLUDE_HIDDEN)return;var role=axRole(el);var name=(el.getAttribute('aria-label')||el.getAttribute('alt')||el.innerText||el.value||'').toString().trim().replace(/\\s+/g,' ').slice(0,200);if(role!=='generic'||name){{ax.push({{role:role,name:name,level:depth,ref:(window.__zcodeRefMeta&&Array.from(window.__zcodeRefMeta.entries()).find(function(x){{return x[1].selector&&el.matches&&el.matches(x[1].selector);}})||[])[0]||null}});axCount++;}}Array.prototype.forEach.call(el.children||[],function(child){{axWalk(child,depth+1);}});}}
+axWalk(document.body,0);
 return JSON.stringify({{
   url:location.href,title:document.title,viewportWidth:vw,viewportHeight:vh,
   scrollX:window.scrollX||0,scrollY:window.scrollY||0,
   elements:elements,truncated:truncated,
-  dom:dom,domTruncated:domTruncated
+  dom:dom,domTruncated:domTruncated,accessibility:ax
 }});
 }})()"#,
         max = max,
@@ -131,6 +138,15 @@ var ref={ref_json};
 var map=window.__zcodeRefs;
 if(!map)return JSON.stringify({{found:false,reason:'no_snapshot'}});
 var el=map.get(ref);
+if(!el||!el.isConnected){{
+  var meta=window.__zcodeRefMeta&&window.__zcodeRefMeta.get(ref), candidates=[];
+  try{{if(meta&&meta.selector)candidates=Array.from(document.querySelectorAll(meta.selector));}}catch(e){{}}
+  if(!candidates.length&&meta&&meta.xpath){{try{{var x=document.evaluate(meta.xpath,document,null,XPathResult.FIRST_ORDERED_NODE_TYPE,null).singleNodeValue;if(x)candidates=[x];}}catch(e){{}}}}
+  if(meta&&candidates.length){{
+    el=candidates.find(function(node){{return (!meta.role||node.getAttribute('role')===meta.role)&&(!meta.name||((node.getAttribute('aria-label')||node.innerText||node.value||node.placeholder||'').toString().slice(0,200)===meta.name));}})||candidates[0];
+    if(window.__zcodeRefs)window.__zcodeRefs.set(ref,el);
+  }}
+}}
 if(!el||!el.isConnected)return JSON.stringify({{found:false,reason:'stale_ref'}});
 var r=el.getBoundingClientRect();
 if(r.width===0&&r.height===0)return JSON.stringify({{found:false,reason:'hidden'}});

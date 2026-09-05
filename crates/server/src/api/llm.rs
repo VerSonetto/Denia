@@ -13,9 +13,7 @@ use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use denia_core::message::ChatMessage;
-use denia_llm::{
-    GenerateRequest, WireProtocol, build_model_catalog, discover_models,
-};
+use denia_llm::{GenerateRequest, WireProtocol, build_model_catalog, discover_models};
 use futures::{Stream, StreamExt};
 use serde::Deserialize;
 use serde_json::json;

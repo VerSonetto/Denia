@@ -43,12 +43,8 @@ async fn browser_command(
     State(state): State<Arc<AppState>>,
     Json(body): Json<CommandBody>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
-    let command: BrowserCommand = serde_json::from_value(body.command).map_err(|error| {
-        (
-            StatusCode::BAD_REQUEST,
-            format!("非法浏览器命令: {error}"),
-        )
-    })?;
+    let command: BrowserCommand = serde_json::from_value(body.command)
+        .map_err(|error| (StatusCode::BAD_REQUEST, format!("非法浏览器命令: {error}")))?;
     let outcome = state.browser.execute(command).await;
     let value = serde_json::to_value(&outcome).unwrap_or_else(|_| serde_json::json!({"ok": false}));
     Ok(Json(value))
@@ -61,8 +57,9 @@ async fn browser_stream(
     let receiver = state.browser.subscribe();
     let stream = BroadcastStream::new(receiver).filter_map(|result| async move {
         match result {
-            Ok(event) => Some(Ok(Event::default()
-                .data(serde_json::to_string(&event).unwrap_or_default()))),
+            Ok(event) => Some(Ok(
+                Event::default().data(serde_json::to_string(&event).unwrap_or_default())
+            )),
             Err(_) => None,
         }
     });

@@ -15,10 +15,13 @@ use denia_credentials::CredentialStore;
 use denia_settings::SettingsStore;
 use serde::{Deserialize, Serialize};
 
-use crate::catalog::{highest_reasoning_effort, DiscoveredModel, LlmModelInfo, LlmResolvedModelInfo, ProviderInfo, ReasoningEffortInfo, ReasoningInfo};
+use crate::catalog::{
+    DiscoveredModel, LlmModelInfo, LlmResolvedModelInfo, ProviderInfo, ReasoningEffortInfo,
+    ReasoningInfo, highest_reasoning_effort,
+};
 use crate::http::http_error_failure;
 use crate::protocols::{
-    self, CompletionsStream, EventTranslator, ResponsesStream, AnthropicStream, WireProtocol,
+    self, AnthropicStream, CompletionsStream, EventTranslator, ResponsesStream, WireProtocol,
 };
 use crate::request::GenerateRequest;
 use crate::sse::sse_chunk_stream;
@@ -119,8 +122,11 @@ fn openai_reasoning_info(model: &OpenAiCatalogModel) -> Option<ReasoningInfo> {
         return None;
     }
     let known_order: Vec<&str> = OPENAI_KNOWN_EFFORTS.iter().map(|(id, _)| *id).collect();
-    let default_effort = highest_reasoning_effort(efforts.iter().map(|effort| effort.id.as_str()), &known_order)
-        .or_else(|| efforts.first().map(|effort| effort.id.clone()));
+    let default_effort = highest_reasoning_effort(
+        efforts.iter().map(|effort| effort.id.as_str()),
+        &known_order,
+    )
+    .or_else(|| efforts.first().map(|effort| effort.id.clone()));
     Some(ReasoningInfo {
         efforts,
         default_effort,
@@ -230,9 +236,13 @@ impl LlmAdapter for OpenAiCompatAdapter {
         }
         // No declared catalog: interrogate the endpoint itself.
         let api_key = self.resolve_api_key(&profile)?;
-        let discovered =
-            discover_models(&self.http, &profile.base_url, profile.protocol, api_key.as_deref())
-                .await?;
+        let discovered = discover_models(
+            &self.http,
+            &profile.base_url,
+            profile.protocol,
+            api_key.as_deref(),
+        )
+        .await?;
         Ok(discovered
             .into_iter()
             .map(|model| LlmModelInfo {
@@ -301,18 +311,15 @@ impl LlmAdapter for OpenAiCompatAdapter {
         let body = match protocol {
             WireProtocol::ChatCompletions => protocols::build_openai_body(request),
             WireProtocol::Responses => protocols::build_responses_body(request),
-            WireProtocol::AnthropicMessages => protocols::build_anthropic_body(
-                request,
-                max_tokens.unwrap_or(DEFAULT_MAX_TOKENS),
-            ),
+            WireProtocol::AnthropicMessages => {
+                protocols::build_anthropic_body(request, max_tokens.unwrap_or(DEFAULT_MAX_TOKENS))
+            }
         };
 
         let url = match protocol {
             WireProtocol::ChatCompletions => protocols::chat_completions_url(&profile.base_url),
             WireProtocol::Responses => protocols::responses_url(&profile.base_url),
-            WireProtocol::AnthropicMessages => {
-                protocols::anthropic_messages_url(&profile.base_url)
-            }
+            WireProtocol::AnthropicMessages => protocols::anthropic_messages_url(&profile.base_url),
         };
         let mut builder = self
             .http
@@ -340,13 +347,19 @@ impl LlmAdapter for OpenAiCompatAdapter {
         let body_size = serde_json::to_string(&body).map(|s| s.len()).unwrap_or(0);
         let request_timeout_secs = if body_size > 100_000 { 120 } else { 60 };
         builder = builder.timeout(Duration::from_secs(request_timeout_secs));
-        let response = builder.json(&body).send().await.map_err(crate::http::transport_error)?;
+        let response = builder
+            .json(&body)
+            .send()
+            .await
+            .map_err(crate::http::transport_error)?;
 
         if !response.status().is_success() {
             let status = response.status();
             let headers = response.headers().clone();
             let body_text = response.text().await.unwrap_or_default();
-            return Err(LlmError::from_failure(http_error_failure(status, &body_text, &headers)));
+            return Err(LlmError::from_failure(http_error_failure(
+                status, &body_text, &headers,
+            )));
         }
         let translator: Box<dyn EventTranslator> = match protocol {
             WireProtocol::ChatCompletions => Box::new(CompletionsStream::new(UsageStyle::OpenAi)),
@@ -404,9 +417,14 @@ pub async fn discover_models(
         let status = response.status();
         let headers = response.headers().clone();
         let body_text = response.text().await.unwrap_or_default();
-        return Err(LlmError::from_failure(http_error_failure(status, &body_text, &headers)));
+        return Err(LlmError::from_failure(http_error_failure(
+            status, &body_text, &headers,
+        )));
     }
-    let bytes = response.bytes().await.map_err(crate::http::transport_error)?;
+    let bytes = response
+        .bytes()
+        .await
+        .map_err(crate::http::transport_error)?;
     if bytes.len() > DISCOVERY_RESPONSE_CAP {
         return Err(LlmError::new(
             codes::MALFORMED_RESPONSE,
@@ -424,7 +442,9 @@ pub async fn discover_models(
         .into_iter()
         .map(|entry| DiscoveredModel {
             id: entry.id.clone(),
-            name: entry.owned_by.map(|owner| format!("{} ({owner})", entry.id)),
+            name: entry
+                .owned_by
+                .map(|owner| format!("{} ({owner})", entry.id)),
         })
         .collect())
 }

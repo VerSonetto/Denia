@@ -35,8 +35,8 @@ async fn capability(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     } else if cfg!(windows) || cfg!(target_os = "macos") {
         "native"
     } else if cfg!(target_os = "linux") {
-        let has_display = std::env::var_os("DISPLAY").is_some()
-            || std::env::var_os("WAYLAND_DISPLAY").is_some();
+        let has_display =
+            std::env::var_os("DISPLAY").is_some() || std::env::var_os("WAYLAND_DISPLAY").is_some();
         let has_tool = which("zenity") || which("kdialog");
         if has_display && has_tool {
             "native"
@@ -51,9 +51,7 @@ async fn capability(State(state): State<Arc<AppState>>) -> impl IntoResponse {
 
 fn which(tool: &str) -> bool {
     std::env::var_os("PATH")
-        .map(|paths| {
-            std::env::split_paths(&paths).any(|dir| dir.join(tool).exists())
-        })
+        .map(|paths| std::env::split_paths(&paths).any(|dir| dir.join(tool).exists()))
         .unwrap_or(false)
 }
 
@@ -61,8 +59,7 @@ fn which(tool: &str) -> bool {
 async fn mkdir(Json(body): Json<MkdirBody>) -> Result<impl IntoResponse, ApiError> {
     let parent = std::path::PathBuf::from(body.path.trim());
     let name = body.name.trim();
-    if name.is_empty() || name.contains('/') || name.contains('\\') || name == "." || name == ".."
-    {
+    if name.is_empty() || name.contains('/') || name.contains('\\') || name == "." || name == ".." {
         return Err(ApiError::bad_request(
             "directory-picker/create-failed",
             "invalid folder name",
@@ -100,11 +97,13 @@ async fn pick_dir() -> Result<impl IntoResponse, ApiError> {
             .pick_folder()
     })
     .await
-    .map_err(|e| ApiError::new(
-        axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-        "fs/pick-failed",
-        e.to_string(),
-    ))?;
+    .map_err(|e| {
+        ApiError::new(
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            "fs/pick-failed",
+            e.to_string(),
+        )
+    })?;
     Ok(Json(json!({
         "path": picked.map(|p| p.to_string_lossy().to_string()),
     })))
@@ -125,14 +124,14 @@ fn default_root() -> PathBuf {
 
 async fn list_dirs(Query(query): Query<BrowseQuery>) -> Result<impl IntoResponse, ApiError> {
     tokio::task::spawn_blocking(move || browse_impl(query.path))
-      .await
-      .map_err(|e| {
-          ApiError::new(
-              axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-              "fs/browse-failed",
-              e.to_string(),
-          )
-      })?
+        .await
+        .map_err(|e| {
+            ApiError::new(
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                "fs/browse-failed",
+                e.to_string(),
+            )
+        })?
 }
 
 fn browse_impl(path: Option<String>) -> Result<impl IntoResponse, ApiError> {

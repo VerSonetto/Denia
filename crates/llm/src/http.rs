@@ -1,8 +1,8 @@
 //! Shared HTTP error mapping for chat-completions endpoints.
 
 use denia_core::error::{LlmFailure, codes};
-use reqwest::header::{HeaderMap, RETRY_AFTER};
 use reqwest::StatusCode;
+use reqwest::header::{HeaderMap, RETRY_AFTER};
 use serde::Deserialize;
 
 #[derive(Debug, Deserialize)]
@@ -97,15 +97,32 @@ fn retry_after_ms(headers: &HeaderMap) -> Option<u64> {
 fn parse_imf_fixdate(value: &str) -> Option<u64> {
     // 固定布局:ddd, DD Mon YYYY HH:MM:SS GMT(29 字符)。
     let b = value.as_bytes();
-    if b.len() != 29 || !b[25..29].eq_ignore_ascii_case(b"GMT") || b[3] != b',' || b[4] != b' '
-        || b[7] != b' ' || b[11] != b' ' || b[16] != b' ' || b[19] != b':' || b[22] != b':'
+    if b.len() != 29
+        || !b[25..29].eq_ignore_ascii_case(b"GMT")
+        || b[3] != b','
+        || b[4] != b' '
+        || b[7] != b' '
+        || b[11] != b' '
+        || b[16] != b' '
+        || b[19] != b':'
+        || b[22] != b':'
     {
         return None;
     }
     let day = value[5..7].parse::<u32>().ok()?;
     let month = match &value[8..11] {
-        "Jan" => 1u32, "Feb" => 2, "Mar" => 3, "Apr" => 4, "May" => 5, "Jun" => 6,
-        "Jul" => 7, "Aug" => 8, "Sep" => 9, "Oct" => 10, "Nov" => 11, "Dec" => 12,
+        "Jan" => 1u32,
+        "Feb" => 2,
+        "Mar" => 3,
+        "Apr" => 4,
+        "May" => 5,
+        "Jun" => 6,
+        "Jul" => 7,
+        "Aug" => 8,
+        "Sep" => 9,
+        "Oct" => 10,
+        "Nov" => 11,
+        "Dec" => 12,
         _ => return None,
     };
     let year = value[12..16].parse::<i64>().ok()?;

@@ -14,7 +14,7 @@
 
 use denia_core::message::{ChatMessage, ChatRole};
 use denia_core::session::{SurfaceMessage, ToolResultPruneConfig};
-use denia_token_meter::{estimate_message, ContextPressure};
+use denia_token_meter::{ContextPressure, estimate_message};
 
 /// 层叠压缩/剪枝配置。默认值对齐 dsh base 装配(threshold 8192)与
 /// Claude Code auto-compact 的缓冲语义(有效窗口 = 窗口 - 输出预留 - buffer,
@@ -149,10 +149,12 @@ pub fn select_keep_start(
         let Some(call_id) = first.message.tool_call_id.as_deref() else {
             break;
         };
-        let Some(pos) = surface[..start]
-            .iter()
-            .rposition(|item| item.message.tool_calls.iter().any(|call| call.id == call_id))
-        else {
+        let Some(pos) = surface[..start].iter().rposition(|item| {
+            item.message
+                .tool_calls
+                .iter()
+                .any(|call| call.id == call_id)
+        }) else {
             break;
         };
         start = pos;
@@ -203,10 +205,9 @@ pub fn build_summary_messages(
             message
         })
         .collect();
-    messages.push(ChatMessage::user(SUMMARY_PROMPT.replace(
-        "{CUSTOM_INSTRUCTIONS}",
-        custom_instructions,
-    )));
+    messages.push(ChatMessage::user(
+        SUMMARY_PROMPT.replace("{CUSTOM_INSTRUCTIONS}", custom_instructions),
+    ));
     messages
 }
 
@@ -266,7 +267,9 @@ pub fn format_summary(summary: &str) -> String {
     }
     if let Some(start) = formatted.find("<summary>") {
         if let Some(end) = formatted[start..].find("</summary>") {
-            let content = formatted[start + "<summary>".len()..start + end].trim().to_string();
+            let content = formatted[start + "<summary>".len()..start + end]
+                .trim()
+                .to_string();
             formatted = format!("Summary:\n{content}");
         }
     }
@@ -354,11 +357,14 @@ mod tests {
     fn keep_window_skips_when_not_enough_history() {
         let settings = tiny();
         // 单条消息:无压缩区间(需要窗口前还有一条可压)。
-        let events = vec![envelope(1, denia_core::session::SessionEvent::UserMessage {
-            text: "hi".into(),
-            injected: false,
-            images: Vec::new(),
-        })];
+        let events = vec![envelope(
+            1,
+            denia_core::session::SessionEvent::UserMessage {
+                text: "hi".into(),
+                injected: false,
+                images: Vec::new(),
+            },
+        )];
         let surface = surface_of(&events);
         assert_eq!(select_keep_start(&surface, &settings), None);
     }
@@ -368,11 +374,14 @@ mod tests {
         let settings = tiny();
         let mut events: Vec<SessionEnvelope> = Vec::new();
         // 老历史:用户消息 + 一条大结果。
-        events.push(envelope(1, denia_core::session::SessionEvent::UserMessage {
-            text: "early request".into(),
-            injected: false,
-            images: Vec::new(),
-        }));
+        events.push(envelope(
+            1,
+            denia_core::session::SessionEvent::UserMessage {
+                text: "early request".into(),
+                injected: false,
+                images: Vec::new(),
+            },
+        ));
         events.push(envelope(
             2,
             denia_core::session::SessionEvent::AssistantMessage {
@@ -416,17 +425,23 @@ mod tests {
                 replaces: None,
             },
         ));
-        events.push(envelope(5, denia_core::session::SessionEvent::UserMessage {
-            text: "now do the fix".into(),
-            injected: false,
-            images: Vec::new(),
-        }));
+        events.push(envelope(
+            5,
+            denia_core::session::SessionEvent::UserMessage {
+                text: "now do the fix".into(),
+                injected: false,
+                images: Vec::new(),
+            },
+        ));
 
         let surface = surface_of(&events);
         let start = select_keep_start(&surface, &settings).expect("should find a window");
         // 保留窗口起点必须落在工具对之前:call(seq 3)与 result(seq 4)
         // 不能被切开。
-        assert!(start <= 1, "keep start must include the tool pair, got {start}");
+        assert!(
+            start <= 1,
+            "keep start must include the tool pair, got {start}"
+        );
     }
 
     #[test]

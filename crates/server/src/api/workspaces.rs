@@ -14,7 +14,10 @@ use crate::state::AppState;
 
 pub fn router() -> Router<Arc<AppState>> {
     Router::new()
-        .route("/api/workspaces", get(list_workspaces).post(create_workspace))
+        .route(
+            "/api/workspaces",
+            get(list_workspaces).post(create_workspace),
+        )
         .route("/api/workspaces/{id}", delete(delete_workspace))
 }
 
@@ -38,7 +41,9 @@ async fn create_workspace(
         .workspaces
         .create(std::path::Path::new(body.path.trim()), body.title)
         .map_err(|message| ApiError::bad_request("workspace/bad-path", message))?;
-    let _ = state.events.send(crate::state::ServerEvent::SessionsUpdated);
+    let _ = state
+        .events
+        .send(crate::state::ServerEvent::SessionsUpdated);
     Ok((
         axum::http::StatusCode::CREATED,
         Json(json!({ "workspace": record })),
@@ -61,6 +66,10 @@ async fn delete_workspace(
 
     // 1) 任一成员运行中 → 拒绝(让用户先取消,避免半删)。
     for session_id in &members {
+        state
+            .runtime
+            .ensure_removable(session_id)
+            .map_err(|e| ApiError::bad_request("runtime/active-child", e))?;
         if let Ok(live) = state.live.get_or_load(&state.sessions, session_id) {
             if live.running.load(std::sync::atomic::Ordering::SeqCst) {
                 return Err(ApiError::new(
@@ -74,6 +83,11 @@ async fn delete_workspace(
 
     // 2) 删除全部成员会话(账本残留 id 对 NotFound 幂等忽略,顺带清理)。
     for session_id in &members {
+        state
+            .runtime
+            .remove_owner(session_id)
+            .await
+            .map_err(|e| ApiError::bad_request("runtime/cleanup-failed", e))?;
         match state.sessions.delete(session_id) {
             Ok(()) => {}
             Err(denia_session::SessionError::NotFound(_)) => {}
@@ -84,6 +98,8 @@ async fn delete_workspace(
 
     // 3) 移除注册表记录本身。
     state.workspaces.take(&id);
-    let _ = state.events.send(crate::state::ServerEvent::SessionsUpdated);
+    let _ = state
+        .events
+        .send(crate::state::ServerEvent::SessionsUpdated);
     Ok(Json(json!({ "ok": true })))
 }

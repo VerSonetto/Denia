@@ -41,11 +41,20 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/api/sessions/{id}/events", get(get_session_events))
         .route("/api/sessions/{id}/prompt", post(prompt_session))
         .route("/api/sessions/{id}/cancel", post(cancel_session))
-        .route("/api/sessions/{id}/permission", axum::routing::put(set_session_permission))
-        .route("/api/sessions/{id}/approvals/{request_id}", post(answer_approval))
+        .route(
+            "/api/sessions/{id}/permission",
+            axum::routing::put(set_session_permission),
+        )
+        .route(
+            "/api/sessions/{id}/approvals/{request_id}",
+            post(answer_approval),
+        )
         .route("/api/sessions/{id}/fork", post(fork_session))
         .route("/api/sessions/{id}/follow", get(follow_session))
-        .route("/api/sessions/{id}/context-breakdown", get(context_breakdown))
+        .route(
+            "/api/sessions/{id}/context-breakdown",
+            get(context_breakdown),
+        )
         .route("/api/sessions/{id}/compact", post(compact_session))
         .route("/api/sessions/{id}/checkpoints", get(list_checkpoints))
         .route(
@@ -91,12 +100,13 @@ async fn create_session(
         ));
     }
     let workspace = match &body.workspace_id {
-        Some(id) => Some(
-            state
-                .workspaces
-                .get(id)
-                .ok_or_else(|| ApiError::new(StatusCode::NOT_FOUND, "workspace/not-found", "workspace not found"))?,
-        ),
+        Some(id) => Some(state.workspaces.get(id).ok_or_else(|| {
+            ApiError::new(
+                StatusCode::NOT_FOUND,
+                "workspace/not-found",
+                "workspace not found",
+            )
+        })?),
         None => None,
     };
     let cwd = match &workspace {
@@ -155,7 +165,10 @@ async fn get_session(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let live = state.live.get_or_load(&state.sessions, &id).map_err(ApiError::from_session)?;
+    let live = state
+        .live
+        .get_or_load(&state.sessions, &id)
+        .map_err(ApiError::from_session)?;
     let session = live.session.clone();
     Ok(Json(json!({
         "header": session.header(),
@@ -185,16 +198,17 @@ async fn get_session_events(
     Query(query): Query<SessionPageQuery>,
 ) -> Result<impl IntoResponse, ApiError> {
     let sessions = state.sessions.clone();
-    let page = tokio::task::spawn_blocking(move || sessions.read_page(&id, query.before, query.limit))
-        .await
-        .map_err(|error| {
-            ApiError::new(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "task/join",
-                error.to_string(),
-            )
-        })?
-        .map_err(ApiError::from_session)?;
+    let page =
+        tokio::task::spawn_blocking(move || sessions.read_page(&id, query.before, query.limit))
+            .await
+            .map_err(|error| {
+                ApiError::new(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "task/join",
+                    error.to_string(),
+                )
+            })?
+            .map_err(ApiError::from_session)?;
     Ok(Json(json!({
         "header": page.header,
         "events": page.events,
@@ -216,6 +230,11 @@ async fn delete_session(
             ));
         }
     }
+    state
+        .runtime
+        .remove_owner(&id)
+        .await
+        .map_err(|e| ApiError::bad_request("runtime/active-child", e))?;
     state.sessions.delete(&id).map_err(ApiError::from_session)?;
     state.live.remove(&id);
     // 全局账本去引用:工作区列表里不残留已删会话。
@@ -228,6 +247,8 @@ async fn delete_session(
 #[serde(rename_all = "camelCase")]
 struct PromptBody {
     prompt: String,
+    #[serde(default)]
+    skills: Vec<String>,
     #[serde(default)]
     provider: Option<String>,
     #[serde(default)]
@@ -281,12 +302,21 @@ async fn prompt_session(
 ) -> Result<impl IntoResponse, ApiError> {
     let prompt = body.prompt.trim().to_string();
     if prompt.is_empty() {
-        return Err(ApiError::bad_request("session/empty-prompt", "prompt is empty"));
+        return Err(ApiError::bad_request(
+            "session/empty-prompt",
+            "prompt is empty",
+        ));
     }
     let live = state
         .live
         .get_or_load(&state.sessions, &id)
         .map_err(ApiError::from_session)?;
+    if live.session.header().subagent.is_some() {
+        return Err(ApiError::bad_request(
+            "subagent/read-only",
+            "请从父会话向子代理发送指令",
+        ));
+    }
     {
         let session = live.session.clone();
         let cwd = session.header().cwd.clone();
@@ -369,7 +399,8 @@ async fn prompt_session(
         let uploads_root = state.home.join("uploads").join(&id);
         for file in &body.files {
             let path = std::path::PathBuf::from(file);
-            let allowed = (path.starts_with(&cwd) || path.starts_with(&uploads_root)) && path.is_file();
+            let allowed =
+                (path.starts_with(&cwd) || path.starts_with(&uploads_root)) && path.is_file();
             if !allowed {
                 live.running.store(false, Ordering::SeqCst);
                 return Err(ApiError::bad_request(
@@ -390,6 +421,20 @@ async fn prompt_session(
         .collect();
     // 轨迹引用:非空校验 + 体积上限(fail loud,不静默丢弃)。
     let mut quoted: Vec<(String, String)> = Vec::with_capacity(body.quoted.len());
+    for name in &body.skills {
+        let skill = match state
+            .runtime
+            .load_skill(live.session.header().cwd.clone().into(), name.clone(), true)
+            .await
+        {
+            Ok(skill) => skill,
+            Err(e) => {
+                live.running.store(false, Ordering::SeqCst);
+                return Err(ApiError::bad_request("skill/invocation-failed", e));
+            }
+        };
+        quoted.push((format!("用户显式调用技能：{name}"), skill.to_string()));
+    }
     let mut quoted_total = 0usize;
     for quote in body.quoted {
         let title = quote.title.trim().to_string();
@@ -405,9 +450,7 @@ async fn prompt_session(
             live.running.store(false, Ordering::SeqCst);
             return Err(ApiError::bad_request(
                 "session/quote-too-large",
-                format!(
-                    "引用过大:标题 ≤ 200 字符、单条正文 ≤ {QUOTE_TEXT_LIMIT} 字符"
-                ),
+                format!("引用过大:标题 ≤ 200 字符、单条正文 ≤ {QUOTE_TEXT_LIMIT} 字符"),
             ));
         }
         quoted_total += text.len();
@@ -422,6 +465,7 @@ async fn prompt_session(
     }
 
     let token = CancellationToken::new();
+    state.runtime.human_turn(&id, &selection);
     *live.cancel.lock().unwrap() = Some(token.clone());
 
     let followers_for_turn = live.followers.clone();
@@ -429,12 +473,14 @@ async fn prompt_session(
     let driver = state.driver.clone();
     let session = live.session.clone();
     let live = live.clone();
+    let runtime = state.runtime.clone();
     tokio::spawn(async move {
         // RAII:任务结束(含 panic)自动复位 running + 清 cancel + 广播结束。
         let _guard = RunningGuard::new(live.clone(), events_for_guard);
-        let emit: Arc<dyn Fn(&SessionEnvelope) + Send + Sync> = Arc::new(move |envelope: &SessionEnvelope| {
-            let _ = followers_for_turn.send(envelope.clone());
-        });
+        let emit: Arc<dyn Fn(&SessionEnvelope) + Send + Sync> =
+            Arc::new(move |envelope: &SessionEnvelope| {
+                let _ = followers_for_turn.send(envelope.clone());
+            });
         let _reason = driver
             .run_turn(
                 &session,
@@ -448,6 +494,8 @@ async fn prompt_session(
                 emit,
             )
             .await;
+        drop(_guard);
+        runtime.on_idle(session.id());
         // 上下文管理(投影剪枝 + LLM 压缩)已内建于 driver 的请求构造前
         // (denia_agent_loop::SessionDriver):轮次闭合后不再落盘替换,
         // 日志保持 append-only,provider 前缀缓存不被破坏。
@@ -460,7 +508,10 @@ async fn cancel_session(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let live = state.live.get_or_load(&state.sessions, &id).map_err(ApiError::from_session)?;
+    let live = state
+        .live
+        .get_or_load(&state.sessions, &id)
+        .map_err(ApiError::from_session)?;
     // 幂等取消:保留 token(不 take),轮次结束由 RunningGuard 清空;
     // 若首次点击时 turn 恰好卡在无取消意识的等待上,后续再点仍能生效,
     // 不会出现"点了一次之后再点就没反应"。
@@ -593,12 +644,13 @@ async fn fork_session(
         let session = live.session.clone();
         (session.events(), session.header().clone())
     };
-    let cut = denia_core::session::fork_cut_index(&source_events, body.at_seq).ok_or_else(|| {
-        ApiError::bad_request(
-            "session/fork-unavailable",
-            "仅可从已完成的轮次分支:该会话还没有已完成的轮次(或锚点所在轮次尚未完成)",
-        )
-    })?;
+    let cut =
+        denia_core::session::fork_cut_index(&source_events, body.at_seq).ok_or_else(|| {
+            ApiError::bad_request(
+                "session/fork-unavailable",
+                "仅可从已完成的轮次分支:该会话还没有已完成的轮次(或锚点所在轮次尚未完成)",
+            )
+        })?;
     let cwd = std::path::PathBuf::from(&header.cwd);
     let child = state
         .sessions
@@ -860,15 +912,14 @@ async fn follow_session(
         .get_or_load(&state.sessions, &id)
         .map_err(ApiError::from_session)?;
     state.live.touch(&id);
-    let live_stream = BroadcastStream::new(live.followers.subscribe()).filter_map(
-        |result| async move {
+    let live_stream =
+        BroadcastStream::new(live.followers.subscribe()).filter_map(|result| async move {
             match result {
                 Ok(envelope) => Some(envelope),
                 // Lagged: close so the client re-snapshots.
                 Err(_) => None,
             }
-        },
-    );
+        });
     // 只拉增量区间(after 到尾部),长会话断线重连不再克隆全量日志。
     let replay: Vec<SessionEnvelope> = live.session.events_after(query.after);
     let stream = futures::stream::iter(replay)

@@ -26,7 +26,9 @@ pub fn is_valid_namespace(name: &str) -> bool {
     if !bytes[0].is_ascii_lowercase() {
         return false;
     }
-    bytes.iter().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || *b == b'-')
+    bytes
+        .iter()
+        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || *b == b'-')
 }
 
 #[cfg(test)]

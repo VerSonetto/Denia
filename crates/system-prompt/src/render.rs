@@ -117,7 +117,11 @@ fn interpolate(
                 panic!(
                     "unknown prompt variable \"{{{{{name}}}}}\" in {kind} \"{}\"; registered variables: {}",
                     input.name,
-                    if known.is_empty() { "(none)".to_string() } else { known }
+                    if known.is_empty() {
+                        "(none)".to_string()
+                    } else {
+                        known
+                    }
                 );
             };
             result.push_str(&text[last..start]);

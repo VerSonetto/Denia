@@ -14,7 +14,14 @@ use crate::protocols::EventTranslator;
 
 struct SseState {
     events: std::pin::Pin<
-        Box<dyn futures::Stream<Item = Result<eventsource_stream::Event, eventsource_stream::EventStreamError<reqwest::Error>>> + Send>,
+        Box<
+            dyn futures::Stream<
+                    Item = Result<
+                        eventsource_stream::Event,
+                        eventsource_stream::EventStreamError<reqwest::Error>,
+                    >,
+                > + Send,
+        >,
     >,
     translator: Box<dyn EventTranslator>,
     buffer: VecDeque<StreamChunk>,

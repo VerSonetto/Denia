@@ -11,7 +11,7 @@ use axum::http::StatusCode;
 use axum::routing::post;
 use axum::{Json, Router};
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::state::AppState;
 
@@ -21,7 +21,10 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/api/browser/recon/search", post(recon_search))
         .route("/api/browser/recon/source", post(recon_source))
         .route("/api/browser/recon/breakpoint", post(recon_breakpoint))
-        .route("/api/browser/recon/breakpointRemove", post(recon_breakpoint_remove))
+        .route(
+            "/api/browser/recon/breakpointRemove",
+            post(recon_breakpoint_remove),
+        )
         .route("/api/browser/recon/breakpoints", post(recon_breakpoints))
         .route("/api/browser/recon/paused", post(recon_paused))
         .route("/api/browser/recon/eval", post(recon_eval))
@@ -79,9 +82,18 @@ async fn recon_scripts(
     State(state): State<Arc<AppState>>,
     Json(req): Json<Req>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
-    let (tab_id, _) = state.browser.recon_resolve_tab(req.tab_id.as_deref()).await.map_err(|e| bad(e))?;
-    let scripts = state.browser.recon().scripts(&tab_id, req.url_filter.as_deref());
-    Ok(Json(json!({ "tabId": tab_id, "scripts": scripts, "count": scripts.len() })))
+    let (tab_id, _) = state
+        .browser
+        .recon_resolve_tab(req.tab_id.as_deref())
+        .await
+        .map_err(|e| bad(e))?;
+    let scripts = state
+        .browser
+        .recon()
+        .scripts(&tab_id, req.url_filter.as_deref());
+    Ok(Json(
+        json!({ "tabId": tab_id, "scripts": scripts, "count": scripts.len() }),
+    ))
 }
 
 /// POST /api/browser/recon/search {tabId?, query, isRegex?, caseSensitive?, urlFilter?, maxResults?}
@@ -91,7 +103,11 @@ async fn recon_search(
     Json(req): Json<Req>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
     let query = req.query.clone().ok_or_else(|| bad("query 必填"))?;
-    let (tab_id, _) = state.browser.recon_resolve_tab(req.tab_id.as_deref()).await.map_err(|e| bad(e))?;
+    let (tab_id, _) = state
+        .browser
+        .recon_resolve_tab(req.tab_id.as_deref())
+        .await
+        .map_err(|e| bad(e))?;
     let max = req.max_results.unwrap_or(30).clamp(1, 100);
     let (matches, skipped_large) = state
         .browser
@@ -121,7 +137,11 @@ async fn recon_source(
     State(state): State<Arc<AppState>>,
     Json(req): Json<Req>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
-    let (tab_id, _) = state.browser.recon_resolve_tab(req.tab_id.as_deref()).await.map_err(|e| bad(e))?;
+    let (tab_id, _) = state
+        .browser
+        .recon_resolve_tab(req.tab_id.as_deref())
+        .await
+        .map_err(|e| bad(e))?;
     let source = state
         .browser
         .recon()
@@ -145,7 +165,11 @@ async fn recon_breakpoint(
     Json(req): Json<Req>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
     let query = req.query.clone().ok_or_else(|| bad("query 必填"))?;
-    let (tab_id, _) = state.browser.recon_resolve_tab(req.tab_id.as_deref()).await.map_err(|e| bad(e))?;
+    let (tab_id, _) = state
+        .browser
+        .recon_resolve_tab(req.tab_id.as_deref())
+        .await
+        .map_err(|e| bad(e))?;
     let info = state
         .browser
         .recon()
@@ -167,8 +191,15 @@ async fn recon_breakpoint_remove(
     State(state): State<Arc<AppState>>,
     Json(req): Json<Req>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
-    let breakpoint_id = req.breakpoint_id.clone().ok_or_else(|| bad("breakpointId 必填"))?;
-    let (tab_id, _) = state.browser.recon_resolve_tab(req.tab_id.as_deref()).await.map_err(|e| bad(e))?;
+    let breakpoint_id = req
+        .breakpoint_id
+        .clone()
+        .ok_or_else(|| bad("breakpointId 必填"))?;
+    let (tab_id, _) = state
+        .browser
+        .recon_resolve_tab(req.tab_id.as_deref())
+        .await
+        .map_err(|e| bad(e))?;
     let removed = state
         .browser
         .recon()
@@ -183,7 +214,11 @@ async fn recon_breakpoints(
     State(state): State<Arc<AppState>>,
     Json(req): Json<Req>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
-    let (tab_id, _) = state.browser.recon_resolve_tab(req.tab_id.as_deref()).await.map_err(|e| bad(e))?;
+    let (tab_id, _) = state
+        .browser
+        .recon_resolve_tab(req.tab_id.as_deref())
+        .await
+        .map_err(|e| bad(e))?;
     let breakpoints = state.browser.recon().list_breakpoints(&tab_id);
     Ok(Json(json!({ "tabId": tab_id, "breakpoints": breakpoints })))
 }
@@ -193,7 +228,11 @@ async fn recon_paused(
     State(state): State<Arc<AppState>>,
     Json(req): Json<Req>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
-    let (tab_id, _) = state.browser.recon_resolve_tab(req.tab_id.as_deref()).await.map_err(|e| bad(e))?;
+    let (tab_id, _) = state
+        .browser
+        .recon_resolve_tab(req.tab_id.as_deref())
+        .await
+        .map_err(|e| bad(e))?;
     let paused = state.browser.recon().paused_info();
     let mine = paused.filter(|info| info.tab_id == tab_id);
     Ok(Json(json!({ "tabId": tab_id, "paused": mine })))
@@ -205,12 +244,24 @@ async fn recon_eval(
     State(state): State<Arc<AppState>>,
     Json(req): Json<Req>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
-    let expression = req.expression.clone().ok_or_else(|| bad("expression 必填"))?;
-    let (tab_id, _) = state.browser.recon_resolve_tab(req.tab_id.as_deref()).await.map_err(|e| bad(e))?;
+    let expression = req
+        .expression
+        .clone()
+        .ok_or_else(|| bad("expression 必填"))?;
+    let (tab_id, _) = state
+        .browser
+        .recon_resolve_tab(req.tab_id.as_deref())
+        .await
+        .map_err(|e| bad(e))?;
     let value = state
         .browser
         .recon()
-        .debug_eval(&state.browser, &tab_id, req.frame_index.unwrap_or(0), &expression)
+        .debug_eval(
+            &state.browser,
+            &tab_id,
+            req.frame_index.unwrap_or(0),
+            &expression,
+        )
         .await
         .map_err(|e| bad(e))?;
     Ok(Json(json!({ "tabId": tab_id, "value": value })))
@@ -222,7 +273,11 @@ async fn recon_step(
     Json(req): Json<Req>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
     let direction = req.direction.clone().unwrap_or_else(|| "over".to_string());
-    let (tab_id, _) = state.browser.recon_resolve_tab(req.tab_id.as_deref()).await.map_err(|e| bad(e))?;
+    let (tab_id, _) = state
+        .browser
+        .recon_resolve_tab(req.tab_id.as_deref())
+        .await
+        .map_err(|e| bad(e))?;
     state
         .browser
         .recon()
@@ -237,7 +292,11 @@ async fn recon_resume(
     State(state): State<Arc<AppState>>,
     Json(req): Json<Req>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
-    let (tab_id, _) = state.browser.recon_resolve_tab(req.tab_id.as_deref()).await.map_err(|e| bad(e))?;
+    let (tab_id, _) = state
+        .browser
+        .recon_resolve_tab(req.tab_id.as_deref())
+        .await
+        .map_err(|e| bad(e))?;
     state
         .browser
         .recon()
@@ -252,9 +311,18 @@ async fn recon_console(
     State(state): State<Arc<AppState>>,
     Json(req): Json<Req>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
-    let (tab_id, _) = state.browser.recon_resolve_tab(req.tab_id.as_deref()).await.map_err(|e| bad(e))?;
-    let messages = state.browser.recon().console_list(&tab_id, req.max.unwrap_or(100));
-    Ok(Json(json!({ "tabId": tab_id, "messages": messages, "count": messages.len() })))
+    let (tab_id, _) = state
+        .browser
+        .recon_resolve_tab(req.tab_id.as_deref())
+        .await
+        .map_err(|e| bad(e))?;
+    let messages = state
+        .browser
+        .recon()
+        .console_list(&tab_id, req.max.unwrap_or(100));
+    Ok(Json(
+        json!({ "tabId": tab_id, "messages": messages, "count": messages.len() }),
+    ))
 }
 
 /// POST /api/browser/recon/clear {tabId?} — 清该 tab 的脚本表/控制台(断点保留,URL 级)。
@@ -262,7 +330,11 @@ async fn recon_clear(
     State(state): State<Arc<AppState>>,
     Json(req): Json<Req>,
 ) -> Result<Json<Value>, (StatusCode, String)> {
-    let (tab_id, _) = state.browser.recon_resolve_tab(req.tab_id.as_deref()).await.map_err(|e| bad(e))?;
+    let (tab_id, _) = state
+        .browser
+        .recon_resolve_tab(req.tab_id.as_deref())
+        .await
+        .map_err(|e| bad(e))?;
     state.browser.recon().clear(&tab_id);
     state.browser.network_clear(&tab_id);
     Ok(Json(json!({ "cleared": true })))

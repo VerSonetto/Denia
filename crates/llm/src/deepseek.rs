@@ -12,7 +12,10 @@ use denia_credentials::CredentialStore;
 use denia_settings::SettingsStore;
 use serde::{Deserialize, Serialize};
 
-use crate::catalog::{highest_reasoning_effort, LlmModelInfo, LlmResolvedModelInfo, ProviderInfo, ReasoningEffortInfo, ReasoningInfo};
+use crate::catalog::{
+    LlmModelInfo, LlmResolvedModelInfo, ProviderInfo, ReasoningEffortInfo, ReasoningInfo,
+    highest_reasoning_effort,
+};
 use crate::http::http_error_failure;
 use crate::request::GenerateRequest;
 use crate::sse::sse_chunk_stream;
@@ -236,15 +239,23 @@ impl DeepSeekAdapter {
             .settings
             .resolved(DEEPSEEK_SETTINGS_NS)
             .map_err(|e| LlmError::new(codes::SETTINGS, e.to_string()))?;
-        serde_json::from_value(value)
-            .map_err(|e| LlmError::new(codes::SETTINGS, format!("invalid llm-deepseek section: {e}")))
+        serde_json::from_value(value).map_err(|e| {
+            LlmError::new(
+                codes::SETTINGS,
+                format!("invalid llm-deepseek section: {e}"),
+            )
+        })
     }
 
     fn base_url(section: &DeepSeekSection) -> String {
         section
             .base_url
             .clone()
-            .or_else(|| std::env::var("DEEPSEEK_BASE_URL").ok().filter(|v| !v.is_empty()))
+            .or_else(|| {
+                std::env::var("DEEPSEEK_BASE_URL")
+                    .ok()
+                    .filter(|v| !v.is_empty())
+            })
             .unwrap_or_else(|| DEFAULT_BASE_URL.to_string())
     }
 
@@ -282,7 +293,10 @@ impl DeepSeekAdapter {
         )
     }
 
-    fn reasoning_info_for_efforts(section: &DeepSeekSection, effort_ids: Vec<String>) -> ReasoningInfo {
+    fn reasoning_info_for_efforts(
+        section: &DeepSeekSection,
+        effort_ids: Vec<String>,
+    ) -> ReasoningInfo {
         if section.thinking == ThinkingMode::Disabled {
             return ReasoningInfo {
                 efforts: vec![ReasoningEffortInfo {
@@ -306,12 +320,18 @@ impl DeepSeekAdapter {
                     })
             })
             .collect();
-        let default_effort = if efforts.iter().any(|effort| effort.id == section.reasoning_effort.as_id()) {
+        let default_effort = if efforts
+            .iter()
+            .any(|effort| effort.id == section.reasoning_effort.as_id())
+        {
             Some(section.reasoning_effort.as_id().to_string())
         } else {
             let known_order: Vec<&str> = KNOWN_EFFORTS.iter().map(|(id, _)| *id).collect();
-            highest_reasoning_effort(efforts.iter().map(|effort| effort.id.as_str()), &known_order)
-                .or_else(|| efforts.first().map(|effort| effort.id.clone()))
+            highest_reasoning_effort(
+                efforts.iter().map(|effort| effort.id.as_str()),
+                &known_order,
+            )
+            .or_else(|| efforts.first().map(|effort| effort.id.clone()))
         };
         ReasoningInfo {
             efforts,
@@ -391,7 +411,10 @@ impl LlmAdapter for DeepSeekAdapter {
             Some(model) => (
                 model.name.clone().unwrap_or_else(|| model.id.clone()),
                 model.description.clone(),
-                model.input_modalities.clone().unwrap_or_else(|| vec!["text".to_string()]),
+                model
+                    .input_modalities
+                    .clone()
+                    .unwrap_or_else(|| vec!["text".to_string()]),
                 model.context_window.unwrap_or(context_window_default),
                 model.max_tokens.unwrap_or(max_tokens_default),
                 Some(Self::model_reasoning_info(&section, Some(model))),
@@ -446,7 +469,10 @@ impl LlmAdapter for DeepSeekAdapter {
 
         let body = build_deepseek_body(request, effort, &section);
 
-        let url = format!("{}/chat/completions", Self::base_url(&section).trim_end_matches('/'));
+        let url = format!(
+            "{}/chat/completions",
+            Self::base_url(&section).trim_end_matches('/')
+        );
         // 请求总超时按请求体规模放宽(优化项,与 openai.rs 同口径):
         // 大体量 + 深度思考请求提供方处理慢,固定短超时会系统性错杀。
         let body_size = serde_json::to_string(&body).map(|s| s.len()).unwrap_or(0);
@@ -468,11 +494,15 @@ impl LlmAdapter for DeepSeekAdapter {
             let status = response.status();
             let headers = response.headers().clone();
             let body_text = response.text().await.unwrap_or_default();
-            return Err(LlmError::from_failure(http_error_failure(status, &body_text, &headers)));
+            return Err(LlmError::from_failure(http_error_failure(
+                status, &body_text, &headers,
+            )));
         }
         Ok(sse_chunk_stream(
             response,
-            Box::new(crate::protocols::CompletionsStream::new(UsageStyle::DeepSeek)),
+            Box::new(crate::protocols::CompletionsStream::new(
+                UsageStyle::DeepSeek,
+            )),
             STREAM_IDLE_TIMEOUT,
         ))
     }

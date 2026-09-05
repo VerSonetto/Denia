@@ -260,6 +260,8 @@ mod tests {
 
     fn context(cwd: PathBuf) -> ToolContext {
         ToolContext {
+            session_id: None,
+            selection: None,
             cwd,
             cancel: CancellationToken::new(),
             confined: true,

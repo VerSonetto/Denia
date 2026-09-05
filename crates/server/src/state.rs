@@ -10,7 +10,7 @@ use async_trait::async_trait;
 use denia_agent_loop::{ApprovalBridge, SessionDriver};
 use denia_core::session::ApprovalOutcome;
 use denia_credentials::{CredentialEvent, CredentialStore};
-use denia_llm::{RetryPolicy, OPENAI_SETTINGS_NS, OpenAiCompatAdapter, OpenAiSection, LlmRegistry};
+use denia_llm::{LlmRegistry, OPENAI_SETTINGS_NS, OpenAiCompatAdapter, OpenAiSection, RetryPolicy};
 use denia_session::{Session, SessionError, SessionStore};
 use denia_settings::{Applies, NamespaceSpec, SettingsEvent, SettingsStore};
 use serde::{Deserialize, Serialize};
@@ -112,7 +112,6 @@ pub fn compaction_settings_from(console: &ConsoleSettings) -> denia_agent_loop::
     }
 }
 
-
 fn default_true() -> bool {
     true
 }
@@ -134,11 +133,17 @@ fn validate_console(value: Value) -> Result<Value, String> {
         ));
     }
     if !matches!(parsed.locale.as_str(), "zh" | "en") {
-        return Err(format!("locale must be 'zh' or 'en'; got '{}'", parsed.locale));
+        return Err(format!(
+            "locale must be 'zh' or 'en'; got '{}'",
+            parsed.locale
+        ));
     }
     let c = &parsed.compaction;
     if !(0.0..=1.0).contains(&c.prune_ratio) {
-        return Err(format!("compaction.pruneRatio must be in [0, 1]; got {}", c.prune_ratio));
+        return Err(format!(
+            "compaction.pruneRatio must be in [0, 1]; got {}",
+            c.prune_ratio
+        ));
     }
     if !(0.0..=1.0).contains(&c.compact_ratio) {
         return Err(format!(
@@ -175,9 +180,9 @@ pub fn console_settings(settings: &SettingsStore) -> ConsoleSettings {
         })
 }
 
-
 /// Process-wide shared state handed to every handler.
 pub struct AppState {
+    pub runtime: Arc<crate::agent_runtime::Runtime>,
     pub home: std::path::PathBuf,
     pub settings: Arc<SettingsStore>,
     pub credentials: Arc<CredentialStore>,
@@ -206,7 +211,10 @@ pub enum ServerEvent {
     SessionsUpdated,
     /// 会话运行状态变化(发消息/轮次结束/删除);前端据此维护 running 集合,
     /// 无需为后台会话各维持一条 SSE 长连接。
-    RunningChanged { id: String, running: bool },
+    RunningChanged {
+        id: String,
+        running: bool,
+    },
     /// 自定义系统提示词文件变更后广播(前端可选订阅)。
     SystemPromptChanged,
 }
@@ -221,9 +229,8 @@ pub struct LiveSession {
     pub last_touch: AtomicU64,
     pub cancel: std::sync::Mutex<Option<CancellationToken>>,
     /// 等待用户决策的审批请求(request_id → oneshot)。
-    pub pending_approvals: std::sync::Mutex<
-        HashMap<String, tokio::sync::oneshot::Sender<ApprovalOutcome>>,
-    >,
+    pub pending_approvals:
+        std::sync::Mutex<HashMap<String, tokio::sync::oneshot::Sender<ApprovalOutcome>>>,
 }
 
 /// Live sessions keyed by id; loads (and repairs) on first touch.
@@ -271,7 +278,8 @@ impl LiveSessions {
     ) -> Result<Arc<LiveSession>, SessionError> {
         let mut map = self.inner.lock().unwrap();
         if let Some(live) = map.get(id) {
-            live.last_touch.store(now_millis(), std::sync::atomic::Ordering::Relaxed);
+            live.last_touch
+                .store(now_millis(), std::sync::atomic::Ordering::Relaxed);
             return Ok(live.clone());
         }
         let session = store.load(id)?;
@@ -302,6 +310,7 @@ impl LiveSessions {
             .filter(|(_, live)| {
                 !live.running.load(std::sync::atomic::Ordering::SeqCst)
                     && live.followers.receiver_count() == 0
+                    && Arc::strong_count(live) == 1
             })
             .map(|(id, live)| {
                 (
@@ -316,6 +325,7 @@ impl LiveSessions {
             if let Some(live) = map.get(&id) {
                 if !live.running.load(std::sync::atomic::Ordering::SeqCst)
                     && live.followers.receiver_count() == 0
+                    && Arc::strong_count(live) == 1
                 {
                     map.remove(&id);
                 }
@@ -331,7 +341,8 @@ impl LiveSessions {
     /// 记录一次外部访问(follow 连接等),防止被空闲淘汰。
     pub fn touch(&self, id: &str) {
         if let Some(live) = self.inner.lock().unwrap().get(id) {
-            live.last_touch.store(now_millis(), std::sync::atomic::Ordering::Relaxed);
+            live.last_touch
+                .store(now_millis(), std::sync::atomic::Ordering::Relaxed);
         }
     }
 
@@ -345,10 +356,10 @@ impl LiveSessions {
             for (id, live) in map.iter() {
                 let running = live.running.load(std::sync::atomic::Ordering::SeqCst);
                 let subscribed = live.followers.receiver_count() > 0;
-                let idle = now.saturating_sub(
-                    live.last_touch.load(std::sync::atomic::Ordering::Relaxed),
-                ) >= idle_ms;
-                if !running && !subscribed && idle {
+                let idle = now
+                    .saturating_sub(live.last_touch.load(std::sync::atomic::Ordering::Relaxed))
+                    >= idle_ms;
+                if !running && !subscribed && idle && Arc::strong_count(live) == 1 {
                     to_remove.push(id.clone());
                 }
             }
@@ -359,6 +370,7 @@ impl LiveSessions {
             if let Some(live) = map.get(id) {
                 if !live.running.load(std::sync::atomic::Ordering::SeqCst)
                     && live.followers.receiver_count() == 0
+                    && Arc::strong_count(live) == 1
                 {
                     map.remove(id);
                 }
@@ -441,7 +453,6 @@ impl RunningGuard {
 
 impl Drop for RunningGuard {
     fn drop(&mut self) {
-        self.live.running.store(false, Ordering::SeqCst);
         // 任务无论正常/panic 结束,未答审批一律按 cancelled 结算,
         // 避免 pending oneshot 泄漏。
         {
@@ -460,6 +471,7 @@ impl Drop for RunningGuard {
             id: self.live.session.id().to_string(),
             running: false,
         });
+        self.live.running.store(false, Ordering::SeqCst);
     }
 }
 
@@ -487,18 +499,18 @@ where
     serde_json::to_value(parsed).map_err(|e| e.to_string())
 }
 
-pub fn build_state(home: &Path, bound_remote: bool) -> Result<AppState, Box<dyn std::error::Error>> {
+pub fn build_state(
+    home: &Path,
+    bound_remote: bool,
+) -> Result<AppState, Box<dyn std::error::Error>> {
     let events = broadcast::channel::<ServerEvent>(64).0;
 
     let settings_events = broadcast::channel::<SettingsEvent>(64);
     let credentials_events = broadcast::channel::<CredentialEvent>(64);
 
-    let settings = Arc::new(
-        SettingsStore::open(home)?.with_events(settings_events.0.clone()),
-    );
-    let credentials = Arc::new(
-        CredentialStore::open(home)?.with_events(credentials_events.0.clone()),
-    );
+    let settings = Arc::new(SettingsStore::open(home)?.with_events(settings_events.0.clone()));
+    let credentials =
+        Arc::new(CredentialStore::open(home)?.with_events(credentials_events.0.clone()));
     let registry = Arc::new(LlmRegistry::new());
 
     register_namespaces(&settings)?;
@@ -512,8 +524,22 @@ pub fn build_state(home: &Path, bound_remote: bool) -> Result<AppState, Box<dyn 
 
     // Sessions, tools, and the driver.
     let sessions = Arc::new(SessionStore::open(home)?);
+    // 启动一次性清扫:删掉"从未发过消息"的残留空白会话(浏览器直接关闭、
+    // 进程被杀留下的空壳)。放在数据层而不是前端,是因为前端每个页面只知道
+    // 自己的焦点,却能看到全局会话列表 —— 在那里做"非活跃空白即删"会误删
+    // 别的页面(或共用同一数据目录的另一实例)正在使用的会话。
+    // 10 分钟年龄门槛给并发实例留缓冲,避免删掉用户正停着的草稿。
+    // 必须在 bootstrap 之前跑,否则这些空壳会被写进工作区账本。
+    let swept = sessions.sweep_stale_blanks(10 * 60 * 1000);
     // 工作区注册表:独立持久化域;首启按会话头 cwd 自动分组。
     let workspaces = Arc::new(crate::workspace::WorkspaceRegistry::open(home)?);
+    // 已初始化过的账本里可能还挂着上次运行留下的空壳引用,一并去引用。
+    for id in &swept {
+        workspaces.detach_session(id);
+    }
+    if !swept.is_empty() {
+        tracing::info!(count = swept.len(), "swept stale blank sessions at startup");
+    }
     workspaces.bootstrap(
         &sessions
             .list()?
@@ -539,18 +565,31 @@ pub fn build_state(home: &Path, bound_remote: bool) -> Result<AppState, Box<dyn 
         Some(recon_hub.clone()),
     ));
     let file_history = Arc::new(crate::file_history::FileHistoryStore::new(home));
-    let tools = denia_tools::default_registry_with_browser_and_recon(Some(browser_hub), Some(recon_hub));
+    let runtime = crate::agent_runtime::Runtime::new(
+        home,
+        sessions.clone(),
+        live.clone(),
+        settings.clone(),
+        events.clone(),
+        registry.clone(),
+        workspaces.clone(),
+    )?;
+    let mut tools =
+        denia_tools::default_registry_with_browser_and_recon(Some(browser_hub), Some(recon_hub));
+    denia_tools::capabilities::register(&mut tools, runtime.clone());
+    tools.replace(Arc::new(
+        denia_tools::BashTool::new().with_runtime(runtime.clone()),
+    ));
     let approval = Arc::new(ServerApprovalBridge::new(live.clone()));
     let driver = Arc::new(
-        SessionDriver::new(
-            registry.clone(),
-            Arc::new(tools),
-            system_prompt.handle(),
-        )
-        .with_file_history(file_history.clone())
-        .with_approval(approval)
-        .with_compaction(compaction_settings_from(&console_settings(&settings))),
+        SessionDriver::new(registry.clone(), Arc::new(tools), system_prompt.handle())
+            .with_file_history(file_history.clone())
+            .with_approval(approval)
+            .with_runtime(runtime.clone())
+            .with_compaction(compaction_settings_from(&console_settings(&settings))),
     );
+
+    runtime.attach(&driver);
 
     spawn_forwarders(
         settings_events.1,
@@ -563,6 +602,7 @@ pub fn build_state(home: &Path, bound_remote: bool) -> Result<AppState, Box<dyn 
     system_prompt.spawn_watcher(events.clone());
 
     let state = AppState {
+        runtime,
         home: home.to_path_buf(),
         settings,
         credentials,
@@ -585,6 +625,16 @@ pub fn build_state(home: &Path, bound_remote: bool) -> Result<AppState, Box<dyn 
 }
 
 fn register_namespaces(settings: &SettingsStore) -> Result<(), Box<dyn std::error::Error>> {
+    settings.register(
+        "runtime",
+        NamespaceSpec {
+            defaults: serde_json::to_value(crate::agent_runtime::RuntimeConfig::default())?,
+            validate: crate::agent_runtime::validate_config,
+            secrets: &[],
+            applies: Applies::Live,
+        },
+        json!({}),
+    )?;
     settings.register(
         CONSOLE_NS,
         NamespaceSpec {

@@ -95,7 +95,8 @@ pub fn estimate_text(text: &str) -> u64 {
             other = other.saturating_add(1);
         }
     }
-    cjk.div_ceil(CJK_CHARS_PER_TOKEN).saturating_add(other.div_ceil(CHARS_PER_TOKEN))
+    cjk.div_ceil(CJK_CHARS_PER_TOKEN)
+        .saturating_add(other.div_ceil(CHARS_PER_TOKEN))
 }
 
 /// 系统提示词估算(与消息同一密度;`ROLE_OVERHEAD` 是角色框开销)。
@@ -179,7 +180,10 @@ fn extract_assistant_message(blocks: &[ContentBlock]) -> Option<ChatMessage> {
 fn prompt_tokens(usage: &TokenUsage) -> u64 {
     let cache = usage.cache_read_tokens.unwrap_or(0);
     let cache_write = usage.cache_write_tokens_opt().unwrap_or(0);
-    usage.input_tokens.saturating_add(cache).saturating_add(cache_write)
+    usage
+        .input_tokens
+        .saturating_add(cache)
+        .saturating_add(cache_write)
 }
 
 /// 用 dsh `deriveTurnTokenUsage` 思路 fold 一个 turn 的精确 usage。
@@ -239,7 +243,12 @@ fn derive_turn_token_usage(events: &[SessionEnvelope]) -> Option<TurnTokenUsage>
                     invalid = true;
                     break;
                 }
-                close_attempt(&mut usage, &mut step_usage_sample, &mut step_attempt, &mut invalid);
+                close_attempt(
+                    &mut usage,
+                    &mut step_usage_sample,
+                    &mut step_attempt,
+                    &mut invalid,
+                );
                 open_turn = None;
             }
             SessionEvent::StepStart { turn, step } => {
@@ -254,7 +263,12 @@ fn derive_turn_token_usage(events: &[SessionEnvelope]) -> Option<TurnTokenUsage>
                     invalid = true;
                     break;
                 }
-                close_attempt(&mut usage, &mut step_usage_sample, &mut step_attempt, &mut invalid);
+                close_attempt(
+                    &mut usage,
+                    &mut step_usage_sample,
+                    &mut step_attempt,
+                    &mut invalid,
+                );
             }
             SessionEvent::AssistantMessage {
                 turn,
@@ -363,7 +377,9 @@ fn calibrate_breakdown(system: u64, tools: u64, message: u64, target: u64) -> Co
     order.sort_by(|&a, &b| {
         let frac_a = scaled[a] - allocated[a] as f64;
         let frac_b = scaled[b] - allocated[b] as f64;
-        frac_b.partial_cmp(&frac_a).unwrap_or(std::cmp::Ordering::Equal)
+        frac_b
+            .partial_cmp(&frac_a)
+            .unwrap_or(std::cmp::Ordering::Equal)
     });
     let mut index = 0usize;
     while remainder > 0 {
@@ -402,7 +418,7 @@ impl ContextMeter {
             SessionEvent::SystemPrompt { .. } => {
                 // 不参与 fold;由 driver 调 `set_system_tokens` 喂 framed 版本。
             }
-            SessionEvent::UserMessage { text, .. } => {
+            SessionEvent::UserMessage { text, .. } | SessionEvent::AgentDelivery { text, .. } => {
                 let message = ChatMessage::user(text);
                 self.fold_message_add(envelope.seq, estimate_message(&message));
             }
@@ -417,9 +433,7 @@ impl ContextMeter {
                 }
             }
             SessionEvent::ToolResult {
-                content,
-                replaces,
-                ..
+                content, replaces, ..
             } => {
                 let message = ChatMessage::tool_result("__unused__", content);
                 let tokens = estimate_message(&message);
@@ -520,7 +534,12 @@ impl ContextMeter {
             return raw;
         };
         let target = pressure.saturating_add(self.surface_tokens.saturating_sub(sampled));
-        calibrate_breakdown(self.system_tokens, self.tools_tokens, self.surface_tokens, target)
+        calibrate_breakdown(
+            self.system_tokens,
+            self.tools_tokens,
+            self.surface_tokens,
+            target,
+        )
     }
 
     /// 读当前精确 usage 累计。
@@ -581,7 +600,14 @@ mod tests {
     #[test]
     fn system_prompt_event_ignored_in_breakdown() {
         let events = vec![
-            envelope(1, SessionEvent::UserMessage { text: "a".into(), injected: false, images: Vec::new() }),
+            envelope(
+                1,
+                SessionEvent::UserMessage {
+                    text: "a".into(),
+                    injected: false,
+                    images: Vec::new(),
+                },
+            ),
             envelope(
                 2,
                 SessionEvent::SystemPrompt {
@@ -607,7 +633,9 @@ mod tests {
                 SessionEvent::AssistantMessage {
                     turn: 1,
                     step: 1,
-                    blocks: vec![ContentBlock::Text { text: "tool".into() }],
+                    blocks: vec![ContentBlock::Text {
+                        text: "tool".into(),
+                    }],
                     usage: Some(TokenUsage {
                         input_tokens: 100,
                         output_tokens: 5,
@@ -637,7 +665,13 @@ mod tests {
                 },
             ),
             envelope(7, SessionEvent::StepEnd { turn: 1, step: 2 }),
-            envelope(8, SessionEvent::TurnEnd { turn: 1, reason: denia_core::session::TurnEndReason::Completed }),
+            envelope(
+                8,
+                SessionEvent::TurnEnd {
+                    turn: 1,
+                    reason: denia_core::session::TurnEndReason::Completed,
+                },
+            ),
         ];
         let u = derive_turn_token_usage(&events).expect("turn should fold");
         assert_eq!(u.uncached_input_tokens, 180);
@@ -664,7 +698,13 @@ mod tests {
                 },
             ),
             envelope(4, SessionEvent::StepEnd { turn: 1, step: 1 }),
-            envelope(5, SessionEvent::TurnEnd { turn: 1, reason: denia_core::session::TurnEndReason::Completed }),
+            envelope(
+                5,
+                SessionEvent::TurnEnd {
+                    turn: 1,
+                    reason: denia_core::session::TurnEndReason::Completed,
+                },
+            ),
         ];
         assert!(derive_turn_token_usage(&events).is_none());
     }
@@ -700,10 +740,7 @@ mod tests {
                 replaces: None,
             },
         ));
-        assert_eq!(
-            meter.breakdown().message_tokens,
-            user_tokens + long_tokens
-        );
+        assert_eq!(meter.breakdown().message_tokens, user_tokens + long_tokens);
 
         meter.apply_one(&envelope(
             3,
@@ -748,7 +785,13 @@ mod tests {
                 },
             ),
             envelope(4, SessionEvent::StepEnd { turn: 1, step: 1 }),
-            envelope(5, SessionEvent::TurnEnd { turn: 1, reason: denia_core::session::TurnEndReason::Completed }),
+            envelope(
+                5,
+                SessionEvent::TurnEnd {
+                    turn: 1,
+                    reason: denia_core::session::TurnEndReason::Completed,
+                },
+            ),
         ];
         meter.fold(&events);
         // 锚点 = input + cache_read = 120;锚点在本消息入表前盖章,所以
@@ -895,30 +938,54 @@ mod tests {
         // 常态:固定行(系统/工具)原样,余额全部归对话消息行。
         assert_eq!(
             calibrate_breakdown(10, 20, 70, 200),
-            ContextBreakdown { system_tokens: 10, tools_tokens: 20, message_tokens: 170 }
+            ContextBreakdown {
+                system_tokens: 10,
+                tools_tokens: 20,
+                message_tokens: 170
+            }
         );
         assert_eq!(
             calibrate_breakdown(10, 20, 70, 100),
-            ContextBreakdown { system_tokens: 10, tools_tokens: 20, message_tokens: 70 }
+            ContextBreakdown {
+                system_tokens: 10,
+                tools_tokens: 20,
+                message_tokens: 70
+            }
         );
         assert_eq!(
             calibrate_breakdown(10, 20, 70, 90),
-            ContextBreakdown { system_tokens: 10, tools_tokens: 20, message_tokens: 60 }
+            ContextBreakdown {
+                system_tokens: 10,
+                tools_tokens: 20,
+                message_tokens: 60
+            }
         );
         // 退化:target 低于固定成本之和(现实几乎不可能),按占比缩放
         // 仍保证整数和恰好 == target。
         assert_eq!(
             calibrate_breakdown(10, 20, 70, 25),
-            ContextBreakdown { system_tokens: 3, tools_tokens: 5, message_tokens: 17 }
+            ContextBreakdown {
+                system_tokens: 3,
+                tools_tokens: 5,
+                message_tokens: 17
+            }
         );
         // 全零份额:target 全额给 message 兜底。
         assert_eq!(
             calibrate_breakdown(0, 0, 0, 5),
-            ContextBreakdown { system_tokens: 0, tools_tokens: 0, message_tokens: 5 }
+            ContextBreakdown {
+                system_tokens: 0,
+                tools_tokens: 0,
+                message_tokens: 5
+            }
         );
         assert_eq!(
             calibrate_breakdown(1, 2, 3, 0),
-            ContextBreakdown { system_tokens: 0, tools_tokens: 0, message_tokens: 0 }
+            ContextBreakdown {
+                system_tokens: 0,
+                tools_tokens: 0,
+                message_tokens: 0
+            }
         );
     }
 }

@@ -22,7 +22,9 @@ pub enum CredentialError {
     InvalidRefName(String),
     #[error("credential value rejected: {0}")]
     InvalidValue(String),
-    #[error("credential reference {0} is shadowed by the process environment; unset it in the shell that starts the server instead")]
+    #[error(
+        "credential reference {0} is shadowed by the process environment; unset it in the shell that starts the server instead"
+    )]
     Shadowed(String),
     #[error("unsupported credentials document version: {0}")]
     Version(u32),
@@ -127,12 +129,18 @@ impl CredentialStore {
         validate_ref_name(reference)?;
         if let Ok(value) = std::env::var(reference) {
             if !value.is_empty() {
-                return Ok(Some(ResolvedCredential { value, source: "env" }));
+                return Ok(Some(ResolvedCredential {
+                    value,
+                    source: "env",
+                }));
             }
         }
         let stored = self.state.read().unwrap().refs.get(reference).cloned();
         if let Some(value) = stored.filter(|v| !v.is_empty()) {
-            return Ok(Some(ResolvedCredential { value, source: "file" }));
+            return Ok(Some(ResolvedCredential {
+                value,
+                source: "file",
+            }));
         }
         let fallbacks: [(Option<PathBuf>, &str); 2] = [
             (std::env::current_dir().ok(), "project-env"),
@@ -257,8 +265,7 @@ fn parse_document(text: &str) -> Result<CredentialDoc, CredentialError> {
 }
 
 fn persist(path: &Path, doc: &CredentialDoc) -> Result<(), CredentialError> {
-    let mut text =
-        serde_yaml::to_string(doc).map_err(|e| CredentialError::Parse(e.to_string()))?;
+    let mut text = serde_yaml::to_string(doc).map_err(|e| CredentialError::Parse(e.to_string()))?;
     if !text.ends_with('\n') {
         text.push('\n');
     }
@@ -330,7 +337,11 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let env_path = dir.join(".env");
         let mut file = std::fs::File::create(&env_path).unwrap();
-        writeln!(file, "# comment\nFOO=bar\nexport BAZ=\"quoted\"\nEMPTY=\nQUOTED='single'").unwrap();
+        writeln!(
+            file,
+            "# comment\nFOO=bar\nexport BAZ=\"quoted\"\nEMPTY=\nQUOTED='single'"
+        )
+        .unwrap();
         assert_eq!(
             read_dotenv_key(&env_path, "FOO").unwrap().as_deref(),
             Some("bar")

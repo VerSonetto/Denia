@@ -167,15 +167,13 @@ pub struct WireFunctionRef {
     pub arguments: String,
 }
 
-
 /// 回传清洗:部分网关(如 MiniMax)会把 arguments 再解析成 dict,
 /// 畸形原始串会毒化下一轮请求。抢救第一个 JSON 值,否则 {}。
 pub(crate) fn wire_arguments(raw: &str) -> String {
     if serde_json::from_str::<serde_json::Value>(raw).is_ok() {
         return raw.to_string();
     }
-    let mut iter = serde_json::Deserializer::from_str(raw.trim())
-        .into_iter::<serde_json::Value>();
+    let mut iter = serde_json::Deserializer::from_str(raw.trim()).into_iter::<serde_json::Value>();
     match iter.next() {
         Some(Ok(value)) => value.to_string(),
         _ => "{}".to_string(),
@@ -511,12 +509,14 @@ mod tests {
     fn reasoning_then_text_then_finish() {
         let mut translator = StreamTranslator::default();
         let mut all = Vec::new();
-        all.extend(translator.feed(&chunk(
-            r#"{"choices":[{"delta":{"reasoning_content":"thinking..."}}]}"#,
-        ), UsageStyle::DeepSeek));
-        all.extend(translator.feed(&chunk(
-            r#"{"choices":[{"delta":{"content":"hello"}}]}"#,
-        ), UsageStyle::DeepSeek));
+        all.extend(translator.feed(
+            &chunk(r#"{"choices":[{"delta":{"reasoning_content":"thinking..."}}]}"#),
+            UsageStyle::DeepSeek,
+        ));
+        all.extend(translator.feed(
+            &chunk(r#"{"choices":[{"delta":{"content":"hello"}}]}"#),
+            UsageStyle::DeepSeek,
+        ));
         all.extend(translator.feed(&chunk(
             r#"{"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":12,"completion_tokens":3,"prompt_cache_hit_tokens":2}}"#,
         ), UsageStyle::DeepSeek));
@@ -548,10 +548,13 @@ mod tests {
             ]
         );
         // Cache hits are subtracted from DeepSeek prompt tokens.
-        let usage = all.iter().find_map(|c| match c {
-            denia_core::stream::StreamChunk::Usage { usage } => Some(*usage),
-            _ => None,
-        }).unwrap();
+        let usage = all
+            .iter()
+            .find_map(|c| match c {
+                denia_core::stream::StreamChunk::Usage { usage } => Some(*usage),
+                _ => None,
+            })
+            .unwrap();
         assert_eq!(usage.input_tokens, 10);
         assert_eq!(usage.cache_read_tokens, Some(2));
     }
@@ -559,7 +562,10 @@ mod tests {
     #[test]
     fn empty_stop_is_empty_response() {
         let mut translator = StreamTranslator::default();
-        translator.feed(&chunk(r#"{"choices":[{"delta":{},"finish_reason":"stop"}]}"#), UsageStyle::OpenAi);
+        translator.feed(
+            &chunk(r#"{"choices":[{"delta":{},"finish_reason":"stop"}]}"#),
+            UsageStyle::OpenAi,
+        );
         let final_chunks = translator.finalize();
         let finish = final_chunks.last().unwrap();
         match finish {
@@ -576,9 +582,10 @@ mod tests {
     #[test]
     fn empty_first_reasoning_delta_opens_no_block() {
         let mut translator = StreamTranslator::default();
-        let emitted = translator.feed(&chunk(
-            r#"{"choices":[{"delta":{"reasoning_content":""}}]}"#,
-        ), UsageStyle::DeepSeek);
+        let emitted = translator.feed(
+            &chunk(r#"{"choices":[{"delta":{"reasoning_content":""}}]}"#),
+            UsageStyle::DeepSeek,
+        );
         assert!(emitted.is_empty());
     }
 
@@ -719,10 +726,7 @@ mod wire_tests {
         assert_eq!(parts[0]["type"], "text");
         assert_eq!(parts[0]["text"], "看这张图");
         assert_eq!(parts[1]["type"], "image_url");
-        assert_eq!(
-            parts[1]["image_url"]["url"],
-            "data:image/png;base64,QUJD"
-        );
+        assert_eq!(parts[1]["image_url"]["url"], "data:image/png;base64,QUJD");
     }
 
     #[test]

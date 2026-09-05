@@ -3,7 +3,7 @@
 use denia_core::session::SessionEvent;
 use denia_session::Session;
 use denia_system_prompt::{
-    is_runtime_context_snapshot, render_context_snapshot, PromptAssembly, RUNTIME_CONTEXT_CLEARED,
+    PromptAssembly, RUNTIME_CONTEXT_CLEARED, is_runtime_context_snapshot, render_context_snapshot,
 };
 
 /// Tracks the last retained runtime-context snapshot without owning session commits.
@@ -20,9 +20,11 @@ impl RuntimeContextProjection {
             .iter()
             .rev()
             .find_map(|envelope| match &envelope.event {
-                SessionEvent::UserMessage { text, injected: true, .. } if is_runtime_context_snapshot(text) => {
-                    Some(text.clone())
-                }
+                SessionEvent::UserMessage {
+                    text,
+                    injected: true,
+                    ..
+                } if is_runtime_context_snapshot(text) => Some(text.clone()),
                 _ => None,
             });
         Self { retained }
@@ -51,9 +53,7 @@ impl RuntimeContextProjection {
 mod tests {
     use denia_core::session::SessionEvent;
     use denia_session::Session;
-    use denia_system_prompt::{
-        AssembledContext, PromptAssembly, RUNTIME_CONTEXT_HEADER,
-    };
+    use denia_system_prompt::{AssembledContext, PromptAssembly, RUNTIME_CONTEXT_HEADER};
 
     use super::*;
 
