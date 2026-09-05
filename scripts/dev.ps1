@@ -26,13 +26,14 @@ $DevHome = if ($env:DEV_HOME) { $env:DEV_HOME } else { Join-Path $HOME '.denia' 
 Write-Host "`n==> building web console"
 if (-not (Test-Path 'web/node_modules')) {
   Push-Location web
-  try { pnpm install } finally { Pop-Location }
+  try { pnpm install; if ($LASTEXITCODE -ne 0) { throw '前端依赖安装失败' } } finally { Pop-Location }
 }
 Push-Location web
-try { pnpm build } finally { Pop-Location }
+try { pnpm build; if ($LASTEXITCODE -ne 0) { throw '前端构建失败' } } finally { Pop-Location }
 
 Write-Host "`n==> release build (no install, no kill)"
 cargo build --release -p denia-server
+if ($LASTEXITCODE -ne 0) { throw '后端构建失败，保留现有开发实例' }
 
 Write-Host "`n==> staging denia_develop"
 # 只杀旧开发实例(正式 denia.exe 绝不碰),再复制替换。
