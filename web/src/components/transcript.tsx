@@ -303,7 +303,7 @@ function SystemPromptRow({ text }: { text: string }) {
 function ContextInjectionRow({ text }: { text: string }) {
   return (
     <DisclosureRow
-      title={t('contextInjectionTitle')}
+      title={text.startsWith('[子代理') || text.startsWith('[代理 ') || text.startsWith('[后台任务') ? text.split('\n')[0] : t('contextInjectionTitle')}
       icon={<IconTool size={14} />}
       text={text}
     />
@@ -394,6 +394,18 @@ function ThinkRow({
 
 function toolMeta(name: string): { title: string; icon: ReactNode } {
   switch (name) {
+    case 'spawn_agent':
+    case 'fork_agent': return { title: t('runtimeAgents'), icon: <IconTool size={14} /> }
+    case 'send_message': return { title: t('runtimeMessage'), icon: <IconTool size={14} /> }
+    case 'interrupt_agent':
+    case 'job_kill': return { title: t('runtimeInterrupt'), icon: <IconTool size={14} /> }
+    case 'list_agents':
+    case 'wait_agent': return { title: t('runtimeAgents'), icon: <IconTool size={14} /> }
+    case 'job_start':
+    case 'job_list': return { title: t('runtimeJobs'), icon: <IconTool size={14} /> }
+    case 'job_output': return { title: t('runtimeOutput'), icon: <IconTool size={14} /> }
+    case 'skill': return { title: t('runtimeSkills'), icon: <IconTool size={14} /> }
+
     case 'bash':
       return { title: 'Bash', icon: <IconTerminal size={14} /> }
     case 'read_file':

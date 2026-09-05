@@ -47,6 +47,20 @@ export function toolCallSummary(name: string, args: string): string {
   const parsed = parseArgsObject(args)
   if (parsed) {
     switch (name) {
+      case 'spawn_agent':
+      case 'fork_agent':
+        return readString(parsed, 'description') ?? (readString(parsed, 'prompt') ?? '').slice(0, 90)
+      case 'skill':
+        return readString(parsed, 'name') ?? ''
+      case 'send_message':
+      case 'interrupt_agent':
+      case 'wait_agent':
+        return readString(parsed, 'target') ?? ''
+      case 'job_output':
+      case 'job_kill':
+        return readString(parsed, 'id') ?? ''
+      case 'job_start':
+        return (readString(parsed, 'label') ?? readString(parsed, 'command') ?? '').slice(0, 90)
       case 'read_file':
       case 'write_file': {
         const path = readString(parsed, 'path')

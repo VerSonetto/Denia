@@ -1,3 +1,4 @@
+import { RuntimePanel } from '../components/RuntimePanel'
 import { useCallback, useEffect, useRef, useState, type ClipboardEvent, type KeyboardEvent, type WheelEvent } from 'react'
 import * as api from '../api'
 import { optimizePromptText } from '../promptOptimizer'
@@ -1241,6 +1242,7 @@ export default function SessionsPage({
               </>
             )}
           </div>
+          {activeId && <RuntimePanel key={activeId} id={activeId} />}
         </header>
       )}
       <div
@@ -1289,7 +1291,7 @@ export default function SessionsPage({
             <div className={`composer-stack${phase === 'hero' ? ' composer-hero' : ''}`}>
               {phase === 'hero' && workspaceRow}
               {phase === 'active' && <TodoPanel todos={todos} />}
-              {composerCard}
+              {activeSession?.subagent ? <div className="runtime-child-composer"><span>{t('runtimeChildReadonly')}</span><button type="button" className="runtime-child-back-button" onClick={() => activeSession.parent_session && setActiveId(activeSession.parent_session, null)}>{t('runtimeBackParent')}</button></div> : composerCard}
               {phase === 'active' && (
                 <StatsBar nodes={transcriptNodes} running={running} />
               )}

@@ -9,6 +9,7 @@ import {
   deleteWorkspaceAction,
   findWorkspaceBlank,
   getActiveWorkspace,
+  markLocalBlank,
   notify,
   refreshList,
   setActiveId,
@@ -17,6 +18,7 @@ import {
   setRunningStatus,
   useActiveId,
   useConnLost,
+  useLocalBlankIds,
   useRunningIds,
   useSessions,
   useSessionsLoaded,
@@ -58,6 +60,7 @@ export default function App() {
   const workspaces = useWorkspaces()
   const activeId = useActiveId()
   const startedIds = useStartedIds()
+  const localBlankIds = useLocalBlankIds()
   const sessionsLoaded = useSessionsLoaded()
   const connLost = useConnLost()
   const toast = useToast()
@@ -277,38 +280,28 @@ export default function App() {
     if (recent) connectWorkspace(recent)
   }, [workspaces, activeId, hashSettled, recentWorkspace, connectWorkspace])
 
-  /* ---- 空白会话不保留:离开即删 + 非活跃清扫 ---- */
+  /* ---- 空白会话不保留:仅清理本页面自己创建的空白会话 ---- */
 
+  // 清理作用域必须是 `localBlankIds`(本页面创建的会话),绝不能按"全局列表
+  // 里非活跃即空白"去扫:会话列表是跨页面/跨实例共享的(正式与开发实例还
+  // 共用同一份数据目录),那样会把别的标签页刚创建、正在使用的会话当垃圾删掉,
+  // 表现为"新建会话没选中工作区 + 发不出消息 + 列表里看不到新会话",以及
+  // 发消息时报 `session not found`。浏览器直接关闭留下的残留空白,由后端
+  // 启动时一次性清扫(见 SessionStore::sweep_stale_blanks)。
   const prevActiveIdRef = useRef<string | null>(null)
   useEffect(() => {
     const prev = prevActiveIdRef.current
     prevActiveIdRef.current = activeId
     if (prev === null || prev === activeId) return
-    // 焦点从空白会话切走:它没有任何内容,直接清理,不留账本残影。
+    if (!localBlankIds[prev]) return
+    // 焦点从本页面创建的空白会话切走:它没有任何内容,直接清理,不留账本残影。
     const left = sessions.find((s) => s.id === prev)
     if (left && isBlank(left)) {
       deleteSessionAction(prev).catch(() => {
-        // 删除失败(如网络抖动):残留空白无害,非活跃清扫会兜底重试。
+        // 删除失败(如网络抖动):残留空白无害,下次切走或后端启动清扫会兜底。
       })
     }
-  }, [activeId, sessions, isBlank])
-
-  // 兜底清扫:启动/列表刷新后,非活跃的空白会话(历史遗留、浏览器直接
-  // 关闭的残留)统一静默清掉;timer 推迟一拍,避免抢在启动自动落点的
-  // 空白复用之前动手。
-  useEffect(() => {
-    if (!sessionsLoaded) return
-    const timer = window.setTimeout(() => {
-      for (const s of sessions) {
-        if (s.id !== activeId && isBlank(s)) {
-          deleteSessionAction(s.id).catch(() => {
-            // 同上:删除失败静默留待下次机会,不打断用户操作。
-          })
-        }
-      }
-    }, 0)
-    return () => window.clearTimeout(timer)
-  }, [sessions, sessionsLoaded, activeId, isBlank])
+  }, [activeId, sessions, localBlankIds, isBlank])
 
   /* ---- 显式"新建会话" ---- */
 
@@ -338,6 +331,8 @@ export default function App() {
           cwd_alive: true,
         }
         addSessionLocal(summary, target.id)
+        // 登记为本页面创建的空白会话:只有它允许被本页面的"切走即删"清理。
+        markLocalBlank(summary.id)
         setActiveId(summary.id, target.id)
         void refreshList()
       } catch (error) {
@@ -971,11 +966,13 @@ function SessionRow({
 }) {
   // 标题前补"(父)"提示,让用户一眼看出这是分支出来的子会话(已嵌套显示,
   // 但同工作区里有多个分支时文字也帮回忆),只对子会话生效,顶会不画。
-  const isBranch = depth > 0
+  const isSubagent = Boolean(session.subagent)
+  const isBranch = depth > 0 && !isSubagent
+  const isChild = depth > 0
   return (
     <div
-      className={`session-row-wrap${active ? ' active' : ''}${isBranch ? ' nested' : ''}`}
-      style={isBranch ? { paddingLeft: 10 + depth * 14 } : undefined}
+      className={`session-row-wrap${active ? ' active' : ''}${isChild ? ' nested' : ''}`}
+      style={isChild ? { paddingLeft: 10 + depth * 14 } : undefined}
     >
       <button type="button" className={`session-row${active ? ' active' : ''}`} onClick={onOpen}>
         <span className="lead">
@@ -986,6 +983,11 @@ function SessionRow({
           ) : null}
         </span>
         <span className="excerpt">{sessionDisplayTitle(session)}</span>
+        {isSubagent && (
+          <span className="subagent-tag" title={t('subagentTagHint')} aria-label={t('subagentTagHint')}>
+            {t('subagentTag')}
+          </span>
+        )}
         {isBranch && (
           <span className="branch-tag" title={t('branchTagHint')} aria-label={t('branchTagHint')}>
             {t('branchTag')}

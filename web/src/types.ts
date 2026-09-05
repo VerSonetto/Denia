@@ -170,6 +170,7 @@ export interface UserMessageImage {
 }
 
 export type SessionEnvelope =
+  | { seq: number; time: number; type: 'agent-inbox' | 'agent-delivery'; id: string; text: string; source: string }
   | { seq: number; time: number; type: 'turn-start'; turn: number }
   | { seq: number; time: number; type: 'turn-end'; turn: number; reason: TurnEndReason }
   | { seq: number; time: number; type: 'step-start'; turn: number; step: number }
@@ -269,6 +270,7 @@ export type SessionEnvelope =
 export type PermissionMode = 'read-only' | 'workspace-write' | 'danger-full-access'
 
 export interface SessionHeader {
+  subagent?: { label: string; depth: number; mode: string; selection: ModelSelection }
   type: 'session'
   version: number
   id: string
@@ -280,6 +282,7 @@ export interface SessionHeader {
 }
 
 export interface SessionSummary {
+  subagent?: { label: string; depth: number; mode: string; selection: ModelSelection }
   id: string
   created_at: number
   excerpt: string | null

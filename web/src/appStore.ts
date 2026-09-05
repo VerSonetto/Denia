@@ -26,6 +26,16 @@ interface AppSnapshot {
   connLost: boolean
   catalogTick: number
   startedIds: Record<string, true>
+  /**
+   * 本页面自己创建的空白会话 id。
+   *
+   * 空白会话的自动清理作用域**必须**限于此集合:会话列表是全局共享的,
+   * 而 `activeId` 只代表本页面的焦点。若按"列表里非活跃即空白"去清扫,
+   * 就会把别的标签页 / 别的实例(正式与开发实例共用同一数据目录)刚创建、
+   * 正在使用的会话当垃圾删掉 —— 表现为"新建会话没选中工作区 + 发不出消息
+   * + 列表里看不到新会话",以及发消息时报 `session not found`。
+   */
+  localBlankIds: Record<string, true>
   sessionsLoaded: boolean
   /** 运行中的会话集合:服务端 SSE 推送驱动 + 本地乐观兜底。 */
   runningIds: Record<string, boolean>
@@ -40,6 +50,7 @@ let state: AppSnapshot = {
   connLost: false,
   catalogTick: 0,
   startedIds: {},
+  localBlankIds: {},
   sessionsLoaded: false,
   runningIds: {},
 }
@@ -134,6 +145,19 @@ export function markStarted(id: string) {
   setState({ startedIds: { ...startedIds, [id]: true } })
 }
 
+/**
+ * 登记"本页面创建的空白会话":只有落在这个集合里的会话,才允许被本页面
+ * 在切走时自动清理。跨页面/跨实例的清理一律不做(见 `localBlankIds` 注释)。
+ */
+export function markLocalBlank(id: string) {
+  if (state.localBlankIds[id]) return
+  setState({ localBlankIds: { ...state.localBlankIds, [id]: true } })
+}
+
+export function useLocalBlankIds(): Record<string, true> {
+  return useApp((s) => s.localBlankIds)
+}
+
 /** 全量刷新会话列表 + 工作区列表(SSE 通知/删除/创建后调用)。 */
 export async function refreshList(): Promise<void> {
   try {
@@ -142,11 +166,18 @@ export async function refreshList(): Promise<void> {
     for (const session of sess.sessions) {
       if (session.excerpt) nextStarted[session.id] = true
     }
+    // activeId 指向的会话已不存在(被别的页面/实例删除,或本页面切走后
+    // 被清理):必须丢掉悬空焦点,否则输入框仍停在它上面,发消息会报
+    // `session not found`。只清焦点、保留 pendingWsId —— 工作区落点还在,
+    // 页面回到该工作区的可输入草稿态,而不是掉进 inert 死态。
+    const activeStillExists =
+      state.activeId === null || sess.sessions.some((s) => s.id === state.activeId)
     setState({
       sessions: sess.sessions,
       workspaces: ws.workspaces,
       startedIds: nextStarted,
       sessionsLoaded: true,
+      ...(activeStillExists ? {} : { activeId: null }),
     })
   } catch (error) {
     setState({ sessionsLoaded: true })
@@ -177,13 +208,18 @@ export function addSessionLocal(summary: SessionSummary, workspaceId?: string) {
 export async function deleteSessionAction(id: string): Promise<void> {
   await api.deleteSession(id)
   dropSession(id)
+  const localBlankIds = { ...state.localBlankIds }
+  delete localBlankIds[id]
   setState({
     sessions: state.sessions.filter((s) => s.id !== id),
     workspaces: state.workspaces.map((ws) => ({
       ...ws,
       sessionIds: ws.sessionIds.filter((sid) => sid !== id),
     })),
-    ...(state.activeId === id ? { activeId: null, pendingWsId: null } : {}),
+    localBlankIds,
+    // 只丢焦点,保留 pendingWsId:删掉当前会话后仍停在该工作区的草稿态,
+    // 输入框可以继续用,不会掉进 inert 死态。
+    ...(state.activeId === id ? { activeId: null } : {}),
   })
 }
 
@@ -229,7 +265,14 @@ export function getActiveWorkspace(): WorkspaceRecord | null {
  * 返回会话 id;无工作区时返回 null。
  */
 export async function ensureSession(ws: WorkspaceRecord | null): Promise<string | null> {
-  if (state.activeId) return state.activeId
+  // activeId 可能悬空(会话被别的页面/实例删掉,而本页面焦点还没跟上)。
+  // 直接拿它去 postPrompt 会报 `session not found`,所以先校验它确实还在
+  // 列表里;列表尚未加载完时不做校验,避免误判。
+  if (state.activeId !== null) {
+    const known = !state.sessionsLoaded || state.sessions.some((s) => s.id === state.activeId)
+    if (known) return state.activeId
+    setState({ activeId: null })
+  }
   if (!ws) return null
   const blank = findWorkspaceBlank(ws.path)
   if (blank) {
@@ -246,6 +289,8 @@ export async function ensureSession(ws: WorkspaceRecord | null): Promise<string 
     cwd_alive: true,
   }
   addSessionLocal(summary, ws.id)
+  // 本页面为发送首条消息而创建的会话:同样登记,发送失败留下空白时可被清理。
+  markLocalBlank(summary.id)
   setActiveId(summary.id, ws.id)
   return summary.id
 }

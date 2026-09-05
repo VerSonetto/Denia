@@ -1,3 +1,4 @@
+import { RuntimeSettings } from './settings/RuntimeSettings'
 import { useCallback, useEffect, useState, type ReactNode } from 'react'
 import * as api from '../api'
 import { t } from '../i18n'
@@ -7,14 +8,16 @@ import { loadProviderCredentials, ModelProvidersPanel } from './settings/ModelPr
 import { Toggle } from './ui/controls'
 import type { SettingsDescribe } from '../types'
 
-type SettingsTab = 'general' | 'models' | 'security' | 'appearance'
+type SettingsTab = 'runtime' | 'general' | 'models' | 'security' | 'appearance'
 
 const CONSOLE_NS = 'console'
 
-const TABS: SettingsTab[] = ['general', 'models', 'security', 'appearance']
+const TABS: SettingsTab[] = ['general', 'models', 'runtime', 'security', 'appearance']
 
 function tabIcon(tab: SettingsTab, size = 16) {
   switch (tab) {
+    case 'runtime':
+      return <IconGear size={size} />
     case 'general':
       return <IconPrompt size={size} />
     case 'models':
@@ -28,6 +31,8 @@ function tabIcon(tab: SettingsTab, size = 16) {
 
 function tabLabel(tab: SettingsTab): string {
   switch (tab) {
+    case 'runtime':
+      return t('runtimeSettings')
     case 'general':
       return t('settingsTabGeneral')
     case 'models':
@@ -41,6 +46,8 @@ function tabLabel(tab: SettingsTab): string {
 
 function tabNavDesc(tab: SettingsTab): string {
   switch (tab) {
+    case 'runtime':
+      return t('runtimeSettingsHint')
     case 'general':
       return t('settingsTabGeneralDesc')
     case 'models':
@@ -54,6 +61,8 @@ function tabNavDesc(tab: SettingsTab): string {
 
 function paneTitle(tab: SettingsTab): string {
   switch (tab) {
+    case 'runtime':
+      return t('runtimeSettings')
     case 'general':
       return t('systemPromptTitle')
     case 'models':
@@ -67,6 +76,8 @@ function paneTitle(tab: SettingsTab): string {
 
 function paneDesc(tab: SettingsTab): string {
   switch (tab) {
+    case 'runtime':
+      return t('runtimeSettingsHint')
     case 'general':
       return t('systemPromptHint')
     case 'models':
@@ -312,6 +323,7 @@ export function SettingsModal({ notify, onClose }: { notify: Notify; onClose: ()
               </div>
             ) : (
               <>
+                {tab === 'runtime' && <RuntimeSettings />}
                 {tab === 'general' && (
                   <section className="setm-section">
                     {promptSource === 'default' && !promptText && (

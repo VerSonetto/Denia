@@ -169,6 +169,10 @@ export function foldEvents(events: SessionEnvelope[]): TranscriptNode[] {
 
   for (const event of events) {
     switch (event.type) {
+      case 'agent-delivery':
+        closeOpen()
+        nodes.push({ kind: 'context-injection', text: event.text, seq: event.seq })
+        break
       case 'turn-start':
         closeOpen()
         nodes.push({ kind: 'turn-start', turn: event.turn, time: event.time })
@@ -328,6 +332,8 @@ export function applyEnvelope(
   event: SessionEnvelope,
 ): TranscriptNode[] {
   switch (event.type) {
+    case 'agent-delivery':
+      return [...nodes, { kind: 'context-injection', text: event.text, seq: event.seq }]
     case 'turn-start':
       return [...nodes, { kind: 'turn-start', turn: event.turn, time: event.time }]
     case 'user-message':

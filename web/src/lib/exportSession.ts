@@ -113,6 +113,9 @@ function fenceSafe(value: string): string {
 function headLine(envelope: SessionEnvelope): string {
   const t = envelope.type
   switch (t) {
+    case 'agent-inbox':
+    case 'agent-delivery':
+      return `${envelope.type} · ${envelope.source}\n${envelope.text}`
     case 'turn-start':
       return `turn-start · turn=${envelope.turn}`
     case 'turn-end':
@@ -152,6 +155,9 @@ function eventBody(envelope: SessionEnvelope): string {
   const t = envelope.type
   const lines: string[] = []
   switch (t) {
+    case 'agent-inbox':
+    case 'agent-delivery':
+      return `${envelope.type} · ${envelope.source}\n${envelope.text}`
     case 'turn-start':
     case 'turn-end':
     case 'step-start':
