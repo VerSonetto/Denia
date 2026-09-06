@@ -20,7 +20,6 @@
 //! 加载时修复 torn tail(截断到最后一个合法行边界)并用合成
 //! `turn-end { aborted }` 关闭崩溃遗留的孤儿轮次——事件不会静默丢失。
 
-use std::collections::VecDeque;
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
@@ -896,6 +895,60 @@ pub struct SessionSummary {
     pub subagent: Option<denia_core::session::SubagentDescriptor>,
 }
 
+/// 轮次轴锚点:一条非注入 user-message 的定位与预览文本。
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SessionAnchor {
+    pub seq: u64,
+    pub text: String,
+}
+
+/// 锚点预览截断长度:轮次轴悬浮预览够用即可,不随正文长度膨胀响应。
+const ANCHOR_PREVIEW_CHARS: usize = 240;
+
+fn anchor_preview(text: &str) -> String {
+    let collapsed: String = text
+        .chars()
+        .map(|c| if c == '\n' || c == '\r' { ' ' } else { c })
+        .collect();
+    let trimmed = collapsed.trim();
+    if trimmed.chars().count() <= ANCHOR_PREVIEW_CHARS {
+        return trimmed.to_string();
+    }
+    let cut: String = trimmed.chars().take(ANCHOR_PREVIEW_CHARS).collect();
+    format!("{cut}…")
+}
+
+/// 逐行读下一条可解析的日志事件:首个非空行产出会话头(存入 `header`,
+/// 不作为事件返回),空行跳过,损坏行跳过(torn-tail 容忍),文件读尽返回
+/// `None`。分页的两遍扫描共用,保证对同一文件产出一致的事件序列。
+fn next_log_event(
+    reader: &mut BufReader<File>,
+    header: &mut Option<SessionHeader>,
+    line: &mut String,
+    line_no: &mut usize,
+) -> Result<Option<SessionEnvelope>, SessionError> {
+    loop {
+        line.clear();
+        let read = reader.read_line(line)?;
+        if read == 0 {
+            return Ok(None);
+        }
+        *line_no += 1;
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if *line_no == 1 {
+            *header = Some(
+                serde_json::from_str(trimmed)
+                    .map_err(|e| SessionError::Corrupt(format!("bad header: {e}")))?,
+            );
+            continue;
+        }
+        return Ok(serde_json::from_str(trimmed).ok());
+    }
+}
+
 /// 一次分页读取的会话事件窗口:只保留 `limit` 条,后端不驻留全量历史。
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct SessionPage {
@@ -903,6 +956,8 @@ pub struct SessionPage {
     pub events: Vec<SessionEnvelope>,
     pub total: u64,
     pub has_more_before: bool,
+    /// 全会话非注入 user-message 锚点(与 `before` 无关,恒为全量)。
+    pub anchors: Vec<SessionAnchor>,
 }
 
 /// 索引条目:启动/失效时从文件摘要得到,list 只读它。
@@ -1077,11 +1132,20 @@ impl SessionStore {
         Ok(session)
     }
 
-    /// 直接按文件流式读取一个事件窗口,不构造/驻留完整 `Session`。
+    /// 直接按文件流式读取一个「展示粒度」事件窗口,不构造/驻留完整 `Session`。
     ///
     /// - `before = None`:取日志尾部最近 `limit` 条。
     /// - `before = Some(seq)`:取 `seq` 之前最近 `limit` 条(供前端向上翻页)。
-    /// - 内存只保留一个 `limit` 大小的滑窗,`total` 为文件有效事件总数。
+    /// - 分页单位是展示事件:流式 `assistant-chunk` 不计入 `total` 也不进入
+    ///   窗口——历史重建只依赖结算的 `assistant-message`(dsh 语义:失败
+    ///   尝试不进派生历史),否则 chunk 洪流会让窗口在两三个轮次内触底。
+    /// - 窗口起点对齐轮次组:展示边界(total-limit)回退到其前最近一条非
+    ///   注入 user-message——保证窗口内第一个轮次完整,前端折叠概览依赖
+    ///   成对的 turn-start/turn-end;边界落在首条锚点之前时直接用边界。
+    /// - `anchors` 恒为全会话非注入 user-message(不受 `before` 限制),供
+    ///   前端轮次轴渲染全部刻度。
+    /// - 两遍顺序扫描:窗口起点依赖文件末尾才能确定的边界,单遍需无界缓存;
+    ///   两遍只引入一次顺序 IO,内存 O(锚点数 + 窗口)。
     pub fn read_page(
         &self,
         id: &str,
@@ -1093,51 +1157,69 @@ impl SessionStore {
             return Err(SessionError::NotFound(id.to_string()));
         }
         let limit = limit.clamp(1, 1000);
+        let eligible = |seq: u64| before.map_or(true, |cut| seq < cut);
+
+        // 第一遍:统计展示事件总数、收集全会话锚点,并记录每个 eligible 锚点
+        // 的展示位次(供起点回退二分)。
         let mut reader = BufReader::new(File::open(&file)?);
         let mut header: Option<SessionHeader> = None;
-        let mut total = 0u64;
-        let mut before_count = 0u64;
-        let mut window: VecDeque<SessionEnvelope> = VecDeque::with_capacity(limit);
         let mut line = String::new();
         let mut line_no = 0usize;
-        loop {
-            line.clear();
-            let read = reader.read_line(&mut line)?;
-            if read == 0 {
-                break;
-            }
-            line_no += 1;
-            let trimmed = line.trim();
-            if trimmed.is_empty() {
+        let mut total = 0u64;
+        let mut anchors: Vec<SessionAnchor> = Vec::new();
+        // (展示位次, seq):展示位次按 eligible 展示事件序号计。
+        let mut anchor_at: Vec<(u64, u64)> = Vec::new();
+        while let Some(envelope) = next_log_event(&mut reader, &mut header, &mut line, &mut line_no)? {
+            if matches!(envelope.event, SessionEvent::AssistantChunk { .. }) {
                 continue;
             }
-            if line_no == 1 {
-                header = Some(
-                    serde_json::from_str(trimmed)
-                        .map_err(|e| SessionError::Corrupt(format!("bad header: {e}")))?,
-                );
-                continue;
-            }
-            let envelope: SessionEnvelope = match serde_json::from_str(trimmed) {
-                Ok(envelope) => envelope,
-                Err(_) => continue,
-            };
-            total += 1;
-            let eligible = before.map_or(true, |seq| envelope.seq < seq);
-            if eligible {
-                before_count += 1;
-                if window.len() == limit {
-                    window.pop_front();
+            if let SessionEvent::UserMessage { text, injected: false, .. } = &envelope.event {
+                anchors.push(SessionAnchor {
+                    seq: envelope.seq,
+                    text: anchor_preview(text),
+                });
+                if eligible(envelope.seq) {
+                    anchor_at.push((total, envelope.seq));
                 }
-                window.push_back(envelope);
+            }
+            if eligible(envelope.seq) {
+                total += 1;
             }
         }
         let header = header.ok_or_else(|| SessionError::Corrupt("missing header".into()))?;
+
+        // 窗口起点:边界回退到其前最近锚点;无锚点可用则直接用边界。
+        let boundary = total.saturating_sub(limit as u64);
+        let start_index = match anchor_at.binary_search_by(|(index, _)| index.cmp(&boundary)) {
+            Ok(pos) => anchor_at[pos].0,
+            Err(0) => boundary,
+            Err(insert) => anchor_at[insert - 1].0,
+        };
+
+        // 第二遍:收集 eligible 展示事件中位次 ≥ 起点的窗口。
+        let mut reader = BufReader::new(File::open(&file)?);
+        let mut header2: Option<SessionHeader> = None;
+        let mut line_no = 0usize;
+        let mut events: Vec<SessionEnvelope> = Vec::new();
+        let mut index = 0u64;
+        while let Some(envelope) = next_log_event(&mut reader, &mut header2, &mut line, &mut line_no)? {
+            if matches!(envelope.event, SessionEvent::AssistantChunk { .. }) {
+                continue;
+            }
+            if !eligible(envelope.seq) {
+                continue;
+            }
+            if index >= start_index {
+                events.push(envelope);
+            }
+            index += 1;
+        }
         Ok(SessionPage {
             header,
-            events: window.into_iter().collect(),
+            events,
             total,
-            has_more_before: before_count > limit as u64,
+            has_more_before: start_index > 0,
+            anchors,
         })
     }
 
@@ -1581,6 +1663,222 @@ mod tests {
             store.read_page("00000000-0000-4000-8000-000000000000", None, 5),
             Err(SessionError::NotFound(_))
         ));
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn read_page_display_granularity_ignores_chunks_and_aligns_turn_group() {
+        let root = temp_root();
+        let store = SessionStore::open(&root).unwrap();
+        let cwd = root.join("work");
+        std::fs::create_dir_all(&cwd).unwrap();
+
+        let session = store.create(&cwd, true).unwrap();
+        let id = session.id().to_string();
+        let chunk = |text: &str| SessionEvent::AssistantChunk {
+            turn: 1,
+            step: 1,
+            chunk: denia_core::stream::StreamChunk::TextDelta {
+                index: 0,
+                text: text.into(),
+            },
+        };
+        // 轮次 1:用户 + 3 条 chunk + 结算消息 + 收尾。
+        session
+            .append(SessionEvent::UserMessage {
+                text: "u1\nsecond line".into(),
+                injected: false,
+                images: Vec::new(),
+            })
+            .unwrap();
+        session.append(SessionEvent::TurnStart { turn: 1 }).unwrap();
+        for _ in 0..3 {
+            session.append(chunk("x")).unwrap();
+        }
+        session
+            .append(SessionEvent::AssistantMessage {
+                turn: 1,
+                step: 1,
+                blocks: Vec::new(),
+                usage: None,
+                interrupted: false,
+                source_event_seqs: Vec::new(),
+            })
+            .unwrap();
+        session
+            .append(SessionEvent::TurnEnd {
+                turn: 1,
+                reason: TurnEndReason::Completed,
+            })
+            .unwrap();
+        // 轮次 2:用户 + 工具 + 2 条 chunk + 结算消息 + 收尾。
+        session
+            .append(SessionEvent::UserMessage {
+                text: "u2".into(),
+                injected: false,
+                images: Vec::new(),
+            })
+            .unwrap();
+        session.append(SessionEvent::TurnStart { turn: 2 }).unwrap();
+        session
+            .append(SessionEvent::ToolCall {
+                turn: 2,
+                step: 1,
+                call_id: "c1".into(),
+                name: "bash".into(),
+                arguments: "{}".into(),
+            })
+            .unwrap();
+        session
+            .append(SessionEvent::ToolResult {
+                turn: 2,
+                step: 1,
+                call_id: "c1".into(),
+                content: "ok".into(),
+                is_error: false,
+                error: None,
+                error_identity: None,
+                meta: None,
+                replaces: None,
+            })
+            .unwrap();
+        session.append(chunk("y")).unwrap();
+        session.append(chunk("z")).unwrap();
+        session
+            .append(SessionEvent::AssistantMessage {
+                turn: 2,
+                step: 1,
+                blocks: Vec::new(),
+                usage: None,
+                interrupted: false,
+                source_event_seqs: Vec::new(),
+            })
+            .unwrap();
+        session
+            .append(SessionEvent::TurnEnd {
+                turn: 2,
+                reason: TurnEndReason::Completed,
+            })
+            .unwrap();
+        drop(session);
+
+        // 展示粒度:chunk 不计入 total,也不出现在窗口。
+        let page = store.read_page(&id, None, 100).unwrap();
+        assert_eq!(page.total, 10);
+        assert!(page
+            .events
+            .iter()
+            .all(|envelope| !matches!(envelope.event, SessionEvent::AssistantChunk { .. })));
+        assert!(!page.has_more_before);
+        // 锚点为全会话非注入用户消息,预览压平换行。
+        assert_eq!(page.anchors.len(), 2);
+        assert_eq!(page.anchors[0].text, "u1 second line");
+        assert_eq!(page.anchors[1].text, "u2");
+
+        // 小窗口:最近锚点(u2)距尾部已达 limit,窗口回退到 u2——
+        // 轮次 2 完整在窗口内(前端折叠依赖成对的 turn-start/turn-end)。
+        let tail = store.read_page(&id, None, 4).unwrap();
+        assert_eq!(tail.total, 10);
+        assert_eq!(tail.events.len(), 6);
+        assert_eq!(tail.events.first().unwrap().seq, page.anchors[1].seq);
+        assert!(tail.has_more_before);
+        assert!(tail.anchors.len() == 2, "anchors 不受窗口限制");
+
+        // before 查询:eligible 区按展示粒度计数;最近锚点(u1)起的轮次组
+        // 已达 limit,窗口回退到 u1 整组返回,锚点仍为全量。
+        let before = store.read_page(&id, Some(page.anchors[1].seq), 2).unwrap();
+        assert_eq!(before.total, 4);
+        assert_eq!(before.events.len(), 4);
+        assert_eq!(before.events.first().unwrap().seq, page.anchors[0].seq);
+        assert!(!before.has_more_before);
+        assert_eq!(before.anchors.len(), 2);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn read_page_aligns_window_to_earlier_anchor_behind_small_tail_turns() {
+        let root = temp_root();
+        let store = SessionStore::open(&root).unwrap();
+        let cwd = root.join("work");
+        std::fs::create_dir_all(&cwd).unwrap();
+
+        let session = store.create(&cwd, true).unwrap();
+        let id = session.id().to_string();
+        let user = |text: &str| SessionEvent::UserMessage {
+            text: text.into(),
+            injected: false,
+            images: Vec::new(),
+        };
+        // 轮次 1:u1 + 工具×3 对 + 结算 + 收尾(展示位次 0..9);
+        // 轮次 2/3:各 4 条展示事件的小轮次。尾部小轮次合计不足 limit 时,
+        // 边界会落在轮次 1 的工具段中间——窗口必须回退到 u1,否则切出
+        // 无 turn-start 的残轮次,前端折叠失效。
+        let turn = |turn: u32, tools: usize, session: &Session| {
+            session.append(user(&format!("u{turn}"))).unwrap();
+            session
+                .append(SessionEvent::TurnStart { turn })
+                .unwrap();
+            for i in 0..tools {
+                session
+                    .append(SessionEvent::ToolCall {
+                        turn,
+                        step: 1,
+                        call_id: format!("c{turn}-{i}"),
+                        name: "bash".into(),
+                        arguments: "{}".into(),
+                    })
+                    .unwrap();
+                session
+                    .append(SessionEvent::ToolResult {
+                        turn,
+                        step: 1,
+                        call_id: format!("c{turn}-{i}"),
+                        content: "ok".into(),
+                        is_error: false,
+                        error: None,
+                        error_identity: None,
+                        meta: None,
+                        replaces: None,
+                    })
+                    .unwrap();
+            }
+            session
+                .append(SessionEvent::AssistantMessage {
+                    turn,
+                    step: 1,
+                    blocks: Vec::new(),
+                    usage: None,
+                    interrupted: false,
+                    source_event_seqs: Vec::new(),
+                })
+                .unwrap();
+            session
+                .append(SessionEvent::TurnEnd {
+                    turn,
+                    reason: TurnEndReason::Completed,
+                })
+                .unwrap();
+        };
+        turn(1, 3, &session);
+        turn(2, 0, &session);
+        turn(3, 0, &session);
+        drop(session);
+
+        // total=18;limit=12 → 边界=6,正是轮次 1 第三个 toolcall(工具段中)。
+        let page = store.read_page(&id, None, 12).unwrap();
+        assert_eq!(page.total, 18);
+        // 窗口回退到 u1:第一个轮次完整,而不是从边界切出残轮次。
+        assert_eq!(page.events.len(), 18);
+        assert_eq!(page.anchors[0].seq, page.events[0].seq);
+        assert!(matches!(page.events[0].event, SessionEvent::UserMessage { .. }));
+        assert!(!page.has_more_before);
+
+        // 尾部小窗口:边界落在轮次 2/3 之间,起点对齐 u2,完整返回尾两个轮次。
+        let tail = store.read_page(&id, None, 7).unwrap();
+        assert_eq!(tail.total, 18);
+        assert_eq!(tail.events.len(), 8);
+        assert_eq!(tail.events[0].seq, page.anchors[1].seq);
+        assert!(tail.has_more_before);
         std::fs::remove_dir_all(&root).unwrap();
     }
 

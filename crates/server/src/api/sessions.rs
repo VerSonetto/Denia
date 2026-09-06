@@ -214,6 +214,7 @@ async fn get_session_events(
         "events": page.events,
         "total": page.total,
         "hasMoreBefore": page.has_more_before,
+        "anchors": page.anchors,
     })))
 }
 
