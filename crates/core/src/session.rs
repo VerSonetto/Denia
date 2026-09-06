@@ -208,48 +208,6 @@ pub struct ToolFailureIdentity {
     pub code: String,
 }
 
-/// 工具结果剪枝配置(对齐 dsh `compaction-tool-result-pruner` 默认值)。
-/// 既用于会话侧落盘剪枝(legacy `prune_tool_results`),也用于模型历史的
-/// 投影剪枝(`derive_messages_projected`)。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ToolResultPruneConfig {
-    /// 超过该字符数(Unicode code point)的工具结果才剪。
-    pub threshold_chars: usize,
-    /// 剪枝后保留的头部字符数。
-    pub head_chars: usize,
-    /// 剪枝后保留的尾部字符数。
-    pub tail_chars: usize,
-}
-
-impl Default for ToolResultPruneConfig {
-    fn default() -> Self {
-        Self {
-            threshold_chars: 8_192,
-            head_chars: 4_096,
-            tail_chars: 1_024,
-        }
-    }
-}
-
-/// 剪枝替换的中间省略标记(原样抄 dsh `PRUNE_MARKER`)。
-pub const PRUNE_MARKER: &str = "\n\n[... tool result middle pruned ...]\n\n";
-
-/// 按 Unicode code point 对工具结果做 head + marker + tail 剪枝(对齐 dsh
-/// `pruneContent`)。未超过阈值返回 `None`。
-pub fn prune_text(content: &str, config: &ToolResultPruneConfig) -> Option<String> {
-    let chars: Vec<char> = content.chars().collect();
-    let total = chars.len();
-    if total <= config.threshold_chars {
-        return None;
-    }
-    let head_end = config.head_chars.min(total);
-    let tail_start = total.saturating_sub(config.tail_chars).max(head_end);
-    let mut out: String = chars[..head_end].iter().collect();
-    out.push_str(PRUNE_MARKER);
-    out.extend(chars[tail_start..].iter());
-    Some(out)
-}
-
 /// The durable event vocabulary, internally tagged on `type`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "kebab-case")]
@@ -478,9 +436,11 @@ pub fn fork_cut_index(events: &[SessionEnvelope], at_seq: Option<u64>) -> Option
 /// Tool-result pruning replacements (`tool-result` with `replaces`) fold the
 /// surface: the replacement takes the original node's position and the old
 /// content no longer reaches the model (对齐 dsh `surfaceOp.replace`)。
-/// 派生模型可见历史(无投影:工具结果原文直出)。
 pub fn derive_messages(events: &[SessionEnvelope]) -> Vec<ChatMessage> {
-    derive_messages_projected(events, None)
+    derive_surface(events)
+        .into_iter()
+        .map(|item| item.message)
+        .collect()
 }
 
 /// 一条派生 surface 消息及其来源事件 seq。压缩器用它把消息切回事件区间。
@@ -490,37 +450,13 @@ pub struct SurfaceMessage {
     pub message: ChatMessage,
 }
 
-/// 派生模型可见历史,带事件 seq(投影 + 压缩折叠同 [`derive_messages_projected`])。
-pub fn derive_surface(
-    events: &[SessionEnvelope],
-    projection: Option<&ToolResultPruneConfig>,
-) -> Vec<SurfaceMessage> {
-    derive_surface_inner(events, projection)
+/// 派生模型可见历史,带事件 seq(压缩折叠同 [`derive_messages`])。
+pub fn derive_surface(events: &[SessionEnvelope]) -> Vec<SurfaceMessage> {
+    derive_surface_inner(events)
 }
 
-/// 派生模型可见历史,带可选的工具结果投影剪枝与 LLM 压缩折叠。
-///
-/// - `projection`:压力闸门开启时的 head/marker/tail 投影(日志不改,
-///   仅本次派生的历史被剪)——低压力传 `None`,请求内容与日志逐字一致,
-///   provider 前缀缓存持续命中;
-/// - `CompactionSummary` 事件在折叠时把其 `replaces_from..=replaces_to`
-///   区间内的事件从 surface 移除,并把摘要消息插到保留窗口(`keep_from`)
-///   之前(对齐 Claude Code compact boundary 语义)。
-pub fn derive_messages_projected(
-    events: &[SessionEnvelope],
-    projection: Option<&ToolResultPruneConfig>,
-) -> Vec<ChatMessage> {
-    derive_surface_inner(events, projection)
-        .into_iter()
-        .map(|item| item.message)
-        .collect()
-}
-
-/// [`derive_surface`] 的实现;派生细节见 [`derive_messages_projected`]。
-fn derive_surface_inner(
-    events: &[SessionEnvelope],
-    projection: Option<&ToolResultPruneConfig>,
-) -> Vec<SurfaceMessage> {
+/// [`derive_surface`] 的实现。
+fn derive_surface_inner(events: &[SessionEnvelope]) -> Vec<SurfaceMessage> {
     /// 当前模型可见 surface 节点(仅 user/assistant/tool-result 三类有消息)。
     struct SurfaceItem {
         seq: u64,
@@ -621,11 +557,7 @@ fn derive_surface_inner(
                 ..
             } => {
                 unanswered.retain(|id| id != call_id);
-                // 投影剪枝:超预算结果替换为 head/marker/tail(仅本次派生)。
-                let content = match projection {
-                    Some(config) => prune_text(content, config).unwrap_or_else(|| content.clone()),
-                    None => content.clone(),
-                };
+                let content = content.clone();
                 if let Some(replaced_seq) = replaces {
                     if let Some(item) = surface.iter_mut().find(|item| item.seq == *replaced_seq) {
                         item.message = ChatMessage::tool_result(call_id.clone(), content);
@@ -1322,68 +1254,6 @@ mod tests {
         // 锚点越过末尾:回退到最后一个 turn-end,仍没有 → None。
         assert_eq!(fork_cut_index(&events, Some(99)), None);
         assert_eq!(fork_cut_index(&[], None), None);
-    }
-
-    #[test]
-    fn derive_projection_trims_over_budget_tool_results_only() {
-        // 合法预算:head + marker + tail 必须 ≤ threshold(dsh 校验语义);
-        // 原文 96 > threshold 70,剪后 head24 + marker39 + tail8 = 71。
-        let config = ToolResultPruneConfig {
-            threshold_chars: 70,
-            head_chars: 24,
-            tail_chars: 8,
-        };
-        let long = "A".repeat(96);
-        let events = vec![
-            envelope(
-                1,
-                SessionEvent::UserMessage {
-                    text: "hi".into(),
-                    injected: false,
-                    images: Vec::new(),
-                },
-            ),
-            envelope(
-                2,
-                SessionEvent::AssistantMessage {
-                    turn: 1,
-                    step: 1,
-                    blocks: vec![ContentBlock::ToolCall {
-                        id: "c1".into(),
-                        name: "bash".into(),
-                        arguments: "{}".into(),
-                    }],
-                    usage: None,
-                    interrupted: false,
-                    source_event_seqs: Vec::new(),
-                },
-            ),
-            envelope(
-                3,
-                SessionEvent::ToolResult {
-                    turn: 1,
-                    step: 1,
-                    call_id: "c1".into(),
-                    content: long.clone(),
-                    is_error: false,
-                    error: None,
-                    error_identity: None,
-                    meta: None,
-                    replaces: None,
-                },
-            ),
-        ];
-        // 无投影:原文直出(低压力,prefix 稳定)。
-        let plain = derive_messages(&events);
-        assert_eq!(plain[2].content, long);
-        // 有投影:head + marker + tail。无投影时一字不改。
-        let projected = derive_messages_projected(&events, Some(&config));
-        assert_eq!(projected[2].content.chars().count(), 71);
-        assert!(projected[2].content.starts_with(&"A".repeat(24)));
-        assert!(projected[2].content.contains(PRUNE_MARKER));
-        assert!(projected[2].content.ends_with(&"A".repeat(8)));
-        // marker 只出现一次。
-        assert_eq!(projected[2].content.matches(PRUNE_MARKER).count(), 1);
     }
 
     #[test]

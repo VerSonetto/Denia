@@ -35,31 +35,21 @@ pub struct ConsoleSettings {
     #[serde(default = "default_locale")]
     pub locale: String,
     /// 层叠上下文管理(学 dsh 压力驱动 + Claude Code compact):
-    /// 低压力不动(前缀缓存稳定),中压力投影剪枝,高压力 LLM 总结压缩。
+    /// 低压力不动(前缀缓存稳定),高压力 LLM 总结压缩。
     /// 全部字段带默认值;见 `ConsoleCompactionSettings`。
     #[serde(default)]
     pub compaction: ConsoleCompactionSettings,
 }
 
-/// `console.compaction` 段(层叠上下文管理配置,默认对齐 dsh base 装配与
-/// Claude Code auto-compact 缓冲语义)。
+/// `console.compaction` 段(层叠上下文管理配置,默认对齐 Claude Code
+/// auto-compact 缓冲语义)。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct ConsoleCompactionSettings {
     /// LLM 总结压缩总开关。
     pub compact_enabled: bool,
-    /// 投影剪枝开关。
-    pub prune_enabled: bool,
-    /// 压力 ≥ 窗口 × 该比例时启用投影剪枝(低压力原文直出)。
-    pub prune_ratio: f64,
     /// 压力 ≥ 窗口 × 该比例时触发 LLM 总结压缩。
     pub compact_ratio: f64,
-    /// 投影剪枝:超过该字符数(Unicode code point)的工具结果才剪。
-    pub prune_threshold_chars: usize,
-    /// 投影剪枝保留的头部字符数。
-    pub prune_head_chars: usize,
-    /// 投影剪枝保留的尾部字符数。
-    pub prune_tail_chars: usize,
     /// 压缩后保留窗口下限 token。
     pub compact_min_keep_tokens: u64,
     /// 压缩后保留窗口上限 token。
@@ -76,12 +66,7 @@ impl Default for ConsoleCompactionSettings {
     fn default() -> Self {
         Self {
             compact_enabled: true,
-            prune_enabled: true,
-            prune_ratio: 0.75,
             compact_ratio: 0.90,
-            prune_threshold_chars: 8_192,
-            prune_head_chars: 4_096,
-            prune_tail_chars: 1_024,
             compact_min_keep_tokens: 10_000,
             compact_max_keep_tokens: 40_000,
             compact_min_text_messages: 5,
@@ -96,14 +81,7 @@ pub fn compaction_settings_from(console: &ConsoleSettings) -> denia_agent_loop::
     let c = &console.compaction;
     denia_agent_loop::CompactionSettings {
         compact_enabled: c.compact_enabled,
-        prune_enabled: c.prune_enabled,
-        prune_ratio: c.prune_ratio,
         compact_ratio: c.compact_ratio,
-        prune: denia_core::session::ToolResultPruneConfig {
-            threshold_chars: c.prune_threshold_chars,
-            head_chars: c.prune_head_chars,
-            tail_chars: c.prune_tail_chars,
-        },
         min_keep_tokens: c.compact_min_keep_tokens,
         max_keep_tokens: c.compact_max_keep_tokens,
         min_text_messages: c.compact_min_text_messages,
@@ -139,28 +117,10 @@ fn validate_console(value: Value) -> Result<Value, String> {
         ));
     }
     let c = &parsed.compaction;
-    if !(0.0..=1.0).contains(&c.prune_ratio) {
-        return Err(format!(
-            "compaction.pruneRatio must be in [0, 1]; got {}",
-            c.prune_ratio
-        ));
-    }
     if !(0.0..=1.0).contains(&c.compact_ratio) {
         return Err(format!(
             "compaction.compactRatio must be in [0, 1]; got {}",
             c.compact_ratio
-        ));
-    }
-    if c.compact_ratio < c.prune_ratio {
-        return Err(format!(
-            "compaction.compactRatio ({}) must be >= compaction.pruneRatio ({})",
-            c.compact_ratio, c.prune_ratio
-        ));
-    }
-    if c.prune_head_chars + c.prune_tail_chars > c.prune_threshold_chars {
-        return Err(format!(
-            "compaction.pruneHeadChars ({}) + pruneTailChars ({}) must be <= pruneThresholdChars ({})",
-            c.prune_head_chars, c.prune_tail_chars, c.prune_threshold_chars
         ));
     }
     serde_json::to_value(parsed).map_err(|e| e.to_string())

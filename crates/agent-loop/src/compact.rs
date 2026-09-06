@@ -1,10 +1,8 @@
-//! LLM 总结压缩 + 投影剪枝闸门(学 dsh 压力驱动剪枝 + Claude Code compact 设计)。
+//! LLM 总结压缩(学 dsh 压力驱动 + Claude Code compact 设计)。
 //!
-//! 三层策略(压力递增):
+//! 两层策略(压力递增):
 //! 1. **低压力**:什么都不做 —— 派生历史与日志逐字一致,provider 前缀缓存持续命中;
-//! 2. **中压力**(≥ `prune_ratio`):投影剪枝 —— 超预算工具结果在派生成
-//!    历史时替换为 head/marker/tail,日志保持 append-only;
-//! 3. **高压力**(≥ `compact_ratio`):LLM 总结压缩 —— 把旧事件区间折叠成
+//! 2. **高压力**(≥ `compact_ratio`):LLM 总结压缩 —— 把旧事件区间折叠成
 //!    一条摘要消息(compaction-summary 事件),保留窗口从尾部按
 //!    min/max tokens 选取,工具对完整性由 [`select_keep_start`] 保证
 //!    (对齐 Claude Code `adjustIndexToPreserveAPIInvariants`)。
@@ -13,24 +11,17 @@
 //! 前缀不变则 provider 缓存命中,压缩调用的成本几乎是纯增量。
 
 use denia_core::message::{ChatMessage, ChatRole};
-use denia_core::session::{SurfaceMessage, ToolResultPruneConfig};
+use denia_core::session::SurfaceMessage;
 use denia_token_meter::{ContextPressure, estimate_message};
 
-/// 层叠压缩/剪枝配置。默认值对齐 dsh base 装配(threshold 8192)与
-/// Claude Code auto-compact 的缓冲语义(有效窗口 = 窗口 - 输出预留 - buffer,
-/// 200K 窗口 ≈ 180K 触发 ≈ 0.9)。
+/// 压缩配置。默认值对齐 Claude Code auto-compact 的缓冲语义
+/// (有效窗口 = 窗口 - 输出预留 - buffer,200K 窗口 ≈ 180K 触发 ≈ 0.9)。
 #[derive(Debug, Clone, PartialEq)]
 pub struct CompactionSettings {
     /// LLM 总结压缩总开关。
     pub compact_enabled: bool,
-    /// 投影剪枝开关。
-    pub prune_enabled: bool,
-    /// 压力 ≥ 窗口 × 该比例时启用投影剪枝。
-    pub prune_ratio: f64,
     /// 压力 ≥ 窗口 × 该比例时触发 LLM 总结压缩。
     pub compact_ratio: f64,
-    /// 投影剪枝参数(阈值/头/尾字符)。
-    pub prune: ToolResultPruneConfig,
     /// 保留窗口下限 token(压缩后至少保留这么多,有上下文深度)。
     pub min_keep_tokens: u64,
     /// 保留窗口上限 token(不会太大又触发下一次压缩)。
@@ -47,10 +38,7 @@ impl Default for CompactionSettings {
     fn default() -> Self {
         Self {
             compact_enabled: true,
-            prune_enabled: true,
-            prune_ratio: 0.75,
             compact_ratio: 0.90,
-            prune: ToolResultPruneConfig::default(),
             min_keep_tokens: 10_000,
             max_keep_tokens: 40_000,
             min_text_messages: 5,
@@ -69,22 +57,6 @@ fn pressure_ratio(pressure: &ContextPressure) -> Option<f64> {
     }
     let projected = pressure.projected_tokens?;
     Some(projected as f64 / window as f64)
-}
-
-/// 中压力闸门:返回启用投影剪枝时的配置;低压力返回 `None`(原文直出)。
-pub fn prune_projection(
-    pressure: &ContextPressure,
-    settings: &CompactionSettings,
-) -> Option<ToolResultPruneConfig> {
-    if !settings.prune_enabled {
-        return None;
-    }
-    let ratio = pressure_ratio(pressure)?;
-    if ratio >= settings.prune_ratio {
-        Some(settings.prune)
-    } else {
-        None
-    }
 }
 
 /// 高压力闸门:是否触发 LLM 总结压缩。
@@ -303,17 +275,14 @@ mod tests {
     }
 
     fn surface_of(events: &[SessionEnvelope]) -> Vec<SurfaceMessage> {
-        denia_core::session::derive_surface(events, None)
+        denia_core::session::derive_surface(events)
     }
 
     /// 小预算:min 100 / max 9K / 至少 2 条文本(测试历史只有几百 token)。
     fn tiny() -> CompactionSettings {
         CompactionSettings {
             compact_enabled: true,
-            prune_enabled: true,
-            prune_ratio: 0.75,
             compact_ratio: 0.9,
-            prune: ToolResultPruneConfig::default(),
             min_keep_tokens: 100,
             max_keep_tokens: 9_000,
             min_text_messages: 2,
@@ -331,25 +300,19 @@ mod tests {
     }
 
     #[test]
-    fn gates_are_pressure_driven() {
+    fn compact_gate_is_pressure_driven() {
         let settings = tiny();
-        // 低压力:两者都不动。
-        assert!(prune_projection(&pressure(100_000, 50_000), &settings).is_none());
+        // 低压力:不动。
         assert!(!should_compact(&pressure(100_000, 50_000), &settings));
-        // 中压力:只投影,不压缩。
-        assert!(prune_projection(&pressure(100_000, 80_000), &settings).is_some());
-        assert!(!should_compact(&pressure(100_000, 80_000), &settings));
         // 高压力:压缩。
         assert!(should_compact(&pressure(100_000, 95_000), &settings));
         // 无窗口/无锚点:不做启发式兜底。
-        assert!(prune_projection(&pressure(0, 95_000), &settings).is_none());
         assert!(!should_compact(&pressure(0, 95_000), &settings));
         let no_anchor = ContextPressure {
             context_window: Some(100_000),
             pressure_tokens: None,
             projected_tokens: None,
         };
-        assert!(prune_projection(&no_anchor, &settings).is_none());
         assert!(!should_compact(&no_anchor, &settings));
     }
 

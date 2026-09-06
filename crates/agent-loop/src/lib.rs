@@ -44,8 +44,8 @@ use workspace_instructions::{
 
 pub use compact::{CompactOutcome, CompactionSettings};
 use compact::{
-    build_summary_messages, format_summary, prune_projection, rough_tokens, select_keep_start,
-    should_compact, truncate_head,
+    build_summary_messages, format_summary, rough_tokens, select_keep_start, should_compact,
+    truncate_head,
 };
 
 /// 文件历史提供者:server 侧实现,按会话提供备份句柄并在用户消息落库后
@@ -244,7 +244,7 @@ pub struct SessionDriver {
     system_prompt: Arc<ArcSwap<SystemPrompt>>,
     file_history: Option<Arc<dyn FileHistoryProvider>>,
     approval: Option<Arc<dyn ApprovalBridge>>,
-    /// 层叠上下文管理:投影剪枝闸门 + LLM 总结压缩(学 dsh / Claude Code)。
+    /// 层叠上下文管理:LLM 总结压缩(学 dsh 压力驱动 + Claude Code compact)。
     compaction: CompactionSettings,
     /// 连续压缩失败计数(熔断,学 Claude Code `MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES`)。
     compact_failures: AtomicU32,
@@ -285,7 +285,7 @@ impl SessionDriver {
         self
     }
 
-    /// 覆盖层叠上下文管理配置(投影闸门 + LLM 压缩;默认值见
+    /// 覆盖层叠上下文管理配置(LLM 压缩;默认值见
     /// [`CompactionSettings::default`])。
     pub fn with_compaction(mut self, settings: CompactionSettings) -> Self {
         self.compaction = settings;
@@ -316,9 +316,8 @@ impl SessionDriver {
     ) -> Result<Option<CompactOutcome>, LlmFailure> {
         let settings = self.compaction.clone();
         let events = session.events();
-        // 压缩输入走投影口径:被压缩的历史里,超预算工具结果本来就是
-        // head/marker/tail(与闸门下的主请求同视角),摘要更省 token。
-        let surface = denia_core::session::derive_surface(&events, Some(&settings.prune));
+        // 压缩输入即当前模型可见 surface(与主请求同视角,原文直出)。
+        let surface = denia_core::session::derive_surface(&events);
         let Some(keep_start) = select_keep_start(&surface, &settings) else {
             return Ok(None);
         };
@@ -965,13 +964,11 @@ impl SessionDriver {
                 last_context = Some(context);
             }
 
-            // —— 层叠上下文管理(学 dsh 压力驱动剪枝 + Claude Code compact)——
-            // 1. 高压力:LLM 总结压缩,把旧事件区间折叠成摘要(落盘
-            //    compaction-summary,日志保持 append-only)。
-            // 2. 中压力:投影剪枝,派生历史时对超预算工具结果做
-            //    head/marker/tail(不落盘,请求前缀才稳定)。
-            // 3. 低压力:什么都不做 —— 请求内容与日志逐字一致,provider
+            // —— 层叠上下文管理(学 dsh 压力驱动 + Claude Code compact)——
+            // 1. 低压力:什么都不做 —— 请求内容与日志逐字一致,provider
             //    前缀缓存持续命中。
+            // 2. 高压力:LLM 总结压缩,把旧事件区间折叠成摘要(落盘
+            //    compaction-summary,日志保持 append-only)。
             let pressure = session.context_pressure();
             if should_compact(&pressure, &self.compaction)
                 && self.compact_failures.load(Ordering::SeqCst) < self.compaction.max_attempts
@@ -1021,15 +1018,10 @@ impl SessionDriver {
                     }
                 }
             }
-            // 压缩成功后压力已下降(compaction-summary 折叠进 meter),重新
-            // 决策投影闸门;低压力即原文直出。
-            let pressure = session.context_pressure();
-            let projection = prune_projection(&pressure, &self.compaction);
-
             let request = GenerateRequest {
                 model: selection.model.clone(),
                 reasoning_effort: selection.reasoning_effort.clone(),
-                messages: session.derive_messages_projected(projection.as_ref()),
+                messages: session.derive_messages(),
                 system: Some(framed_system.clone()),
                 tools: assembly.tools,
                 temperature: None,
