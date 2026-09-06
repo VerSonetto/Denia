@@ -3234,6 +3234,121 @@ button.btn.form-action {
   padding: 6px 12px;
 }
 
+/* ---- 消息队列面板(输入框上方,与 todo panel 同级) ---- */
+
+.queue-panel {
+  box-sizing: border-box;
+  flex: none;
+  overflow: hidden;
+  width: 100%;
+  border: 1px solid var(--border-l1);
+  border-radius: var(--r-md);
+  background: var(--bg-layer-1);
+}
+
+.queue-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 8px 12px;
+  border: none;
+  background: transparent;
+  font-family: var(--font-ui);
+}
+
+.queue-lead {
+  display: grid;
+  flex: none;
+  place-items: center;
+  color: var(--label-tertiary);
+}
+
+.queue-title {
+  flex: none;
+  font-size: 13px;
+  line-height: 20px;
+  font-weight: 500;
+  color: var(--label-primary);
+}
+
+.queue-count {
+  flex: none;
+  font-size: 12px;
+  line-height: 20px;
+  color: var(--label-tertiary);
+}
+
+.queue-hint {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  font-size: 12px;
+  line-height: 20px;
+  color: var(--label-caption);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: right;
+}
+
+.queue-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0;
+  padding: 2px 12px 10px;
+  list-style: none;
+  max-height: 180px;
+  overflow-y: auto;
+}
+
+.queue-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  font-size: 13px;
+  line-height: 20px;
+  color: var(--label-secondary);
+}
+
+.queue-content {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.queue-actions {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 2px;
+}
+
+.queue-action {
+  width: 24px;
+  height: 24px;
+  border-radius: 6px;
+  color: var(--label-tertiary);
+}
+
+.queue-action:hover {
+  background: var(--hover-fill);
+  color: var(--label-primary);
+}
+
+.queue-send-now:hover {
+  color: var(--label-primary);
+  background: var(--active-fill);
+}
+
+.queue-delete:hover {
+  color: var(--danger);
+  background: var(--danger-soft);
+}
+
 /* ---- todo panel (docked above the composer) ---- */
 
 .todo-panel {

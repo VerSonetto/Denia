@@ -195,6 +195,16 @@ const zh = {
   todoDone: '{done} 已完成',
   todoActive: '{active} 进行中',
   todoPending: '{pending} 待开始',
+
+  queueTitle: '消息队列',
+  queueCount: '{count} 条待发',
+  queueSendNow: '立即发送（打断当前 AI）',
+  queueEdit: '编辑',
+  queueDelete: '删除',
+  queueDeleteTitle: '删除这条队列消息',
+  queueSentHint: 'AI 本轮结束后自动发送',
+  queueSendFailed: 'AI 未能在 5 秒内停止，已保留在输入框，请重试',
+  queueNoAttachments: 'AI 运行中只能排队纯文本消息；带图片/附件请等本轮结束后发送',
   axisLabel: '对话导航',
 
   statsTurns: '{turns} 轮 · {steps} 步',
@@ -754,6 +764,16 @@ const en: typeof zh = {
   todoDone: '{done} done',
   todoActive: '{active} active',
   todoPending: '{pending} pending',
+
+  queueTitle: 'Message queue',
+  queueCount: '{count} pending',
+  queueSendNow: 'Send now (interrupts the AI)',
+  queueEdit: 'Edit',
+  queueDelete: 'Delete',
+  queueDeleteTitle: 'Delete this queued message',
+  queueSentHint: 'Sent automatically when this turn ends',
+  queueSendFailed: 'AI did not stop within 5s; message kept in the input box, please retry',
+  queueNoAttachments: 'Only plain text can be queued while the AI is running; send images/attachments after this turn ends',
   axisLabel: 'Conversation navigation',
 
   statsTurns: '{turns} turns · {steps} steps',

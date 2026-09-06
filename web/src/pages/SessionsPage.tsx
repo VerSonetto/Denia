@@ -45,6 +45,7 @@ import {
 } from '../components/icons'
 import { resolveSessionReasoningEffort } from '../modelCatalog'
 import { TodoPanel } from '../components/TodoPanel'
+import { QueuedMessagePanel } from '../components/QueuedMessagePanel'
 import { ConversationAxis } from '../components/ConversationAxis'
 import {
   downloadFile,
@@ -59,6 +60,7 @@ import type {
   SessionEnvelope,
   SessionSummary,
   TodoItem,
+  QueuedMessage,
   UserMessageImage,
   WorkspaceRecord,
 } from '../types'
@@ -162,6 +164,10 @@ export default function SessionsPage({
 
   // 运行状态直接订阅引擎(侧栏/状态栏同源)。
   const running = useRunningFor(activeId)
+  // 最新 running 的 ref 镜像:异步函数(轮询等 running 变 false)读它,
+  // 避免闭包捕获渲染时的旧值。
+  const runningRef = useRef(running)
+  runningRef.current = running
 
   const [catalog, setCatalog] = useState<ModelCatalog | null>(null)
   const [prompt, setPrompt] = useState('')
@@ -197,6 +203,9 @@ export default function SessionsPage({
   // 轮次轴跳转请求:点击未加载刻度时递增 nonce 触发视图翻页定位。
   const [axisJump, setAxisJump] = useState<{ seq: number; nonce: number } | null>(null)
   const [todos, setTodos] = useState<TodoItem[]>([])
+  // 消息队列:AI 运行中输入的新消息,等本轮结束后自动发送。
+  const [queuedMessages, setQueuedMessages] = useState<QueuedMessage[]>([])
+  const queueSeqRef = useRef(0)
   // 会话内容视图(dsh conversation.view 环):对话 / 轨迹。组件按
   // activeId 重挂(key),视图状态随会话切换自然复位。
   const [view, setView] = useState<'chat' | 'trajectory'>('chat')
@@ -233,6 +242,8 @@ export default function SessionsPage({
     setAxisAnchors([])
     setAxisJump(null)
     setTodos([])
+    setQueuedMessages([])
+    queueSeqRef.current = 0
     stickRef.current = true
     setStick(true)
     const el = scrollRef.current
@@ -848,29 +859,44 @@ export default function SessionsPage({
    * 3. 服务端事件(同文本 user-message)到达 → 移除乐观行(由 Server 流确认);
    * 4. 失败 → 移除乐观行、恢复输入框、报错。
    */
-  const send = async () => {
-    const trimmed = prompt.trim()
-    const message =
-      trimmed || (pastedImages.length > 0 ? t('pastedImageLabel') : '')
-    if (optimizing || !message || sendingRef.current) return
-    if (inert) {
-      onOpenPicker()
-      return
-    }
+  /**
+   * 消息入队(AI 运行中):清空输入框与附件,消息进入队列,本轮结束后自动发送。
+   */
+  const enqueueMessage = (text: string) => {
+    queueSeqRef.current += 1
+    setQueuedMessages((previous) => [
+      ...previous,
+      { id: `queue-${queueSeqRef.current}`, text },
+    ])
+    setPrompt('')
+    setOptimizedPrompt(null)
+    originalPromptRef.current = ''
+    setPastedImages([])
+    setAttachments([])
+    setTrajQuotes([])
+  }
+
+  /**
+   * 核心发送:把指定消息发往当前会话(复用乐观行/附件/引用的完整流程)。
+   * 供输入框 send 与队列自动发送共用。
+   */
+  const postMessage = async (text: string, options?: { clearInput?: boolean }): Promise<boolean> => {
+    if (sendingRef.current) return false
     // 粘贴图片:模型必须标记为可识图,否则拒绝整条发送。
-    if (pastedImages.length > 0 && !ensureVision()) return
+    if (pastedImages.length > 0 && !ensureVision()) return false
     // 发送 = 用户要看回复:立即恢复吸底,不等 202——服务端可能先于
     // postPrompt 响应就开始推流,此刻不吸底,后续内容全会落在视口之外。
     snapToBottom()
     sendingRef.current = true
     setSending(true)
+    let ok = false
     try {
       // 从欢迎页发首条消息时,活动会话尚未创建;把当前选择的权限带到新会话。
       const wasHero = !activeId
       const id = await ensureSession(activeWs)
       if (!id) {
         onOpenPicker()
-        return
+        return false
       }
       markStarted(id)
       if (wasHero && permission !== 'workspace-write') {
@@ -893,7 +919,7 @@ export default function SessionsPage({
         }
       }
       await api.postPrompt(id, {
-        prompt: message,
+        prompt: text,
         provider: selection?.provider,
         model: selection?.model,
         reasoningEffort: selection?.reasoningEffort,
@@ -905,14 +931,18 @@ export default function SessionsPage({
       ensureFollowing(id)
       const sentImages: UserMessageImage[] = pastedImages.map(({ mime, data }) => ({ mime, data }))
       // 收到 202:服务端已接单,立即乐观反馈(running 也由服务端 SSE 推送)。
-      pushPending(message, sentImages.length > 0 ? sentImages : undefined)
+      pushPending(text, sentImages.length > 0 ? sentImages : undefined)
       setRunningStatus(id, true)
-      setPrompt('')
-      setOptimizedPrompt(null)
-      originalPromptRef.current = ''
-      setPastedImages([])
-      setAttachments([])
-      setTrajQuotes([])
+      if (options?.clearInput !== false) {
+        // 仅"输入框发送"清空输入区;队列自动发送不清空(用户可能正在打字)。
+        setPrompt('')
+        setOptimizedPrompt(null)
+        originalPromptRef.current = ''
+        setPastedImages([])
+        setAttachments([])
+        setTrajQuotes([])
+      }
+      ok = true
     } catch (error) {
       notify('err', error instanceof Error ? error.message : String(error))
       // 保留输入框内容;若会话侧已经创建但发送失败,等待用户重试。
@@ -920,7 +950,64 @@ export default function SessionsPage({
       sendingRef.current = false
       setSending(false)
     }
+    return ok
   }
+
+  const send = async () => {
+    const trimmed = prompt.trim()
+    const message =
+      trimmed || (pastedImages.length > 0 ? t('pastedImageLabel') : '')
+    if (optimizing || !message || sendingRef.current) return
+    if (inert) {
+      onOpenPicker()
+      return
+    }
+    // AI 正在运行:不打断,把消息加入队列,本轮结束后自动发送。
+    if (running) {
+      if (pastedImages.length > 0 || attachments.length > 0 || trajQuotes.length > 0) {
+        // 队列只承载纯文本;带图片/附件/轨迹引用时请等本轮结束后直接发送。
+        notify('err', t('queueNoAttachments'))
+        return
+      }
+      enqueueMessage(message)
+      notify('ok', t('queueSentHint'))
+      return
+    }
+    // 不运行时:附件随消息一起发。
+    await postMessage(message)
+    // postMessage 成功后已清空输入框/附件;发送失败时保留,等待重试。
+  }
+
+  /**
+   * 轮次结束自动发送队首队列消息:
+   * running 由 true → false 时,若队列非空,取出队首发送(不打断,因为已结束)。
+   * 用 ref 保存最新 postMessage 与队列,避免 effect 闭包过期。
+   */
+  const postMessageRef = useRef(postMessage)
+  postMessageRef.current = postMessage
+  const queuedMessagesRef = useRef(queuedMessages)
+  queuedMessagesRef.current = queuedMessages
+  const prevRunningRef = useRef(running)
+  // 正在"立即发送"(sendNow)时抑制自动发送:sendNow 已移除目标消息,
+  // 若此时 running 变 false,effect 不能再取队首发一次(会重复发送)。
+  const suppressAutoFlushRef = useRef(false)
+  useEffect(() => {
+    const prev = prevRunningRef.current
+    prevRunningRef.current = running
+    if (prev && !running && !suppressAutoFlushRef.current) {
+      const next = queuedMessagesRef.current[0]
+      if (next) {
+        setQueuedMessages((previous) => previous.slice(1))
+        void postMessageRef.current(next.text, { clearInput: false }).then((ok) => {
+          if (!ok) {
+            // 发送失败:放回队首,等用户处理(不丢消息)。
+            setQueuedMessages((previous) => [{ ...next }, ...previous])
+          }
+        })
+      }
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [running])
 
   const stop = async () => {
     if (!activeId) return
@@ -929,6 +1016,56 @@ export default function SessionsPage({
     } catch (error) {
       notify('err', error instanceof Error ? error.message : String(error))
     }
+  }
+
+  /* ---- 队列操作:立即发送(打断)/ 编辑(回填输入框)/ 删除 ---- */
+
+  /** 立即发送:先打断当前 AI,再直接发送这条队列消息。 */
+  const sendNow = async (message: QueuedMessage) => {
+    if (!activeId) return
+    suppressAutoFlushRef.current = true
+    try {
+      await api.cancelSession(activeId)
+    } catch (error) {
+      notify('err', error instanceof Error ? error.message : String(error))
+    }
+    // cancel 是异步的,等 driver 退出 running 再发送(running guard 会拒绝并发)。
+    const deadline = Date.now() + 5000
+    while (runningRef.current && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 150))
+    }
+    if (runningRef.current) {
+      // 没能打断:消息保留在队列,提示用户。
+      suppressAutoFlushRef.current = false
+      notify('err', t('queueSendFailed'))
+      return
+    }
+    // 打断成功:移出队列并发送(纯文本)。
+    setQueuedMessages((previous) => previous.filter((item) => item.id !== message.id))
+    try {
+      const ok = await postMessageRef.current(message.text, { clearInput: false })
+      if (!ok) {
+        // 发送失败:放回队列(保持原位置),不丢消息。
+        setQueuedMessages((previous) => [message, ...previous])
+      }
+    } finally {
+      suppressAutoFlushRef.current = false
+    }
+  }
+
+  /** 编辑:把消息回填到输入框并移出队列。 */
+  const editQueued = (message: QueuedMessage) => {
+    setPrompt(message.text)
+    setOptimizedPrompt(null)
+    originalPromptRef.current = ''
+    syncPromptHeight()
+    setQueuedMessages((previous) => previous.filter((item) => item.id !== message.id))
+    promptRef.current?.focus()
+  }
+
+  /** 删除队列消息。 */
+  const deleteQueued = (message: QueuedMessage) => {
+    setQueuedMessages((previous) => previous.filter((item) => item.id !== message.id))
   }
 
   const onPromptKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
@@ -1324,6 +1461,14 @@ export default function SessionsPage({
           <div className="composer-seat" ref={seatRef} data-composer-seat="">
             <div className={`composer-stack${phase === 'hero' ? ' composer-hero' : ''}`}>
               {phase === 'hero' && workspaceRow}
+              {phase === 'active' && (
+                <QueuedMessagePanel
+                  messages={queuedMessages}
+                  onSendNow={(message) => void sendNow(message)}
+                  onEdit={editQueued}
+                  onDelete={deleteQueued}
+                />
+              )}
               {phase === 'active' && <TodoPanel todos={todos} />}
               {activeSession?.subagent ? <div className="runtime-child-composer"><span>{t('runtimeChildReadonly')}</span><button type="button" className="runtime-child-back-button" onClick={() => activeSession.parent_session && setActiveId(activeSession.parent_session, null)}>{t('runtimeBackParent')}</button></div> : composerCard}
               {phase === 'active' && (

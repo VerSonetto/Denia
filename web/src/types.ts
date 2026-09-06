@@ -163,6 +163,12 @@ export interface TodoItem {
   status: 'pending' | 'in_progress' | 'completed'
 }
 
+/** One queued message: sent while a turn is running, delivered after it ends. */
+export interface QueuedMessage {
+  id: string
+  text: string
+}
+
 /** One inline image attached to a user message (mirrors Rust `ImageData`). */
 export interface UserMessageImage {
   mime: string
