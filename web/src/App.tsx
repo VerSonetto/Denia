@@ -27,12 +27,14 @@ import {
   useWorkspaces,
 } from './appStore'
 import {
-  BrandMark,
   IconClose,
   IconCollapseAll,
   IconExpandAll,
   IconFolder,
+  IconFolderPlus,
   IconGear,
+  IconPanelClose,
+  IconPanelOpen,
   IconPlus,
   IconSearch,
   IconTrash,
@@ -54,6 +56,10 @@ import type { SessionSummary, WorkspaceRecord } from './types'
  * 业务状态与动作全部在 `appStore`,本组件只做编排,不持有会话数据。
  */
 export type Notify = (kind: 'ok' | 'err', message: string) => void
+
+// 侧栏收起偏好与过渡时长(与 styles.css 的 shell 列宽过渡同步)。
+const SIDEBAR_COLLAPSED_KEY = 'denia.sidebar-collapsed'
+const SIDEBAR_TRANSITION_MS = 260
 
 export default function App() {
   const sessions = useSessions()
@@ -94,6 +100,88 @@ export default function App() {
   const [sidebarSearchOpen, setSidebarSearchOpen] = useState(false)
   const [sidebarExpandAllTick, setSidebarExpandAllTick] = useState(0)
   const [sidebarAllExpanded, setSidebarAllExpanded] = useState(false)
+
+  /* ---- 侧栏收起(dsh 折叠控制栏) ---- */
+
+  // 收起态是 56px 图标控制栏而不是零宽:常驻开关/新建/添加/搜索/设置,
+  // 与展开态各行顺序一一对应。偏好进 localStorage(纯 UI 态,不进 console 配置)。
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(() => {
+    try {
+      return window.localStorage.getItem(SIDEBAR_COLLAPSED_KEY) === '1'
+    } catch {
+      return false
+    }
+  })
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(SIDEBAR_COLLAPSED_KEY, sidebarCollapsed ? '1' : '0')
+    } catch {
+      /* 隐私模式等存储不可用:仅失去持久化,不影响交互 */
+    }
+  }, [sidebarCollapsed])
+
+  // 交叉过渡编排:收起时宽内容原地淡出(列宽滑动由 CSS 裁切,内容冻结宽度
+  // 不重排),落位后卸载宽态、控制栏淡入;展开时控制栏让位、宽内容淡入。
+  // 首次渲染即收起时不播放入场动画(dsh 语义);reduced-motion 直接切换。
+  const [wideMounted, setWideMounted] = useState(!sidebarCollapsed)
+  const [railMounted, setRailMounted] = useState(sidebarCollapsed)
+  const [wideFadeOut, setWideFadeOut] = useState(false)
+  const [wideEnter, setWideEnter] = useState(false)
+  const [railEnter, setRailEnter] = useState(false)
+  const prevCollapsedRef = useRef(sidebarCollapsed)
+  useEffect(() => {
+    const toggled = prevCollapsedRef.current !== sidebarCollapsed
+    prevCollapsedRef.current = sidebarCollapsed
+    const reduced =
+      typeof window.matchMedia === 'function' &&
+      window.matchMedia('(prefers-reduced-motion: reduce)').matches
+    if (!toggled || reduced) {
+      setWideMounted(!sidebarCollapsed)
+      setRailMounted(sidebarCollapsed)
+      setWideFadeOut(false)
+      setWideEnter(false)
+      setRailEnter(false)
+      return
+    }
+    if (sidebarCollapsed) {
+      setWideFadeOut(true)
+      setWideEnter(false)
+      const timer = window.setTimeout(() => {
+        setWideMounted(false)
+        setRailMounted(true)
+        setRailEnter(true)
+      }, SIDEBAR_TRANSITION_MS)
+      return () => window.clearTimeout(timer)
+    }
+    setRailMounted(false)
+    setRailEnter(false)
+    setWideFadeOut(false)
+    setWideMounted(true)
+    setWideEnter(true)
+  }, [sidebarCollapsed])
+
+  // 滑动落位后再弹搜索框并聚焦,过渡中聚焦会被移动的输入框甩开(dsh 同款时序)。
+  const expandSidebarWithSearch = useCallback(() => {
+    setSidebarCollapsed(false)
+    window.setTimeout(() => setSidebarSearchOpen(true), SIDEBAR_TRANSITION_MS + 20)
+  }, [])
+
+  // Ctrl+B / Cmd+B 切换侧栏(VSCode 惯例)。
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (
+        (event.ctrlKey || event.metaKey) &&
+        !event.altKey &&
+        !event.shiftKey &&
+        event.key.toLowerCase() === 'b'
+      ) {
+        event.preventDefault()
+        setSidebarCollapsed((v) => !v)
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [])
 
   // URL 会话状态:挂载时读 hash;列表加载完成后判定恢复或放弃。
   const [pendingHashId] = useState<string | null>(() => {
@@ -447,80 +535,146 @@ export default function App() {
   }, [])
 
   return (
-    <div className="shell">
+    <div className="shell" data-collapsed={sidebarCollapsed || undefined}>
       <aside className="sidebar">
-        <div className="sidebar-logo">
-          <BrandMark size={22} />
-          <span className="brand-text">Denia</span>
-        </div>
-        <button
-          type="button"
-          className="sidebar-new-btn"
-          onClick={() => void startSession()}
-        >
-          <IconPlus size={14} />
-          {t('newSession')}
-        </button>
-        <div className="sidebar-region">
-          <div className="sidebar-region-head">
-            <span className="label">{t('workspacesTitle')}</span>
-            <div className="sidebar-region-actions">
+        {wideMounted && (
+          <div
+            className={`sidebar-wide${wideFadeOut ? ' fade-out' : ''}${wideEnter ? ' wide-in' : ''}`}
+          >
+            <div className="sidebar-logo">
+              <span className="brand-text">Denia</span>
               <button
                 type="button"
-                className={`icon-btn${sidebarSearchOpen ? ' active' : ''}`}
-                title={t('searchSessions')}
-                aria-label={t('searchSessions')}
-                aria-pressed={sidebarSearchOpen}
-                onClick={() => setSidebarSearchOpen((open) => !open)}
+                className="icon-btn sidebar-toggle"
+                title={t('sidebarCollapse')}
+                aria-label={t('sidebarCollapse')}
+                onClick={() => setSidebarCollapsed(true)}
               >
-                <IconSearch size={14} />
+                <IconPanelClose size={16} />
               </button>
+            </div>
+            <button
+              type="button"
+              className="sidebar-new-btn"
+              onClick={() => void startSession()}
+            >
+              <IconPlus size={14} />
+              {t('newSession')}
+            </button>
+            <div className="sidebar-region">
+              <div className="sidebar-region-head">
+                <span className="label">{t('workspacesTitle')}</span>
+                <div className="sidebar-region-actions">
+                  <button
+                    type="button"
+                    className={`icon-btn${sidebarSearchOpen ? ' active' : ''}`}
+                    title={t('searchSessions')}
+                    aria-label={t('searchSessions')}
+                    aria-pressed={sidebarSearchOpen}
+                    onClick={() => setSidebarSearchOpen((open) => !open)}
+                  >
+                    <IconSearch size={14} />
+                  </button>
+                  <button
+                    type="button"
+                    className="icon-btn"
+                    title={sidebarAllExpanded ? t('collapseAllWorkspaces') : t('expandAllWorkspaces')}
+                    aria-label={sidebarAllExpanded ? t('collapseAllWorkspaces') : t('expandAllWorkspaces')}
+                    onClick={() => setSidebarExpandAllTick((tick) => tick + 1)}
+                  >
+                    {sidebarAllExpanded ? <IconCollapseAll size={14} /> : <IconExpandAll size={14} />}
+                  </button>
+                  <button
+                    type="button"
+                    className="icon-btn"
+                    title={t('addWorkspace')}
+                    aria-label={t('addWorkspace')}
+                    onClick={openDirectoryFlow}
+                  >
+                    <IconPlus size={14} />
+                  </button>
+                </div>
+              </div>
+              <SidebarWorkspaces
+                sessions={sessions}
+                workspaces={workspaces}
+                activeId={activeId}
+                runningIds={runningIds}
+                searchOpen={sidebarSearchOpen}
+                onSearchOpenChange={setSidebarSearchOpen}
+                expandAllTick={sidebarExpandAllTick}
+                onAllExpandedChange={setSidebarAllExpanded}
+                onOpenSession={openSession}
+                onNewSession={(wsId) => void startSession(wsId)}
+                onDeleteWorkspace={(ws) => void deleteWorkspace(ws)}
+                onDeleteSession={(session) => void deleteSession(session)}
+                onDeleteUngrouped={(items) => void deleteUngrouped(items)}
+              />
+            </div>
+            <nav className="sidebar-foot" aria-label={t('navSettings')}>
               <button
                 type="button"
-                className="icon-btn"
-                title={sidebarAllExpanded ? t('collapseAllWorkspaces') : t('expandAllWorkspaces')}
-                aria-label={sidebarAllExpanded ? t('collapseAllWorkspaces') : t('expandAllWorkspaces')}
-                onClick={() => setSidebarExpandAllTick((tick) => tick + 1)}
+                className="sidebar-nav"
+                onClick={() => setSettingsOpen(true)}
               >
-                {sidebarAllExpanded ? <IconCollapseAll size={14} /> : <IconExpandAll size={14} />}
+                <IconGear size={16} />
+                <span>{t('navSettings')}</span>
               </button>
+            </nav>
+          </div>
+        )}
+        {railMounted && (
+          <div className={`sidebar-rail${railEnter ? ' enter' : ''}`}>
+            <button
+              type="button"
+              className="rail-btn"
+              title={t('sidebarExpand')}
+              aria-label={t('sidebarExpand')}
+              onClick={() => setSidebarCollapsed(false)}
+            >
+              <IconPanelOpen size={18} />
+            </button>
+            <button
+              type="button"
+              className="rail-btn accent"
+              title={t('newSession')}
+              aria-label={t('newSession')}
+              onClick={() => void startSession()}
+            >
+              <IconPlus size={16} />
+            </button>
+            <button
+              type="button"
+              className="rail-btn"
+              title={t('addWorkspace')}
+              aria-label={t('addWorkspace')}
+              onClick={openDirectoryFlow}
+            >
+              <IconFolderPlus size={16} />
+            </button>
+            <button
+              type="button"
+              className="rail-btn"
+              title={t('searchSessions')}
+              aria-label={t('searchSessions')}
+              onClick={expandSidebarWithSearch}
+            >
+              <IconSearch size={16} />
+            </button>
+            <div className="rail-spacer" />
+            <div className="rail-foot">
               <button
                 type="button"
-                className="icon-btn"
-                title={t('addWorkspace')}
-                aria-label={t('addWorkspace')}
-                onClick={openDirectoryFlow}
+                className="rail-btn"
+                title={t('navSettings')}
+                aria-label={t('navSettings')}
+                onClick={() => setSettingsOpen(true)}
               >
-                <IconPlus size={14} />
+                <IconGear size={16} />
               </button>
             </div>
           </div>
-          <SidebarWorkspaces
-            sessions={sessions}
-            workspaces={workspaces}
-            activeId={activeId}
-            runningIds={runningIds}
-            searchOpen={sidebarSearchOpen}
-            onSearchOpenChange={setSidebarSearchOpen}
-            expandAllTick={sidebarExpandAllTick}
-            onAllExpandedChange={setSidebarAllExpanded}
-            onOpenSession={openSession}
-            onNewSession={(wsId) => void startSession(wsId)}
-            onDeleteWorkspace={(ws) => void deleteWorkspace(ws)}
-            onDeleteSession={(session) => void deleteSession(session)}
-            onDeleteUngrouped={(items) => void deleteUngrouped(items)}
-          />
-        </div>
-        <nav className="sidebar-foot" aria-label={t('navSettings')}>
-          <button
-            type="button"
-            className="sidebar-nav"
-            onClick={() => setSettingsOpen(true)}
-          >
-            <IconGear size={16} />
-            <span>{t('navSettings')}</span>
-          </button>
-        </nav>
+        )}
       </aside>
       <main className="main">
         <div className="main-row">

@@ -172,15 +172,144 @@ button {
   grid-template-columns: var(--sidebar-w) minmax(0, 1fr);
   height: 100%;
   background: var(--bg-base);
+  /* 列宽滑动过渡:收起/展开共用(dsh 侧栏曲线);拖拽/无动画偏好下由下述规则关闭 */
+  transition: grid-template-columns 260ms var(--ease);
+}
+
+/* 收起态固定 56px 控制栏(dsh SIDEBAR_COLLAPSED),不把宽度全让给主列 */
+.shell[data-collapsed] {
+  grid-template-columns: 56px minmax(0, 1fr);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .shell {
+    transition: none;
+  }
 }
 
 .sidebar {
   display: flex;
   flex-direction: column;
   min-height: 0;
+  min-width: 0;
   padding: 8px 10px 10px;
   background: var(--sidebar-fill);
   border-right: 1px solid var(--border-l1);
+  /* 列宽收拢时裁切冻结宽度的宽态内容:滑动途中不发生重排 */
+  overflow: hidden;
+}
+
+/* 宽态内容:冻结宽度随列收拢被裁切,原地淡出后卸载 */
+.sidebar-wide {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  flex: 1;
+  width: calc(var(--sidebar-w) - 20px);
+  transition: opacity 150ms var(--ease);
+}
+
+.sidebar-wide.fade-out {
+  opacity: 0;
+}
+
+.sidebar-wide.wide-in {
+  animation: sidebar-wide-in 150ms var(--ease) backwards;
+}
+
+@keyframes sidebar-wide-in {
+  from {
+    opacity: 0;
+  }
+}
+
+/* 收起态控制栏:与展开态一一对应的图标控件(开关/新建/添加/搜索 + 设置) */
+.sidebar-rail {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  min-height: 0;
+  flex: 1;
+}
+
+.sidebar-rail.enter {
+  animation: sidebar-rail-in 150ms var(--ease) backwards;
+}
+
+@keyframes sidebar-rail-in {
+  from {
+    opacity: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sidebar-wide,
+  .sidebar-wide.fade-out {
+    transition: none;
+  }
+  .sidebar-wide.wide-in,
+  .sidebar-rail.enter {
+    animation: none;
+  }
+}
+
+.rail-btn {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  border: none;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--label-secondary);
+  cursor: pointer;
+  transition:
+    background 0.15s var(--ease),
+    color 0.15s var(--ease),
+    opacity 0.15s var(--ease);
+}
+
+.rail-btn:hover {
+  background: var(--hover-fill);
+  color: var(--label-primary);
+}
+
+.rail-btn.accent {
+  background: var(--accent);
+  color: var(--accent-on);
+}
+
+.rail-btn.accent:hover {
+  opacity: 0.9;
+}
+
+.rail-spacer {
+  flex: 1;
+}
+
+.rail-foot {
+  flex: none;
+  display: flex;
+  justify-content: center;
+  width: 100%;
+  padding-top: 8px;
+  border-top: 1px solid var(--border-l1);
+}
+
+/* 展开态顶部开关:logo 行右侧 */
+.sidebar-toggle {
+  margin-left: auto;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  align-items: center;
+  justify-content: center;
+  border-radius: 7px;
+  flex: none;
 }
 
 .sidebar-logo {
@@ -1068,7 +1197,7 @@ button {
   padding: 8px 4px 0;
 }
 
-/* figma 34:10411:mark + title,gap 10,居中;26/32 wt500 主色,无渐变无副标题。 */
+/* hero 标题:26/32 wt500 主色,无渐变无副标题。 */
 .hero-headline {
   display: flex;
   align-items: center;
@@ -1082,34 +1211,6 @@ button {
 
 .hero-headline-text {
   white-space: nowrap;
-}
-
-/* hover 时 mark 轻轻摆一下(dsh hero-fish-swim),reduced-motion 不播。 */
-.hero-mark-hitbox {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  color: var(--label-primary);
-}
-
-@keyframes hero-mark-sway {
-  0%,
-  100% {
-    transform: translate(0, 0) rotate(0deg);
-  }
-  35% {
-    transform: translate(-1px, -1px) rotate(-5deg);
-  }
-  70% {
-    transform: translate(1px, 0) rotate(3deg);
-  }
-}
-
-@media (hover: hover) and (prefers-reduced-motion: no-preference) {
-  .hero-mark-hitbox:hover > svg {
-    animation: hero-mark-sway 0.6s var(--ease);
-    transform-origin: 50% 60%;
-  }
 }
 
 /* ---------- transcript turns (dsh MessageItem + DisclosureRow) ---------- */

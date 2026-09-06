@@ -365,6 +365,60 @@ export function IconFolder(props: IconProps) {
   )
 }
 
+/** 收起侧栏:面板左收(lucide panel-left-close)。 */
+export function IconPanelClose(props: IconProps) {
+  return (
+    <Svg {...props} viewBox="0 0 24 24">
+      <rect width="18" height="18" x="3" y="3" rx="2" stroke="currentColor" strokeWidth="2" />
+      <path d="M9 3v18" stroke="currentColor" strokeWidth="2" />
+      <path
+        d="m16 15-3-3 3-3"
+        stroke="currentColor"
+        strokeWidth="2"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </Svg>
+  )
+}
+
+/** 展开侧栏:面板左开(lucide panel-left-open)。 */
+export function IconPanelOpen(props: IconProps) {
+  return (
+    <Svg {...props} viewBox="0 0 24 24">
+      <rect width="18" height="18" x="3" y="3" rx="2" stroke="currentColor" strokeWidth="2" />
+      <path d="M9 3v18" stroke="currentColor" strokeWidth="2" />
+      <path
+        d="m14 9 3 3-3 3"
+        stroke="currentColor"
+        strokeWidth="2"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </Svg>
+  )
+}
+
+/** 添加工作区:带加号的文件夹(lucide folder-plus)。 */
+export function IconFolderPlus(props: IconProps) {
+  return (
+    <Svg {...props} viewBox="0 0 24 24">
+      <path
+        d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"
+        stroke="currentColor"
+        strokeWidth="2"
+        strokeLinejoin="round"
+      />
+      <path
+        d="M12 10v6M9 13h6"
+        stroke="currentColor"
+        strokeWidth="2"
+        strokeLinecap="round"
+      />
+    </Svg>
+  )
+}
+
 /** 展开全部工作区(多层折线张开)。 */
 export function IconExpandAll(props: IconProps) {
   return (
@@ -441,24 +495,5 @@ export function IconPrompt(props: IconProps) {
       />
       <path d="M6.5 6.5h5M6.5 9h3.5" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
     </Svg>
-  )
-}
-
-/** 品牌标识:极简方块 + 横线,黑白体系。 */
-export function BrandMark({ size = 24 }: IconProps) {
-  return (
-    <svg width={size} height={size} viewBox="0 0 24 24" aria-hidden="true" style={{ flex: 'none' }}>
-      <rect
-        x="5"
-        y="5"
-        width="14"
-        height="14"
-        rx="3"
-        fill="none"
-        stroke="currentColor"
-        strokeWidth="1.5"
-      />
-      <path d="M8 12h8" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
-    </svg>
   )
 }

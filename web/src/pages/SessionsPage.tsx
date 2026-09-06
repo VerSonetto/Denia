@@ -29,7 +29,6 @@ import { ApprovalDialog, type ApprovalDecision, type ApprovalRequest } from '../
 import { ConfirmDialog } from '../components/ConfirmDialog'
 import { ContextRing } from '../components/ContextRing'
 import {
-  BrandMark,
   IconBranch,
   IconChevron,
   IconClose,
@@ -1316,9 +1315,6 @@ export default function SessionsPage({
           ) : (
             <div className="session-hero">
               <div className="hero-headline">
-                <span className="hero-mark-hitbox">
-                  <BrandMark size={30} />
-                </span>
                 <span className="hero-headline-text">{t('heroTitle')}</span>
               </div>
             </div>
