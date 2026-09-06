@@ -23,7 +23,7 @@ import type { TranscriptNode } from '../fold'
 import type { TrajectoryQuote } from '../trajectory'
 import { SessionView } from '../components/SessionView'
 import { StatsBar } from '../components/StatsBar'
-import { ModelPicker } from '../components/llm/ModelPicker'
+import { ComposerModelMenu } from '../components/ComposerModelMenu'
 import { PermissionSelector, loadPermission, type PermissionLevel } from '../components/PermissionSelector'
 import { ApprovalDialog, type ApprovalDecision, type ApprovalRequest } from '../components/ApprovalDialog'
 import { ConfirmDialog } from '../components/ConfirmDialog'
@@ -294,20 +294,14 @@ export default function SessionsPage({
     }
   }, [catalog, selection])
 
-  /**
-   * 应用一次模型选择:setDefault=false 时只影响当前页面(后续 prompt),
-   * 不写入 localStorage;默认写入,未来新会话沿用(dsh「上次使用的模型」语义)。
-   */
-  const applySelection = (next: ModelSelection, options?: { setDefault?: boolean }) => {
+  const applySelection = (next: ModelSelection) => {
     if (!catalog) return
     const normalized = normalizeSelection(catalog, next)
     setSelection(normalized)
-    if (options?.setDefault !== false) {
-      try {
-        window.localStorage.setItem(LAST_MODEL_KEY, JSON.stringify(normalized))
-      } catch {
-        /* storage unavailable */
-      }
+    try {
+      window.localStorage.setItem(LAST_MODEL_KEY, JSON.stringify(normalized))
+    } catch {
+      /* storage unavailable */
     }
   }
 
@@ -1122,7 +1116,7 @@ export default function SessionsPage({
             disabled={inert || permissionBusy}
           />
           {catalog && selection && (
-            <ModelPicker
+            <ComposerModelMenu
               catalog={catalog}
               selection={selection}
               disabled={inert || optimizing}

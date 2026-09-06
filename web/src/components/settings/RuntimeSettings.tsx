@@ -1,6 +1,8 @@
 import { useEffect, useState } from 'react'
 import * as api from '../../api'
 import { t } from '../../i18n'
+import { Button, Field, NumberInput } from '../llm/atoms/form'
+import styles from './RuntimeSettings.module.css'
 
 const fields = [
   ['maxAgents', 'runtimeMaxAgents'], ['maxDepth', 'runtimeMaxDepth'],
@@ -25,6 +27,11 @@ export function RuntimeSettings() {
     return () => { disposed = true }
   }, [])
   const save = async () => {
+    // 与原生 required 语义对齐:任一数字字段为空就不提交。
+    if (value && fields.some(([key]) => typeof value[key] !== 'number')) {
+      setError(t('llm.error.numberPositive'))
+      return
+    }
     setSaving(true); setError(''); setSaved(false)
     try {
       await api.replaceNamespace('runtime', value, revision)
@@ -34,12 +41,25 @@ export function RuntimeSettings() {
     } catch (e) { setError(e instanceof Error ? e.message : String(e)) } finally { setSaving(false) }
   }
   return <section className="setm-section">
-    {error && <p role="alert">{error}</p>}
+    {error && <p className={styles.error} role="alert">{error}</p>}
     {value && <form onSubmit={e => { e.preventDefault(); void save() }}>
-      {fields.map(([key, label]) => <label key={key} style={{ display: 'flex', justifyContent: 'space-between', gap: 16, marginBottom: 12 }}>{t(label)}<input type="number" min={1} step={1} required value={Number(value[key])} onChange={e => { setSaved(false); setValue({ ...value, [key]: e.target.valueAsNumber }) }} /></label>)}
-      <label>{t('runtimeCustomDirs')}<textarea className="setm-textarea" rows={4} value={(value.customSkillDirs as string[]).join('\n')} onChange={e => { setSaved(false); setValue({ ...value, customSkillDirs: e.target.value.split('\n').map(s => s.trim()).filter(Boolean) }) }} /></label>
-      <p>{t('runtimeConfigHint')}</p>
-      <button type="submit" disabled={saving}>{saving ? t('loading') : t('save')}</button>{saved && <span role="status"> {t('runtimeSaved')}</span>}
+      <div className={styles.grid}>
+        {fields.map(([key, label]) => (
+          <Field key={key} label={t(label)}>
+            <NumberInput
+              mono
+              value={typeof value[key] === 'number' ? (value[key] as number) : undefined}
+              onChange={(next) => { setSaved(false); setValue({ ...value, [key]: next }) }}
+            />
+          </Field>
+        ))}
+      </div>
+      {/* customSkillDirs 不再提供编辑入口;value 原样透传,保存不丢已有配置。 */}
+      <p className={styles.hint}>{t('runtimeConfigHint')}</p>
+      <div className={styles.actions}>
+        <Button variant="primary" type="submit" disabled={saving}>{saving ? t('loading') : t('save')}</Button>
+        {saved && <span className={styles.saved} role="status">{t('runtimeSaved')}</span>}
+      </div>
     </form>}
   </section>
 }
