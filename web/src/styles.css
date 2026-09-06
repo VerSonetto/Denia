@@ -32,6 +32,16 @@
   --danger-border: rgba(255, 120, 120, 0.35);
   --danger-soft: rgba(255, 80, 80, 0.12);
 
+  /* 状态/身份前景色(暗色阶):底色恒浅,彩字必须给足亮度保证对比 */
+  --success-fg: #8fd49a;
+  --error-fg: #ff9c9c;
+  --warn-fg: #e8c07a;
+  --violet-fg: #c4b0f2;
+  --violet-base: #8b5cf6;
+  --method-get: #7cc98a;
+  --method-post: #e0b060;
+  --method-ws: #c9a8f5;
+
   --hover-fill: rgba(255, 255, 255, 0.05);
   --active-fill: rgba(255, 255, 255, 0.09);
 
@@ -45,6 +55,7 @@
   --font-mono: 'SF Mono', 'JetBrains Mono', 'Cascadia Code', Consolas, monospace;
 
   --r-sm: 8px;
+  --r-xs: 6px;
   --r-md: 12px;
   --r-lg: 16px;
   --r-pill: 22px;
@@ -87,6 +98,16 @@
     --danger-border: rgba(168, 58, 58, 0.45);
     --danger-soft: rgba(168, 58, 58, 0.1);
 
+    /* 状态/身份前景色(亮色阶):浅底配深彩字 */
+    --success-fg: #1f7a33;
+    --error-fg: #b93a3a;
+    --warn-fg: #9a6a15;
+    --violet-fg: #6d3fd6;
+    --violet-base: #8b5cf6;
+    --method-get: #2e7d32;
+    --method-post: #b7791f;
+    --method-ws: #6d28d9;
+
     --hover-fill: rgba(0, 0, 0, 0.04);
     --active-fill: rgba(0, 0, 0, 0.07);
 
@@ -128,6 +149,16 @@
   --danger: #a83a3a;
   --danger-border: rgba(168, 58, 58, 0.45);
   --danger-soft: rgba(168, 58, 58, 0.1);
+
+  /* 状态/身份前景色(亮色阶):浅底配深彩字 */
+  --success-fg: #1f7a33;
+  --error-fg: #b93a3a;
+  --warn-fg: #9a6a15;
+  --violet-fg: #6d3fd6;
+  --violet-base: #8b5cf6;
+  --method-get: #2e7d32;
+  --method-post: #b7791f;
+  --method-ws: #6d28d9;
 
   --hover-fill: rgba(0, 0, 0, 0.04);
   --active-fill: rgba(0, 0, 0, 0.07);
@@ -601,8 +632,8 @@ button {
 }
 
 .row-action-btn.danger:hover {
-  color: #ff8e8e;
-  background: rgba(255, 90, 90, 0.12);
+  color: var(--error-fg);
+  background: var(--danger-soft);
 }
 
 .row-action-btn:disabled {
@@ -655,8 +686,8 @@ button {
 }
 
 .ungrouped-clear:hover {
-  color: #ff8e8e;
-  background: rgba(255, 90, 90, 0.12);
+  color: var(--error-fg);
+  background: var(--danger-soft);
 }
 
 .ws-group + .ws-group {
@@ -841,9 +872,9 @@ button {
   line-height: 14px;
   padding: 0 6px;
   border-radius: var(--r-pill);
-  background: color-mix(in srgb, #8b5cf6 14%, transparent);
-  color: #a78bfa;
-  border: 1px solid color-mix(in srgb, #8b5cf6 42%, transparent);
+  background: color-mix(in srgb, var(--violet-base) 14%, transparent);
+  color: var(--violet-fg);
+  border: 1px solid color-mix(in srgb, var(--violet-base) 42%, transparent);
   letter-spacing: 0.02em;
   user-select: none;
 }
@@ -2784,7 +2815,7 @@ code {
 
 button.btn {
   background: var(--accent);
-  color: #fff;
+  color: var(--accent-on);
   border: none;
   border-radius: var(--r-md);
   padding: 8px 16px;
@@ -3608,7 +3639,7 @@ button.btn.form-action {
 .confirm-actions .btn-primary.danger {
   background: var(--error);
   border-color: var(--error);
-  color: #fff;
+  color: var(--accent-on);
 }
 
 .confirm-actions .btn-secondary {
@@ -4725,12 +4756,12 @@ button.btn.form-action {
 
 .setm-btn.danger {
   background: transparent;
-  border-color: rgba(255, 120, 120, 0.35);
-  color: #ffb4b4;
+  border-color: var(--danger-border);
+  color: var(--error-fg);
 }
 
 .setm-btn.danger:hover:not(:disabled) {
-  background: rgba(255, 80, 80, 0.12);
+  background: var(--danger-soft);
 }
 
 .setm-btn.small {
@@ -4818,12 +4849,12 @@ button.btn.form-action {
 
 .setm-badge.ok {
   border-color: rgba(120, 200, 140, 0.25);
-  color: #9fd4a8;
+  color: var(--success-fg);
 }
 
 .setm-badge.err {
   border-color: rgba(255, 120, 120, 0.2);
-  color: #d4a0a0;
+  color: var(--error-fg);
 }
 
 .setm-badge-dot {
@@ -5188,8 +5219,8 @@ button.btn.form-action {
   text-overflow: ellipsis;
   white-space: nowrap;
   font-size: 12px;
-  color: var(--color-warning, #b7791f);
-}
+  color: var(--warn-fg);
+  }
 
 .recon-clear {
   border: 1px solid var(--border-l1);
@@ -5208,7 +5239,7 @@ button.btn.form-action {
 .recon-error {
   padding: 6px 12px;
   font-size: 12px;
-  color: var(--color-danger, #c0392b);
+  color: var(--error-fg);
   background: var(--bg-layer-2);
   border-bottom: 1px solid var(--border-l1);
 }
@@ -5280,7 +5311,7 @@ button.btn.form-action {
 }
 
 .recon-check input {
-  accent-color: var(--active-fill, #3b82f6);
+  accent-color: var(--accent);
 }
 
 .recon-search-row button,
@@ -5480,17 +5511,17 @@ button.btn.form-action {
 }
 
 .recon-method.get {
-  color: #2e7d32;
+  color: var(--method-get);
 }
 
 .recon-method.post,
 .recon-method.put,
 .recon-method.patch {
-  color: #b7791f;
+  color: var(--method-post);
 }
 
 .recon-method.ws {
-  color: #6d28d9;
+  color: var(--method-ws);
 }
 
 .recon-status {
@@ -5506,11 +5537,11 @@ button.btn.form-action {
 }
 
 .recon-bad {
-  color: var(--color-danger, #c0392b);
+  color: var(--error-fg);
 }
 
 .recon-redirect {
-  color: var(--color-warning, #b7791f);
+  color: var(--warn-fg);
 }
 
 .recon-req-detail {
@@ -5576,11 +5607,11 @@ button.btn.form-action {
 }
 
 .recon-level-error {
-  color: var(--color-danger, #c0392b);
+  color: var(--error-fg);
 }
 
 .recon-level-warning {
-  color: var(--color-warning, #b7791f);
+  color: var(--warn-fg);
 }
 
 /* ---------- 长会话性能:有限窗口 + 浏览器跳过屏外渲染 ---------- */
