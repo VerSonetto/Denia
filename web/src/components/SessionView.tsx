@@ -30,7 +30,8 @@ function latestTodos(events: { type: string; todos?: TodoItem[] }[]): TodoItem[]
  * ## 性能
  * 流式帧经 rAF 合并派发——浏览器一帧最多一次 setNodes,
  * 高频 chunk(数百/s)不会触发等量 React 渲染;事件不丢失,
- * 逐条 fold 后一次性应用。
+ * 逐条 fold 后一次性应用。历史窗口由后端按展示粒度分页
+ * (流式 chunk 不占窗口),向上翻页按需补更早的完整轮次组。
  *
  * ## 生命周期
  * - 卸载时取消 rAF 与流订阅,不残留定时器/帧回调。
@@ -44,6 +45,9 @@ export function SessionView({
   onNotFound,
   onPendingSettled,
   onNodesChange,
+  onAnchorsChange,
+  jumpRequest,
+  onJumpSettled,
   onRewind,
   onFork,
   onQuote,
@@ -60,6 +64,12 @@ export function SessionView({
   onPendingSettled?: (message: { text: string; images?: UserMessageImage[] }) => void
   /** 内容变化时通知父级(对话轴/统计条/贴底跟随)。 */
   onNodesChange?: (nodes: TranscriptNode[]) => void
+  /** 全会话用户消息锚点变化时通知父级(轮次轴刻度,不受分页窗口限制)。 */
+  onAnchorsChange?: (anchors: api.SessionAnchor[]) => void
+  /** 轮次轴跳转请求:锚点未加载时自动向上翻页直至覆盖后定位。 */
+  jumpRequest?: { seq: number; nonce: number } | null
+  /** 跳转请求已处理(定位完成或无法覆盖),父级据此清空请求。 */
+  onJumpSettled?: () => void
   /** 用户消息回退按钮触发。 */
   onRewind?: (seq: number) => void
   /** 轮次收尾消息分支按钮触发(以该消息 seq 为锚点开新会话)。 */
@@ -70,14 +80,24 @@ export function SessionView({
   const [nodes, setNodes] = useState<TranscriptNode[]>([])
   // 原始事件流:轨迹视图的 fold 源(与 transcript 共用一次订阅)。
   const [events, setEvents] = useState<SessionEnvelope[]>([])
-  const [pageMeta, setPageMeta] = useState<SessionPageMeta>({ total: 0, hasMoreBefore: false })
+  const [pageMeta, setPageMeta] = useState<SessionPageMeta>({ total: 0, hasMoreBefore: false, anchors: [] })
   const [loadingOlder, setLoadingOlder] = useState(false)
   const [loading, setLoading] = useState(true)
   const eventsRef = useRef<SessionEnvelope[]>([])
+  const pageMetaRef = useRef(pageMeta)
+  const paneRef = useRef<HTMLDivElement | null>(null)
   const settleRef = useRef(onPendingSettled)
   settleRef.current = onPendingSettled
   const nodesChangeRef = useRef(onNodesChange)
   nodesChangeRef.current = onNodesChange
+  const jumpSettledRef = useRef(onJumpSettled)
+  jumpSettledRef.current = onJumpSettled
+
+  pageMetaRef.current = pageMeta
+
+  useEffect(() => {
+    onAnchorsChange?.(pageMeta.anchors)
+  }, [pageMeta.anchors, onAnchorsChange])
 
   // rAF 批处理:流式帧入队,每帧最多一次渲染。
   const queueRef = useRef<SessionEnvelope[]>([])
@@ -110,7 +130,7 @@ export function SessionView({
     const unsubscribe = attach(id, {
       onSnapshot: (_header, snapshot, meta) => {
         queueRef.current = []
-        const pageInfo = meta ?? { total: snapshot.length, hasMoreBefore: false }
+        const pageInfo = meta ?? { total: snapshot.length, hasMoreBefore: false, anchors: [] }
         eventsRef.current = snapshot
         setEvents(snapshot)
         setPageMeta(pageInfo)
@@ -151,11 +171,11 @@ export function SessionView({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id])
 
-  /** 向上翻页:把更早的有限窗口 prepend 到当前事件流并重建 fold。 */
-  const loadOlder = useCallback(async () => {
+  /** 向上翻页:把更早的完整轮次组 prepend 到当前事件流并重建 fold。 */
+  const loadOlder = useCallback(async (): Promise<boolean> => {
     const current = eventsRef.current
     const oldest = current[0]?.seq
-    if (!oldest || loadingOlder || !pageMeta.hasMoreBefore) return
+    if (!oldest || loadingOlder || !pageMetaRef.current.hasMoreBefore) return false
     setLoadingOlder(true)
     try {
       const page = await api.getSessionPage(id, { before: oldest, limit: OLDER_PAGE_LIMIT })
@@ -163,14 +183,48 @@ export function SessionView({
       eventsRef.current = merged
       setEvents(merged)
       setNodes(foldEvents(merged))
-      setPageMeta({ total: page.total, hasMoreBefore: page.hasMoreBefore })
+      setPageMeta({ total: page.total, hasMoreBefore: page.hasMoreBefore, anchors: page.anchors ?? [] })
       onTodosChange?.(latestTodos(merged))
+      return page.events.length > 0
     } catch {
       /* 翻页失败不打断已有内容;按钮保持可重试 */
+      return false
     } finally {
       setLoadingOlder(false)
     }
-  }, [id, loadingOlder, pageMeta.hasMoreBefore, onTodosChange])
+  }, [id, loadingOlder, onTodosChange])
+
+  // 轮次轴跳转:锚点在窗口内直接定位;不在则向上翻页直至覆盖(或到头放弃)。
+  useEffect(() => {
+    if (!jumpRequest) return
+    let cancelled = false
+    void (async () => {
+      const { seq } = jumpRequest
+      while (!cancelled && !eventsRef.current.some((envelope) => envelope.seq === seq)) {
+        const oldest = eventsRef.current[0]?.seq
+        const progressed = await loadOlder()
+        if (cancelled) return
+        // 到头仍未见目标(异常请求)或翻页无进展:放弃并恢复轴的可点击态。
+        if (!progressed || eventsRef.current[0]?.seq === oldest) {
+          jumpSettledRef.current?.()
+          return
+        }
+      }
+      if (cancelled) return
+      // 等 React 提交新行后再定位,smooth 滚动到可视带中央。
+      requestAnimationFrame(() => {
+        const target = paneRef.current?.querySelector<HTMLElement>(
+          `[data-user-anchor="${seq}"]`,
+        )
+        target?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+        jumpSettledRef.current?.()
+      })
+    })()
+    return () => {
+      cancelled = true
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [jumpRequest])
 
   if (loading) {
     return <div className="empty-hint">{t('loading')}</div>
@@ -185,7 +239,7 @@ export function SessionView({
   }
 
   return (
-    <div className="transcript-pane">
+    <div className="transcript-pane" ref={paneRef}>
       {pageMeta.hasMoreBefore && (
         <div className="load-older-row">
           <button
@@ -194,7 +248,11 @@ export function SessionView({
             disabled={loadingOlder}
             onClick={() => void loadOlder()}
           >
-            {loadingOlder ? t('loadingOlder') : t('loadOlder')}
+            {loadingOlder
+              ? t('loadingOlder')
+              : pageMeta.total > events.length
+                ? t('loadOlderRemaining', { n: pageMeta.total - events.length })
+                : t('loadOlder')}
           </button>
         </div>
       )}

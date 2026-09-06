@@ -1,4 +1,5 @@
 import * as api from './api'
+import type { SessionAnchor } from './api'
 import type { SessionEnvelope, SessionHeader } from './types'
 
 /**
@@ -27,6 +28,8 @@ import type { SessionEnvelope, SessionHeader } from './types'
 export interface SessionPageMeta {
   total: number
   hasMoreBefore: boolean
+  /** 全会话非注入 user-message 锚点(轮次轴刻度)。 */
+  anchors: SessionAnchor[]
 }
 
 export interface SessionStreamListener {
@@ -136,7 +139,11 @@ function reconnect(id: string, state: StreamState) {
       state.retryDelayMs = 300
       state.cursor = data.events.length ? data.events[data.events.length - 1].seq : 0
       state.lastFrameAt = now()
-      const meta = { total: data.total, hasMoreBefore: data.hasMoreBefore }
+      const meta = {
+        total: data.total,
+        hasMoreBefore: data.hasMoreBefore,
+        anchors: data.anchors ?? [],
+      }
       for (const listener of state.listeners) {
         listener.onSnapshot(data.header, data.events, meta)
       }

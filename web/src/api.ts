@@ -381,11 +381,18 @@ export function getSession(id: string, signal?: AbortSignal): Promise<{
   return http(`/api/sessions/${encodeURIComponent(id)}`, { signal })
 }
 
+export interface SessionAnchor {
+  seq: number
+  text: string
+}
+
 export interface SessionPageResponse {
   header: SessionHeader
   events: SessionEnvelope[]
   total: number
   hasMoreBefore: boolean
+  /** 全会话非注入 user-message 锚点(轮次轴刻度,不受分页窗口限制)。 */
+  anchors: SessionAnchor[]
 }
 
 /** 分页读取会话事件窗口:不经过全量快照,长会话首屏只拉尾部有限窗口。 */

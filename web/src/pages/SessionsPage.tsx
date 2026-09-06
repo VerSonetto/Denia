@@ -193,6 +193,10 @@ export default function SessionsPage({
   const [transcriptReloadTick, setTranscriptReloadTick] = useState(0)
   // 当前会话的 transcript 节点,供状态栏统计。
   const [transcriptNodes, setTranscriptNodes] = useState<TranscriptNode[]>([])
+  // 全会话用户消息锚点(轮次轴刻度,来自分页响应,不受窗口限制)。
+  const [axisAnchors, setAxisAnchors] = useState<api.SessionAnchor[]>([])
+  // 轮次轴跳转请求:点击未加载刻度时递增 nonce 触发视图翻页定位。
+  const [axisJump, setAxisJump] = useState<{ seq: number; nonce: number } | null>(null)
   const [todos, setTodos] = useState<TodoItem[]>([])
   // 会话内容视图(dsh conversation.view 环):对话 / 轨迹。组件按
   // activeId 重挂(key),视图状态随会话切换自然复位。
@@ -227,6 +231,8 @@ export default function SessionsPage({
     setPendingMessages([])
     sendingRef.current = false
     setTranscriptNodes([])
+    setAxisAnchors([])
+    setAxisJump(null)
     setTodos([])
     atBottomRef.current = true
     setAtBottom(true)
@@ -1252,7 +1258,11 @@ export default function SessionsPage({
         data-conversation-scroll=""
       >
         {phase === 'active' && view === 'chat' && (
-          <ConversationAxis nodes={transcriptNodes} scrollRef={scrollRef} />
+          <ConversationAxis
+            anchors={axisAnchors}
+            scrollRef={scrollRef}
+            onJumpMiss={(seq) => setAxisJump((prev) => ({ seq, nonce: (prev?.nonce ?? 0) + 1 }))}
+          />
         )}
         <div className={view === 'trajectory' ? 'conversation-view full-bleed' : 'conversation-view'}>
           {showTranscript && activeId ? (
@@ -1271,6 +1281,9 @@ export default function SessionsPage({
                 setTranscriptNodes(nodes)
                 followIfPinned()
               }}
+              onAnchorsChange={setAxisAnchors}
+              jumpRequest={axisJump}
+              onJumpSettled={() => setAxisJump(null)}
               onRewind={(seq) => void handleRewind(seq)}
               onFork={(seq) => void handleFork(seq)}
               onQuote={handleQuote}

@@ -397,6 +397,7 @@ const zh = {
 
   loading: '加载中…',
   loadOlder: '加载更早记录',
+  loadOlderRemaining: '加载更早记录(还有 {{n}} 条)',
   loadingOlder: '正在加载更早记录…',
   retry: '重试',
   cancel: '取消',
@@ -860,6 +861,7 @@ const en: typeof zh = {
 
   loading: 'Loading…',
   loadOlder: 'Load earlier records',
+  loadOlderRemaining: 'Load earlier records ({{n}} more)',
   loadingOlder: 'Loading earlier records…',
   retry: 'Retry',
   cancel: 'Cancel',

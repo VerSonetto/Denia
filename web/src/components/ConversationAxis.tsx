@@ -1,19 +1,19 @@
-import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
-import type { TranscriptNode } from '../fold'
+import { useCallback, useEffect, useId, useRef, useState } from 'react'
+import type { SessionAnchor } from '../api'
 import { t } from '../i18n'
 
 /**
  * 对话轴(抄 dsh TurnNavigator):聊天区左侧一条紧凑轨道,每条用户消息一个
- * 短横线 tick。默认按 10px 自然间距挤成一簇、在可视带里垂直居中;只有当自然
- * 高度超过可视带时才压缩成等比铺满——少时是一小簇,多时才撑开。整条轨道接管
+ * 短横线 tick。刻度来自后端全量锚点(不受分页窗口限制),即使只加载了尾部
+ * 窗口也能显示全部轮次;点击未加载的刻度由视图向上翻页覆盖后再定位。
+ * 默认按 10px 自然间距挤成一簇、在可视带里垂直居中;只有当自然高度超过
+ * 可视带时才压缩成等比铺满——少时是一小簇,多时才撑开。整条轨道接管
  * 指针:悬浮显示对应消息预览,点击跳转并居中。
  */
 
 /** 相邻 tick 的自然间距与轨道两端内边距(px)。 */
 const MARK_SPACING_PX = 10
 const RAIL_INSET_PX = 6
-
-type AxisItem = { anchor: number; text: string }
 
 function nearestItem(marks: HTMLElement[], clientY: number): number {
   if (marks.length === 0) return -1
@@ -31,22 +31,16 @@ function nearestItem(marks: HTMLElement[], clientY: number): number {
 }
 
 export function ConversationAxis({
-  nodes,
+  anchors,
   scrollRef,
+  onJumpMiss,
 }: {
-  nodes: TranscriptNode[]
+  anchors: SessionAnchor[]
   scrollRef: React.RefObject<HTMLDivElement | null>
+  /** 点击的刻度尚未加载(锚点在分页窗口之外):交由视图翻页覆盖后定位。 */
+  onJumpMiss?: (seq: number) => void
 }) {
-  const items = useMemo<AxisItem[]>(
-    () =>
-      nodes
-        .filter(
-          (n): n is Extract<TranscriptNode, { kind: 'user' }> =>
-            n.kind === 'user' && n.anchor !== undefined,
-        )
-        .map((n) => ({ anchor: n.anchor!, text: n.text })),
-    [nodes],
-  )
+  const items = anchors
 
   const [preview, setPreview] = useState(-1)
   const [active, setActive] = useState(-1)
@@ -66,13 +60,17 @@ export function ConversationAxis({
       const scroller = scrollRef.current
       if (!scroller) return
       const target = scroller.querySelector<HTMLElement>(`[data-user-anchor="${anchor}"]`)
-      if (!target) return
+      if (!target) {
+        onJumpMiss?.(anchor)
+        return
+      }
       target.scrollIntoView({ behavior: 'smooth', block: 'center' })
     },
-    [scrollRef],
+    [scrollRef, onJumpMiss],
   )
 
   // active = 可视带中线最近的那条用户消息;滚动与内容变化时重算。
+  // 已加载的行才能量到几何,按 seq 映射回全量锚点序列定位刻度。
   useEffect(() => {
     const scroller = scrollRef.current
     if (!scroller) return
@@ -88,7 +86,7 @@ export function ConversationAxis({
         const dist = Math.abs(bandCenter - (r.top + r.height / 2))
         if (dist < bestDist) {
           bestDist = dist
-          best = items.findIndex((it) => String(it.anchor) === node.dataset.userAnchor)
+          best = items.findIndex((it) => String(it.seq) === node.dataset.userAnchor)
         }
       }
       setActive(best)
@@ -130,7 +128,7 @@ export function ConversationAxis({
         style={railStyle}
         onClick={(e) => {
           const i = nearestItem(marksRef.current, e.clientY)
-          if (i >= 0) jump(items[i].anchor)
+          if (i >= 0) jump(items[i].seq)
         }}
         onPointerMove={(e) => setPreview(nearestItem(marksRef.current, e.clientY))}
         onPointerLeave={() => setPreview(-1)}
@@ -141,7 +139,7 @@ export function ConversationAxis({
               index === active ? 'active' : index === previewIndex ? 'preview' : 'rest'
             return (
               <div
-                key={item.anchor}
+                key={item.seq}
                 ref={setMark(index)}
                 className={`axis-mark axis-mark-${state}`}
                 style={positionVars(index)}
