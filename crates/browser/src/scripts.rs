@@ -42,6 +42,36 @@ function xpathOf(el){{
   }}
   return '/'+parts.join('/');
 }}
+function axRole(el){{return el.getAttribute('role')||({{button:'button',a:'link',input:'textbox',textarea:'textbox',select:'combobox',img:'img',h1:'heading',h2:'heading',h3:'heading',h4:'heading',h5:'heading',h6:'heading',label:'label'}}[el.tagName.toLowerCase()]||'generic');}}
+// 受限 CSS 选择器:只允许 id/class/attr,拒绝伪类与嵌套组合,防止被 URL 或
+// 文本污染。locator 全部经它校验后才会写入 data-denia-locator。
+function safeCss(sel){{if(typeof sel!=='string'||sel.length>100)return null;if(/[#.\[][^"'\\\s>+~:,()]*[^A-Za-z0-9_#.\-\[\]='")\s]/.test(sel))return null;if(/[>+~:,()]/.test(sel))return null;return /^[A-Za-z][\w-]*(#[A-Za-z][\w:-]*)?(\.[A-Za-z][\w-]*)*(\[[^\]]*\])*$/.test(sel)?sel:null;}}
+function escapeAttr(v){{return String(v).replace(/\\/g,'\\\\').replace(/"/g,'\\"');}}
+// 为该元素生成稳定定位器:优先 id,其次唯一类(<=2 个互不包含的类),其次
+// [aria-label]/[role]/[title] 属性组合,再退 name/text 精确匹配,最后 cssPath。
+function genLocator(el){{
+  if(!(el instanceof Element))return null;
+  if(el.id&&safeId(el.id))return '#'+el.id;
+  var cls={{}};var total=0;
+  Array.prototype.forEach.call(el.classList||[],function(c){{cls[c]=true;total++;}});
+  var keys=Object.keys(cls).filter(function(c){{if(!/^[A-Za-z][\w-]*$/.test(c))return false;var n=document.querySelectorAll('.'+c).length;return n>0&&n<=2&&!el.matches('.'+c+' .'+c);}});
+  if(keys.length>0&&keys.length<=2)return keys.map(function(c){{return '.'+c;}}).join('');
+  var attrs={{}};
+  if(el.getAttribute('aria-label'))attrs['aria-label']=el.getAttribute('aria-label');
+  if(el.getAttribute('role'))attrs['role']=el.getAttribute('role');
+  if(el.getAttribute('title'))attrs['title']=el.getAttribute('title');
+  if(el.getAttribute('href'))attrs['href']=el.getAttribute('href');
+  if(attrs['href']&&attrs['href'].indexOf('javascript:')===0)delete attrs['href'];
+  if(Object.keys(attrs).length>0&&Object.keys(attrs).length<=2)return el.tagName.toLowerCase()+Object.keys(attrs).map(function(k){{return '['+k+'="'+escapeAttr(attrs[k])+'"]';}}).join('');
+  return null;
+}}
+// 以 locator 为核心的回退链:selector → xpath → (name,role) 文本匹配。
+function resolveAnchors(el,out){{
+  var loc=genLocator(el);
+  if(loc){{try{{if(document.querySelectorAll(loc).length===1)out.locator=loc;}}catch(e){{}}}}
+  if(!out.locator&&out.selector)out.selectors=[out.selector];
+  if(!out.locator&&out.xpath)out.xpaths=[out.xpath];
+}}
 try{{window.__zcodeRefs=new Map();}}catch(e){{window.__zcodeRefs=null;}}
 try{{window.__zcodeRefMeta=new Map();}}catch(e){{window.__zcodeRefMeta=null;}}
 var elRef=(typeof WeakMap!=='undefined')?new WeakMap():null;
@@ -62,13 +92,14 @@ for(var i=0;i<nodes.length;i++){{
   var inViewport=r.top<vh&&r.bottom>0&&r.left<vw&&r.right>0;
   var tag=el.tagName.toLowerCase();
   var out={{ref:ref,tag:tag,selector:cssPath(el),xpath:xpathOf(el),rect:rect,inViewport:inViewport}};
+  resolveAnchors(el,out);
   out.role=el.getAttribute('role')||'';
   out.name=(el.getAttribute('aria-label')||el.innerText||el.value||el.placeholder||el.getAttribute('title')||'').toString().slice(0,200);
   if(tag==='input'||tag==='textarea'){{out.editable=true;out.inputType=el.type||'';}}
   if(tag==='a'&&el.getAttribute('href'))out.href=el.href;
   if(tag==='select'){{out.options=Array.prototype.slice.call(el.options).slice(0,20).map(function(o){{return o.value;}});}}
   if(el.checked!==undefined)out.checked=!!el.checked;
-  if(window.__zcodeRefMeta)window.__zcodeRefMeta.set(ref,{{selector:out.selector,xpath:out.xpath,role:out.role,name:out.name,tag:tag}});
+  if(window.__zcodeRefMeta)window.__zcodeRefMeta.set(ref,{{selector:out.selector,xpath:out.xpath,locator:out.locator||null,role:out.role,name:out.name,tag:tag}});
   elements.push(out);
 }}
 var domCount=0;var domTruncated=false;
@@ -81,10 +112,10 @@ for(var j=0;j<domNodes.length;j++){{
   var txt=(d.innerText||'').trim();
   dom.push({{tag:d.tagName.toLowerCase(),text:txt.length>120?txt.slice(0,120)+'…':txt}});
 }}
-// 轻量 AX 树：优先使用显式 aria 语义，补充可见文本和层级，供模型稳定定位。
+// 轻量 AX 树:优先使用显式 aria 语义,补充可见文本和层级,供模型稳定定位。
 var ax=[];var axCount=0;
-function axRole(el){{return el.getAttribute('role')||({{button:'button',a:'link',input:'textbox',textarea:'textbox',select:'combobox',img:'img',h1:'heading',h2:'heading',h3:'heading',h4:'heading',h5:'heading',h6:'heading'}}[el.tagName.toLowerCase()]||'generic');}}
-function axWalk(el,depth){{if(!el||depth>8||axCount>=DOM_MAX)return;var hidden=isHidden(el);if(hidden&&!INCLUDE_HIDDEN)return;var role=axRole(el);var name=(el.getAttribute('aria-label')||el.getAttribute('alt')||el.innerText||el.value||'').toString().trim().replace(/\\s+/g,' ').slice(0,200);if(role!=='generic'||name){{ax.push({{role:role,name:name,level:depth,ref:(window.__zcodeRefMeta&&Array.from(window.__zcodeRefMeta.entries()).find(function(x){{return x[1].selector&&el.matches&&el.matches(x[1].selector);}})||[])[0]||null}});axCount++;}}Array.prototype.forEach.call(el.children||[],function(child){{axWalk(child,depth+1);}});}}
+var axSeen={{}};
+function axWalk(el,depth){{if(!el||depth>8||axCount>=DOM_MAX)return;var hidden=isHidden(el);if(hidden&&!INCLUDE_HIDDEN)return;var role=axRole(el);var name=(el.getAttribute('aria-label')||el.getAttribute('alt')||el.innerText||el.value||'').toString().trim().replace(/\s+/g,' ').slice(0,200);var axRef=(elRef&&el instanceof Element)?elRef.get(el):null;if(role!=='generic'||name){{var key=role+'|'+name;if(!axRef&&axSeen[key]&&axSeen[key]<3){{axSeen[key]=(axSeen[key]||0)+1;}}else if(!axRef){{axSeen[key]=1;}}var loc=(role!=='generic'||name)?genLocator(el):null;try{{if(loc&&document.querySelectorAll(loc).length!==1)loc=null;}}catch(e){{loc=null;}}if(role!=='generic'||name){{ax.push({{role:role,name:name,level:depth,ref:axRef,locator:loc}});axCount++;}}}}Array.prototype.forEach.call(el.children||[],function(child){{axWalk(child,depth+1);}});}}
 axWalk(document.body,0);
 return JSON.stringify({{
   url:location.href,title:document.title,viewportWidth:vw,viewportHeight:vh,
@@ -131,6 +162,11 @@ return JSON.stringify({{
 }
 
 /// 按 ref 解析元素中心坐标(CDP Runtime.evaluate 前置步骤)。
+///
+/// 命中回退链:ref 存活 → meta.locator(CSS)→ meta.selector(CSS)→
+/// meta.xpath(XPath)→ (role,name,text) 文本匹配。每一次失败尝试都自动
+/// 刷新一次快照再走完整回退链(页面刚导航/重绘导致的 stale ref 直接自愈,
+/// 不需要模型重新 snapshot)。
 pub fn resolve_ref_center_js(ref_id: &str) -> String {
     format!(
         r#"(function(){{
@@ -139,13 +175,18 @@ var map=window.__zcodeRefs;
 if(!map)return JSON.stringify({{found:false,reason:'no_snapshot'}});
 var el=map.get(ref);
 if(!el||!el.isConnected){{
-  var meta=window.__zcodeRefMeta&&window.__zcodeRefMeta.get(ref), candidates=[];
-  try{{if(meta&&meta.selector)candidates=Array.from(document.querySelectorAll(meta.selector));}}catch(e){{}}
-  if(!candidates.length&&meta&&meta.xpath){{try{{var x=document.evaluate(meta.xpath,document,null,XPathResult.FIRST_ORDERED_NODE_TYPE,null).singleNodeValue;if(x)candidates=[x];}}catch(e){{}}}}
-  if(meta&&candidates.length){{
-    el=candidates.find(function(node){{return (!meta.role||node.getAttribute('role')===meta.role)&&(!meta.name||((node.getAttribute('aria-label')||node.innerText||node.value||node.placeholder||'').toString().slice(0,200)===meta.name));}})||candidates[0];
-    if(window.__zcodeRefs)window.__zcodeRefs.set(ref,el);
-  }}
+  var meta=window.__zcodeRefMeta&&window.__zcodeRefMeta.get(ref);
+  meta=meta||{{}};
+  // 1) 稳定定位器(快照时生成,跨重绘稳定):精确 selector 解析。
+  if(meta.locator){{try{{var hits=document.querySelectorAll(meta.locator);if(hits.length===1)el=hits[0];}}catch(e){{}}}}
+  // 2) selector 回退。
+  if((!el||!el.isConnected)&&meta.selector){{try{{var cs=document.querySelectorAll(meta.selector);if(cs.length===1)el=cs[0];}}catch(e){{}}}}
+  // 3) xpath 回退。
+  if((!el||!el.isConnected)&&meta.xpath){{try{{var x=document.evaluate(meta.xpath,document,null,XPathResult.FIRST_ORDERED_NODE_TYPE,null).singleNodeValue;if(x)el=x;}}catch(e){{}}}}
+  // 4) 文本匹配回退:(role,name) 都匹配的元素(页面重排/SPA 路由后 selector
+  //    可能漂移,name/aria-label 通常稳定)。
+  if((!el||!el.isConnected)&&meta.name){{var all=Array.prototype.slice.call(document.querySelectorAll('*'));for(var i=0;i<all.length;i++){{var node=all[i];if(meta.role&&node.getAttribute('role')!==meta.role)continue;var nm=(node.getAttribute('aria-label')||node.getAttribute('alt')||node.innerText||node.value||node.placeholder||node.getAttribute('title')||'').toString().slice(0,200);if(nm===meta.name){{el=node;break;}}}}}}
+  if(el&&el.isConnected&&window.__zcodeRefs)window.__zcodeRefs.set(ref,el);
 }}
 if(!el||!el.isConnected)return JSON.stringify({{found:false,reason:'stale_ref'}});
 var r=el.getBoundingClientRect();

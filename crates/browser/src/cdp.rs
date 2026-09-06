@@ -137,7 +137,7 @@ impl CdpHandle {
         ))
     }
 
-    /// 发送一条 CDP 命令,等待结果(默认 120s 超时)。
+    /// 发送一条 CDP 命令,等待结果(默认 CDP_REQUEST_TIMEOUT 超时)。
     pub async fn send(&self, method: &str, params: Value) -> Result<Value, String> {
         self.send_with_session(method, params, None).await
     }
@@ -148,6 +148,18 @@ impl CdpHandle {
         method: &str,
         params: Value,
         session_id: Option<&str>,
+    ) -> Result<Value, String> {
+        self.send_with_session_timeout(method, params, session_id, Duration::from_secs(30))
+            .await
+    }
+
+    /// 发送 CDP 命令并指定单请求超时(默认 30s;调用方可用更短超时做轮询)。
+    pub async fn send_with_session_timeout(
+        &self,
+        method: &str,
+        params: Value,
+        session_id: Option<&str>,
+        timeout: Duration,
     ) -> Result<Value, String> {
         let id = self.next_id.fetch_add(1, Ordering::SeqCst);
         let mut request = json!({ "id": id, "method": method, "params": params });
@@ -163,7 +175,7 @@ impl CdpHandle {
         self.request_tx
             .send(text)
             .map_err(|_| "cdp_writer_closed".to_string())?;
-        match tokio::time::timeout(Duration::from_secs(120), rx).await {
+        match tokio::time::timeout(timeout, rx).await {
             Ok(Ok(result)) => result,
             Ok(Err(_)) => Err("cdp_caller_dropped".to_string()),
             Err(_) => {

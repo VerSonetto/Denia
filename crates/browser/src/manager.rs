@@ -67,6 +67,9 @@ pub struct BrowserManager {
     command_gate: tokio::sync::Mutex<()>,
     generation: AtomicU64,
     event_broadcast: tokio::sync::broadcast::Sender<BrowserEvent>,
+    /// 断线重启后恢复导航视图用:上次活跃 tab 的 URL(跨实例存活)。
+    /// 重启后 profile 恢复的 tab 里 URL 匹配的就优先激活,模型视角不变。
+    last_active_url: std::sync::Arc<std::sync::Mutex<Option<String>>>,
     /// 挂起 JS dialog(tabId -> {type,message});事件泵写入,getDialog/handleDialog 读写。
     pending_dialogs: std::sync::Arc<std::sync::Mutex<HashMap<String, Value>>>,
     /// 网络抓包缓冲(事件泵写入,networkList/GetBody 读取)。
@@ -282,9 +285,17 @@ impl BrowserManager {
             network_log: std::sync::Arc::new(std::sync::Mutex::new(NetworkLog::default())),
             recon: ReconStore::new(),
             tab_views: std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
+            last_active_url: std::sync::Arc::new(std::sync::Mutex::new(None)),
             exited_ping: tokio::sync::watch::channel(false).0,
             shutting_down: std::sync::atomic::AtomicBool::new(false),
             home: home.clone(),
+        }
+    }
+
+    /// 记录当前活跃 tab 的 URL(断线重启后恢复导航视图用)。
+    pub(crate) fn track_active_url(&self, url: &str) {
+        if !url.is_empty() {
+            *self.last_active_url.lock().unwrap() = Some(url.to_string());
         }
     }
 
@@ -436,8 +447,18 @@ impl BrowserManager {
         if inner.tabs.is_empty() {
             Self::create_tab_inner(&mut inner, None).await?;
         }
+        // 断线重启后恢复导航视图:优先激活上次活跃 tab 对应的 URL
+        // (profile 恢复的会话里 URL 相同),其次才取第一个 tab。
+        let remembered = { self.last_active_url.lock().unwrap().clone() };
+        let restored = remembered.and_then(|url| {
+            inner
+                .tabs
+                .values()
+                .find(|info| info.url == url || self.tab_view(&info.tab_id).map(|v| v.0) == Some(url.clone()))
+                .map(|info| info.tab_id.clone())
+        });
         let first = inner.tabs.keys().next().cloned();
-        inner.active_tab = first;
+        inner.active_tab = restored.or(first);
 
         let event_broadcast = self.event_broadcast.clone();
         let handle_for_pump = inner.handle.clone();
@@ -654,6 +675,9 @@ impl BrowserManager {
         }
         // CDP 在页面崩溃/浏览器更新时可能在命令中途断开。重建实例并
         // 重放一次命令，避免把瞬时传输错误暴露给上层；业务错误不会重放。
+        // 断线重连:最多 3 次重试,每次先收尸(杀残留进程树+清陈旧状态)再
+        // 重启实例;重启后 tab 表/active_tab 由 refresh_targets 重建,模型
+        // 视角的导航状态没有丢失(profile 持久,登录态/URL 都在)。
         let mut attempt = 0u8;
         let outcome = loop {
             let outcome = {
@@ -673,10 +697,11 @@ impl BrowserManager {
                     || error.message.contains("cdp_writer_closed")
                     || error.message.contains("cdp_timeout")
             });
-            if !transient || attempt >= 1 {
+            if !transient || attempt >= 3 {
                 break outcome;
             }
             attempt += 1;
+            tracing::warn!(attempt, "浏览器命令瞬时失败,断线重连并重试");
             self.on_pump_exit().await;
             if self.get_or_start().await.is_err() {
                 break outcome;

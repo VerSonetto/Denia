@@ -15,15 +15,19 @@ use crate::{Tool, ToolContext, ToolOutput, parse_args_lenient};
 
 const TOOL_DESCRIPTION: &str = r#"控制内嵌浏览器(headless Chrome),可导航、读取页面、交互操作。ZCode 同款命令面:
 - 导航:navigate{url}(仅 http/https)、back{}、forward{}、reload{}
-- 读取:getState{}、snapshot{maxElements?, includeHidden?}(返回可交互元素列表,每个带 ref 编号;后续交互用 ref 引用元素)、screenshot{fullPage?, clip?}(返回截图,图片自动注入会话)、elementInfo{x,y}
-- 交互:click{ref?|x,y, button?, doubleClick?}、fill{ref, value}(整体替换输入框内容)、type{ref?, text}(追加粘贴)、press{key, ref?}、scroll{ref?|x,y}、hover{ref?|x,y}、select{ref, values[]}、check{ref, checked?}、drag{fromRef,toRef}
+- 读取:getState{}、snapshot{maxElements?, includeHidden?}(返回可交互元素列表,每个带 ref 编号与稳定定位器 locator/selector;后续交互用 ref 或 locator)、screenshot{fullPage?, clip?}(返回截图,图片自动注入会话)、elementInfo{x,y}
+- 交互:click{ref?|locator?|x,y, button?, doubleClick?}、fill{ref|locator, value}(整体替换输入框内容)、type{ref?|locator?, text}(追加粘贴)、press{key, ref?}、scroll{ref?|x,y}、hover{ref?|x,y}、select{ref, values[]}、check{ref, checked?}、drag{fromRef,toRef}。ref 和 locator 也可直接放 ref 字段:CSS 选择器、#id、[aria-label=...]、text:文本
 - 等待:waitFor{selector?|text?|textGone?, timeoutMs?}
 - 弹窗:getDialog{}、handleDialog{accept, promptText?}(页面 alert/confirm/prompt 会挂起等待处理)
 - 执行:evaluate{expression}(页面 JS,返回 JSON)
 - tab:newTab{url?}、list{}、activate{tabId}、close{tabId?}(缺省 tabId = 当前 tab)
 - 视口:viewportSet{width,height}、viewportReset{}
 - 网络抓包:networkList{urlFilter?, max?}(该 tab 捕获的请求:URL/方法/状态码/请求响应头/postData;环形缓冲约 200 条)、networkGetBody{requestId, bodyKind?}(bodyKind 缺省 "response" 取响应体;传 "request" 取 POST 请求体;文本直出,二进制返回 base64 标记)
-典型流程:snapshot 拿 ref → 用 ref 交互 → 需要视觉时 screenshot。snapshot 过期(ref 失效)时重新 snapshot。要分析页面背后的 API 调用时先 networkList。"#;
+稳定性保证:
+- 元素失效自动重定位:ref 过期会按 locator/selector/xpath/文本 回退链自动重绑,并在 1.2s 窗口内自动刷新快照重试,无需重复 snapshot
+- 统一超时:命令总耗时 30s(waitFor 可显式更长,上限 60s),CDP 单请求 30s
+- 断线自动重连:浏览器掉线自动重启实例并恢复活跃 tab(最多重试 3 次);关闭最后一个 tab 会彻底回收 Chrome 进程与资源
+典型流程:snapshot 拿 ref → 用 ref/locator 交互 → 需要视觉时 screenshot。要分析页面背后的 API 调用时先 networkList。"#;
 
 #[derive(Deserialize)]
 #[allow(dead_code)]
@@ -71,7 +75,7 @@ impl BrowserTool {
                         },
                         "url": { "type": "string", "description": "navigate/newTab:目标地址(仅 http/https)" },
                         "tabId": { "type": "string", "description": "目标 tab;缺省 = 当前 tab" },
-                        "ref": { "type": "string", "description": "snapshot 给出的元素编号(如 e12)" },
+                        "ref": { "type": "string", "description": "snapshot 给出的元素编号(如 e12);也接受 CSS 选择器/locator/text:文本" },
                         "x": { "type": "number" }, "y": { "type": "number" },
                         "width": { "type": "integer" }, "height": { "type": "integer" },
                         "value": { "type": "string", "description": "fill:输入内容" },
