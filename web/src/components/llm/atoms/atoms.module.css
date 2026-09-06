@@ -1,0 +1,278 @@
+/* LLM 面板共享表单原子。只用语义 token,不写死颜色;暗/亮主题自动生效。 */
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  min-width: 0;
+}
+
+.fieldLabel {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--label-caption);
+}
+
+.fieldHint {
+  margin: -2px 0 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--label-tertiary);
+}
+
+.fieldError {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--label-primary);
+}
+
+.fieldError::before {
+  content: '';
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--label-primary);
+}
+
+/* ---- 文本输入 ---- */
+
+.input {
+  width: 100%;
+  min-height: 40px;
+  padding: 9px 12px;
+  border-radius: 10px;
+  border: 1px solid var(--border-l1);
+  background: var(--input-major);
+  color: var(--label-primary);
+  font-size: 13px;
+  font-family: inherit;
+  outline: none;
+  transition: border-color 0.15s var(--ease), box-shadow 0.15s var(--ease);
+}
+
+.input:hover:not(:disabled) {
+  border-color: var(--border-l2);
+}
+
+.input:focus-visible {
+  border-color: var(--accent-tint);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+.input:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.input::placeholder {
+  color: var(--label-caption);
+}
+
+.input.mono {
+  font-family: var(--font-mono);
+  font-size: 12px;
+}
+
+.input.invalid {
+  border-color: var(--border-l3);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+/* 长 URL / 模型 id 按字符断行,不撑破容器 */
+.monoAnywhere {
+  overflow-wrap: anywhere;
+  word-break: normal;
+}
+
+/* ---- chip 单选组 ---- */
+
+.chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 34px;
+  padding: 6px 14px;
+  border-radius: 10px;
+  border: 1px solid var(--border-l1);
+  background: var(--bg-layer-2);
+  color: var(--label-secondary);
+  font-size: 12.5px;
+  font-weight: 550;
+  font-family: inherit;
+  white-space: nowrap;
+  cursor: pointer;
+  transition:
+    background 0.15s var(--ease),
+    border-color 0.15s var(--ease),
+    color 0.15s var(--ease);
+}
+
+.chip:hover:not(:disabled) {
+  border-color: var(--border-l2);
+  color: var(--label-primary);
+}
+
+.chip:focus-visible {
+  outline: none;
+  border-color: var(--accent-tint);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+.chip.active {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--label-primary);
+}
+
+.chip:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/* ---- 徽标 ---- */
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 550;
+  border: 1px solid var(--border-l1);
+  color: var(--label-secondary);
+  white-space: nowrap;
+}
+
+.badgeDot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+  flex: none;
+}
+
+.badge.ok {
+  color: var(--label-primary);
+  border-color: var(--border-l2);
+}
+
+.badge.err {
+  color: var(--danger);
+  border-color: var(--danger-border);
+}
+
+/* ---- 按钮 ---- */
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 36px;
+  padding: 0 14px;
+  border-radius: 10px;
+  border: 1px solid transparent;
+  font-size: 13px;
+  font-weight: 650;
+  font-family: inherit;
+  white-space: nowrap;
+  cursor: pointer;
+  transition:
+    background 0.15s var(--ease),
+    border-color 0.15s var(--ease),
+    color 0.15s var(--ease),
+    opacity 0.15s var(--ease);
+}
+
+.btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.btn:focus-visible {
+  outline: none;
+  border-color: var(--accent-tint);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+.btn.primary {
+  background: var(--accent);
+  color: var(--accent-on);
+  border-color: var(--accent);
+}
+
+.btn.primary:hover:not(:disabled) {
+  filter: brightness(1.06);
+}
+
+.btn.ghost {
+  background: transparent;
+  border-color: var(--border-l2);
+  color: var(--label-primary);
+}
+
+.btn.ghost:hover:not(:disabled) {
+  background: var(--hover-fill);
+}
+
+.btn.danger {
+  background: transparent;
+  border-color: var(--danger-border);
+  color: var(--danger);
+}
+
+.btn.danger:hover:not(:disabled) {
+  background: var(--danger-soft);
+}
+
+.btn.small {
+  min-height: 30px;
+  padding: 0 10px;
+  font-size: 12px;
+  border-radius: 8px;
+}
+
+/* ---- 骨架屏(探测中) ---- */
+
+.skeleton {
+  border-radius: 8px;
+  background: linear-gradient(
+    90deg,
+    var(--hover-fill) 25%,
+    var(--active-fill) 45%,
+    var(--hover-fill) 65%
+  );
+  background-size: 200% 100%;
+  animation: skeleton-slide 1.3s ease-in-out infinite;
+}
+
+@keyframes skeleton-slide {
+  from {
+    background-position: 180% 0;
+  }
+  to {
+    background-position: -80% 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .skeleton {
+    animation: none;
+  }
+}

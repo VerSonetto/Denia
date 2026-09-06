@@ -1,0 +1,247 @@
+.root {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  min-width: 0;
+}
+
+.intro {
+  margin: 0;
+  font-size: 12.5px;
+  line-height: 1.6;
+  color: var(--label-tertiary);
+  max-width: 56ch;
+}
+
+.controls {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr) auto;
+  gap: 12px;
+  align-items: end;
+  min-width: 0;
+}
+
+.controlField {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  min-width: 0;
+}
+
+.controlLabel {
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--label-caption);
+}
+
+.runBox {
+  display: flex;
+  align-items: flex-end;
+}
+
+.effortRow {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+/* ---- 运行中监视器 ---- */
+
+.monitor {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 14px 16px;
+  border: 1px solid var(--border-l1);
+  border-radius: 12px;
+  background: var(--bg-layer-2);
+}
+
+.monitorHead {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.stage {
+  font-size: 12.5px;
+  font-weight: 650;
+  color: var(--label-primary);
+}
+
+.elapsed {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  color: var(--label-tertiary);
+}
+
+.bar {
+  height: 6px;
+  border-radius: 999px;
+  background: var(--hover-fill);
+  overflow: hidden;
+}
+
+.barFill {
+  display: block;
+  height: 100%;
+  border-radius: 999px;
+  background: var(--label-primary);
+  transition: width 0.14s linear;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .barFill {
+    transition: none;
+  }
+}
+
+/* ---- 结果 / 失败 ---- */
+
+.result,
+.failure {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 16px 18px;
+  border-radius: 14px;
+  border: 1px solid var(--border-l1);
+  background: var(--bg-layer-2);
+  min-width: 0;
+}
+
+.result {
+  border-color: var(--border-l2);
+}
+
+.resultTitle {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--label-primary);
+}
+
+.metrics {
+  margin: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 28px;
+}
+
+.metric {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+
+.metric dt {
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--label-caption);
+}
+
+.metric dd {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: 15px;
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+  color: var(--label-primary);
+}
+
+.errorList {
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.errorLine {
+  display: flex;
+  gap: 12px;
+  min-width: 0;
+}
+
+.errorLine dt {
+  flex: none;
+  width: 84px;
+  font-size: 11.5px;
+  color: var(--label-caption);
+  padding-top: 1px;
+}
+
+.errorLine dd {
+  margin: 0;
+  font-size: 12.5px;
+  line-height: 1.55;
+  color: var(--label-primary);
+  min-width: 0;
+}
+
+.mono {
+  font-family: var(--font-mono);
+  font-size: 12px !important;
+  overflow-wrap: anywhere;
+}
+
+.errorBody {
+  overflow-wrap: anywhere;
+  color: var(--label-secondary) !important;
+}
+
+.lastFailed {
+  margin: 0;
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--label-caption);
+  overflow-wrap: anywhere;
+}
+
+.promptNote {
+  margin: 0;
+  font-size: 11.5px;
+  color: var(--label-caption);
+}
+
+.promptNote .mono {
+  font-size: 11px;
+  color: var(--label-tertiary);
+}
+
+.empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  justify-content: center;
+  min-height: 260px;
+  border: 1px dashed var(--border-l1);
+  border-radius: 16px;
+  padding: 24px;
+  color: var(--label-caption);
+}
+
+.emptyText {
+  margin: 0;
+  max-width: 40ch;
+  text-align: center;
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--label-tertiary);
+}
+
+@media (max-width: 767px) {
+  .controls {
+    grid-template-columns: 1fr;
+  }
+
+  .runBox {
+    justify-content: flex-end;
+  }
+}

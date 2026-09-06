@@ -8,6 +8,8 @@ import type {
   SessionHeader,
   SessionSummary,
   SettingsDescribe,
+  StreamChunk,
+  TokenUsage,
   WorkspaceRecord,
   WireProtocol,
 } from './types'
@@ -308,6 +310,177 @@ export async function chatCompletion(
       )
     }
     return text.trim()
+  } finally {
+    window.clearTimeout(timer)
+    signal?.removeEventListener('abort', onOuterAbort)
+  }
+}
+
+/* ---- llm chat probe (settings 连通性测试的流式回调版) ---- */
+
+export interface ProbeStreamHandlers {
+  /** 响应头已返回、开始读流(连接 OK,进入等待模型阶段)。 */
+  onConnected: () => void
+  /** 收到第一个输出增量(即 TTFT 锚点)。 */
+  onFirstToken: () => void
+  /** 每个输出增量(驱动流式进度)。 */
+  onDelta: (text: string) => void
+  /** 服务端上报的 token 用量。 */
+  onUsage: (usage: TokenUsage) => void
+  /** 正常结束。 */
+  onSuccess: (reason: string) => void
+  /** 流内/握手失败(错误码、状态与网关返回体由后端脱敏后随 failure 下发)。 */
+  onFailure: (failure: { code: string; message: string; status?: number; requestId?: string; retryAfterMs?: number }) => void
+}
+
+/**
+ * 调一次 /api/llm/chat 并把 StreamChunk 翻译成探测回调。
+ * 与 chatCompletion 的区别:不聚合文本,而是边流边回报,供进度/TTFT/用量展示。
+ */
+export async function probeChatStream(
+  options: { provider: string; model: string; reasoningEffort?: string; prompt: string; maxTokens?: number },
+  handlers: ProbeStreamHandlers,
+  signal?: AbortSignal,
+  timeoutMs = 120_000,
+): Promise<void> {
+  const controller = new AbortController()
+  let timedOut = false
+  const timer = window.setTimeout(() => {
+    timedOut = true
+    controller.abort()
+  }, timeoutMs)
+  const onOuterAbort = () => controller.abort()
+  if (signal) {
+    if (signal.aborted) controller.abort()
+    else signal.addEventListener('abort', onOuterAbort, { once: true })
+  }
+  const toFailure = (raw: {
+    code?: string
+    message?: string
+    status?: number
+    requestId?: string
+    providerRetryAfterMs?: number
+  }) => ({
+    code: raw.code ?? 'probe/failed',
+    message: raw.message ?? '模型调用失败',
+    status: raw.status,
+    requestId: raw.requestId,
+    retryAfterMs: raw.providerRetryAfterMs,
+  })
+  try {
+    let response: Response
+    try {
+      response = await fetch('/api/llm/chat', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          provider: options.provider,
+          model: options.model,
+          reasoningEffort: options.reasoningEffort,
+          prompt: options.prompt,
+          ...(options.maxTokens !== undefined ? { max_tokens: options.maxTokens } : {}),
+        }),
+        signal: controller.signal,
+      })
+    } catch (error) {
+      if (controller.signal.aborted) {
+        handlers.onFailure(
+          timedOut
+            ? { code: 'probe/timeout', message: '连接超时,网关长时间无响应', status: 504 }
+            : { code: 'probe/aborted', message: '测试已取消' },
+        )
+        return
+      }
+      handlers.onFailure({ code: 'probe/network', message: error instanceof Error ? error.message : String(error) })
+      return
+    }
+    if (!response.ok) {
+      let code = `http-${response.status}`
+      let message = response.statusText
+      try {
+        const body = await response.json()
+        if (body?.error) {
+          code = body.error.code ?? code
+          message = body.error.message ?? message
+        }
+      } catch {
+        /* body was not JSON */
+      }
+      handlers.onFailure({ code, message, status: response.status })
+      return
+    }
+    if (!response.body) {
+      handlers.onFailure({ code: 'probe/empty-body', message: '网关没有返回内容', status: response.status })
+      return
+    }
+    handlers.onConnected()
+    const reader = response.body.getReader()
+    const decoder = new TextDecoder()
+    let buffer = ''
+    let isErrorFrame = false
+    let settled = false
+    for (;;) {
+      const { done, value } = await reader.read()
+      if (done) break
+      buffer += decoder.decode(value, { stream: true })
+      const lines = buffer.split('\n')
+      buffer = lines.pop() ?? ''
+      for (const line of lines) {
+        const trimmed = line.trimEnd()
+        if (trimmed.startsWith('event:')) {
+          isErrorFrame = trimmed.slice(6).trim() === 'error'
+        } else if (trimmed.startsWith('data:')) {
+          const payload = trimmed.slice(5).trim()
+          if (!payload) continue
+          let parsed: StreamChunk | { code?: string; message?: string; status?: number; requestId?: string; providerRetryAfterMs?: number }
+          try {
+            parsed = JSON.parse(payload)
+          } catch {
+            continue
+          }
+          if (isErrorFrame) {
+            settled = true
+            handlers.onFailure(toFailure(parsed as { code?: string; message?: string }))
+            isErrorFrame = false
+            continue
+          }
+          const chunk = parsed as StreamChunk
+          if (chunk.type === 'text-delta') {
+            handlers.onFirstToken()
+            handlers.onDelta(chunk.text)
+          } else if (chunk.type === 'reasoning-delta') {
+            handlers.onFirstToken()
+          } else if (chunk.type === 'usage') {
+            handlers.onUsage(chunk.usage)
+          } else if (chunk.type === 'finish') {
+            settled = true
+            if (chunk.reason.kind === 'stop' || chunk.reason.kind === 'tool-calls') {
+              handlers.onSuccess(chunk.reason.kind)
+            } else {
+              handlers.onFailure(
+                toFailure(
+                  chunk.reason.kind === 'error' || chunk.reason.kind === 'aborted'
+                    ? (chunk.reason.failure as { code?: string; message?: string })
+                    : { message: '输出提前截断' },
+                ),
+              )
+            }
+          }
+        }
+      }
+      if (controller.signal.aborted) break
+    }
+    if (!settled) {
+      if (controller.signal.aborted) {
+        handlers.onFailure(
+          timedOut
+            ? { code: 'probe/timeout', message: '连接超时,网关长时间无响应', status: 504 }
+            : { code: 'probe/aborted', message: '测试已取消' },
+        )
+      } else {
+        handlers.onFailure({ code: 'probe/empty-body', message: '流在完成前提前关闭', status: response.status })
+      }
+    }
   } finally {
     window.clearTimeout(timer)
     signal?.removeEventListener('abort', onOuterAbort)

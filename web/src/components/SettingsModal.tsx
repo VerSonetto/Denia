@@ -4,9 +4,8 @@ import * as api from '../api'
 import { t } from '../i18n'
 import type { Notify } from '../App'
 import { IconClose, IconGear, IconPrompt, IconShield, IconSliders } from './icons'
-import { loadProviderCredentials, ModelProvidersPanel } from './settings/ModelProvidersPanel'
+import { LlmPanel } from './llm/LlmPanel'
 import { Toggle } from './ui/controls'
-import type { SettingsDescribe } from '../types'
 
 type SettingsTab = 'runtime' | 'general' | 'models' | 'security' | 'appearance'
 
@@ -147,8 +146,6 @@ export function SettingsModal({ notify, onClose }: { notify: Notify; onClose: ()
   const [tab, setTab] = useState<SettingsTab>('general')
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
-  const [settings, setSettings] = useState<SettingsDescribe | null>(null)
-  const [credentials, setCredentials] = useState<Awaited<ReturnType<typeof loadProviderCredentials>>>({})
 
   const [sandbox, setSandbox] = useState(true)
   const [theme, setTheme] = useState('system')
@@ -165,10 +162,8 @@ export function SettingsModal({ notify, onClose }: { notify: Notify; onClose: ()
         api.getSettings(),
         api.getSystemPrompt(),
       ])
-      setSettings(nextDescribe)
       setPromptText(nextPrompt.text)
       setPromptSource(nextPrompt.source)
-      setCredentials(await loadProviderCredentials(nextDescribe))
 
       const console = nextDescribe.namespaces.find((n) => n.ns === CONSOLE_NS)
       if (console) {
@@ -203,9 +198,24 @@ export function SettingsModal({ notify, onClose }: { notify: Notify; onClose: ()
     return () => source.close()
   }, [load])
 
+  // 弹窗期间锁定 body 滚动并补偿滚动条宽度:遮罩下不再出现滚动条抖动。
+  useEffect(() => {
+    const body = document.body
+    const scrollbar = window.innerWidth - document.documentElement.clientWidth
+    const prevOverflow = body.style.overflow
+    const prevPadding = body.style.paddingRight
+    body.style.overflow = 'hidden'
+    if (scrollbar > 0) body.style.paddingRight = `${scrollbar}px`
+    return () => {
+      body.style.overflow = prevOverflow
+      body.style.paddingRight = prevPadding
+    }
+  }, [])
+
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') onClose()
+      // 内层抽屉/确认框已 preventDefault 的 Esc 不连弹窗一起关。
+      if (event.key === 'Escape' && !event.defaultPrevented) onClose()
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
@@ -256,16 +266,6 @@ export function SettingsModal({ notify, onClose }: { notify: Notify; onClose: ()
       void load()
     } finally {
       setSaving(false)
-    }
-  }
-
-  const reloadProviders = async () => {
-    try {
-      const nextSettings = await api.getSettings()
-      setSettings(nextSettings)
-      setCredentials(await loadProviderCredentials(nextSettings))
-    } catch (error) {
-      notify('err', error instanceof Error ? error.message : String(error))
     }
   }
 
@@ -350,14 +350,7 @@ export function SettingsModal({ notify, onClose }: { notify: Notify; onClose: ()
                   </section>
                 )}
 
-                {tab === 'models' && settings && (
-                  <ModelProvidersPanel
-                    settings={settings}
-                    credentials={credentials}
-                    notify={notify}
-                    onChanged={() => void reloadProviders()}
-                  />
-                )}
+                {tab === 'models' && <LlmPanel notify={notify} />}
 
                 {tab === 'security' && (
                   <section className="setm-section">

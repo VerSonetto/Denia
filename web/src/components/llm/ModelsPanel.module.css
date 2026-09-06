@@ -1,0 +1,456 @@
+.root {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+}
+
+/* ---- 加载骨架 ---- */
+
+.skeletonBlock {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 4px 0;
+}
+
+.skeletonRow {
+  height: 38px;
+  border-radius: 10px;
+  background: linear-gradient(
+    90deg,
+    var(--hover-fill) 25%,
+    var(--active-fill) 45%,
+    var(--hover-fill) 65%
+  );
+  background-size: 200% 100%;
+  animation: models-skeleton-slide 1.3s ease-in-out infinite;
+}
+
+@keyframes models-skeleton-slide {
+  from {
+    background-position: 180% 0;
+  }
+  to {
+    background-position: -80% 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .skeletonRow {
+    animation: none;
+  }
+}
+
+/* ---- 错误/失败横幅 ---- */
+
+.errorBlock {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding: 14px 16px;
+  border: 1px dashed var(--border-l2);
+  border-radius: 12px;
+}
+
+.errorText {
+  margin: 0;
+  flex: 1;
+  min-width: 200px;
+  font-size: 12.5px;
+  line-height: 1.55;
+  color: var(--label-primary);
+  overflow-wrap: anywhere;
+}
+
+.failureBanner {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 10px 14px;
+  border: 1px dashed var(--border-l2);
+  border-radius: 12px;
+  background: var(--bg-layer-2);
+}
+
+.failureTitle {
+  font-size: 12px;
+  font-weight: 650;
+  color: var(--label-primary);
+}
+
+.failureItem {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--label-tertiary);
+  overflow-wrap: anywhere;
+}
+
+/* ---- 工具行 ---- */
+
+.toolbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.searchBox {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  flex: 1;
+  min-width: 180px;
+  max-width: 320px;
+  height: 36px;
+  padding: 0 10px;
+  border: 1px solid var(--border-l1);
+  border-radius: 10px;
+  background: var(--input-major);
+  color: var(--label-tertiary);
+  transition: border-color 0.15s var(--ease), box-shadow 0.15s var(--ease);
+}
+
+.searchBox:focus-within {
+  border-color: var(--accent-tint);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+.searchBox input {
+  flex: 1;
+  min-width: 0;
+  border: none;
+  outline: none;
+  background: transparent;
+  color: var(--label-primary);
+  font-size: 12.5px;
+  font-family: inherit;
+}
+
+.searchBox input::placeholder {
+  color: var(--label-caption);
+}
+
+.toolbarControls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.toolbarControls > :first-child {
+  min-width: 132px;
+}
+
+.filterChip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 32px;
+  padding: 0 11px;
+  border: 1px solid var(--border-l1);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--label-secondary);
+  font-size: 12px;
+  font-weight: 550;
+  font-family: inherit;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background 0.12s var(--ease), border-color 0.12s var(--ease), color 0.12s var(--ease);
+}
+
+.filterChip:hover {
+  color: var(--label-primary);
+  border-color: var(--border-l2);
+}
+
+.filterChip:focus-visible {
+  outline: none;
+  border-color: var(--accent-tint);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+.filterOn {
+  background: var(--accent-soft);
+  border-color: var(--accent);
+  color: var(--label-primary);
+}
+
+/* ---- 表头 ---- */
+
+.headRow {
+  display: grid;
+  grid-template-columns: 150px minmax(160px, 1.6fr) minmax(90px, 1fr) minmax(120px, 1fr) 76px 32px;
+  gap: 10px;
+  align-items: center;
+  padding: 0 12px;
+}
+
+.headCell {
+  font-size: 11px;
+  font-weight: 650;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--label-caption);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sortBtn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  border: none;
+  background: transparent;
+  padding: 0;
+  font: inherit;
+  font-size: 11px;
+  font-weight: 650;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--label-caption);
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.sortBtn:hover {
+  color: var(--label-primary);
+}
+
+.sortBtn:focus-visible {
+  outline: none;
+  border-radius: 4px;
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+.sortActive {
+  color: var(--label-primary);
+}
+
+.sortArrow {
+  font-size: 8px;
+  transition: transform 0.15s var(--ease);
+  opacity: 0;
+}
+
+.sortActive .sortArrow {
+  opacity: 1;
+}
+
+.sortDesc {
+  transform: rotate(180deg);
+}
+
+/* ---- 行 ---- */
+
+.scroll {
+  max-height: min(430px, 52vh);
+  overflow-y: auto;
+  border: 1px solid var(--border-l1);
+  border-radius: 12px;
+  background: var(--bg-layer-2);
+  overscroll-behavior: contain;
+}
+
+.rowSlot {
+  position: absolute;
+  left: 0;
+  right: 0;
+  padding: 0 6px;
+}
+
+.row {
+  display: grid;
+  grid-template-columns: 138px minmax(150px, 1.6fr) minmax(80px, 1fr) minmax(112px, 1fr) 68px 28px;
+  gap: 10px;
+  align-items: center;
+  width: 100%;
+  height: 40px;
+  margin-top: 3px;
+  padding: 0 6px;
+  border: none;
+  border-radius: 9px;
+  background: transparent;
+  color: var(--label-secondary);
+  font-family: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.12s var(--ease), color 0.12s var(--ease);
+}
+
+.row:hover {
+  background: var(--hover-fill);
+  color: var(--label-primary);
+}
+
+.row:focus-visible {
+  outline: none;
+  background: var(--hover-fill);
+  box-shadow: inset 0 0 0 1px var(--accent-tint);
+}
+
+.rowProvider {
+  font-size: 12.5px;
+  font-weight: 550;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rowId {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--label-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rowName {
+  font-size: 12px;
+  color: var(--label-tertiary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rowCaps {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.capIcon {
+  display: inline-flex;
+  color: var(--label-tertiary);
+  flex: none;
+}
+
+.rowEfforts {
+  font-size: 10.5px;
+  color: var(--label-caption);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rowCtx {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  color: var(--label-tertiary);
+  text-align: right;
+}
+
+.rowEdit {
+  display: inline-flex;
+  color: var(--label-caption);
+  opacity: 0;
+  transition: opacity 0.12s var(--ease);
+}
+
+.row:hover .rowEdit,
+.row:focus-visible .rowEdit {
+  opacity: 1;
+}
+
+/* ---- 空态/页脚 ---- */
+
+.noMatch {
+  padding: 40px 16px;
+  text-align: center;
+}
+
+.noMatchTitle {
+  margin: 0;
+  font-size: 13.5px;
+  font-weight: 650;
+  color: var(--label-primary);
+}
+
+.noMatchHint {
+  margin: 6px 0 0;
+  font-size: 12px;
+  color: var(--label-tertiary);
+}
+
+.footer {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.count {
+  font-size: 11.5px;
+  color: var(--label-caption);
+  font-variant-numeric: tabular-nums;
+}
+
+.empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  min-height: 280px;
+  justify-content: center;
+  border: 1px dashed var(--border-l1);
+  border-radius: 16px;
+  text-align: center;
+  padding: 24px;
+}
+
+.emptyTitle {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--label-primary);
+}
+
+.emptyHint {
+  margin: 0 0 8px;
+  max-width: 42ch;
+  font-size: 12.5px;
+  line-height: 1.6;
+  color: var(--label-tertiary);
+}
+
+/* ---- 响应式:窄屏逐列收敛 ---- */
+
+@media (max-width: 1023px) {
+  .headRow,
+  .row {
+    grid-template-columns: 120px minmax(120px, 1.6fr) minmax(80px, 1fr) minmax(100px, 1fr) 68px 28px;
+  }
+}
+
+@media (max-width: 767px) {
+  /* 窄屏只留:模型 ID / 上下文 / 编辑(提供方、名称、能力列隐藏) */
+  .headRow {
+    grid-template-columns: minmax(0, 1.6fr) 68px 28px;
+  }
+
+  .headRow > :nth-child(1),
+  .headRow > :nth-child(3),
+  .headCaps {
+    display: none;
+  }
+
+  .row {
+    grid-template-columns: minmax(0, 1.6fr) 68px 28px;
+  }
+
+  .rowProvider,
+  .rowName,
+  .rowCaps {
+    display: none;
+  }
+}

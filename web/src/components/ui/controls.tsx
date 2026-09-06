@@ -110,7 +110,7 @@ export function DropdownField<T extends string>({
 
   return (
     <div className="field">
-      <label>{label}</label>
+      {label ? <label>{label}</label> : null}
       <div className={`ui-dropdown${open ? ' open' : ''}`} ref={rootRef}>
         <button
           type="button"

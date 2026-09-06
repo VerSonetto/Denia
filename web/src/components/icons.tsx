@@ -497,3 +497,100 @@ export function IconPrompt(props: IconProps) {
     </Svg>
   )
 }
+
+/** 钥匙:密钥/凭据。 */
+export function IconKey(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <circle cx="5.5" cy="5.5" r="2.6" stroke="currentColor" strokeWidth="1.3" />
+      <path
+        d="m7.5 7.5 5.4 5.4M10.6 10.6l1.6-1.6M12.4 12.4l1.4-1.4"
+        stroke="currentColor"
+        strokeWidth="1.3"
+        strokeLinecap="round"
+      />
+    </Svg>
+  )
+}
+
+/** 心跳折线:连通性测试。 */
+export function IconActivity(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <path
+        d="M1.8 8.2h3l1.7-4 2.8 8 1.8-4h3.1"
+        stroke="currentColor"
+        strokeWidth="1.4"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </Svg>
+  )
+}
+
+/** 层叠:模型目录。 */
+export function IconStack(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <path
+        d="m8 2.4 5.6 2.8L8 8 2.4 5.2 8 2.4Z"
+        stroke="currentColor"
+        strokeWidth="1.2"
+        strokeLinejoin="round"
+      />
+      <path
+        d="m2.8 8.4 5.2 2.6 5.2-2.6M2.8 11.4l5.2 2.6 5.2-2.6"
+        stroke="currentColor"
+        strokeWidth="1.2"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </Svg>
+  )
+}
+
+/** 警告三角:错误提示。 */
+export function IconAlert(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <path
+        d="M8 2.6 14.2 13H1.8L8 2.6Z"
+        stroke="currentColor"
+        strokeWidth="1.2"
+        strokeLinejoin="round"
+      />
+      <path d="M8 6.4v3" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
+      <circle cx="8" cy="11.2" r="0.75" fill="currentColor" />
+    </Svg>
+  )
+}
+
+/** 环形箭头:重试/重新探测。 */
+export function IconRefresh(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <path
+        d="M13.2 8a5.2 5.2 0 1 1-1.6-3.75M13.4 1.9v2.6h-2.6"
+        stroke="currentColor"
+        strokeWidth="1.4"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </Svg>
+  )
+}
+
+/** 返回箭头:抽屉/步骤回退。 */
+export function IconArrowLeft(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <path
+        d="M13 8H3M6.5 4.5 3 8l3.5 3.5"
+        stroke="currentColor"
+        strokeWidth="1.4"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </Svg>
+  )
+}

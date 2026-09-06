@@ -46,7 +46,7 @@ function levelMeta(level: PermissionLevel) {
 
 /**
  * 权限选择器:左下角(模型选择器左侧),三权限单选。
- * 视觉与模型选择器(ComposerModelMenu)对齐:同款透明 chip,
+ * 视觉与模型选择器(llm/ModelPicker)对齐:同款透明 chip,
  * 弹层为带图标卡片的菜单,当前项右侧打勾。
  * 审批发生在运行时 —— AI 被策略拒绝后带 sandbox_permissions 重试,
  * 会在输入框上方弹出审批弹窗(见 ApprovalDialog),不在这里配置。

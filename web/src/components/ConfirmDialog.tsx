@@ -27,7 +27,11 @@ export function ConfirmDialog({
   useEffect(() => {
     if (!open) return
     const onKey = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') onCancel()
+      // 已被内层抽屉等拦截的 Esc 不重复当取消处理。
+      if (event.key === 'Escape' && !event.defaultPrevented) {
+        event.preventDefault()
+        onCancel()
+      }
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)

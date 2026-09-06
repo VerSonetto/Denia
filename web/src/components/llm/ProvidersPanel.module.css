@@ -1,0 +1,131 @@
+.root {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-width: 0;
+}
+
+.list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+}
+
+.card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 16px 18px;
+  border: 1px solid var(--border-l1);
+  border-radius: 14px;
+  background: var(--bg-layer-2);
+  min-width: 0;
+}
+
+.cardHead {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.cardTitleBox {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.cardName {
+  font-size: 15px;
+  font-weight: 650;
+  color: var(--label-primary);
+}
+
+.cardRoute {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--label-caption);
+}
+
+.cardMeta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px 14px;
+  min-width: 0;
+}
+
+.cardURL {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--label-tertiary);
+  overflow-wrap: anywhere;
+  min-width: 0;
+}
+
+.cardProto {
+  flex: none;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--label-secondary);
+  border: 1px solid var(--border-l1);
+  border-radius: 999px;
+  padding: 2px 8px;
+}
+
+.cardCount {
+  flex: none;
+  font-size: 11.5px;
+  color: var(--label-caption);
+}
+
+.cardWarn {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--label-tertiary);
+}
+
+.cardActions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+/* ---- 空态 ---- */
+
+.empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  min-height: 320px;
+  padding: 32px 24px;
+  border: 1px dashed var(--border-l1);
+  border-radius: 16px;
+  text-align: center;
+}
+
+.emptyArt {
+  color: var(--label-caption);
+  margin-bottom: 6px;
+}
+
+.emptyTitle {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 700;
+  color: var(--label-primary);
+}
+
+.emptyHint {
+  margin: 0 0 8px;
+  max-width: 42ch;
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--label-tertiary);
+}

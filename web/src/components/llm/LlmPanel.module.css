@@ -1,0 +1,148 @@
+/* LLM 总面板:左子导航 + 右详情;<1024px 折叠单列(导航横排)。 */
+
+.root {
+  display: grid;
+  grid-template-columns: 216px minmax(0, 1fr);
+  gap: 22px;
+  align-items: start;
+  min-width: 0;
+}
+
+.nav {
+  position: sticky;
+  top: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.navItem {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  width: 100%;
+  padding: 10px 12px;
+  border: 1px solid transparent;
+  border-radius: 12px;
+  background: transparent;
+  color: var(--label-secondary);
+  text-align: left;
+  font-family: inherit;
+  cursor: pointer;
+  transition:
+    background 0.16s var(--ease),
+    border-color 0.16s var(--ease),
+    color 0.16s var(--ease);
+}
+
+.navItem:hover {
+  background: var(--hover-fill);
+  color: var(--label-primary);
+}
+
+.navItem:focus-visible {
+  outline: none;
+  border-color: var(--accent-tint);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+.navActive {
+  background: var(--accent-soft);
+  border-color: var(--border-l2);
+  color: var(--label-primary);
+}
+
+.navIcon {
+  flex: none;
+  width: 28px;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 8px;
+  background: var(--hover-fill);
+  color: var(--label-secondary);
+}
+
+.navActive .navIcon {
+  background: var(--accent-tint);
+  color: var(--label-primary);
+}
+
+.navCopy {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.navLabel {
+  font-size: 13px;
+  font-weight: 650;
+  line-height: 1.25;
+}
+
+.navDesc {
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--label-caption);
+}
+
+.navCount {
+  flex: none;
+  min-width: 20px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  border: 1px solid var(--border-l1);
+  font-size: 10.5px;
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+  color: var(--label-tertiary);
+  text-align: center;
+}
+
+.detail {
+  min-width: 0;
+}
+
+/* ---- 单列折叠 ---- */
+
+@media (max-width: 1023px) {
+  .root {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 16px;
+  }
+
+  .nav {
+    position: static;
+    flex-direction: row;
+    gap: 6px;
+    overflow-x: auto;
+    overflow-y: hidden;
+    padding-bottom: 2px;
+    scrollbar-width: none;
+  }
+
+  .navItem {
+    flex: none;
+    width: auto;
+    align-items: center;
+    padding: 7px 12px;
+    border-radius: 10px;
+  }
+
+  .navIcon {
+    width: 24px;
+    height: 24px;
+  }
+
+  .navDesc {
+    display: none;
+  }
+
+  .navCount {
+    margin-left: 2px;
+  }
+}
