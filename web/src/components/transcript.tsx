@@ -300,14 +300,72 @@ function SystemPromptRow({ text }: { text: string }) {
   return <DisclosureRow title={t('systemPromptTitle')} icon={<IconPrompt size={14} />} text={text} />
 }
 
+/** 注入消息的 UI 投影:对话流上"老老实实显示是什么"——识别通道、给出诚实
+ * 标题并剥掉给模型看的 `<system-reminder>` 框架与通道头行;未识别的文本保持
+ * 原样。模型可见历史不受影响:框架只在后端日志里,前端只做展示投影。 */
+const REMINDER_OPEN = '<system-reminder>\n'
+const REMINDER_CLOSE = '</system-reminder>'
+
+function injectionDisplay(text: string): { title: string; body: string } {
+  // 子代理/后台任务通知沿用首行原样展示。
+  if (
+    text.startsWith('[子代理') ||
+    text.startsWith('[代理 ') ||
+    text.startsWith('[后台任务')
+  ) {
+    return { title: text.split('\n')[0], body: text }
+  }
+  if (text.startsWith('[技能正文 ')) {
+    const head = text.split('\n')[0] ?? ''
+    const name = head.slice('[技能正文 '.length).split('（')[0]?.trim() || '…'
+    return {
+      title: t('injectionSkillBody', { name }),
+      body: text.slice(head.length + 1),
+    }
+  }
+  if (text.startsWith('[denia 能力上下文]')) {
+    return {
+      title: t('injectionCapability'),
+      body: text.split('\n').slice(1).join('\n'),
+    }
+  }
+  if (text.startsWith('Current runtime context.')) {
+    return {
+      title: t('injectionRuntimeSnapshot'),
+      body: text.split('\n').slice(1).join('\n'),
+    }
+  }
+  if (text.startsWith(REMINDER_OPEN)) {
+    const inner = text.endsWith(REMINDER_CLOSE)
+      ? text.slice(REMINDER_OPEN.length, -REMINDER_CLOSE.length - 1)
+      : text.slice(REMINDER_OPEN.length)
+    const nl = inner.indexOf('\n')
+    const head = nl < 0 ? inner : inner.slice(0, nl)
+    const body = nl < 0 ? '' : inner.slice(nl + 1).replace(/^\n+/, '')
+    if (head.startsWith('工作区指令:')) {
+      return {
+        title: t(head.includes('取代') ? 'injectionWorkspaceUpdate' : 'injectionWorkspace'),
+        body,
+      }
+    }
+    if (head.startsWith('技能目录:')) {
+      // <available_skills> 帧是给模型的;对话流里直接展示技能行列表。
+      const lines = body
+        .replace('<available_skills>\n', '')
+        .replace('\n</available_skills>', '')
+      return {
+        title: t(head.includes('取代') ? 'injectionSkillCatalogUpdate' : 'injectionSkillCatalog'),
+        body: lines,
+      }
+    }
+    return { title: t('contextInjectionTitle'), body: inner }
+  }
+  return { title: t('contextInjectionTitle'), body: text }
+}
+
 function ContextInjectionRow({ text }: { text: string }) {
-  return (
-    <DisclosureRow
-      title={text.startsWith('[子代理') || text.startsWith('[代理 ') || text.startsWith('[后台任务') ? text.split('\n')[0] : t('contextInjectionTitle')}
-      icon={<IconTool size={14} />}
-      text={text}
-    />
-  )
+  const display = injectionDisplay(text)
+  return <DisclosureRow title={display.title} icon={<IconTool size={14} />} text={display.body} />
 }
 
 function ThinkRow({
@@ -436,6 +494,18 @@ function firstLine(text: string, max = 90): string {
   }
 }
 
+/** skill load 的 SKILL.md 正文随工具结果 JSON 返回;展开时按 markdown 渲染
+ * 而不是裸 JSON。解析失败或非 load 结果(list/resource)返回 null 走原 pre。 */
+function skillLoadBody(name: string, content: string, isError: boolean): string | null {
+  if (isError || name !== 'skill') return null
+  try {
+    const value = JSON.parse(content) as { body?: unknown }
+    return typeof value.body === 'string' && value.body.trim() ? value.body : null
+  } catch {
+    return null
+  }
+}
+
 function ToolRow({ node }: { node: Extract<TranscriptNode, { kind: 'tool' }> }) {
   const [open, setOpen] = useState(false)
   const running = !node.result
@@ -447,6 +517,18 @@ function ToolRow({ node }: { node: Extract<TranscriptNode, { kind: 'tool' }> }) 
       ? firstLine(node.result!.content)
       : argSummary || firstLine(node.result!.content)
   const inputBody = toolCallInput(node.name, node.args)
+  // Hook 常驻组件顶层:条件 JSX 内挂 hook 会在展开/收起时改变 hook 数量。
+  const labels = useMemo<MarkdownLabels>(
+    () => ({
+      code: { copyLabel: t('copy'), copiedLabel: t('copied') },
+      footnotes: t('footnotes'),
+    }),
+    [localeRevision()],
+  )
+  const skillBody = useMemo(
+    () => (node.result ? skillLoadBody(node.name, node.result.content, node.result.isError) : null),
+    [node.name, node.result],
+  )
   return (
     <div
       className={`disc-row tool-row${open ? ' open' : ''}${running ? ' running' : ''}`}
@@ -488,9 +570,15 @@ function ToolRow({ node }: { node: Extract<TranscriptNode, { kind: 'tool' }> }) 
                   <span style={{ color: 'var(--success)' }}>ok</span>
                 )}
               </div>
-              <pre className={node.result.isError ? 'err' : ''}>
-                {node.result.content}
-              </pre>
+              {skillBody ? (
+                <div className="prose tool-skill-body">
+                  <MarkdownText text={skillBody} streaming={false} labels={labels} />
+                </div>
+              ) : (
+                <pre className={node.result.isError ? 'err' : ''}>
+                  {node.result.content}
+                </pre>
+              )}
             </div>
           )}
         </div>

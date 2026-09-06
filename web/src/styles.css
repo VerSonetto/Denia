@@ -1392,6 +1392,24 @@ button {
   color: var(--error);
 }
 
+/* skill load 的 out:SKILL.md 正文按 markdown 渲染(与 pre 同 padding,可滚动) */
+.code-card .tool-skill-body {
+  padding: 10px;
+  max-height: 420px;
+  overflow-y: auto;
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--label-secondary);
+}
+
+.tool-skill-body .markdown > :first-child {
+  margin-top: 0;
+}
+
+.tool-skill-body .markdown > :last-child {
+  margin-bottom: 0;
+}
+
 .dot {
   width: 7px;
   height: 7px;
