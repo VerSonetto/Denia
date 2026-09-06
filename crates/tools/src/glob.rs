@@ -4,10 +4,14 @@
 //! - 无 "/" 的模式按 basename 匹配**任意深度**(`*.rs` ≈ `**/*.rs`);
 //! - 结果只含文件、不含目录;按修改时间降序(新鲜优先);
 //! - 默认包含隐藏与忽略文件(VCS 元数据目录除外),与 dsh glob 契约一致;
-//! - 并行遍历,超大目录来去自如;路径回收上限防止把结果撑爆。
+//! - 并行遍历;每线程只保留 top-N(mtime 最新),归并出全局 top-N,
+//!   命中总量只计数不收集路径——扫几十万文件的目录树内存恒定、零额外 syscall。
 
+use std::cmp::Reverse;
+use std::collections::BinaryHeap;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 
 use async_trait::async_trait;
@@ -19,11 +23,70 @@ use crate::{Tool, ToolContext, ToolOutput, parse_args_lenient, resolve_within};
 
 const DEFAULT_MAX_RESULTS: usize = 100;
 const HARD_MAX_RESULTS: usize = 5_000;
-/// 收集上限:超出的路径不再收集(结果本身仍会截断提示)。
+/// 收集上限:命中数超过即提前收手(结果仍会截断提示)。
 const COLLECT_CAP: usize = 200_000;
 
 /// gitignore 语义下不会出现在列表里的 VCS 元数据目录,显式排除。
 const VCS_EXCLUDES: &[&str] = &[".git", ".svn", ".hg", ".bzr", ".jj", ".sl"];
+
+/// 堆内条目:`Reverse(mtime)` 让 `BinaryHeap` 成为 mtime 最小堆,
+/// 堆顶即 top-N 里最旧的一条,新条目比它新才值得换入。
+type Ranked = (Reverse<SystemTime>, PathBuf);
+
+/// 一个 walker 线程的本地 top-N 收集器。
+///
+/// 只在堆顶被换入或堆未满时才把 `DirEntry` 转成 `PathBuf`,淘汰零分配;
+/// Drop 时把本地堆交还归并池并汇入命中总数,visitor 闭包销毁即触发。
+struct TopNBatch {
+    cap: usize,
+    top: BinaryHeap<Ranked>,
+    hits: usize,
+    pool: Arc<Mutex<Vec<BinaryHeap<Ranked>>>>,
+    total_hits: Arc<AtomicUsize>,
+}
+
+impl TopNBatch {
+    fn new(
+        cap: usize,
+        pool: Arc<Mutex<Vec<BinaryHeap<Ranked>>>>,
+        total_hits: Arc<AtomicUsize>,
+    ) -> Self {
+        Self {
+            cap,
+            top: BinaryHeap::new(),
+            hits: 0,
+            pool,
+            total_hits,
+        }
+    }
+
+    /// `path` 是惰性产出的 `DirEntry::into_path`,只有真正进堆才分配。
+    fn offer(&mut self, modified: SystemTime, path: impl FnOnce() -> PathBuf) {
+        self.hits += 1;
+        if self.top.len() < self.cap {
+            self.top.push((Reverse(modified), path()));
+            return;
+        }
+        // 堆顶是 top-N 里最旧的一条,新条目更新才值得换入。
+        if let Some(mut oldest) = self.top.peek_mut()
+            && oldest.0.0 < modified
+        {
+            *oldest = (Reverse(modified), path());
+        }
+    }
+}
+
+impl Drop for TopNBatch {
+    fn drop(&mut self) {
+        if !self.top.is_empty() {
+            self.pool
+                .lock()
+                .unwrap()
+                .push(std::mem::take(&mut self.top));
+        }
+        self.total_hits.fetch_add(self.hits, Ordering::Relaxed);
+    }
+}
 
 #[derive(Deserialize)]
 struct GlobArgs {
@@ -136,28 +199,28 @@ impl Tool for GlobTool {
                 .git_exclude(false)
                 .ignore(false)
                 .git_global(false)
-                .follow_links(false);
+                .follow_links(false)
+                // 目录枚举是阻塞 IO,多线程摊平等待;32 之后实测无增益。
+                .threads(32);
             let mut overrides = ignore::overrides::OverrideBuilder::new(&root);
             overrides
                 .add(&args.pattern)
                 .map_err(|error| format!("invalid glob pattern: {error}"))?;
-            for vcs in VCS_EXCLUDES {
-                overrides.add(&format!("!{vcs}/")).ok();
-                overrides.add(&format!("!**/{vcs}/**")).ok();
-            }
+            // VCS 目录不走 overrides 规则(那要对每个 entry 多匹配 12 条
+            // GlobSet 规则),在 visitor 里按 basename 面量剪枝,见下。
             let overrides = overrides
                 .build()
                 .map_err(|error| format!("invalid glob pattern: {error}"))?;
             builder.overrides(overrides);
             let walker = builder.build_parallel();
 
-            let found: Arc<std::sync::Mutex<Vec<(PathBuf, SystemTime)>>> =
-                Arc::new(std::sync::Mutex::new(Vec::new()));
-            let overflow = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let batches: Arc<Mutex<Vec<BinaryHeap<Ranked>>>> = Arc::new(Mutex::new(Vec::new()));
+            let total_hits = Arc::new(AtomicUsize::new(0));
+            let overflow = Arc::new(AtomicBool::new(false));
             walker.run(|| {
                 let cancel = cancel.clone();
-                let found = found.clone();
-                let overflow = overflow.clone();
+                let overflow = Arc::clone(&overflow);
+                let mut batch = TopNBatch::new(max, Arc::clone(&batches), Arc::clone(&total_hits));
                 Box::new(move |entry| {
                     if cancel.is_cancelled() {
                         return ignore::WalkState::Quit;
@@ -168,54 +231,76 @@ impl Tool for GlobTool {
                     let Some(file_type) = entry.file_type() else {
                         return ignore::WalkState::Continue;
                     };
+                    if file_type.is_dir() {
+                        // VCS 元数据目录按 basename 面量剪掉整棵子树;
+                        // .git 文件(worktree 指针)不属于目录,照常走 pattern。
+                        let name = entry.file_name();
+                        if VCS_EXCLUDES.iter().any(|vcs| name == *vcs) {
+                            return ignore::WalkState::Skip;
+                        }
+                        return ignore::WalkState::Continue;
+                    }
                     if !file_type.is_file() {
                         return ignore::WalkState::Continue;
                     }
-                    // overrides 命中即收集;收集满后仅置溢出标记。
-                    let mut all = found.lock().unwrap();
-                    if all.len() < COLLECT_CAP {
-                        let modified = std::fs::metadata(entry.path())
-                            .and_then(|meta| meta.modified())
-                            .unwrap_or(SystemTime::UNIX_EPOCH);
-                        all.push((entry.path().to_path_buf(), modified));
-                    } else {
+                    // DirEntry::metadata 复用目录枚举时已带回的时间戳,
+                    // 比按完整路径再 stat 一次便宜一个量级(Windows 上零 syscall)。
+                    let modified = match entry.metadata() {
+                        Ok(meta) => meta.modified().unwrap_or(SystemTime::UNIX_EPOCH),
+                        Err(_) => SystemTime::UNIX_EPOCH,
+                    };
+                    batch.offer(modified, || entry.into_path());
+                    if batch.hits > COLLECT_CAP {
                         overflow.store(true, std::sync::atomic::Ordering::Relaxed);
                         return ignore::WalkState::Quit;
                     }
                     ignore::WalkState::Continue
                 })
             });
-            let mut found = std::mem::take(&mut *found.lock().unwrap());
 
-            found.sort_by(|a, b| b.1.cmp(&a.1));
-            let paths: Vec<String> = found
-                .into_iter()
-                .map(|(path, _)| {
-                    path.strip_prefix(&display_root)
-                        .unwrap_or(&path)
-                        .to_string_lossy()
-                        .replace('\\', "/")
+            let mut pools = std::mem::take(&mut *batches.lock().unwrap());
+            let mut ranked: Vec<(SystemTime, PathBuf)> = pools
+                .drain(..)
+                .flat_map(|heap| {
+                    heap.into_iter()
+                        .map(|(Reverse(modified), path)| (modified, path))
                 })
                 .collect();
-            Ok::<_, String>((paths, overflow.load(std::sync::atomic::Ordering::Relaxed)))
+            ranked.sort_unstable_by_key(|(modified, _)| std::cmp::Reverse(*modified));
+            let total = total_hits.load(std::sync::atomic::Ordering::Relaxed);
+            Ok::<_, String>((
+                ranked,
+                total,
+                overflow.load(std::sync::atomic::Ordering::Relaxed),
+            ))
         })
         .await;
 
         match result {
-            Ok(Ok((paths, overflow))) => {
-                if paths.is_empty() {
+            Ok(Ok((ranked, total, overflow))) => {
+                if ranked.is_empty() {
                     return ToolOutput {
                         content: "No files found".to_string(),
                         is_error: false,
                     };
                 }
-                let shown = &paths[..paths.len().min(max)];
-                let mut output = shown.join("\n");
-                if paths.len() > max {
+                let shown_len = ranked.len().min(max);
+                let mut output = String::new();
+                for path in ranked.iter().take(max) {
+                    if !output.is_empty() {
+                        output.push('\n');
+                    }
+                    let rel = path
+                        .1
+                        .strip_prefix(&display_root)
+                        .unwrap_or(&path.1)
+                        .to_string_lossy()
+                        .replace('\\', "/");
+                    output.push_str(&rel);
+                }
+                if total > max {
                     output.push_str(&format!(
-                        "\n\n(Showing {} of {} paths; narrow the pattern to see more)",
-                        shown.len(),
-                        paths.len()
+                        "\n\n(Showing {shown_len} of {total} paths; narrow the pattern to see more)"
                     ));
                 }
                 if overflow {
@@ -247,12 +332,14 @@ mod tests {
     use tokio_util::sync::CancellationToken;
 
     fn temp_root() -> PathBuf {
+        // 并行测试在同一时钟 tick 里调用会撞名,目录共用会把对方的
+        // 遍历/删除搅黄(见 remove_dir_all 的 PermissionDenied 抖动);
+        // pid + 进程内原子序号保证唯一,不依赖时钟精度。
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let dir = std::env::temp_dir().join(format!(
-            "denia-glob-{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
+            "denia-glob-{}-{}",
+            std::process::id(),
+            SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         ));
         std::fs::create_dir_all(&dir).unwrap();
         dir
@@ -340,6 +427,24 @@ mod tests {
             .await;
         assert!(!out.is_error);
         assert!(out.content.contains("Showing 5 of 20"), "{}", out.content);
+        std::fs::remove_dir_all(&ctx.cwd).unwrap();
+    }
+
+    #[tokio::test]
+    async fn newest_first_ordering() {
+        let root = temp_root();
+        for i in 0..4 {
+            touch(&root.join(format!("f{i}.txt")));
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let ctx = context(root);
+        let tool = GlobTool::new();
+        let out = tool.execute(r#"{"pattern":"*.txt"}"#, &ctx).await;
+        assert!(!out.is_error);
+        let lines: Vec<&str> = out.content.lines().collect();
+        assert_eq!(lines.len(), 4, "{}", out.content);
+        assert_eq!(lines[0], "f3.txt", "{}", out.content);
+        assert_eq!(lines[3], "f0.txt", "{}", out.content);
         std::fs::remove_dir_all(&ctx.cwd).unwrap();
     }
 }
