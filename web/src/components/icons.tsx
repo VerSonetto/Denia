@@ -212,10 +212,46 @@ export function IconCheck(props: IconProps) {
   )
 }
 
+/** 撤销/回退:折返箭头(lucide undo-2),小尺寸下比残缺圆环更易辨认。 */
 export function IconRewind(props: IconProps) {
   return (
-    <Svg {...props}>
-      <path d="M3.5 8a4.5 4.5 0 1 0 1.3-3.2M3.5 4.5V8M3.5 8h4" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
+    <Svg {...props} viewBox="0 0 24 24">
+      <path
+        d="M9 14 4 9l5-5"
+        stroke="currentColor"
+        strokeWidth="2"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+      <path
+        d="M4 9h10.5a5.5 5.5 0 0 1 5.5 5.5 5.5 5.5 0 0 1-5.5 5.5H11"
+        stroke="currentColor"
+        strokeWidth="2"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </Svg>
+  )
+}
+
+/** 撤销优化:Ctrl+Z 式弧形箭头(lucide undo),与会话回退折返箭头区分。 */
+export function IconUndo(props: IconProps) {
+  return (
+    <Svg {...props} viewBox="0 0 24 24">
+      <path
+        d="M3 7v6h6"
+        stroke="currentColor"
+        strokeWidth="2"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+      <path
+        d="M21 17a9 9 0 0 0-9-9 9 9 0 0 0-6.7 2.9L3 13"
+        stroke="currentColor"
+        strokeWidth="2"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
     </Svg>
   )
 }

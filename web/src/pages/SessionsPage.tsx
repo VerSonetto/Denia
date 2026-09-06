@@ -38,9 +38,9 @@ import {
   IconImage,
   IconPlus,
   IconPaperclip,
-  IconRewind,
   IconSend,
   IconSparkles,
+  IconUndo,
   IconSpinner,
   IconStop,
 } from '../components/icons'
@@ -1145,7 +1145,7 @@ export default function SessionsPage({
           <button
             type="button"
             className={`icon-btn composer-opt-btn${optimizedPrompt ? ' undo' : ''}${optimizing ? ' busy' : ''}`}
-            title={t('optimizePromptHint')}
+            title={optimizedPrompt ? t('optimizeUndo') : t('optimizePromptHint')}
             aria-label={optimizing ? t('optimizing') : optimizedPrompt ? t('optimizeUndo') : t('optimizePrompt')}
             disabled={
               inert ||
@@ -1164,7 +1164,7 @@ export default function SessionsPage({
             {optimizing ? (
               <IconSpinner size={16} />
             ) : optimizedPrompt ? (
-              <IconRewind size={16} />
+              <IconUndo size={16} />
             ) : (
               <IconSparkles size={16} />
             )}

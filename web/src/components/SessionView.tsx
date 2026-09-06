@@ -25,6 +25,27 @@ function latestTodos(events: { type: string; todos?: TodoItem[] }[]): TodoItem[]
 }
 
 /**
+ * 全部完成后本轮仍展示完成态;下一轮用户消息发出(乐观行或已入账)
+ * 再收起,避免输入框上方一直占着一条「N 已完成」。
+ */
+function visibleTodos(
+  events: SessionEnvelope[],
+  pendingCount: number,
+): TodoItem[] {
+  const todos = latestTodos(events)
+  if (todos.length === 0) return []
+  if (todos.some((item) => item.status !== 'completed')) return todos
+  if (pendingCount > 0) return []
+  let lastTodoSeq = -1
+  let lastUserSeq = -1
+  for (const event of events) {
+    if (event.type === 'todo-write') lastTodoSeq = event.seq
+    else if (event.type === 'user-message' && !event.injected) lastUserSeq = event.seq
+  }
+  return lastUserSeq > lastTodoSeq ? [] : todos
+}
+
+/**
  * 会话内容视图:transcript + 乐观用户行 + todo 快照。
  *
  * ## 性能
@@ -92,6 +113,14 @@ export function SessionView({
   nodesChangeRef.current = onNodesChange
   const jumpSettledRef = useRef(onJumpSettled)
   jumpSettledRef.current = onJumpSettled
+  const todosChangeRef = useRef(onTodosChange)
+  todosChangeRef.current = onTodosChange
+  const pendingCountRef = useRef(pendingMessages.length)
+  pendingCountRef.current = pendingMessages.length
+
+  const publishTodos = useCallback((source: SessionEnvelope[], pendingCount = pendingCountRef.current) => {
+    todosChangeRef.current?.(visibleTodos(source, pendingCount))
+  }, [])
 
   pageMetaRef.current = pageMeta
 
@@ -117,7 +146,11 @@ export function SessionView({
       const batch = queueRef.current
       queueRef.current = []
       if (batch.length === 0) return
-      setEvents((previous) => [...previous, ...batch])
+      setEvents((previous) => {
+        const next = [...previous, ...batch]
+        eventsRef.current = next
+        return next
+      })
       setNodes((previous) => batch.reduce((acc, env) => applyEnvelope(acc, env), previous))
     }
     const settlePending = (events: SessionEnvelope[]) => {
@@ -135,16 +168,16 @@ export function SessionView({
         setEvents(snapshot)
         setPageMeta(pageInfo)
         setNodes(foldEvents(snapshot))
-        onTodosChange?.(latestTodos(snapshot))
+        publishTodos(snapshot)
         settlePending(snapshot)
         setLoading(false)
       },
       onEnvelope: (envelope) => {
         settlePending([envelope])
-        if (envelope.type === 'todo-write') {
-          onTodosChange?.(envelope.todos)
-        }
         queueRef.current.push(envelope)
+        if (envelope.type === 'todo-write' || envelope.type === 'user-message') {
+          publishTodos([...eventsRef.current, ...queueRef.current])
+        }
         if (rafRef.current === undefined) {
           rafRef.current = window.requestAnimationFrame(flush)
         }
@@ -166,10 +199,15 @@ export function SessionView({
 
   useEffect(() => {
     return () => {
-      onTodosChange?.([])
+      todosChangeRef.current?.([])
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id])
+
+  // 用户发出下一轮时立刻收起已完成清单,不等服务端 user-message 入账。
+  useEffect(() => {
+    publishTodos([...eventsRef.current, ...queueRef.current], pendingMessages.length)
+  }, [pendingMessages.length, publishTodos])
 
   /** 向上翻页:把更早的完整轮次组 prepend 到当前事件流并重建 fold。 */
   const loadOlder = useCallback(async (): Promise<boolean> => {
@@ -184,7 +222,7 @@ export function SessionView({
       setEvents(merged)
       setNodes(foldEvents(merged))
       setPageMeta({ total: page.total, hasMoreBefore: page.hasMoreBefore, anchors: page.anchors ?? [] })
-      onTodosChange?.(latestTodos(merged))
+      publishTodos(merged)
       return page.events.length > 0
     } catch {
       /* 翻页失败不打断已有内容;按钮保持可重试 */
@@ -192,7 +230,7 @@ export function SessionView({
     } finally {
       setLoadingOlder(false)
     }
-  }, [id, loadingOlder, onTodosChange])
+  }, [id, loadingOlder, publishTodos])
 
   // 轮次轴跳转:锚点在窗口内直接定位;不在则向上翻页直至覆盖(或到头放弃)。
   useEffect(() => {

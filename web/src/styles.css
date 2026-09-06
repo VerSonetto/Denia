@@ -1121,14 +1121,30 @@ button {
 }
 
 .message-actions {
-  display: none;
+  display: flex;
   align-items: center;
   gap: 1px;
+  /* 提前占位:hover 只改透明度,不再把后续消息顶下去。 */
+  min-height: 28px;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 120ms ease;
 }
 
 /* 助手消息末尾的复制按钮始终可见,不依赖 hover。 */
-.message-actions.always-visible {
-  display: flex;
+.message-actions.always-visible,
+.msg-copy-anchor:hover .message-actions,
+.msg-copy-anchor:focus-within .message-actions {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+/* 触控设备没有 hover,按钮已经占位,直接显示。 */
+@media (hover: none) {
+  .message-actions {
+    opacity: 1;
+    pointer-events: auto;
+  }
 }
 
 .copy-message-btn,
@@ -1147,7 +1163,8 @@ button {
   transition: color 80ms ease, background 80ms ease, transform 80ms ease;
 }
 
-.copy-message-btn svg {
+.copy-message-btn svg,
+.rewind-message-btn svg {
   /* 图标 16px 渲染在 28px 容器里比原来 32px 更内敛,看起来更紧凑 */
   width: 15px;
   height: 15px;
@@ -1156,11 +1173,6 @@ button {
 .msg-assistant .message-actions {
   align-self: flex-start;
   margin-left: -6px;
-}
-
-.msg-copy-anchor:hover .message-actions,
-.msg-copy-anchor:focus-within .message-actions {
-  display: flex;
 }
 
 .copy-message-btn:hover,
@@ -3928,6 +3940,11 @@ button.btn.form-action {
 
 .composer-opt-btn.undo {
   color: var(--label-primary);
+}
+
+.composer-opt-btn svg {
+  width: 15px;
+  height: 15px;
 }
 
 .composer-opt-btn.busy {
