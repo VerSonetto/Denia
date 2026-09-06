@@ -10,6 +10,43 @@ pub trait AgentRuntime: Send + Sync {
     async fn execute(&self, name: &str, args: Value, ctx: &ToolContext) -> Result<Value, String>;
     async fn context(&self, session: &str, cwd: &std::path::Path) -> Result<Vec<String>, String>;
     async fn drain(&self, session: &str) -> Result<Vec<String>, String>;
+
+    /// 技能目录条目 (名称, 描述)，仅 model_invocable；描述已按配置截断。
+    /// 目录注入与幂等去重由会话驱动器负责，实现方只负责发现与过滤。
+    async fn skill_catalog(
+        &self,
+        session: &str,
+        cwd: &std::path::Path,
+    ) -> Result<Vec<(String, String)>, String> {
+        let _ = (session, cwd);
+        Ok(Vec::new())
+    }
+
+    /// 用户 `/技能名` 手势加载：校验 user_invocable 后返回 (来源, 正文)；
+    /// 未知技能或不允许用户调用的技能返回 None（手势降级为普通文本）。
+    async fn user_skill(
+        &self,
+        session: &str,
+        name: &str,
+        cwd: &std::path::Path,
+    ) -> Result<Option<(String, String)>, String> {
+        let _ = (session, name, cwd);
+        Ok(None)
+    }
+
+    /// 工作区指令（AGENTS.md）注入文本；None 表示当前无需注入。
+    /// 发现、单文件源上限、总预算截断与替换语义都在实现方完成；
+    /// `previous` 是日志中最后一条本通道注入文本（内容未变时实现方必须
+    /// 返回 None，引导语由正文是否变化决定）。
+    async fn workspace_instructions(
+        &self,
+        cwd: &std::path::Path,
+        touched: &[std::path::PathBuf],
+        previous: Option<&str>,
+    ) -> Result<Option<String>, String> {
+        let _ = (cwd, touched, previous);
+        Ok(None)
+    }
 }
 
 pub fn schemas() -> Vec<ToolSchema> {
@@ -76,7 +113,7 @@ pub fn schemas() -> Vec<ToolSchema> {
         ),
         (
             "skill",
-            "技能按作用域分为全局技能与项目技能：全局技能位于用户数据目录 skills/（跨项目复用），项目技能位于项目 .denia/skills 等目录（随项目走），同名时项目技能优先，来源见返回的 source。先用 action=list 发现可用技能；action=load 按 name 加载后，SKILL.md 正文会自动注入后续上下文，无需再用文件读取工具读 SKILL.md；其余参考资料与脚本用 action=resource、name、path 按返回的 resourceBase 相对路径读取，禁止越界。",
+            "技能按作用域分为全局技能与项目技能：全局技能位于用户数据目录 skills/（跨项目复用），项目技能位于项目 .denia/skills 等目录（随项目走），同名时项目技能优先，来源见返回的 source。可用技能以 <available_skills> 目录注入消息提供，先从目录取准确技能名；action=load 按 name 加载，SKILL.md 全文直接随本工具结果返回（加载一次即可，目录只含摘要，未加载前不得凭摘要推断技能内容）；其余参考资料与脚本用 action=resource、name、path 按返回的 resourceBase 相对路径读取，禁止越界。",
             json!({"action":{"type":"string","enum":["list","load","resource"]},"name":{"type":"string"},"path":{"type":"string"}}),
             vec!["action"],
         ),

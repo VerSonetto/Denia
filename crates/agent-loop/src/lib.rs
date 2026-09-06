@@ -9,6 +9,7 @@
 
 mod compact;
 mod runtime_context;
+mod workspace_instructions;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -36,6 +37,10 @@ use denia_tools::{FileHistoryBackend, ToolContext, ToolRegistry};
 use futures::StreamExt;
 use runtime_context::RuntimeContextProjection;
 use tokio_util::sync::CancellationToken;
+use workspace_instructions::{
+    SKILL_CATALOG_PREFIX, WORKSPACE_PREFIX, render_skill_catalog, restore_injected_text,
+    skill_gesture, touched_path,
+};
 
 pub use compact::{CompactOutcome, CompactionSettings};
 use compact::{
@@ -661,6 +666,24 @@ impl SessionDriver {
                 }
             }
         }
+        // 用户手势:真实用户消息(injected=false,注入文本无法伪造)首行 /技能名
+        // 直接加载技能正文;未知名与非 user_invocable 技能保持普通文本。
+        // 正文在首个 step 的全部背景注入之后追加(dsh:模型必须行动的材料最后)。
+        let mut gesture_skill: Option<(String, String, String)> = None;
+        if let Some(runtime) = &self.runtime {
+            if let Some(name) = skill_gesture(prompt) {
+                match runtime.user_skill(session.id(), &name, &cwd).await {
+                    Ok(Some((source, body))) => gesture_skill = Some((name, source, body)),
+                    Ok(None) => {}
+                    Err(error) => tracing::warn!(
+                        session_id = session.id(),
+                        skill = %name,
+                        error = %error,
+                        "skill gesture load failed"
+                    ),
+                }
+            }
+        }
         append(session, &emit, SessionEvent::TurnStart { turn })?;
 
         let mut capability_context = session.events().iter().rev().find_map(|e| match &e.event {
@@ -671,6 +694,12 @@ impl SessionDriver {
             } if text.starts_with("[denia 能力上下文]") => Some(text.clone()),
             _ => None,
         });
+        // 工作区指令与技能目录两条注入通道各自的幂等基准:日志里最后一条
+        // 同通道注入文本;文本即身份,内容未变不重复注入。
+        let mut workspace_baseline = restore_injected_text(&session.events(), WORKSPACE_PREFIX);
+        let mut skill_catalog_text = restore_injected_text(&session.events(), SKILL_CATALOG_PREFIX);
+        // 本轮被文件工具成功触碰的路径,驱动嵌套 AGENTS.md 的发现(dsh reconcile)。
+        let mut touched: Vec<PathBuf> = Vec::new();
 
         let mut step: u32 = 0;
         let mut feedback: u32 = 0;
@@ -696,11 +725,38 @@ impl SessionDriver {
             .and_then(|resolved| resolved.context_window);
         'step_loop: loop {
             if let Some(runtime) = &self.runtime {
+                // ① 工作区指令(AGENTS.md):发现/预算/替换语义在 runtime 侧;
+                // restore 的旧文本作为 previous 传入,由正文比较决定幂等与
+                // "取代"引导语;刷新失败不阻断轮次(记日志跳过)。
+                match runtime
+                    .workspace_instructions(&cwd, &touched, workspace_baseline.as_deref())
+                    .await
+                {
+                    Ok(Some(text)) => {
+                        if workspace_baseline.as_deref() != Some(&text) {
+                            append(
+                                session,
+                                &emit,
+                                SessionEvent::UserMessage {
+                                    text: text.clone(),
+                                    injected: true,
+                                    images: Vec::new(),
+                                },
+                            )?;
+                            workspace_baseline = Some(text);
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(error) => tracing::warn!(
+                        session_id = session.id(),
+                        error = %error,
+                        "workspace instructions refresh failed"
+                    ),
+                }
+                // ② 能力上下文。
                 let context = match runtime.context(session.id(), &cwd).await {
                     Ok(parts) => parts.join("\n"),
-                    Err(error) => format!(
-                        "[denia 能力上下文]\n技能目录读取失败：{error}。请修复技能定义后重试 skill 工具。"
-                    ),
+                    Err(error) => format!("[denia 能力上下文]\n上下文生成失败：{error}。"),
                 };
                 if capability_context.as_deref() != Some(&context) {
                     append(
@@ -713,6 +769,41 @@ impl SessionDriver {
                         },
                     )?;
                     capability_context = Some(context);
+                }
+                // ③ 技能目录:仅当 skill 工具对该会话可见(子代理白名单同装配
+                // 过滤);从未发布且为空则不发消息,整块替换语义同工作区指令。
+                let skill_tool_visible = session
+                    .header()
+                    .subagent
+                    .as_ref()
+                    .and_then(|s| s.allowed_tools.as_ref())
+                    .is_none_or(|allowed| allowed.iter().any(|name| name == "skill"));
+                if skill_tool_visible {
+                    match runtime.skill_catalog(session.id(), &cwd).await {
+                        Ok(entries) => {
+                            if let Some(text) =
+                                render_skill_catalog(&entries, skill_catalog_text.as_deref())
+                            {
+                                if skill_catalog_text.as_deref() != Some(&text) {
+                                    append(
+                                        session,
+                                        &emit,
+                                        SessionEvent::UserMessage {
+                                            text: text.clone(),
+                                            injected: true,
+                                            images: Vec::new(),
+                                        },
+                                    )?;
+                                    skill_catalog_text = Some(text);
+                                }
+                            }
+                        }
+                        Err(error) => tracing::warn!(
+                            session_id = session.id(),
+                            error = %error,
+                            "skill catalog refresh failed"
+                        ),
+                    }
                 }
                 runtime
                     .drain(session.id())
@@ -783,6 +874,20 @@ impl SessionDriver {
                     &emit,
                     SessionEvent::UserMessage {
                         text: snapshot,
+                        injected: true,
+                        images: Vec::new(),
+                    },
+                )?;
+            }
+
+            // 用户 /技能名 手势的正文:全部背景注入(工作区指令、能力上下文、
+            // 目录、快照)之后,最贴近模型的回答(dsh material-last 顺序)。
+            if let Some((name, source, body)) = gesture_skill.take() {
+                append(
+                    session,
+                    &emit,
+                    SessionEvent::UserMessage {
+                        text: format!("[技能正文 {name}（来源：{source}）]\n{body}"),
                         injected: true,
                         images: Vec::new(),
                     },
@@ -1402,6 +1507,15 @@ impl SessionDriver {
                         is_error: true,
                     }
                 };
+                // 触碰收集:文件工具成功执行的路径驱动嵌套 AGENTS.md 发现
+                // (dsh 只认 read/write/edit;bash 不解析参数)。
+                if !output.is_error
+                    && matches!(call.name.as_str(), "read_file" | "write_file" | "edit")
+                {
+                    if let Some(path) = touched_path(&cwd, &call.arguments) {
+                        touched.push(path);
+                    }
+                }
                 append(
                     session,
                     &emit,

@@ -132,6 +132,16 @@ fn builtin_skills() -> Vec<Skill> {
     }]
 }
 
+/// 按字符数截断描述（技能目录用；对齐 dsh catalogDescriptionMaxLength 语义）。
+pub fn truncate_chars(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        return text.to_string();
+    }
+    let mut out: String = text.chars().take(max.saturating_sub(1)).collect();
+    out.push('…');
+    out
+}
+
 pub fn discover(home: &Path, cwd: &Path, custom: &[PathBuf]) -> Result<Vec<Skill>, String> {
     let project = cwd
         .ancestors()
@@ -236,6 +246,14 @@ pub fn resource(skills: &[Skill], name: &str, path: &str) -> Result<serde_json::
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn truncate_description_by_chars() {
+        assert_eq!(truncate_chars("短描述", 500), "短描述");
+        assert_eq!(truncate_chars("a".repeat(501).as_str(), 500).chars().count(), 500);
+        assert!(truncate_chars("a".repeat(501).as_str(), 500).ends_with('…'));
+        // 多字节按字符计,不截半个字。
+        assert_eq!(truncate_chars(&"好".repeat(600), 500).chars().count(), 500);
+    }
     #[test]
     fn precedence_and_policy() {
         let root = std::env::temp_dir().join(format!("denia-skills-{}", uuid::Uuid::new_v4()));

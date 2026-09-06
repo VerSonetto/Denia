@@ -31,6 +31,12 @@ pub struct RuntimeConfig {
     pub max_pending_messages: usize,
     pub max_consecutive_wakes: usize,
     pub custom_skill_dirs: Vec<PathBuf>,
+    /// 工作区指令渲染总预算（字节）；0 = 禁用 AGENTS.md 注入。
+    pub workspace_instructions_max_bytes: u64,
+    /// 单个 AGENTS.md 的读取上限（字节）；超限整份跳过。
+    pub workspace_instructions_max_source_bytes: u64,
+    /// 技能目录里单条描述的最大字符数（对齐 dsh catalogDescriptionMaxLength）。
+    pub skill_catalog_description_max_chars: usize,
 }
 impl Default for RuntimeConfig {
     fn default() -> Self {
@@ -45,6 +51,9 @@ impl Default for RuntimeConfig {
             max_pending_messages: 64,
             max_consecutive_wakes: 3,
             custom_skill_dirs: Vec::new(),
+            workspace_instructions_max_bytes: 65_536,
+            workspace_instructions_max_source_bytes: 1_048_576,
+            skill_catalog_description_max_chars: 500,
         }
     }
 }
@@ -62,6 +71,9 @@ pub fn validate_config(value: Value) -> Result<Value, String> {
         || !(1..=1024).contains(&c.max_pending_messages)
         || !(1..=16).contains(&c.max_consecutive_wakes)
         || c.custom_skill_dirs.iter().any(|p| !p.is_absolute())
+        || c.workspace_instructions_max_bytes > 1_048_576
+        || !(1..=16_777_216).contains(&c.workspace_instructions_max_source_bytes)
+        || !(1..=65_536).contains(&c.skill_catalog_description_max_chars)
     {
         return Err("运行时配置超出允许范围；技能自定义目录必须为绝对路径".into());
     }
@@ -92,9 +104,6 @@ struct Inner {
     selections: Mutex<HashMap<String, ModelSelection>>,
     wakes: Mutex<HashMap<String, usize>>,
     paused: Mutex<HashSet<String>>,
-    // 已加载技能正文(session → 技能名 → (来源, SKILL.md 正文))；
-    // 正文经上下文注入通道进入模型视野，不随 skill load 工具结果返回。
-    active_skills: Mutex<HashMap<String, BTreeMap<String, (String, String)>>>,
     admission: tokio::sync::Mutex<()>,
     reserved: Mutex<HashSet<String>>,
     registry: Arc<denia_llm::LlmRegistry>,
@@ -156,7 +165,6 @@ impl Runtime {
                 selections: Mutex::new(HashMap::new()),
                 wakes: Mutex::new(HashMap::new()),
                 paused: Mutex::new(HashSet::new()),
-                active_skills: Mutex::new(HashMap::new()),
                 admission: tokio::sync::Mutex::new(()),
                 reserved: Mutex::new(HashSet::new()),
                 registry,
@@ -942,27 +950,10 @@ impl AgentRuntime for Runtime {
                 }
                 "load" => {
                     let name = string(&args, "name")?;
-                    let value = self
-                        .load_skill(ctx.cwd.clone(), name.clone(), false)
-                        .await?;
-                    // 注入式加载：SKILL.md 正文进入上下文注入通道，随后续请求
-                    // 自动注入；工具结果只回元信息，避免模型再用文件工具读一遍。
-                    let source = value["skill"]["source"].as_str().unwrap_or("").to_string();
-                    let body = value["body"]
-                        .as_str()
-                        .ok_or_else(|| format!("技能 {name} 正文缺失"))?
-                        .to_string();
-                    self.inner
-                        .active_skills
-                        .lock()
-                        .unwrap()
-                        .entry(owner.to_string())
-                        .or_default()
-                        .insert(name, (source, body));
-                    let mut result = value;
-                    result["body"] = json!(null);
-                    result["injected"] = json!(true);
-                    Ok(result)
+                    // dsh 对齐:SKILL.md 全文直接随工具结果返回,一次性进历史;
+                    // load 前经 skills::load 校验 model_invocable(user=false),
+                    // disable-model-invocation 技能只能走用户 /name 手势。
+                    self.load_skill(ctx.cwd.clone(), name, false).await
                 }
                 _ => Err("未知技能操作".into()),
             },
@@ -1045,13 +1036,7 @@ impl AgentRuntime for Runtime {
         }
     }
     async fn context(&self, session: &str, cwd: &Path) -> Result<Vec<String>, String> {
-        let skills = self.skills(cwd.into()).await?;
-        let catalog = skills
-            .into_iter()
-            .filter(|s| s.model_invocable)
-            .map(|s| format!("- {}：{}", s.name, s.description))
-            .collect::<Vec<_>>()
-            .join("\n");
+        let _ = cwd;
         let parent = self
             .inner
             .children
@@ -1059,22 +1044,75 @@ impl AgentRuntime for Runtime {
             .unwrap()
             .get(session)
             .map(|c| c.parent_id.clone());
-        let active = self
-            .inner
-            .active_skills
-            .lock()
-            .unwrap()
-            .get(session)
-            .cloned()
-            .unwrap_or_default();
-        let mut parts = vec![format!(
-            "[denia 能力上下文]\n始终使用简体中文回复，除非用户明确要求其他语言。\n当前代理：{session}；父代理：{}。独立任务可用 spawn_agent/fork_agent 委派；send_message 仅允许直接父子通信。后台任务用 job_start 启动，job_output 领取，job_kill 停止。技能分全局技能（用户数据目录 skills/，跨项目复用）与项目技能（项目 .denia/skills 等目录，随项目走），同名项目技能优先；skill load 加载后 SKILL.md 正文会注入本上下文，无需再用文件读取工具读 SKILL.md；references/scripts 等其余文件用 skill resource 按 resourceBase 相对路径读取，技能不授予额外权限。\n可由模型调用的技能：\n{catalog}",
+        Ok(vec![format!(
+            "[denia 能力上下文]\n始终使用简体中文回复，除非用户明确要求其他语言。\n当前代理：{session}；父代理：{}。独立任务可用 spawn_agent/fork_agent 委派；send_message 仅允许直接父子通信。后台任务用 job_start 启动，job_output 领取，job_kill 停止。可用技能以独立注入的 <available_skills> 目录为准；skill load 的 SKILL.md 全文直接在工具结果中返回，加载一次即可，无需再用文件读取工具读 SKILL.md；references/scripts 等其余文件用 skill resource 按 resourceBase 相对路径读取，技能不授予额外权限。",
             parent.as_deref().unwrap_or("无")
-        )];
-        for (name, (source, body)) in active {
-            parts.push(format!("[技能正文 {name}（来源：{source}）]\n{body}"));
+        )])
+    }
+    async fn skill_catalog(
+        &self,
+        session: &str,
+        cwd: &Path,
+    ) -> Result<Vec<(String, String)>, String> {
+        let _ = session;
+        let max = self.config().skill_catalog_description_max_chars;
+        let skills = self.skills(cwd.to_path_buf()).await?;
+        Ok(skills
+            .iter()
+            .filter(|s| s.model_invocable)
+            .map(|s| {
+                (
+                    s.name.clone(),
+                    crate::skills::truncate_chars(&s.description, max),
+                )
+            })
+            .collect())
+    }
+    async fn user_skill(
+        &self,
+        session: &str,
+        name: &str,
+        cwd: &Path,
+    ) -> Result<Option<(String, String)>, String> {
+        let _ = session;
+        // load(user=true) 校验 user_invocable;找不到/不允许/解析失败一律 None,
+        // 手势降级为普通文本(dsh:未知名字不是这条边界认识的声明)。
+        match self.load_skill(cwd.to_path_buf(), name.to_string(), true).await {
+            Ok(value) => Ok(Some((
+                value["skill"]["source"].as_str().unwrap_or_default().into(),
+                value["body"].as_str().unwrap_or_default().into(),
+            ))),
+            Err(_) => Ok(None),
         }
-        Ok(parts)
+    }
+    async fn workspace_instructions(
+        &self,
+        cwd: &Path,
+        touched: &[PathBuf],
+        previous: Option<&str>,
+    ) -> Result<Option<String>, String> {
+        let config = self.config();
+        if config.workspace_instructions_max_bytes == 0 {
+            return Ok(None);
+        }
+        let home = self.inner.home.clone();
+        let cwd = cwd.to_path_buf();
+        let touched = touched.to_vec();
+        let files = tokio::task::spawn_blocking(move || {
+            crate::workspace_instructions::discover(
+                &home,
+                &cwd,
+                &touched,
+                config.workspace_instructions_max_source_bytes,
+            )
+        })
+        .await
+        .map_err(|e| e.to_string())?;
+        Ok(crate::workspace_instructions::render(
+            &files,
+            config.workspace_instructions_max_bytes as usize,
+            previous,
+        ))
     }
     async fn drain(&self, session: &str) -> Result<Vec<String>, String> {
         let live = self.live(session).await?;
@@ -1537,16 +1575,46 @@ mod tests {
                 .iter()
                 .any(|s| s["name"] == "runtime-test")
         );
-        // 注入式加载：skill load 后 SKILL.md 正文应出现在能力上下文，而非等模型读文件。
-        let injected = state
+        // dsh 对齐：skill load 的 SKILL.md 全文直接随工具结果返回（一次进历史），
+        // 能力上下文不再携带已加载正文。
+        let live = state.live.get(id).unwrap();
+        let events = live.session.events();
+        let skill_call = events
+            .iter()
+            .rev()
+            .find_map(|e| match &e.event {
+                SessionEvent::ToolCall { call_id, name, .. } if name == "skill" => {
+                    Some(call_id.clone())
+                }
+                _ => None,
+            })
+            .expect("skill load 工具调用应已落库");
+        let load_result = events
+            .iter()
+            .rev()
+            .find_map(|e| match &e.event {
+                SessionEvent::ToolResult {
+                    call_id,
+                    content,
+                    is_error: false,
+                    ..
+                } if *call_id == skill_call => Some(content.clone()),
+                _ => None,
+            })
+            .expect("skill load 工具结果应已落库");
+        assert!(
+            load_result.contains("读取并验证运行时结果。"),
+            "SKILL.md 正文应随工具结果返回：{load_result}"
+        );
+        let context = state
             .runtime
             .context(id, &state.home)
             .await
             .unwrap()
             .join("\n");
         assert!(
-            injected.contains("读取并验证运行时结果。"),
-            "SKILL.md 正文应经上下文注入：{injected}"
+            !context.contains("读取并验证运行时结果。"),
+            "能力上下文不应再携带技能正文：{context}"
         );
         server.abort();
     }
