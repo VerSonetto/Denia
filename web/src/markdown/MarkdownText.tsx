@@ -20,6 +20,7 @@ import {
   wrapBlockChildren,
 } from './render'
 import type { MarkdownLabels, MarkdownRenderContext, ReferenceTargets } from './render'
+import { useTypewriter } from '../typewriter'
 import 'katex/dist/katex.min.css'
 
 export type { MarkdownCodeLabels, MarkdownLabels } from './render'
@@ -152,6 +153,9 @@ export const MarkdownText = memo(function MarkdownText({ text, streaming = false
 }) {
   const streamRef = useRef<StreamingRenderer | null>(null)
   const streamLabelsRef = useRef<MarkdownLabels>(labels)
+  // 流式时逐字 reveal:显示文本与模型到达文本分离(打字机效果)。
+  // settle / 非流式时 useTypewriter 立即返回全文,走 settled 渲染。
+  const displayText = useTypewriter(text, streaming)
   const children = useMemo(() => {
     if (!streaming) {
       streamRef.current = null
@@ -161,7 +165,7 @@ export const MarkdownText = memo(function MarkdownText({ text, streaming = false
       streamRef.current = new StreamingRenderer(labels)
       streamLabelsRef.current = labels
     }
-    return streamRef.current.render(text)
-  }, [text, streaming, labels])
+    return streamRef.current.render(displayText)
+  }, [displayText, streaming, labels])
   return <div className="markdown">{children}</div>
 })

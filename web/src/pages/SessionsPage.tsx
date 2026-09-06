@@ -246,6 +246,11 @@ export default function SessionsPage({
     queueSeqRef.current = 0
     stickRef.current = true
     setStick(true)
+    if (smoothRafRef.current !== null) {
+      cancelAnimationFrame(smoothRafRef.current)
+      smoothRafRef.current = null
+      programmaticRef.current = Math.max(0, programmaticRef.current - 1)
+    }
     const el = scrollRef.current
     if (el !== null) el.scrollTop = 0
   }, [activeId])
@@ -546,10 +551,20 @@ export default function SessionsPage({
    * 用户意图单独识别(wheel 向上 = 明确离开);滚动条/触摸滚动按几何判定。 */
   const programmaticRef = useRef(0)
   const followQueuedRef = useRef(false)
+  // 平滑跟随的 rAF 句柄:内容持续增长时逐帧追尾,不瞬间跳变。
+  const smoothRafRef = useRef<number | null>(null)
 
+  /** 瞬间滚到底(用户显式操作/切会话);不打平滑动画。 */
   const scrollBottomNow = useCallback(() => {
     const el = scrollRef.current
     if (el === null) return
+    if (smoothRafRef.current !== null) {
+      cancelAnimationFrame(smoothRafRef.current)
+      smoothRafRef.current = null
+      // 动画被取消:把它启动时打的 programmatic 标记还回去,
+      // 否则后续用户滚动会被误屏蔽。
+      programmaticRef.current = Math.max(0, programmaticRef.current - 1)
+    }
     programmaticRef.current += 1
     el.scrollTop = el.scrollHeight
     // scroll 事件在本帧 rendering steps 派发,下一帧解除标记
@@ -558,22 +573,58 @@ export default function SessionsPage({
     })
   }, [])
 
+  /**
+   * 平滑追尾:吸底时内容增长,用指数缓动逐帧逼近底部而不是瞬跳,
+   * 视觉上「吐字跟着走」的连贯感;内容每帧继续增长,目标值每帧重取,
+   * 距离恒小所以永不抖动。动画期间持续打 programmatic 标记,scroll
+   * 事件不参与打断判定;用户上滚(wheel)或手动拖离后 stickRef 变 false,
+   * 循环自然停止。
+   */
+  const scrollBottomSmooth = useCallback(() => {
+    const el = scrollRef.current
+    if (el === null || !stickRef.current) return
+    if (smoothRafRef.current !== null) return
+    const step = () => {
+      if (el === null || !stickRef.current) {
+        smoothRafRef.current = null
+        programmaticRef.current -= 1
+        return
+      }
+      const target = el.scrollHeight
+      const current = el.scrollTop
+      const delta = target - current
+      if (Math.abs(delta) < 0.6) {
+        el.scrollTop = target
+        smoothRafRef.current = null
+        programmaticRef.current -= 1
+        return
+      }
+      // 追尾缓动:差距大(整段追加)时快速逼近,差距小(逐字吐)时平滑跟随,
+      // 避免"永远差一点"或"跳变"两个极端。
+      const ease = delta > 480 ? 0.6 : delta > 160 ? 0.45 : 0.32
+      el.scrollTop = current + delta * ease
+      smoothRafRef.current = requestAnimationFrame(step)
+    }
+    programmaticRef.current += 1
+    smoothRafRef.current = requestAnimationFrame(step)
+  }, [])
+
   const snapToBottom = useCallback(() => {
     stickRef.current = true
     setStick(true)
     scrollBottomNow()
   }, [scrollBottomNow])
 
-  /** 吸底时的内容跟随:rAF 合并,一帧最多滚一次。 */
+  /** 吸底时的内容跟随:rAF 合并,一帧最多推进一次平滑追尾。 */
   const scheduleFollow = useCallback(() => {
     if (!stickRef.current || followQueuedRef.current) return
     followQueuedRef.current = true
     requestAnimationFrame(() => {
       followQueuedRef.current = false
       if (!stickRef.current) return
-      scrollBottomNow()
+      scrollBottomSmooth()
     })
-  }, [scrollBottomNow])
+  }, [scrollBottomSmooth])
 
   const handleScroll = useCallback(() => {
     if (programmaticRef.current > 0) return
@@ -591,6 +642,17 @@ export default function SessionsPage({
       // 用户向上滚:立即打断,内容继续追加也不再跟随
       stickRef.current = false
       setStick(false)
+    }
+  }, [])
+
+  // 卸载兜底:平滑跟随动画随组件销毁停止。
+  useEffect(() => {
+    return () => {
+      if (smoothRafRef.current !== null) {
+        cancelAnimationFrame(smoothRafRef.current)
+        smoothRafRef.current = null
+        programmaticRef.current = Math.max(0, programmaticRef.current - 1)
+      }
     }
   }, [])
 

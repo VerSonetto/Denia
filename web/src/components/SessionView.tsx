@@ -1,6 +1,6 @@
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react'
 import * as api from '../api'
-import { applyEnvelope, foldEvents } from '../fold'
+import { applyEnvelopes, foldEvents } from '../fold'
 import type { TranscriptNode } from '../fold'
 import { t } from '../i18n'
 import { attach, type SessionPageMeta } from '../sessionStreams'
@@ -106,6 +106,8 @@ export function SessionView({
   const [loading, setLoading] = useState(true)
   const eventsRef = useRef<SessionEnvelope[]>([])
   const pageMetaRef = useRef(pageMeta)
+  const viewRef = useRef(view)
+  viewRef.current = view
   const paneRef = useRef<HTMLDivElement | null>(null)
   const settleRef = useRef(onPendingSettled)
   settleRef.current = onPendingSettled
@@ -146,12 +148,16 @@ export function SessionView({
       const batch = queueRef.current
       queueRef.current = []
       if (batch.length === 0) return
-      setEvents((previous) => {
-        const next = [...previous, ...batch]
-        eventsRef.current = next
-        return next
-      })
-      setNodes((previous) => batch.reduce((acc, env) => applyEnvelope(acc, env), previous))
+      const previous = eventsRef.current
+      const next = previous.length > 0 ? [...previous, ...batch] : batch
+      eventsRef.current = next
+      // events state 只服务于轨迹视图与 todo 台账;纯输出帧(全部是
+      // assistant-chunk)不触发 setEvents,省掉一帧一次的全量数组拷贝。
+      const needsEvents =
+        viewRef.current === 'trajectory' ||
+        batch.some((env) => env.type === 'todo-write' || env.type === 'user-message')
+      if (needsEvents) setEvents(next)
+      setNodes((previous) => applyEnvelopes(previous, batch))
     }
     const settlePending = (events: SessionEnvelope[]) => {
       for (const event of events) {

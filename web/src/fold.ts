@@ -331,6 +331,94 @@ export function applyEnvelope(
   nodes: TranscriptNode[],
   event: SessionEnvelope,
 ): TranscriptNode[] {
+  return applyEnvelopes(nodes, [event])
+}
+
+/**
+ * 批量应用一帧内的多条事件(流式 rAF 合并路径)。
+ *
+ * 单条逐次 `applyEnvelope` 对连续 assistant-chunk 是 O(m·n):每条都要
+ * `[...nodes.slice(0, -1), { ...last, ... }]` 复制整个节点数组。流式高频
+ * 帧(一帧可达数十条 chunk)在长会话上会放大成每帧 O(m·n) 的数组复制。
+ *
+ * 这里把落在同一流式 assistant 节点上的连续 chunk 累积进一个可变
+ * `blocks` 缓冲,中途完全不动节点数组;遇到非 chunk 事件(settle/
+ * turn-end/工具调用等)或帧末,才把缓冲一次 flush 成新数组。连续 chunk
+ * 的数组复制从每帧 m 次降到 1 次,语义与 `applyEnvelope` 逐条应用完全一致。
+ */
+export function applyEnvelopes(
+  nodes: TranscriptNode[],
+  events: SessionEnvelope[],
+): TranscriptNode[] {
+  if (events.length === 0) return nodes
+  let current = nodes
+  // 正在累积的流式尾节点:存在时 current 尾部就是它(引用未变,
+  // 只有 accumulate 真实发生时才在 flush 时重建数组)。
+  interface Accum {
+    node: Extract<TranscriptNode, { kind: 'assistant' }>
+    blocks: UiBlock[]
+  }
+  let acc: Accum | null = null
+  const flush = (): Extract<TranscriptNode, { kind: 'assistant' }> | null => {
+    if (acc === null) return null
+    const settled = { ...acc.node, blocks: acc.blocks }
+    current = current.slice(0, -1)
+    current.push(settled)
+    acc = null
+    return settled
+  }
+  for (const event of events) {
+    if (event.type === 'assistant-chunk') {
+      const last = current[current.length - 1]
+      if (
+        acc !== null &&
+        last?.kind === 'assistant' &&
+        last.streaming &&
+        last.turn === event.turn &&
+        last.step === event.step
+      ) {
+        acc.blocks = applyChunk(acc.blocks, event.chunk)
+        continue
+      }
+      // 先落掉上一个累积节点(节点迁移),再开新累积。
+      if (acc !== null) flush()
+      const tail = current[current.length - 1]
+      if (
+        tail?.kind === 'assistant' &&
+        tail.streaming &&
+        tail.turn === event.turn &&
+        tail.step === event.step
+      ) {
+        const blocks = applyChunk(tail.blocks, event.chunk)
+        acc = { node: { ...tail }, blocks }
+      } else {
+        const fresh: Extract<TranscriptNode, { kind: 'assistant' }> = {
+          kind: 'assistant',
+          turn: event.turn,
+          step: event.step,
+          blocks: [],
+          interrupted: false,
+          streaming: true,
+          stepStartTime: incrementalStepStarts.get(`${event.turn}:${event.step}`),
+          firstChunkTime: event.time,
+        }
+        acc = { node: fresh, blocks: applyChunk(fresh.blocks, event.chunk) }
+        current = [...current, fresh]
+      }
+      continue
+    }
+    if (acc !== null) flush()
+    current = applyEnvelopeStep(current, event)
+  }
+  if (acc !== null) flush()
+  return current
+}
+
+/** 单条事件应用(applyEnvelope 的主体,供批量路径逐条复用)。 */
+function applyEnvelopeStep(
+  nodes: TranscriptNode[],
+  event: SessionEnvelope,
+): TranscriptNode[] {
   switch (event.type) {
     case 'agent-delivery':
       return [...nodes, { kind: 'context-injection', text: event.text, seq: event.seq }]

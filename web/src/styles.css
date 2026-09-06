@@ -1411,6 +1411,30 @@ button {
   color: var(--label-primary);
 }
 
+/* 流式期间新增的 markdown 块:柔和淡入 + 微上浮,吐字有"生长"感。
+   只对挂载瞬间生效一次(React 新增 DOM 节点时触发),历史/翻页消息
+   streaming=false 不挂此 class,不会误动画。 */
+.msg-assistant .prose.streaming-block {
+  animation: streaming-block-in 160ms var(--ease) both;
+}
+
+@keyframes streaming-block-in {
+  from {
+    opacity: 0;
+    transform: translateY(3px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .msg-assistant .prose.streaming-block {
+    animation: none;
+  }
+}
+
 .disc-row {
   display: flex;
   flex-direction: column;

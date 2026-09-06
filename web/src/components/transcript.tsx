@@ -4,6 +4,7 @@ import { localeRevision, t } from '../i18n'
 import { groupTranscript, type OverviewRow, type TranscriptNode } from '../fold'
 import { MarkdownText } from '../markdown/MarkdownText'
 import type { MarkdownLabels } from '../markdown/MarkdownText'
+import { useTypewriter } from '../typewriter'
 import { toolCallInput, toolCallSummary } from '../toolDisplay'
 import type { UserMessageImage } from '../types'
 import { UserMessageBubble } from './UserMessageImages'
@@ -244,7 +245,7 @@ function AssistantNode({
           return null
         }
         return (
-          <div key={index} className="prose">
+          <div key={index} className={`prose${node.streaming ? ' streaming-block' : ''}`}>
             <MarkdownText text={block.text} streaming={node.streaming} labels={labels} />
           </div>
         )
@@ -408,6 +409,8 @@ function ThinkRow({
     raf = requestAnimationFrame(tick)
     return () => cancelAnimationFrame(raf)
   }, [streaming, open])
+  // 思考框正文:流式时逐字 reveal(打字机),settle 立即全量。
+  const displayText = useTypewriter(text, streaming)
   const summary = firstLine(text, 80)
   return (
     <div className={`disc-row${open ? ' open' : ''}`}>
@@ -441,7 +444,7 @@ function ThinkRow({
               onScroll={handleInnerScroll}
               style={{ color: 'var(--label-tertiary)' }}
             >
-              {text}
+              {displayText}
             </pre>
           </div>
         </div>
