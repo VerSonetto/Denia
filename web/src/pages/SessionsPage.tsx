@@ -174,8 +174,8 @@ export default function SessionsPage({
   const originalPromptRef = useRef('')
   const optimizeAbortRef = useRef<AbortController | null>(null)
   const optimizingRef = useRef(false)
-  const [scrollTick, setScrollTick] = useState(0)
-  const [atBottom, setAtBottom] = useState(true)
+  // 贴底跟随状态:吸底时流式内容追加自动滚动;手动滚动打断;滚回底部恢复。
+  const [stick, setStick] = useState(true)
   // 已发送未获服务端确认的用户消息(乐观行)。
   const [pendingMessages, setPendingMessages] = useState<
     { text: string; images?: UserMessageImage[] }[]
@@ -207,7 +207,7 @@ export default function SessionsPage({
   const sendingRef = useRef(false)
   const promptRef = useRef<HTMLTextAreaElement | null>(null)
   const scrollRef = useRef<HTMLDivElement | null>(null)
-  const atBottomRef = useRef(true)
+  const stickRef = useRef(true)
   const seatRef = useRef<HTMLDivElement | null>(null)
 
   const activeWs: WorkspaceRecord | null = getActiveWorkspace()
@@ -234,8 +234,8 @@ export default function SessionsPage({
     setAxisAnchors([])
     setAxisJump(null)
     setTodos([])
-    atBottomRef.current = true
-    setAtBottom(true)
+    stickRef.current = true
+    setStick(true)
     const el = scrollRef.current
     if (el !== null) el.scrollTop = 0
   }, [activeId])
@@ -527,50 +527,72 @@ export default function SessionsPage({
     })
   }, [])
 
-  const snapToBottom = useCallback(() => {
+  /* ---- 对话流贴底跟随 ----
+   * 吸底时内容追加自动滚动;用户手动滚动打断;滚回底部恢复。
+   * 打断判定不靠"scroll 事件里 dist 是否超阈"这一单一信号——内容增长、
+   * 浏览器滚动锚定、折叠引起的布局回缩都会产生方向不明的 scroll 事件,
+   * 误把跟随打断(表现:发送后界面停住不再跟随,手动滚到底才恢复)。
+   * 因此:程序滚动一律打标,其触发的 scroll 事件不参与判定;
+   * 用户意图单独识别(wheel 向上 = 明确离开);滚动条/触摸滚动按几何判定。 */
+  const programmaticRef = useRef(0)
+  const followQueuedRef = useRef(false)
+
+  const scrollBottomNow = useCallback(() => {
     const el = scrollRef.current
     if (el === null) return
+    programmaticRef.current += 1
     el.scrollTop = el.scrollHeight
-    atBottomRef.current = true
-    setAtBottom(true)
-  }, [])
-
-  const followIfPinned = useCallback(() => {
-    if (!atBottomRef.current) return
-    // rAF 延后到本帧 DOM 提交之后量高:流式 chunk 刚改了 React 树,同步读
-    // scrollHeight 拿到的是旧布局,跟随会慢一拍。回调里复检贴底:用户在这
-    // 一帧内手动滚开(handleScroll 同步触发)则放弃本次跟随。
+    // scroll 事件在本帧 rendering steps 派发,下一帧解除标记
     requestAnimationFrame(() => {
-      const el = scrollRef.current
-      if (el === null || !atBottomRef.current) return
-      el.scrollTop = el.scrollHeight
+      programmaticRef.current -= 1
     })
   }, [])
 
+  const snapToBottom = useCallback(() => {
+    stickRef.current = true
+    setStick(true)
+    scrollBottomNow()
+  }, [scrollBottomNow])
+
+  /** 吸底时的内容跟随:rAF 合并,一帧最多滚一次。 */
+  const scheduleFollow = useCallback(() => {
+    if (!stickRef.current || followQueuedRef.current) return
+    followQueuedRef.current = true
+    requestAnimationFrame(() => {
+      followQueuedRef.current = false
+      if (!stickRef.current) return
+      scrollBottomNow()
+    })
+  }, [scrollBottomNow])
+
   const handleScroll = useCallback(() => {
+    if (programmaticRef.current > 0) return
     const el = scrollRef.current
     if (el === null) return
     const bottom = el.scrollHeight - el.scrollTop - el.clientHeight <= FOLLOW_THRESHOLD + 1
-    if (bottom !== atBottomRef.current) {
-      atBottomRef.current = bottom
-      setAtBottom(bottom)
+    if (bottom !== stickRef.current) {
+      stickRef.current = bottom
+      setStick(bottom)
+    }
+  }, [])
+
+  const handleWheel = useCallback((event: WheelEvent<HTMLDivElement>) => {
+    if (event.deltaY < 0 && stickRef.current) {
+      // 用户向上滚:立即打断,内容继续追加也不再跟随
+      stickRef.current = false
+      setStick(false)
     }
   }, [])
 
   useEffect(() => {
-    followIfPinned()
-  }, [running, followIfPinned])
+    scheduleFollow()
+  }, [running, scheduleFollow])
 
   // 运行中的会话才需要 SSE follow 长连接;普通浏览走分页快照,
   // 避免打开长会话就把完整历史加载进服务端 live cache。
   useEffect(() => {
     if (activeId && running) ensureFollowing(activeId)
   }, [activeId, running])
-
-  useEffect(() => {
-    if (scrollTick === 0) return
-    snapToBottom()
-  }, [scrollTick, snapToBottom])
 
   useEffect(() => {
     syncPromptHeight()
@@ -584,12 +606,12 @@ export default function SessionsPage({
     const observer = new ResizeObserver(() => {
       scroller.style.setProperty('--composer-height', `${seat.offsetHeight}px`)
       scroller.style.setProperty('--conversation-viewport-height', `${scroller.clientHeight}px`)
-      followIfPinned()
+      scheduleFollow()
     })
     observer.observe(seat)
     observer.observe(scroller)
     return () => observer.disconnect()
-  }, [followIfPinned, phase])
+  }, [scheduleFollow, phase])
 
   /**
    * 乐观行协调:
@@ -838,6 +860,9 @@ export default function SessionsPage({
     }
     // 粘贴图片:模型必须标记为可识图,否则拒绝整条发送。
     if (pastedImages.length > 0 && !ensureVision()) return
+    // 发送 = 用户要看回复:立即恢复吸底,不等 202——服务端可能先于
+    // postPrompt 响应就开始推流,此刻不吸底,后续内容全会落在视口之外。
+    snapToBottom()
     sendingRef.current = true
     setSending(true)
     try {
@@ -889,7 +914,6 @@ export default function SessionsPage({
       setPastedImages([])
       setAttachments([])
       setTrajQuotes([])
-      setScrollTick((tick) => tick + 1)
     } catch (error) {
       notify('err', error instanceof Error ? error.message : String(error))
       // 保留输入框内容;若会话侧已经创建但发送失败,等待用户重试。
@@ -1255,6 +1279,7 @@ export default function SessionsPage({
         className="conversation-scroll"
         ref={scrollRef}
         onScroll={handleScroll}
+        onWheel={handleWheel}
         data-conversation-scroll=""
       >
         {phase === 'active' && view === 'chat' && (
@@ -1279,7 +1304,7 @@ export default function SessionsPage({
               }}
               onNodesChange={(nodes) => {
                 setTranscriptNodes(nodes)
-                followIfPinned()
+                scheduleFollow()
               }}
               onAnchorsChange={setAxisAnchors}
               jumpRequest={axisJump}
@@ -1312,7 +1337,7 @@ export default function SessionsPage({
           </div>
         )}
       </div>
-      {phase === 'active' && view === 'chat' && !atBottom && (
+      {phase === 'active' && view === 'chat' && !stick && (
         <button
           type="button"
           className="jump-bottom"
