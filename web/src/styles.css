@@ -1529,6 +1529,20 @@ button {
   color: var(--warn);
 }
 
+/* 错误文案可能极长(含提供方完整报错),行内截断保住 token 统计 pill
+   不被挤错位;全文悬停 title 可见,回注的 injected 消息里也有完整错误。 */
+.turn-chrome .reason {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.turn-chrome .dot,
+.turn-chrome .usage-pill {
+  flex: none;
+}
+
 /* LLM 总结压缩的边界标记(学 Claude Code compact boundary):整行按钮
    折叠摘要,meta 行展示 token 前后对比(超长时省略号截断)。 */
 .compaction-row {

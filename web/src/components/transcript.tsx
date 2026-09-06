@@ -610,7 +610,9 @@ function TurnChrome({
       <span
         className={`dot ${reason.kind === 'completed' ? 'ok' : reason.kind === 'error' ? 'err' : 'run'}`}
       />
-      <span className={cls}>{label}</span>
+      <span className={`reason ${cls}`} title={label}>
+        {label}
+      </span>
       {usage && (
         <span className="usage-pill">
           {t('inputTokens')} {usage.inputTokens} · {t('outputTokens')}{' '}
