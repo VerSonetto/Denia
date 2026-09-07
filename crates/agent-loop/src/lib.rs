@@ -48,6 +48,25 @@ use compact::{
     truncate_head,
 };
 
+/// 工具并行执行配置(学 codex `ToolCallRuntime` + dsh `maxParallelToolCalls`)。
+///
+/// 一次 step 内模型返回的多个工具调用并发执行,受滚动池上限约束;结果仍按
+/// model-order 提交,保证每个 call 恰好一条 `ToolResult` 事件(事件源不变量)。
+/// 需要审批的调用(升权)串行化——审批是交互式阻塞,并发弹窗会交错事件。
+#[derive(Debug, Clone, PartialEq)]
+pub struct ParallelSettings {
+    /// 同时执行的工具调用上限(对齐 dsh `maxParallelToolCalls=10`)。
+    pub max_parallel_tool_calls: usize,
+}
+
+impl Default for ParallelSettings {
+    fn default() -> Self {
+        Self {
+            max_parallel_tool_calls: 10,
+        }
+    }
+}
+
 /// 文件历史提供者:server 侧实现,按会话提供备份句柄并在用户消息落库后
 /// 固化快照。`None` 表示该部署不启用文件回退。
 #[async_trait]
@@ -248,6 +267,8 @@ pub struct SessionDriver {
     compaction: CompactionSettings,
     /// 连续压缩失败计数(熔断,学 Claude Code `MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES`)。
     compact_failures: AtomicU32,
+    /// 工具并行执行配置(学 codex `ToolCallRuntime`)。
+    parallel: ParallelSettings,
 }
 
 fn should_log_system_prompt(session: &Session, step: u32, text: &str) -> bool {
@@ -274,6 +295,7 @@ impl SessionDriver {
             approval: None,
             compaction: CompactionSettings::default(),
             compact_failures: AtomicU32::new(0),
+            parallel: ParallelSettings::default(),
         }
     }
 
@@ -289,6 +311,12 @@ impl SessionDriver {
     /// [`CompactionSettings::default`])。
     pub fn with_compaction(mut self, settings: CompactionSettings) -> Self {
         self.compaction = settings;
+        self
+    }
+
+    /// 覆盖工具并行执行配置(默认值见 [`ParallelSettings::default`])。
+    pub fn with_parallel(mut self, settings: ParallelSettings) -> Self {
+        self.parallel = settings;
         self
     }
 
@@ -310,8 +338,8 @@ impl SessionDriver {
         selection: &ModelSelection,
         framed_system: &str,
         tools: &[denia_core::tool::ToolSchema],
-        turn: u32,
-        step: u32,
+        _turn: u32,
+        _step: u32,
         cancel: &CancellationToken,
     ) -> Result<Option<CompactOutcome>, LlmFailure> {
         let settings = self.compaction.clone();
@@ -1209,8 +1237,13 @@ impl SessionDriver {
                     // 白白死亡——有输出重放是安全的,故取消该限制。
                     if retryable {
                         step_retries += 1;
+                        let connection = retry_policy.is_connection_error(&failure.code);
                         let delay = retry_policy
-                            .delay_ms(step_retries, failure.provider_retry_after_ms)
+                            .delay_ms_for(
+                                step_retries,
+                                failure.provider_retry_after_ms,
+                                connection,
+                            )
                             .unwrap_or(0);
                         append(
                             session,
@@ -1392,139 +1425,299 @@ impl SessionDriver {
                 }
             }
 
-            // Sequential dispatch; every logged call gets exactly one result,
-            // including calls caught by a mid-dispatch abort.
+            // 工具并行执行(学 codex `ToolCallRuntime` + `FuturesOrdered` 滚动池):
+            // 一次 step 内模型返回的多个工具调用并发执行,受滚动池上限约束;
+            // 结果按 model-order 提交,每个 call 恰好一条 `ToolResult` 事件。
+            // 需要审批的调用(升权)串行化——审批是交互式阻塞,并发弹窗会交错事件。
             let cwd = PathBuf::from(session.header().cwd.clone());
-            for call in &calls {
-                append(
-                    session,
-                    &emit,
-                    SessionEvent::ToolCall {
-                        turn,
-                        step,
-                        call_id: call.id.clone(),
-                        name: call.name.clone(),
-                        arguments: call.arguments.clone(),
-                    },
-                )?;
-                let output = if cancel.is_cancelled() {
-                    denia_tools::ToolOutput {
-                        content: "aborted before dispatch".to_string(),
-                        is_error: true,
+            let max_parallel = self.parallel.max_parallel_tool_calls.max(1);
+            let mut in_flight: futures::stream::FuturesOrdered<
+                futures::future::BoxFuture<'static, (usize, denia_tools::ToolOutput)>,
+            > = futures::stream::FuturesOrdered::new();
+            let mut next = 0usize;
+            while next < calls.len() || !in_flight.is_empty() {
+                // 调度:填充滚动池(升权调用不入池,等池空后串行执行)。
+                while next < calls.len() && in_flight.len() < max_parallel {
+                    let call = &calls[next];
+                    let needs_escalation = matches!(call.name.as_str(), "bash" | "write_file" | "edit")
+                        && escalation_fields(&call.arguments).is_some();
+                    if needs_escalation {
+                        break;
                     }
-                } else if session
-                    .header()
-                    .subagent
-                    .as_ref()
-                    .and_then(|s| s.allowed_tools.as_ref())
-                    .is_some_and(|allowed| !allowed.contains(&call.name))
-                {
-                    denia_tools::ToolOutput {
-                        content: "该工具不在当前子代理允许的工具集合中".into(),
-                        is_error: true,
-                    }
-                } else if let Some(tool) = self.tools.get(&call.name) {
-                    let current_mode = session.permission_mode();
-                    let mut permission_override = None;
-                    let mut approval_failure = None;
-                    let can_escalate = matches!(call.name.as_str(), "bash" | "write_file" | "edit");
-                    if can_escalate {
-                        if let Some((requested_raw, justification)) =
-                            escalation_fields(&call.arguments)
-                        {
-                            match resolve_escalation(
-                                self,
+                    append(
+                        session,
+                        &emit,
+                        SessionEvent::ToolCall {
+                            turn,
+                            step,
+                            call_id: call.id.clone(),
+                            name: call.name.clone(),
+                            arguments: call.arguments.clone(),
+                        },
+                    )?;
+                    let index = next;
+                    let future = self.dispatch_tool_call(
+                        session,
+                        &emit,
+                        selection,
+                        &cwd,
+                        call,
+                        vision_supported,
+                        file_history.clone(),
+                        cancel.clone(),
+                    );
+                    in_flight.push_back(Box::pin(async move { (index, future.await) }));
+                    next += 1;
+                }
+                if in_flight.is_empty() {
+                    if next < calls.len() {
+                        // 升权调用:串行执行(审批交互式,不并发)。
+                        let call = &calls[next];
+                        append(
+                            session,
+                            &emit,
+                            SessionEvent::ToolCall {
+                                turn,
+                                step,
+                                call_id: call.id.clone(),
+                                name: call.name.clone(),
+                                arguments: call.arguments.clone(),
+                            },
+                        )?;
+                        let output = self
+                            .dispatch_escalated_tool_call(
                                 session,
                                 &emit,
+                                selection,
+                                &cwd,
                                 call,
-                                current_mode,
-                                &requested_raw,
-                                &justification,
-                                escalation_subject(&call.name),
+                                vision_supported,
+                                file_history.clone(),
                                 cancel.clone(),
                             )
-                            .await
-                            {
-                                Ok(mode) => permission_override = Some(mode),
-                                Err(message) => approval_failure = Some(message),
+                            .await;
+                        if !output.is_error
+                            && matches!(call.name.as_str(), "read_file" | "write_file" | "edit")
+                        {
+                            if let Some(path) = touched_path(&cwd, &call.arguments) {
+                                touched.push(path);
                             }
                         }
-                    }
-                    if let Some(message) = approval_failure {
-                        denia_tools::ToolOutput {
-                            content: message,
-                            is_error: true,
-                        }
-                    } else {
-                        // Log-only event sink for tools like todo_write: appends
-                        // through the same session and echoes to SSE followers.
-                        let sink_session = session.clone();
-                        let sink_emit = emit.clone();
-                        let context = ToolContext {
-                            session_id: Some(session.id().to_string()),
-                            selection: Some(selection.clone()),
-                            cwd: cwd.clone(),
-                            cancel: cancel.child_token(),
-                            // 完整权限关闭路径沙箱;其他档位沿用会话头 sandbox。
-                            confined: !current_mode.is_full() && session.header().sandbox,
-                            vision_supported,
-                            emit_event: Some(Arc::new(move |event: SessionEvent| {
-                                if let Ok(envelope) = sink_session.append(event) {
-                                    sink_emit(&envelope);
-                                }
-                            })),
-                            file_history: file_history.clone(),
-                            permission_mode: current_mode,
-                            permission_override,
-                        };
-                        // 工具执行必须可中断:glob/grep/bash 内部已响应 ctx.cancel,
-                        // 但 files/edit/browser/recon 等无取消意识的实现可能在慢盘、
-                        // CDP、网络调用上无限挂起。select 取消令牌兜底:放弃卡死的
-                        // 执行 future(其内部 await 随 drop 中止,spawn_blocking 句柄
-                        // 不再阻塞轮次),保证任何情况下点停止都能立即结束轮次。
-                        let execute = tool.execute(&call.arguments, &context);
-                        tokio::pin!(execute);
-                        tokio::select! {
-                            biased;
-                            _ = cancel.cancelled() => denia_tools::ToolOutput {
-                                content: "工具执行被中断".to_string(),
-                                is_error: true,
+                        append(
+                            session,
+                            &emit,
+                            SessionEvent::ToolResult {
+                                turn,
+                                step,
+                                call_id: call.id.clone(),
+                                content: output.content,
+                                is_error: output.is_error,
+                                error: None,
+                                error_identity: None,
+                                meta: None,
+                                replaces: None,
                             },
-                            output = &mut execute => output,
+                        )?;
+                        next += 1;
+                        continue;
+                    }
+                    break;
+                }
+                // 提交:按 model-order 取回结果并落 `ToolResult`。
+                if let Some((index, output)) = in_flight.next().await {
+                    let call = &calls[index];
+                    if !output.is_error
+                        && matches!(call.name.as_str(), "read_file" | "write_file" | "edit")
+                    {
+                        if let Some(path) = touched_path(&cwd, &call.arguments) {
+                            touched.push(path);
                         }
                     }
-                } else {
-                    denia_tools::ToolOutput {
-                        content: format!("unknown tool: {}", call.name),
-                        is_error: true,
-                    }
-                };
-                // 触碰收集:文件工具成功执行的路径驱动嵌套 AGENTS.md 发现
-                // (dsh 只认 read/write/edit;bash 不解析参数)。
-                if !output.is_error
-                    && matches!(call.name.as_str(), "read_file" | "write_file" | "edit")
-                {
-                    if let Some(path) = touched_path(&cwd, &call.arguments) {
-                        touched.push(path);
-                    }
+                    append(
+                        session,
+                        &emit,
+                        SessionEvent::ToolResult {
+                            turn,
+                            step,
+                            call_id: call.id.clone(),
+                            content: output.content,
+                            is_error: output.is_error,
+                            error: None,
+                            error_identity: None,
+                            meta: None,
+                            replaces: None,
+                        },
+                    )?;
                 }
-                append(
-                    session,
-                    &emit,
-                    SessionEvent::ToolResult {
-                        turn,
-                        step,
-                        call_id: call.id.clone(),
-                        content: output.content,
-                        is_error: output.is_error,
-                        error: None,
-                        error_identity: None,
-                        meta: None,
-                        replaces: None,
-                    },
-                )?;
             }
             append(session, &emit, SessionEvent::StepEnd { turn, step })?;
+        }
+    }
+
+    /// 调度一次工具调用(无升权路径),返回 boxed future 供并行池使用。
+    /// 内部处理取消、子代理白名单、未知工具、权限与审批(普通被拒)。
+    fn dispatch_tool_call(
+        &self,
+        session: &Arc<Session>,
+        emit: &Arc<dyn Fn(&SessionEnvelope) + Send + Sync>,
+        selection: &ModelSelection,
+        cwd: &PathBuf,
+        call: &ToolCallRef,
+        vision_supported: bool,
+        file_history: Option<Arc<dyn FileHistoryBackend>>,
+        cancel: CancellationToken,
+    ) -> futures::future::BoxFuture<'static, denia_tools::ToolOutput> {
+        let session = session.clone();
+        let emit = emit.clone();
+        let selection = selection.clone();
+        let cwd = cwd.clone();
+        let call = call.clone();
+        let tools = self.tools.clone();
+        Box::pin(async move {
+            if cancel.is_cancelled() {
+                return denia_tools::ToolOutput {
+                    content: "aborted before dispatch".to_string(),
+                    is_error: true,
+                };
+            }
+            if session
+                .header()
+                .subagent
+                .as_ref()
+                .and_then(|s| s.allowed_tools.as_ref())
+                .is_some_and(|allowed| !allowed.contains(&call.name))
+            {
+                return denia_tools::ToolOutput {
+                    content: "该工具不在当前子代理允许的工具集合中".into(),
+                    is_error: true,
+                };
+            }
+            let Some(tool) = tools.get(&call.name) else {
+                return denia_tools::ToolOutput {
+                    content: format!("unknown tool: {}", call.name),
+                    is_error: true,
+                };
+            };
+            let current_mode = session.permission_mode();
+            let sink_session = session.clone();
+            let sink_emit = emit.clone();
+            let context = ToolContext {
+                session_id: Some(session.id().to_string()),
+                selection: Some(selection),
+                cwd: cwd.clone(),
+                cancel: cancel.child_token(),
+                confined: !current_mode.is_full() && session.header().sandbox,
+                vision_supported,
+                emit_event: Some(Arc::new(move |event: SessionEvent| {
+                    if let Ok(envelope) = sink_session.append(event) {
+                        sink_emit(&envelope);
+                    }
+                })),
+                file_history,
+                permission_mode: current_mode,
+                permission_override: None,
+            };
+            let execute = tool.execute(&call.arguments, &context);
+            tokio::pin!(execute);
+            tokio::select! {
+                biased;
+                _ = cancel.cancelled() => denia_tools::ToolOutput {
+                    content: "工具执行被中断".to_string(),
+                    is_error: true,
+                },
+                output = &mut execute => output,
+            }
+        })
+    }
+
+    /// 执行一次需升权的工具调用(串行):校验 → 审批 → 执行。
+    async fn dispatch_escalated_tool_call(
+        &self,
+        session: &Arc<Session>,
+        emit: &Arc<dyn Fn(&SessionEnvelope) + Send + Sync>,
+        selection: &ModelSelection,
+        cwd: &PathBuf,
+        call: &ToolCallRef,
+        vision_supported: bool,
+        file_history: Option<Arc<dyn FileHistoryBackend>>,
+        cancel: CancellationToken,
+    ) -> denia_tools::ToolOutput {
+        if cancel.is_cancelled() {
+            return denia_tools::ToolOutput {
+                content: "aborted before dispatch".to_string(),
+                is_error: true,
+            };
+        }
+        if session
+            .header()
+            .subagent
+            .as_ref()
+            .and_then(|s| s.allowed_tools.as_ref())
+            .is_some_and(|allowed| !allowed.contains(&call.name))
+        {
+            return denia_tools::ToolOutput {
+                content: "该工具不在当前子代理允许的工具集合中".into(),
+                is_error: true,
+            };
+        }
+        let Some(tool) = self.tools.get(&call.name) else {
+            return denia_tools::ToolOutput {
+                content: format!("unknown tool: {}", call.name),
+                is_error: true,
+            };
+        };
+        let current_mode = session.permission_mode();
+        let mut permission_override = None;
+        if let Some((requested_raw, justification)) = escalation_fields(&call.arguments) {
+            match resolve_escalation(
+                self,
+                session,
+                emit,
+                call,
+                current_mode,
+                &requested_raw,
+                &justification,
+                escalation_subject(&call.name),
+                cancel.clone(),
+            )
+            .await
+            {
+                Ok(mode) => permission_override = Some(mode),
+                Err(message) => {
+                    return denia_tools::ToolOutput {
+                        content: message,
+                        is_error: true,
+                    };
+                }
+            }
+        }
+        let sink_session = session.clone();
+        let sink_emit = emit.clone();
+        let context = ToolContext {
+            session_id: Some(session.id().to_string()),
+            selection: Some(selection.clone()),
+            cwd: cwd.clone(),
+            cancel: cancel.child_token(),
+            confined: !current_mode.is_full() && session.header().sandbox,
+            vision_supported,
+            emit_event: Some(Arc::new(move |event: SessionEvent| {
+                if let Ok(envelope) = sink_session.append(event) {
+                    sink_emit(&envelope);
+                }
+            })),
+            file_history,
+            permission_mode: current_mode,
+            permission_override,
+        };
+        let execute = tool.execute(&call.arguments, &context);
+        tokio::pin!(execute);
+        tokio::select! {
+            biased;
+            _ = cancel.cancelled() => denia_tools::ToolOutput {
+                content: "工具执行被中断".to_string(),
+                is_error: true,
+            },
+            output = &mut execute => output,
         }
     }
 }
@@ -1991,6 +2184,77 @@ mod tests {
                 .iter()
                 .any(|m| m.role == denia_core::message::ChatRole::Tool)
         );
+    }
+
+    #[tokio::test]
+    async fn parallel_tool_calls_emit_one_result_each_in_order() {
+        // 一次 step 返回 3 个 echo 工具调用:并行执行,但每个 call 恰好一条
+        // ToolResult,且结果按 model-order 提交(事件源不变量)。
+        fn multi_tool_script() -> Vec<StreamChunk> {
+            let mut chunks = vec![StreamChunk::BlockStart {
+                index: 0,
+                block_type: BlockType::ToolCall,
+            }];
+            for (i, id) in ["call_a", "call_b", "call_c"].iter().enumerate() {
+                chunks.push(StreamChunk::ToolCallDelta {
+                    index: i as u32,
+                    id: id.to_string(),
+                    name: Some("echo".to_string()),
+                    arguments_delta: format!("{{\"text\":\"{id}\"}}"),
+                });
+                chunks.push(StreamChunk::BlockEnd {
+                    index: i as u32,
+                    block: ContentBlock::ToolCall {
+                        id: id.to_string(),
+                        name: "echo".to_string(),
+                        arguments: format!("{{\"text\":\"{id}\"}}"),
+                    },
+                });
+            }
+            chunks.push(StreamChunk::Finish {
+                reason: FinishReason::ToolCalls,
+            });
+            chunks
+        }
+        let (driver, _registry) = driver(vec![
+            MockScript::Chunks(multi_tool_script()),
+            MockScript::Chunks(text_script("done")),
+        ]);
+        let session = temp_session();
+        let reason = driver
+            .run_turn(
+                &session,
+                &selection(),
+                "parallel",
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                true,
+                CancellationToken::new(),
+                noop_emit(),
+            )
+            .await;
+        assert_eq!(reason, TurnEndReason::Completed);
+
+        let calls: Vec<String> = session
+            .events()
+            .iter()
+            .filter_map(|envelope| match &envelope.event {
+                SessionEvent::ToolCall { call_id, .. } => Some(call_id.clone()),
+                _ => None,
+            })
+            .collect();
+        let results: Vec<String> = session
+            .events()
+            .iter()
+            .filter_map(|envelope| match &envelope.event {
+                SessionEvent::ToolResult { call_id, .. } => Some(call_id.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(calls, vec!["call_a", "call_b", "call_c"]);
+        // 结果按 model-order 提交,每个 call 恰好一条。
+        assert_eq!(results, vec!["call_a", "call_b", "call_c"]);
     }
 
     #[tokio::test]
