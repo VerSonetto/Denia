@@ -94,6 +94,7 @@ mod tests {
                 text: snapshot.clone(),
                 injected: true,
                 images: Vec::new(),
+                channel: None,
             })
             .unwrap();
         let projection = RuntimeContextProjection::restore(&session);

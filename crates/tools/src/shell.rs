@@ -56,19 +56,19 @@ pub fn bash_tool_description(runtime: &ShellRuntime) -> String {
     let (examples, avoid) = if runtime.dialect == "powershell" {
         (
             "Get-ChildItem; Get-Content .\\src\\lib.rs; $env:USERPROFILE",
-            "bash/sh/cmd syntax (ls, cat, export, cmd /c)",
+            "bash/sh/cmd 语法(ls、cat、export、cmd /c)",
         )
     } else {
         (
             "ls; cat src/lib.rs; echo $HOME",
-            "PowerShell syntax (Get-ChildItem, $env:VAR, cmd /c)",
+            "PowerShell 语法(Get-ChildItem、$env:VAR、cmd /c)",
         )
     };
     format!(
-        "Run one shell command in the session workspace; returns exit code, stdout, and stderr.\n\
-         Host: {os} ({arch}). Shell: {shell} ({executable}).\n\
-         Write `command` in {dialect} syntax only — not {avoid}.\n\
-         Examples on this host: {examples}.",
+        "在会话工作区执行一条 shell 命令,返回退出码、stdout 与 stderr。\n\
+         宿主:{os}({arch});shell:{shell}({executable})。\n\
+         command 只能用 {dialect} 语法,不要写{avoid}。\n\
+         本机示例:{examples}。",
         os = runtime.os,
         arch = runtime.arch,
         shell = runtime.shell_label,
@@ -87,7 +87,7 @@ pub fn bash_command_param_description(runtime: &ShellRuntime) -> String {
         "ls -la"
     };
     format!(
-        "One {dialect} command line for {shell} on {os} ({arch}). Example: {example}.",
+        "{os}({arch})上 {shell} 的单条 {dialect} 命令行。示例:{example}。",
         dialect = runtime.dialect,
         shell = runtime.shell_label,
         os = runtime.os,

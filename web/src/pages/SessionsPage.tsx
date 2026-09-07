@@ -1510,6 +1510,10 @@ export default function SessionsPage({
               onRewind={(seq) => void handleRewind(seq)}
               onFork={(seq) => void handleFork(seq)}
               onQuote={handleQuote}
+              onLoopContinue={() => {
+                // 死循环保护提示行的「继续」:程序化发送继续消息。
+                void postMessage('继续', { clearInput: false })
+              }}
             />
           ) : (
             <div className="session-hero">

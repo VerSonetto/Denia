@@ -15,10 +15,10 @@ pub fn denial_marker(mode: PermissionMode) -> String {
     format!("[sandbox: file access denied under {} mode]", mode.as_str())
 }
 
-/// 拒绝后同一轮次的升权提示(与 dsh escalationHintMarker 同款)。
+/// 拒绝后同一轮次的升权提示(保留 `[sandbox:` 协议前缀,内容中文化)。
 pub fn escalation_hint(subject: &str) -> String {
     format!(
-        "[sandbox: escalation available — retry this exact {subject} once with sandbox_permissions (the narrowest wider mode that suffices) + justification; the approval prompt asks the user]"
+        "[sandbox: 权限不足 — 带 sandbox_permissions(选足够的最窄更宽模式)+ justification 将该 {subject} 原样重试一次;将弹审批询问用户]"
     )
 }
 

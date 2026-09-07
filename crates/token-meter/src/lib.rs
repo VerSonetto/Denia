@@ -606,6 +606,7 @@ mod tests {
                     text: "a".into(),
                     injected: false,
                     images: Vec::new(),
+                    channel: None,
                 },
             ),
             envelope(
@@ -724,6 +725,7 @@ mod tests {
                 text: "hi".into(),
                 injected: false,
                 images: Vec::new(),
+                channel: None,
             },
         ));
         meter.apply_one(&envelope(
@@ -738,6 +740,7 @@ mod tests {
                 error_identity: None,
                 meta: None,
                 replaces: None,
+                truncation: None,
             },
         ));
         assert_eq!(meter.breakdown().message_tokens, user_tokens + long_tokens);
@@ -754,6 +757,7 @@ mod tests {
                 error_identity: None,
                 meta: None,
                 replaces: Some(2),
+                truncation: None,
             },
         ));
         let after = meter.breakdown().message_tokens;
@@ -812,6 +816,7 @@ mod tests {
                 text: "再来".into(),
                 injected: false,
                 images: Vec::new(),
+                channel: None,
             },
         ));
         let p2 = meter.context_pressure();
@@ -838,6 +843,7 @@ mod tests {
                 text: "hi".into(),
                 injected: false,
                 images: Vec::new(),
+                channel: None,
             },
         ));
         let p = meter.context_pressure();
@@ -891,6 +897,7 @@ mod tests {
                 text: "hi".into(),
                 injected: false,
                 images: Vec::new(),
+                channel: None,
             },
         ));
         meter.apply_one(&envelope(

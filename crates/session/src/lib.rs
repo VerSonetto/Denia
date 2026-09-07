@@ -739,6 +739,7 @@ impl Session {
                     error_identity: None,
                     meta: None,
                     replaces: None,
+                    truncation: None,
                 },
                 last_time,
             )?;
@@ -1486,6 +1487,7 @@ mod tests {
                 text: "hello world, this is a prompt".into(),
                 injected: false,
                 images: Vec::new(),
+                channel: None,
             })
             .unwrap();
         session
@@ -1534,6 +1536,7 @@ mod tests {
                     text: format!("message {i}"),
                     injected: false,
                     images: Vec::new(),
+                    channel: None,
                 })
                 .unwrap();
         }
@@ -1585,6 +1588,7 @@ mod tests {
                 text: "u1\nsecond line".into(),
                 injected: false,
                 images: Vec::new(),
+                channel: None,
             })
             .unwrap();
         session.append(SessionEvent::TurnStart { turn: 1 }).unwrap();
@@ -1613,6 +1617,7 @@ mod tests {
                 text: "u2".into(),
                 injected: false,
                 images: Vec::new(),
+                channel: None,
             })
             .unwrap();
         session.append(SessionEvent::TurnStart { turn: 2 }).unwrap();
@@ -1636,6 +1641,7 @@ mod tests {
                 error_identity: None,
                 meta: None,
                 replaces: None,
+                truncation: None,
             })
             .unwrap();
         session.append(chunk("y")).unwrap();
@@ -1704,6 +1710,7 @@ mod tests {
             text: text.into(),
             injected: false,
             images: Vec::new(),
+            channel: None,
         };
         // 轮次 1:u1 + 工具×3 对 + 结算 + 收尾(展示位次 0..9);
         // 轮次 2/3:各 4 条展示事件的小轮次。尾部小轮次合计不足 limit 时,
@@ -1735,6 +1742,7 @@ mod tests {
                         error_identity: None,
                         meta: None,
                         replaces: None,
+                        truncation: None,
                     })
                     .unwrap();
             }
@@ -1823,6 +1831,7 @@ mod tests {
                 text: "fresh excerpt".into(),
                 injected: false,
                 images: Vec::new(),
+                channel: None,
             })
             .unwrap();
         let summary = store.list().unwrap();
@@ -1843,6 +1852,7 @@ mod tests {
                 text: "file-based excerpt".into(),
                 injected: false,
                 images: Vec::new(),
+                channel: None,
             })
             .unwrap();
         // 强制落盘:TurnEnd 边界会 flush。
@@ -1877,6 +1887,7 @@ mod tests {
                 text: "hi".into(),
                 injected: false,
                 images: Vec::new(),
+                channel: None,
             })
             .unwrap();
         let file = session.file().to_path_buf();
@@ -1926,6 +1937,7 @@ mod tests {
                 text: "ping".into(),
                 injected: false,
                 images: Vec::new(),
+                channel: None,
             })
             .unwrap();
         let messages = session.derive_messages();
@@ -1963,6 +1975,7 @@ mod tests {
                 text: "uno".into(),
                 injected: false,
                 images: Vec::new(),
+                channel: None,
             })
             .unwrap();
         session
@@ -1970,6 +1983,7 @@ mod tests {
                 text: "dos".into(),
                 injected: false,
                 images: Vec::new(),
+                channel: None,
             })
             .unwrap();
         let after = session.events_after(1);
@@ -1990,6 +2004,7 @@ mod tests {
                 text: "first".into(),
                 injected: false,
                 images: Vec::new(),
+                channel: None,
             })
             .unwrap();
         session.append(SessionEvent::TurnStart { turn: 1 }).unwrap();
@@ -2001,6 +2016,7 @@ mod tests {
                 text: "second".into(),
                 injected: false,
                 images: Vec::new(),
+                channel: None,
             })
             .unwrap();
         session.append(SessionEvent::TurnStart { turn: 2 }).unwrap();
@@ -2035,6 +2051,7 @@ mod tests {
                 text: "first".into(),
                 injected: false,
                 images: Vec::new(),
+                channel: None,
             })
             .unwrap();
         source
@@ -2060,6 +2077,7 @@ mod tests {
                 text: "running".into(),
                 injected: false,
                 images: Vec::new(),
+                channel: None,
             })
             .unwrap();
         let source_events = source.events();

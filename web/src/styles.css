@@ -1721,6 +1721,34 @@ button {
   flex: none;
 }
 
+/* 死循环保护提示行:警示色文案 + 下划线可点「继续」。
+   样式基准同 .markdown a(下划线用弱边框色,悬停强调)。 */
+.turn-chrome .loop-hint {
+  color: var(--warn);
+  white-space: nowrap;
+}
+
+.turn-chrome .loop-continue {
+  appearance: none;
+  background: none;
+  border: none;
+  padding: 0 0 1px;
+  margin-left: 4px;
+  font: inherit;
+  color: var(--label-primary);
+  cursor: pointer;
+  text-decoration: underline;
+  text-decoration-color: var(--border-l3);
+  text-underline-offset: 2px;
+  transition: text-decoration-color var(--ease), color var(--ease);
+}
+
+.turn-chrome .loop-continue:hover,
+.turn-chrome .loop-continue:focus-visible {
+  color: var(--accent);
+  text-decoration-color: var(--accent);
+}
+
 /* LLM 总结压缩的边界标记(学 Claude Code compact boundary):整行按钮
    折叠摘要,meta 行展示 token 前后对比(超长时省略号截断)。 */
 .compaction-row {

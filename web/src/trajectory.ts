@@ -65,8 +65,8 @@ export interface TrajectoryGroup {
   turn: number | null
   /** 轮次未闭合(进行中)。 */
   open: boolean
-  /** 结束原因(轮次闭合时);组头据此显示完成/中止/超长/出错/中断徽标。 */
-  endReason?: 'completed' | 'aborted' | 'max-tokens' | 'error' | 'interrupted'
+  /** 结束原因(轮次闭合时);组头据此显示完成/中止/超长/出错/死循环/中断徽标。 */
+  endReason?: 'completed' | 'aborted' | 'max-tokens' | 'error' | 'loop-detected' | 'interrupted'
   startTime: number
   endTime: number
   /** 墙钟跨度(endTime − startTime)。 */

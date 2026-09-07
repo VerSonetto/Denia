@@ -19,7 +19,8 @@ use denia_core::tool::ToolSchema;
 use ignore::WalkBuilder;
 use serde::Deserialize;
 
-use crate::{Tool, ToolContext, ToolOutput, parse_args_lenient, resolve_within};
+use crate::support::parse_tool_args;
+use crate::{Tool, ToolContext, ToolOutput, resolve_within};
 
 const DEFAULT_MAX_RESULTS: usize = 100;
 const HARD_MAX_RESULTS: usize = 5_000;
@@ -98,6 +99,9 @@ struct GlobArgs {
     /// 最多返回的路径数(默认 100,上限 5000)。
     #[serde(default)]
     max_results: Option<usize>,
+    /// 跳过排序后(最新在前)的前 N 条路径,与 max_results 组成分页。
+    #[serde(default)]
+    offset: usize,
 }
 
 /// Finds files whose paths match a glob pattern.
@@ -110,26 +114,29 @@ impl GlobTool {
         Self {
             schema: ToolSchema {
                 name: "glob".to_string(),
-                description: "Find files whose paths match a glob pattern. Returns matching file paths — never directories — \
-                    in modification-time order, newest first. A pattern with no \"/\" matches the basename at any depth, so \
-                    \"*.rs\" searches the whole tree. Hidden, ignored, and VCS-metadata files are excluded from discovery."
-                    .to_string(),
+                description: "按 glob 模式查找文件,返回匹配的文件路径(不含目录),按修改时间从新到旧排序。模式里没有 \"/\" 时匹配任意深度的文件名,所以 \"*.rs\" 会搜索整棵树。默认包含隐藏文件,VCS 元数据目录(.git 等)排除。结果多时用 offset/max_results 分页。".to_string(),
                 parameters: serde_json::json!({
                     "type": "object",
                     "properties": {
                         "pattern": {
                             "type": "string",
-                            "description": "Glob pattern (e.g. \"**/*.ts\", \"src/**/*.test.js\", \"*.{rs,toml}\"). A pattern with no \"/\" matches at any depth."
+                            "description": "glob 模式(如 \"**/*.ts\"、\"src/**/*.test.js\"、\"*.{rs,toml}\");没有 \"/\" 时匹配任意深度。"
                         },
                         "path": {
                             "type": "string",
-                            "description": "Directory to search in. Defaults to the session workspace; a relative path resolves against it."
+                            "description": "搜索目录,默认会话工作区;相对路径锚定会话工作区。"
                         },
                         "max_results": {
                             "type": "integer",
                             "minimum": 1,
                             "maximum": HARD_MAX_RESULTS as i64,
-                            "description": "Max paths to return. Default 100."
+                            "description": "最多返回的路径数,默认 100。"
+                        },
+                        "offset": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "default": 0,
+                            "description": "跳过排序后前 N 条路径(从 0 开始);与 max_results 配合分页浏览完整结果。"
                         }
                     },
                     "required": ["pattern"]
@@ -152,41 +159,41 @@ impl Tool for GlobTool {
     }
 
     async fn execute(&self, arguments: &str, ctx: &ToolContext) -> ToolOutput {
-        let args: GlobArgs = match parse_args_lenient(arguments) {
+        let args: GlobArgs = match parse_tool_args(arguments) {
             Ok(args) => args,
             Err(error) => {
-                return ToolOutput {
-                    content: format!("invalid arguments: {error}"),
-                    is_error: true,
-                };
+                return ToolOutput::error(format!(
+                    "[工具错误] 参数解析失败:{error}\n建议:参数必须是 JSON 对象,必填字段为 pattern(字符串)"
+                ));
             }
         };
         if args.pattern.trim().is_empty() {
-            return ToolOutput {
-                content: "pattern must be a non-empty string".to_string(),
-                is_error: true,
-            };
+            return ToolOutput::error(
+                "[工具错误] pattern 不能为空\n建议:pattern 是 glob 模式,如 \"**/*.ts\";没有 \"/\" 时匹配任意深度的文件名",
+            );
         }
         let root = match resolve_within(&ctx.cwd, args.path.as_deref().unwrap_or("."), ctx.confined)
         {
             Ok(path) => path,
             Err(message) => {
-                return ToolOutput {
-                    content: message,
-                    is_error: true,
-                };
+                return ToolOutput::error(format!(
+                    "[工具错误] {message}\n建议:相对路径锚定会话工作区;确认目录存在"
+                ));
             }
         };
         if !root.is_dir() {
-            return ToolOutput {
-                content: format!("path '{}' is not a directory", root.display()),
-                is_error: true,
-            };
+            return ToolOutput::error(format!(
+                "[工具错误] '{}' 不是目录\n建议:path 参数必须是存在的目录;找文件请用 grep 或 read_file",
+                root.display()
+            ));
         }
         let max = args
             .max_results
             .unwrap_or(DEFAULT_MAX_RESULTS)
             .clamp(1, HARD_MAX_RESULTS);
+        let offset = args.offset;
+        // 每线程 batch 收集前 offset+max 条,归并排序后切窗口 [offset, offset+max)。
+        let collect_cap = offset.saturating_add(max);
 
         let cancel = ctx.cancel.clone();
         let display_root = ctx.cwd.clone();
@@ -220,7 +227,8 @@ impl Tool for GlobTool {
             walker.run(|| {
                 let cancel = cancel.clone();
                 let overflow = Arc::clone(&overflow);
-                let mut batch = TopNBatch::new(max, Arc::clone(&batches), Arc::clone(&total_hits));
+                let mut batch =
+                    TopNBatch::new(collect_cap, Arc::clone(&batches), Arc::clone(&total_hits));
                 Box::new(move |entry| {
                     if cancel.is_cancelled() {
                         return ignore::WalkState::Quit;
@@ -279,46 +287,47 @@ impl Tool for GlobTool {
         match result {
             Ok(Ok((ranked, total, overflow))) => {
                 if ranked.is_empty() {
-                    return ToolOutput {
-                        content: "No files found".to_string(),
-                        is_error: false,
-                    };
+                    return ToolOutput::text("未找到匹配的文件");
                 }
-                let shown_len = ranked.len().min(max);
+                let skipped = offset.min(ranked.len());
+                let window: Vec<_> = ranked.iter().skip(skipped).take(max).collect();
+                if window.is_empty() {
+                    return ToolOutput::text(format!(
+                        "offset={offset} 之后再无匹配路径(总共 {total} 条);减小 offset 或缩小 pattern"
+                    ));
+                }
                 let mut output = String::new();
-                for path in ranked.iter().take(max) {
+                for (modified, path) in &window {
                     if !output.is_empty() {
                         output.push('\n');
                     }
+                    let _ = modified;
                     let rel = path
-                        .1
                         .strip_prefix(&display_root)
-                        .unwrap_or(&path.1)
+                        .unwrap_or(path)
                         .to_string_lossy()
                         .replace('\\', "/");
                     output.push_str(&rel);
                 }
-                if total > max {
+                let remaining_total = total.saturating_sub(skipped);
+                if remaining_total > window.len() {
                     output.push_str(&format!(
-                        "\n\n(Showing {shown_len} of {total} paths; narrow the pattern to see more)"
+                        "\n\n(显示第 {}-{} 条,共 {total} 条;增大 offset 看下一页,或缩小 pattern)",
+                        skipped + 1,
+                        skipped + window.len()
                     ));
                 }
                 if overflow {
-                    output.push_str("\n\n(collection capped; results may be incomplete)");
+                    output.push_str("\n\n(收集已达上限,结果可能不完整)");
                 }
-                ToolOutput {
-                    content: output,
-                    is_error: false,
-                }
+                ToolOutput::text(output)
             }
-            Ok(Err(message)) => ToolOutput {
-                content: message,
-                is_error: true,
-            },
-            Err(join_error) => ToolOutput {
-                content: format!("glob worker failed: {join_error}"),
-                is_error: true,
-            },
+            Ok(Err(message)) => ToolOutput::error(format!(
+                "[工具错误] {message}\n建议:核对 glob 模式语法;没有 \"/\" 的模式匹配任意深度的文件名"
+            )),
+            Err(join_error) => ToolOutput::error(format!(
+                "[工具错误] glob 任务失败:{join_error}\n建议:请重试一次"
+            )),
         }
     }
 }
@@ -426,7 +435,46 @@ mod tests {
             .execute(r#"{"pattern":"*.txt","max_results":5}"#, &ctx)
             .await;
         assert!(!out.is_error);
-        assert!(out.content.contains("Showing 5 of 20"), "{}", out.content);
+        assert!(out.content.contains("共 20 条"), "{}", out.content);
+        assert!(out.content.contains("增大 offset"), "{}", out.content);
+        std::fs::remove_dir_all(&ctx.cwd).unwrap();
+    }
+
+    #[tokio::test]
+    async fn offset_pages_through_results() {
+        let root = temp_root();
+        for i in 0..8 {
+            touch(&root.join(format!("f{i}.txt")));
+            std::thread::sleep(std::time::Duration::from_millis(15));
+        }
+        let ctx = context(root);
+        let tool = GlobTool::new();
+        // 第一页:最新 3 条(f7..f5)。
+        let page1 = tool
+            .execute(r#"{"pattern":"*.txt","max_results":3}"#, &ctx)
+            .await;
+        assert!(!page1.is_error, "{}", page1.content);
+        let lines1: Vec<&str> = page1.content.lines().collect();
+        assert_eq!(lines1[0], "f7.txt", "{}", page1.content);
+        // 第二页:跳过 3 条,拿下一批(f4..f2)。
+        let page2 = tool
+            .execute(r#"{"pattern":"*.txt","max_results":3,"offset":3}"#, &ctx)
+            .await;
+        assert!(!page2.is_error, "{}", page2.content);
+        let lines2: Vec<&str> = page2.content.lines().collect();
+        assert_eq!(lines2[0], "f4.txt", "{}", page2.content);
+        assert!(lines2.contains(&"f2.txt"), "{}", page2.content);
+        assert!(!page2.content.contains("f7.txt"), "{}", page2.content);
+        // 越界 offset:明确提示。
+        let past = tool
+            .execute(r#"{"pattern":"*.txt","offset":100}"#, &ctx)
+            .await;
+        assert!(!past.is_error, "{}", past.content);
+        assert!(
+            past.content.contains("offset=100 之后再无匹配路径"),
+            "{}",
+            past.content
+        );
         std::fs::remove_dir_all(&ctx.cwd).unwrap();
     }
 

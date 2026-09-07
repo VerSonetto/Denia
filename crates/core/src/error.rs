@@ -26,6 +26,8 @@ pub mod codes {
     pub const STREAM_CLOSED: &str = "STREAM_CLOSED";
     pub const STEP_LIMIT: &str = "STEP_LIMIT";
     pub const SETTINGS: &str = "SETTINGS";
+    /// 会话日志存储故障(append/flush 失败等 IO 层问题)。
+    pub const STORAGE: &str = "STORAGE";
     pub const UNKNOWN: &str = "UNKNOWN";
 }
 

@@ -154,6 +154,8 @@ export type TurnEndReason =
   | { kind: 'aborted' }
   | { kind: 'max-tokens' }
   | { kind: 'error'; failure: LlmFailure }
+  /** 死循环保护:模型连续输出完全相同的内容达到阈值,driver 强制中断。 */
+  | { kind: 'loop-detected'; repeats?: number }
   // 崩溃孤儿轮次的合成闭合(服务端 close_orphaned_turn 生成)。
   | { kind: 'interrupted' }
 
@@ -228,6 +230,8 @@ export type SessionEnvelope =
       content: string
       is_error: boolean
       error?: string
+      /** 输出截断事实(统一输出预算产出);缺省 = 未截断。 */
+      truncation?: { total_chars: number; shown_chars: number }
       /** 工具结果剪枝替换:本事件是对旧 tool-result 事件(seq)的 surface 替换。 */
       replaces?: number
     }

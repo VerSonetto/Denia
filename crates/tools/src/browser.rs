@@ -167,6 +167,7 @@ fn render_outcome(outcome: CommandOutcome, ctx: &ToolContext, screenshot: bool) 
                                 mime: image.mime_type.clone(),
                                 data: image.base64.clone(),
                             }],
+                            channel: None,
                         });
                     }
                     text.push_str("\n(截图已注入会话,模型可直接看到)");

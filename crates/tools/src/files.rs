@@ -3,8 +3,12 @@
 //! `read_file` 读取图片文件时(魔数识别 png/jpeg/gif/webp/bmp)不返回乱码,
 //! 而是把图片作为视觉输入注入会话(需要当前模型标记为可识图),
 //! 与 DSH 的"读图工具"一致 —— 只是这里复用 read_file 一个入口。
+//!
+//! 性能与容错约定(见 [`crate::support`]):
+//! - 阻塞 fs 调用全部走 `spawn_blocking`,不挡异步运行时;
+//! - 参数解析走 [`parse_tool_args`](宽容:别名提升 + 字符串数字强转);
+//! - 字符级截断不在这里做——统一由落盘层的输出预算收敛。
 
-use std::fs::File;
 use std::io::{BufRead, BufReader};
 
 use async_trait::async_trait;
@@ -13,12 +17,13 @@ use denia_core::tool::ToolSchema;
 use serde::Deserialize;
 
 use crate::permission::{denial_marker, escalation_hint};
-use crate::{Tool, ToolContext, ToolOutput, parse_args_lenient, resolve_within, truncate};
+use crate::support::{parse_tool_args, tool_error};
+use crate::{Tool, ToolContext, ToolOutput, resolve_within};
 
-/// 单次 read_file 返回的最大字符数(安全阀,防止单行超长把上下文撑爆)。
-const READ_CAP: usize = 32_000;
 /// read_file 默认最多读取的行数。
 const DEFAULT_READ_LIMIT: u64 = 400;
+/// 单行最大保留字符数:超长行(如压缩过的 JS)截断并标注,防止一行撑爆预算。
+const MAX_LINE_CHARS: usize = 2_000;
 
 /// 图片魔数表:(magic 前缀, mime)。
 const IMAGE_MAGICS: &[(&[u8], &str)] = &[
@@ -124,22 +129,22 @@ impl ReadFileTool {
         Self {
             schema: ToolSchema {
                 name: "read_file".to_string(),
-                description: "Read one UTF-8 text file from the session workspace. Relative paths anchor at the workspace.".to_string(),
+                description: "读取会话工作区中的一个 UTF-8 文本文件。相对路径锚定会话工作区;大文件用 offset/limit 分页读取。读取图片文件(png/jpeg/gif/webp/bmp)时图片会作为视觉输入注入会话(需要可识图模型)。".to_string(),
                 parameters: serde_json::json!({
                     "type": "object",
                     "properties": {
-                        "path": { "type": "string" },
+                        "path": { "type": "string", "description": "文件路径;相对路径锚定会话工作区。" },
                         "offset": {
                             "type": "integer",
                             "minimum": 1,
                             "default": 1,
-                            "description": "1-based start line. Defaults to 1."
+                            "description": "1-based 起始行号,从 1 开始计数。默认 1。"
                         },
                         "limit": {
                             "type": "integer",
                             "minimum": 1,
                             "default": 400,
-                            "description": "Maximum number of lines to read. Defaults to 400."
+                            "description": "本次最多读取的行数。默认 400;需要看更多内容时用更大的 offset 继续读取。"
                         }
                     },
                     "required": ["path"]
@@ -155,6 +160,17 @@ impl Default for ReadFileTool {
     }
 }
 
+/// 单行防护:超长行截断并标注(按字符截断,不撕 UTF-8)。
+fn guard_line(line: &str) -> String {
+    let mut chars = line.chars();
+    let head: String = chars.by_ref().take(MAX_LINE_CHARS).collect();
+    if chars.next().is_some() {
+        format!("{head}…[本行超长,已截断]")
+    } else {
+        head
+    }
+}
+
 #[async_trait]
 impl Tool for ReadFileTool {
     fn schema(&self) -> &ToolSchema {
@@ -162,117 +178,148 @@ impl Tool for ReadFileTool {
     }
 
     async fn execute(&self, arguments: &str, ctx: &ToolContext) -> ToolOutput {
-        let args: ReadArgs = match parse_args_lenient(arguments) {
+        let args: ReadArgs = match parse_tool_args(arguments) {
             Ok(args) => args,
             Err(error) => {
-                return ToolOutput {
-                    content: format!("invalid arguments: {error}"),
-                    is_error: true,
-                };
+                return tool_error(
+                    format!("参数解析失败:{error}"),
+                    "参数必须是 JSON 对象,必填字段为 path(字符串)",
+                );
             }
         };
         if args.offset < 1 || args.limit < 1 {
-            return ToolOutput {
-                content: "invalid arguments: offset and limit must be >= 1".to_string(),
-                is_error: true,
-            };
+            return tool_error(
+                "offset 和 limit 必须 ≥ 1",
+                "offset 是 1-based 起始行号(从 1 开始);limit 是读取行数",
+            );
         }
         let path = match resolve_within(&ctx.cwd, &args.path, ctx.confined) {
             Ok(path) => path,
             Err(message) => {
-                return ToolOutput {
-                    content: message,
-                    is_error: true,
-                };
-            }
-        };
-        // 图片文件:不走文本截断,而是作为视觉输入注入会话。
-        if let Ok(data) = std::fs::read(&path) {
-            if let Some((mime, width, height)) = sniff_image(&data) {
-                if !ctx.vision_supported {
-                    return ToolOutput {
-                        content: format!(
-                            "图片需要识图模型:{} 是 {}(尺寸 {:?}x{:?});当前模型未标记为可识图,请切换到支持图片输入的模型后再读取。",
-                            args.path, mime, width, height
-                        ),
-                        is_error: true,
-                    };
-                }
-                let b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &data);
-                let image = denia_core::message::ImageData {
-                    mime: mime.to_string(),
-                    data: b64,
-                };
-                // 注入视觉输入(下一条模型请求即可见),与 dsh read-image 的语义一致。
-                if let Some(sink) = &ctx.emit_event {
-                    sink(denia_core::session::SessionEvent::UserMessage {
-                        text: format!("[harness] 读取图片:{}({})", args.path, mime),
-                        injected: true,
-                        images: vec![image],
-                    });
-                }
-                let dimension = match (width, height) {
-                    (Some(w), Some(h)) => format!("{w}x{h}"),
-                    _ => "unknown size".to_string(),
-                };
-                return ToolOutput {
-                    content: format!(
-                        "已读取图片 {} ({} · {} · {} bytes),图片内容已作为视觉输入注入会话,后续步骤可见。",
-                        args.path,
-                        mime,
-                        dimension,
-                        data.len()
+                return tool_error(
+                    message,
+                    format!(
+                        "相对路径锚定会话工作区 {};确认文件是否存在",
+                        ctx.cwd.display()
                     ),
-                    is_error: false,
-                };
-            }
-        }
-        // 文本文件:按行读取 offset/limit,再用字符硬顶兜底。
-        let file = match File::open(&path) {
-            Ok(file) => file,
-            Err(error) => {
-                return ToolOutput {
-                    content: format!("read failed: {error}"),
-                    is_error: true,
-                };
+                );
             }
         };
-        let reader = BufReader::new(file);
-        let mut lines: Vec<String> = Vec::new();
-        let mut current: u64 = 0;
-        for line in reader.lines() {
-            current += 1;
-            if current < args.offset {
-                continue;
+        // 图片嗅探 + 文本读取都是阻塞 IO,整体丢进 blocking 池。
+        let path_for_sniff = path.clone();
+        let sniffed = tokio::task::spawn_blocking(move || std::fs::read(&path_for_sniff).ok())
+            .await
+            .ok()
+            .flatten();
+        // 图片文件:不走文本截断,而是作为视觉输入注入会话。
+        if let Some(data) = &sniffed
+            && let Some((mime, width, height)) = sniff_image(data)
+        {
+            if !ctx.vision_supported {
+                return tool_error(
+                    format!(
+                        "图片需要识图模型:{} 是 {}(尺寸 {:?}x{:?}),当前模型未标记为可识图",
+                        args.path, mime, width, height
+                    ),
+                    "切换到支持图片输入的模型后再读取该文件",
+                );
             }
-            if lines.len() as u64 >= args.limit {
-                break;
+            let b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, data);
+            let image = denia_core::message::ImageData {
+                mime: mime.to_string(),
+                data: b64,
+            };
+            // 注入视觉输入(下一条模型请求即可见),与 dsh read-image 的语义一致。
+            if let Some(sink) = &ctx.emit_event {
+                sink(denia_core::session::SessionEvent::UserMessage {
+                    text: format!("[harness] 读取图片:{}({})", args.path, mime),
+                    injected: true,
+                    channel: Some("image".into()),
+                    images: vec![image],
+                });
             }
-            match line {
-                Ok(text) => lines.push(text),
-                Err(error) => {
-                    return ToolOutput {
-                        content: format!("read failed: {error}"),
-                        is_error: true,
-                    };
+            let dimension = match (width, height) {
+                (Some(w), Some(h)) => format!("{w}x{h}"),
+                _ => "尺寸未知".to_string(),
+            };
+            return ToolOutput::text(format!(
+                "已读取图片 {} ({} · {} · {} 字节),图片内容已作为视觉输入注入会话,后续步骤可见。",
+                args.path,
+                mime,
+                dimension,
+                data.len()
+            ));
+        }
+        // 文本文件:按行读取 offset/limit;字符级预算由落盘层统一兜底。
+        let read = {
+            let path = path.clone();
+            let offset = args.offset;
+            let limit = args.limit;
+            tokio::task::spawn_blocking(move || read_lines(&path, offset, limit)).await
+        };
+        match read {
+            Ok(Ok((lines, truncated_lines))) => {
+                let count = lines.len();
+                let end = if count == 0 {
+                    args.offset
+                } else {
+                    args.offset + count as u64 - 1
+                };
+                let body = lines.join("\n");
+                let mut content = format!(
+                    "{} 第 {}-{} 行（{} 行）:\n{}",
+                    args.path, args.offset, end, count, body
+                );
+                if truncated_lines > 0 {
+                    content.push_str(&format!(
+                        "\n\n({truncated_lines} 行因单行超长被截断;超长单行可用 bash 处理)"
+                    ));
                 }
+                if count == args.limit as usize {
+                    content.push_str(&format!(
+                        "\n\n(已达 limit={};文件可能还有更多行,用 offset={} 继续读取)",
+                        args.limit,
+                        end + 1
+                    ));
+                }
+                ToolOutput::text(content)
             }
-        }
-        let count = lines.len();
-        let end = if count == 0 {
-            args.offset
-        } else {
-            args.offset + count as u64 - 1
-        };
-        let body = truncate(&lines.join("\n"), READ_CAP);
-        ToolOutput {
-            content: format!(
-                "{} 第 {}-{} 行（{} 行）:\n{}",
-                args.path, args.offset, end, count, body
+            Ok(Err(message)) => tool_error(
+                format!("读取 {} 失败:{message}", args.path),
+                "确认文件存在且是 UTF-8 文本;目录请用 glob 列出",
             ),
-            is_error: false,
+            Err(join_error) => tool_error(format!("读取任务失败:{join_error}"), "请重试一次"),
         }
     }
+}
+
+/// 阻塞读行:返回 (行文本列表, 因单行超长被截断的行数)。
+fn read_lines(
+    path: &std::path::Path,
+    offset: u64,
+    limit: u64,
+) -> Result<(Vec<String>, usize), String> {
+    let file = std::fs::File::open(path).map_err(|error| error.to_string())?;
+    let reader = BufReader::new(file);
+    let mut lines: Vec<String> = Vec::new();
+    let mut truncated_lines = 0usize;
+    let mut current: u64 = 0;
+    for line in reader.lines() {
+        current += 1;
+        if current < offset {
+            continue;
+        }
+        if lines.len() as u64 >= limit {
+            break;
+        }
+        let text = line.map_err(|error| error.to_string())?;
+        let guarded = guard_line(&text);
+        if guarded.len() != text.len() {
+            truncated_lines += 1;
+        }
+        lines.push(guarded);
+    }
+    Ok((lines, truncated_lines))
 }
 
 /// Overwrites one UTF-8 text file in the session workspace.
@@ -285,20 +332,20 @@ impl WriteFileTool {
         Self {
             schema: ToolSchema {
                 name: "write_file".to_string(),
-                description: "Write one UTF-8 text file in the session workspace, creating parent directories and overwriting any existing file.".to_string(),
+                description: "在会话工作区写入一个 UTF-8 文本文件:自动创建父目录,已存在的文件会被整体覆盖。新建文件或全量重写用本工具;对现有文件做局部修改请优先用 edit。".to_string(),
                 parameters: serde_json::json!({
                     "type": "object",
                     "properties": {
-                        "path": { "type": "string" },
-                        "content": { "type": "string" },
+                        "path": { "type": "string", "description": "目标文件路径;相对路径锚定会话工作区。" },
+                        "content": { "type": "string", "description": "完整文件内容(整体覆盖写入)。" },
                         "sandbox_permissions": {
                             "type": "string",
                             "enum": ["workspace-write", "danger-full-access"],
-                            "description": "The wider sandbox mode this file operation needs. Only valid as a one-shot retry of an operation the sandbox just denied; requires justification and user approval."
+                            "description": "本次文件操作需要的更宽沙箱模式;仅用于对刚被沙箱拒绝的操作做一次性重试,必须搭配 justification,且需要用户审批。"
                         },
                         "justification": {
                             "type": "string",
-                            "description": "Required with sandbox_permissions: one sentence for the user explaining why this exact file operation needs the wider access."
+                            "description": "与 sandbox_permissions 搭配必填:一句话向用户说明为什么这个文件操作需要更宽的权限。"
                         }
                     },
                     "required": ["path", "content"]
@@ -321,70 +368,73 @@ impl Tool for WriteFileTool {
     }
 
     async fn execute(&self, arguments: &str, ctx: &ToolContext) -> ToolOutput {
-        let args: WriteArgs = match parse_args_lenient(arguments) {
+        let args: WriteArgs = match parse_tool_args(arguments) {
             Ok(args) => args,
             Err(error) => {
-                return ToolOutput {
-                    content: format!("invalid arguments: {error}"),
-                    is_error: true,
-                };
+                return tool_error(
+                    format!("参数解析失败:{error}"),
+                    "参数必须是 JSON 对象,必填字段为 path 和 content(都是字符串)",
+                );
             }
         };
         let effective = ctx.effective_permission();
         if effective == PermissionMode::ReadOnly {
-            return ToolOutput {
-                content: format!(
-                    "{}\n{}",
-                    denial_marker(effective),
-                    escalation_hint("operation")
-                ),
-                is_error: true,
-            };
+            return ToolOutput::error(format!(
+                "{}\n{}",
+                denial_marker(effective),
+                escalation_hint("operation")
+            ));
         }
-        let path = match resolve_within(&ctx.cwd, &args.path, false) {
+        // confined 语义与读取类工具一致:沙箱开启时路径必须落在 cwd 内。
+        let path = match resolve_within(&ctx.cwd, &args.path, ctx.confined) {
             Ok(path) => path,
             Err(message) => {
-                return ToolOutput {
-                    content: message,
-                    is_error: true,
-                };
+                return tool_error(
+                    message,
+                    "相对路径锚定会话工作区;沙箱开启时不能写工作区之外的路径",
+                );
             }
         };
         if effective == PermissionMode::WorkspaceWrite && !path.starts_with(&ctx.cwd) {
-            return ToolOutput {
-                content: format!(
-                    "{}\n{}",
-                    denial_marker(effective),
-                    escalation_hint("operation")
-                ),
-                is_error: true,
-            };
+            return ToolOutput::error(format!(
+                "{}\n{}",
+                denial_marker(effective),
+                escalation_hint("operation")
+            ));
         }
         if let Some(parent) = path.parent() {
             if let Err(error) = std::fs::create_dir_all(parent) {
-                return ToolOutput {
-                    content: format!("create_dir_all failed: {error}"),
-                    is_error: true,
-                };
+                return tool_error(
+                    format!("创建父目录失败:{error}"),
+                    "确认路径合法且当前权限允许写该目录",
+                );
             }
         }
-        if let Some(file_history) = &ctx.file_history {
-            if let Err(message) = file_history.track_before_write(&path).await {
-                return ToolOutput {
-                    content: format!("file history backup failed: {message}"),
-                    is_error: true,
-                };
-            }
+        if let Some(file_history) = &ctx.file_history
+            && let Err(message) = file_history.track_before_write(&path).await
+        {
+            return tool_error(
+                format!("文件历史备份失败:{message}"),
+                "备份失败时不会写入;可重试一次,持续失败请报告",
+            );
         }
-        match std::fs::write(&path, &args.content) {
-            Ok(()) => ToolOutput {
-                content: format!("wrote {} bytes to {}", args.content.len(), args.path),
-                is_error: false,
-            },
-            Err(error) => ToolOutput {
-                content: format!("write failed: {error}"),
-                is_error: true,
-            },
+        // 阻塞写盘丢进 blocking 池。
+        let write = {
+            let path = path.clone();
+            let content = args.content.clone();
+            tokio::task::spawn_blocking(move || std::fs::write(&path, content.as_bytes())).await
+        };
+        match write {
+            Ok(Ok(())) => ToolOutput::text(format!(
+                "已写入 {} 字节到 {}",
+                args.content.len(),
+                args.path
+            )),
+            Ok(Err(error)) => tool_error(
+                format!("写入 {} 失败:{error}", args.path),
+                "确认目标路径可写;文件被占用时稍后重试",
+            ),
+            Err(join_error) => tool_error(format!("写入任务失败:{join_error}"), "请重试一次"),
         }
     }
 }
@@ -471,6 +521,23 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn read_file_accepts_string_offset_and_path_alias() {
+        // 常见错误调用兼容:"offset" 传字符串数字、路径放在 file 字段。
+        let (_guard, ctx) = workspace();
+        let content = (1..=10)
+            .map(|i| format!("line{i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(ctx.cwd.join("lines.txt"), &content).unwrap();
+        let reader = ReadFileTool::new();
+        let out = reader
+            .execute(r#"{"file":"lines.txt","offset":"3","limit":"4"}"#, &ctx)
+            .await;
+        assert!(!out.is_error, "{}", out.content);
+        assert!(out.content.contains("第 3-6 行（4 行）"));
+    }
+
+    #[tokio::test]
     async fn read_file_defaults_to_400_lines() {
         let (_guard, ctx) = workspace();
         let content = (1..=410)
@@ -485,6 +552,20 @@ mod tests {
         assert!(out.content.contains("line1"));
         assert!(out.content.contains("line400"));
         assert!(!out.content.contains("line401"));
+        // 分页提示:告诉模型如何继续读。
+        assert!(out.content.contains("offset=401"), "{}", out.content);
+    }
+
+    #[tokio::test]
+    async fn overly_long_line_is_guarded() {
+        let (_guard, ctx) = workspace();
+        let long = "x".repeat(MAX_LINE_CHARS + 500);
+        std::fs::write(ctx.cwd.join("long.txt"), &long).unwrap();
+        let reader = ReadFileTool::new();
+        let out = reader.execute(r#"{"path":"long.txt"}"#, &ctx).await;
+        assert!(!out.is_error, "{}", out.content);
+        assert!(out.content.contains("本行超长,已截断"), "{}", out.content);
+        assert!(out.content.contains("1 行因单行超长被截断"), "{}", out.content);
     }
 
     #[tokio::test]
@@ -518,15 +599,17 @@ mod tests {
         let reader = ReadFileTool::new();
         let out = reader.execute(r#"{"path":"../outside.txt"}"#, &ctx).await;
         assert!(out.is_error);
-        assert!(out.content.contains("escapes"));
+        assert!(out.content.contains("越出了会话工作区"), "{}", out.content);
     }
 
     #[tokio::test]
-    async fn missing_file_is_error() {
+    async fn missing_file_is_error_with_hint() {
         let (_guard, ctx) = workspace();
         let reader = ReadFileTool::new();
         let out = reader.execute(r#"{"path":"nope.txt"}"#, &ctx).await;
         assert!(out.is_error);
+        assert!(out.content.contains("[工具错误]"), "{}", out.content);
+        assert!(out.content.contains("建议:"), "{}", out.content);
     }
 
     #[tokio::test]
@@ -579,12 +662,14 @@ mod tests {
         match &events[0] {
             denia_core::session::SessionEvent::UserMessage {
                 injected: true,
+                channel,
                 images,
                 ..
             } => {
                 assert_eq!(images.len(), 1);
                 assert_eq!(images[0].mime, "image/png");
                 assert!(!images[0].data.is_empty());
+                assert_eq!(channel.as_deref(), Some("image"));
             }
             other => panic!("expected injected user message, got {other:?}"),
         }

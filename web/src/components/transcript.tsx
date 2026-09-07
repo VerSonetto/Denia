@@ -27,6 +27,7 @@ export function Transcript({
   pendingMessages = [],
   onRewind,
   onFork,
+  onLoopContinue,
 }: {
   nodes: TranscriptNode[]
   /** 已发送未获确认的用户消息:渲染为尾部"发送中"行。 */
@@ -35,6 +36,8 @@ export function Transcript({
   onRewind?: (seq: number) => void
   /** 轮次收尾消息点击分支按钮时回调(以该消息 seq 为锚点)。 */
   onFork?: (seq: number) => void
+  /** 死循环提示行点「继续」:自动发送继续消息。 */
+  onLoopContinue?: () => void
 }) {
   if (nodes.length === 0 && pendingMessages.length === 0) {
     return <div className="empty-hint">{t('emptyTranscript')}</div>
@@ -57,6 +60,7 @@ export function Transcript({
             node={row.node}
             onRewind={onRewind}
             onFork={onFork}
+            onLoopContinue={onLoopContinue}
             showActions={
               row.node.kind === 'assistant' &&
               endedTurns.has(row.node.turn) &&
@@ -119,11 +123,14 @@ const NodeView = memo(function NodeView({
   node,
   onRewind,
   onFork,
+  onLoopContinue,
   showActions = false,
 }: {
   node: TranscriptNode
   onRewind?: (seq: number) => void
   onFork?: (seq: number) => void
+  /** 死循环提示行点「继续」:自动发送继续消息。 */
+  onLoopContinue?: () => void
   /** 已结束轮次的最后一条助手消息:显示复制/分支图标簇。 */
   showActions?: boolean
 }) {
@@ -149,7 +156,7 @@ const NodeView = memo(function NodeView({
       // Boundary marker; only carries the turn's start time.
       return null
     case 'turn-end':
-      return <TurnChrome node={node} />
+      return <TurnChrome node={node} onLoopContinue={onLoopContinue} />
     case 'tool':
       return <ToolRow node={node} />
     case 'compaction':
@@ -592,8 +599,11 @@ function ToolRow({ node }: { node: Extract<TranscriptNode, { kind: 'tool' }> }) 
 
 function TurnChrome({
   node,
+  onLoopContinue,
 }: {
   node: Extract<TranscriptNode, { kind: 'turn-end' }>
+  /** 死循环提示行点「继续」:自动发送继续消息。 */
+  onLoopContinue?: () => void
 }) {
   const { reason, usage } = node
   const label =
@@ -605,7 +615,9 @@ function TurnChrome({
           ? t('reasonMaxTokens')
           : reason.kind === 'interrupted'
             ? t('reasonInterrupted')
-            : `${t('reasonError')}: [${reason.failure?.code ?? 'unknown'}] ${reason.failure?.message ?? ''}`
+            : reason.kind === 'loop-detected'
+              ? t('loopDetectedHint')
+              : `${t('reasonError')}: [${reason.failure?.code ?? 'unknown'}] ${reason.failure?.message ?? ''}`
   const cls =
     reason.kind === 'completed' ? '' : reason.kind === 'error' ? 'err' : 'warn'
   return (
@@ -613,9 +625,23 @@ function TurnChrome({
       <span
         className={`dot ${reason.kind === 'completed' ? 'ok' : reason.kind === 'error' ? 'err' : 'run'}`}
       />
-      <span className={`reason ${cls}`} title={label}>
-        {label}
-      </span>
+      {reason.kind === 'loop-detected' ? (
+        // 死循环保护提示行:「继续」为下划线可点文字,点击自动发送继续消息。
+        <span className="reason loop-hint">
+          {t('loopDetectedHint')}
+          <button
+            type="button"
+            className="loop-continue"
+            onClick={onLoopContinue}
+          >
+            {t('loopDetectedContinue')}
+          </button>
+        </span>
+      ) : (
+        <span className={`reason ${cls}`} title={label}>
+          {label}
+        </span>
+      )}
       {usage && (
         <span className="usage-pill">
           {t('inputTokens')} {usage.inputTokens} · {t('outputTokens')}{' '}

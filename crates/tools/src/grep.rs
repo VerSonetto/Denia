@@ -24,7 +24,8 @@ use ignore::WalkBuilder;
 use regex::bytes::Regex;
 use serde::Deserialize;
 
-use crate::{Tool, ToolContext, ToolOutput, parse_args_lenient, resolve_within};
+use crate::support::parse_tool_args;
+use crate::{Tool, ToolContext, ToolOutput, resolve_within};
 
 const DEFAULT_MAX_MATCHES: usize = 200;
 const HARD_MAX_MATCHES: usize = 2_000;
@@ -52,6 +53,9 @@ struct GrepArgs {
     /// 最多保留的命中行数(默认 200,上限 2000)。
     #[serde(default)]
     max_matches: Option<usize>,
+    /// 跳过排序后(路径+行号)的前 N 条命中,与 max_matches 组成分页。
+    #[serde(default)]
+    offset: usize,
     /// 尊重 .gitignore/.ignore/隐藏文件(默认 true);false 时全树扫描。
     #[serde(default = "default_true")]
     respect_ignore: bool,
@@ -75,39 +79,41 @@ impl GrepTool {
         Self {
             schema: ToolSchema {
                 name: "grep".to_string(),
-                description: "Search file contents with a regular expression (used by ripgrep with the same syntax). \
-                    Matches come back as `path:line:content` rows, workspace-relative, grouped in traversal order; \
-                    the first `maxMatches` hits are returned. Respects .gitignore and hidden files unless disabled, \
-                    so searching a large tree stays fast. Use read_file on a matched file for surrounding context."
-                    .to_string(),
+                description: "用正则表达式(ripgrep 语法)搜索文件内容,结果按 path:line:content 逐行返回(工作区相对路径,按路径与行号排序)。默认尊重 .gitignore 与隐藏文件,大树上搜索也很快;命中多时用 offset/max_matches 分页。找到目标文件后用 read_file 读取上下文。".to_string(),
                 parameters: serde_json::json!({
                     "type": "object",
                     "properties": {
                         "pattern": {
                             "type": "string",
-                            "description": "Regular expression to search for (ripgrep syntax, e.g. \"foo|bar\", \"\\\\bstruct \\\\w+\\\\b\")."
+                            "description": "要搜索的正则表达式(ripgrep 语法,如 \"foo|bar\"、\"\\\\bstruct \\\\w+\\\\b\")。"
                         },
                         "path": {
                             "type": "string",
-                            "description": "File or directory to search. Defaults to the session workspace; a relative path resolves against it."
+                            "description": "搜索的文件或目录,默认会话工作区;相对路径锚定会话工作区。"
                         },
                         "include": {
                             "type": "string",
-                            "description": "One glob filter for which files to search (e.g. \"*.rs\", \"*.{js,jsx}\"). Not a list; negation is not supported."
+                            "description": "单个文件 glob 过滤(如 \"*.rs\"、\"*.{js,jsx}\");不是列表,不支持取反。"
                         },
                         "ignore_case": {
                             "type": "boolean",
-                            "description": "Case-insensitive matching. Default false."
+                            "description": "大小写不敏感匹配。默认 false。"
                         },
                         "max_matches": {
                             "type": "integer",
                             "minimum": 1,
                             "maximum": HARD_MAX_MATCHES as i64,
-                            "description": "Max matching lines to return. Default 200; the search stops early once reached."
+                            "description": "最多返回的命中行数,默认 200;达到后搜索提前停止。"
+                        },
+                        "offset": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "default": 0,
+                            "description": "跳过排序后前 N 条命中(从 0 开始);与 max_matches 配合分页获取更多命中。"
                         },
                         "respect_ignore": {
                             "type": "boolean",
-                            "description": "Respect .gitignore/.ignore and hidden files (default true). Set false to search ignored trees such as node_modules."
+                            "description": "尊重 .gitignore/.ignore 与隐藏文件(默认 true);设为 false 可搜索被忽略的目录(如 node_modules)。"
                         }
                     },
                     "required": ["pattern"]
@@ -130,58 +136,62 @@ impl Tool for GrepTool {
     }
 
     async fn execute(&self, arguments: &str, ctx: &ToolContext) -> ToolOutput {
-        let args: GrepArgs = match parse_args_lenient(arguments) {
+        let args: GrepArgs = match parse_tool_args(arguments) {
             Ok(args) => args,
             Err(error) => {
-                return ToolOutput {
-                    content: format!("invalid arguments: {error}"),
-                    is_error: true,
-                };
+                return ToolOutput::error(format!(
+                    "[工具错误] 参数解析失败:{error}\n建议:参数必须是 JSON 对象,必填字段为 pattern(字符串)"
+                ));
             }
         };
         if args.pattern.trim().is_empty() {
-            return ToolOutput {
-                content: "pattern must be a non-empty string".to_string(),
-                is_error: true,
-            };
+            return ToolOutput::error(
+                "[工具错误] pattern 不能为空\n建议:pattern 是正则表达式(ripgrep 语法);搜索单词可直接写单词本身",
+            );
         }
         let root = match resolve_within(&ctx.cwd, args.path.as_deref().unwrap_or("."), ctx.confined)
         {
             Ok(path) => path,
             Err(message) => {
-                return ToolOutput {
-                    content: message,
-                    is_error: true,
-                };
+                return ToolOutput::error(format!(
+                    "[工具错误] {message}\n建议:相对路径锚定会话工作区;确认路径存在"
+                ));
             }
         };
         if !root.exists() {
-            return ToolOutput {
-                content: format!("path '{}' does not exist", root.display()),
-                is_error: true,
-            };
+            return ToolOutput::error(format!(
+                "[工具错误] 路径 '{}' 不存在\n建议:用 glob 确认目录/文件位置",
+                root.display()
+            ));
         }
         let mut regex_builder = regex::bytes::RegexBuilder::new(&args.pattern);
         regex_builder.case_insensitive(args.ignore_case);
         let regex = match regex_builder.build() {
             Ok(regex) => regex,
             Err(error) => {
-                return ToolOutput {
-                    content: format!("invalid regex: {error}"),
-                    is_error: true,
-                };
+                return ToolOutput::error(format!(
+                    "[工具错误] 正则表达式无效:{error}\n建议:核对正则语法(ripgrep/rust regex);普通文本搜索不需要转义点号之外的特殊字符"
+                ));
             }
         };
         let max = args
             .max_matches
             .unwrap_or(DEFAULT_MAX_MATCHES)
             .clamp(1, HARD_MAX_MATCHES);
+        let offset = args.offset;
 
         // 参数准备完成;重活全部丢进 blocking 池,不挡异步运行时。
+        // 两条路径:
+        // - offset=0(首页):保持提前止损的极速路径。命中达到 max 即停,
+        //   输出是「遍历序最先命中的条目」排序后展示——命中远超窗口时它
+        //   不是全局字典序前缀(ripgrep 亦按遍历序输出),作为采样足够;
+        // - offset>0(显式分页):扫完整树,窗口取排序后的
+        //   [offset, offset+max),跨调用稳定可复现。取消令牌随时可中断。
         let cwd_for_display = ctx.cwd.clone();
         let cancel = ctx.cancel.clone();
         let include = args.include.clone();
         let respect = args.respect_ignore;
+        let stop_limit = if offset == 0 { max } else { usize::MAX };
 
         let result = tokio::task::spawn_blocking(move || {
             let mut walker = WalkBuilder::new(&root);
@@ -233,7 +243,7 @@ impl Tool for GrepTool {
                         path,
                         &regex,
                         &cwd_for_display,
-                        max,
+                        stop_limit,
                         &count,
                         &hits,
                         &stop,
@@ -248,47 +258,43 @@ impl Tool for GrepTool {
 
             let mut all = std::mem::take(&mut *hits.lock().unwrap());
             let total = count.load(Ordering::Relaxed);
-            // 并行执行:停止信号到达时其他线程可能已提交部分命中,最终统一截断,
-            // 保证结果数量严格不超过 max。
-            all.truncate(max);
+            let stopped = stop.load(Ordering::Relaxed);
             // 稳定输出:按路径、行号排序(并行遍历顺序不确定)。
+            // 先排序再截断:截断的是排序意义下的前缀,分页窗口才正确。
             all.sort_by(|a, b| a.path.cmp(&b.path).then(a.line_no.cmp(&b.line_no)));
-            Ok::<_, String>((all, total))
+            all.truncate(offset.saturating_add(max));
+            // 分页窗口:排序后跳过 offset,取 max 条。
+            let window: Vec<GrepHit> = all.into_iter().skip(offset).take(max).collect();
+            Ok::<_, String>((window, total, stopped))
         })
         .await;
 
         match result {
-            Ok(Ok((hits, total))) => {
+            Ok(Ok((hits, total, stopped))) => {
                 if hits.is_empty() {
-                    return ToolOutput {
-                        content: "No matches found".to_string(),
-                        is_error: false,
-                    };
+                    return ToolOutput::text("未找到匹配的行");
                 }
-                let capped = total >= max;
+                // 提前止损时 total 只是下界(可能还有更多),也要提示分页。
+                let more = stopped || total > offset + hits.len();
                 let lines: Vec<String> = hits
                     .iter()
                     .map(|hit| format!("{}:{}:{}", hit.path, hit.line_no, hit.line))
                     .collect();
-                let mut output = format!("{} match(es)\n\n{}", hits.len(), lines.join("\n"));
-                if capped {
-                    output.push_str(
-                        "\n\n(result capped at max_matches; narrow the pattern to see more)",
-                    );
+                let mut output = format!("{} 条命中\n\n{}", hits.len(), lines.join("\n"));
+                if more {
+                    output.push_str(&format!(
+                        "\n\n(命中数达到窗口上限;增大 offset={} 可继续获取,或缩小 pattern)",
+                        offset + hits.len()
+                    ));
                 }
-                ToolOutput {
-                    content: output,
-                    is_error: false,
-                }
+                ToolOutput::text(output)
             }
-            Ok(Err(message)) => ToolOutput {
-                content: message,
-                is_error: true,
-            },
-            Err(join_error) => ToolOutput {
-                content: format!("search worker failed: {join_error}"),
-                is_error: true,
-            },
+            Ok(Err(message)) => ToolOutput::error(format!(
+                "[工具错误] {message}\n建议:include 必须是单个正 glob(不支持取反与顶层逗号)"
+            )),
+            Err(join_error) => ToolOutput::error(format!(
+                "[工具错误] 搜索任务失败:{join_error}\n建议:请重试一次"
+            )),
         }
     }
 }
@@ -527,8 +533,45 @@ mod tests {
             .execute(r#"{"pattern":"value","max_matches":10}"#, &ctx)
             .await;
         assert!(!out.is_error);
-        assert!(out.content.contains("capped"), "{}", out.content);
+        assert!(out.content.contains("窗口上限"), "{}", out.content);
+        assert!(out.content.contains("offset=10"), "{}", out.content);
         assert!(out.content.lines().count() <= 14);
+        std::fs::remove_dir_all(&ctx.cwd).unwrap();
+    }
+
+    #[tokio::test]
+    async fn offset_pages_through_matches() {
+        let root = temp_root();
+        // 5 个文件各 1 行命中,排序后 path:line 为 f0..f4。
+        for i in 0..5 {
+            write_file(&root.join(format!("f{i}.txt")), &format!("value {i}"));
+        }
+        let ctx = context(root);
+        let tool = GrepTool::new();
+        // 首页:止损路径,窗口是遍历序最先命中的 2 条(并行遍历顺序不定,
+        // 不能假设具体是哪些文件——只断言条数与分页提示)。
+        let page1 = tool
+            .execute(r#"{"pattern":"value","max_matches":2}"#, &ctx)
+            .await;
+        assert!(!page1.is_error, "{}", page1.content);
+        assert!(page1.content.contains("2 条命中"), "{}", page1.content);
+        assert!(page1.content.contains("窗口上限"), "{}", page1.content);
+        // 第二页:全扫精确窗口——字典序跳过 2 条,稳定可复现。
+        let page2 = tool
+            .execute(r#"{"pattern":"value","max_matches":2,"offset":2}"#, &ctx)
+            .await;
+        assert!(!page2.is_error, "{}", page2.content);
+        let rows: Vec<&str> = page2
+            .content
+            .lines()
+            .filter(|line| line.contains(".txt:"))
+            .collect();
+        assert_eq!(
+            rows,
+            vec!["f2.txt:1:value 2", "f3.txt:1:value 3"],
+            "{}",
+            page2.content
+        );
         std::fs::remove_dir_all(&ctx.cwd).unwrap();
     }
 
@@ -539,7 +582,7 @@ mod tests {
         let tool = GrepTool::new();
         let out = tool.execute(r#"{"pattern":"("}"#, &ctx).await;
         assert!(out.is_error);
-        assert!(out.content.contains("invalid regex"));
+        assert!(out.content.contains("正则表达式无效"), "{}", out.content);
         std::fs::remove_dir_all(&ctx.cwd).unwrap();
     }
 

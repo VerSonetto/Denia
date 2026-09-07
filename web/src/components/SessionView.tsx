@@ -72,6 +72,7 @@ export function SessionView({
   onRewind,
   onFork,
   onQuote,
+  onLoopContinue,
 }: {
   id: string
   /** 内容视图:对话 transcript 或轨迹台账(共用同一事件流订阅)。 */
@@ -97,6 +98,8 @@ export function SessionView({
   onFork?: (seq: number) => void
   /** 轨迹引用(单条/区间)提交到 composer。 */
   onQuote?: (quote: TrajectoryQuote) => void
+  /** 死循环提示行点「继续」:自动发送继续消息。 */
+  onLoopContinue?: () => void
 }) {
   const [nodes, setNodes] = useState<TranscriptNode[]>([])
   // 原始事件流:轨迹视图的 fold 源(与 transcript 共用一次订阅)。
@@ -300,7 +303,13 @@ export function SessionView({
           </button>
         </div>
       )}
-      <Transcript nodes={nodes} pendingMessages={pendingMessages} onRewind={onRewind} onFork={onFork} />
+      <Transcript
+        nodes={nodes}
+        pendingMessages={pendingMessages}
+        onRewind={onRewind}
+        onFork={onFork}
+        onLoopContinue={onLoopContinue}
+      />
     </div>
   )
 }

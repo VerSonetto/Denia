@@ -128,6 +128,7 @@ mod tests {
                 text: text.into(),
                 injected,
                 images: Vec::new(),
+                channel: None,
             },
         }
     }

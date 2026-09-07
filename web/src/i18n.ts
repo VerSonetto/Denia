@@ -434,6 +434,9 @@ const zh = {
   reasonMaxTokens: '达到长度上限',
   reasonError: '出错',
   reasonInterrupted: '已中断',
+  // 死循环保护:检测到重复输出后的提示行,「继续」为可点击下划线文字。
+  loopDetectedHint: '检测到模型疑似陷入死循环,请手动',
+  loopDetectedContinue: '继续',
   currentModel: '当前模型',
 
   messageBranch: '在新对话中分支',
@@ -1006,6 +1009,8 @@ const en: typeof zh = {
   reasonMaxTokens: 'Hit the token limit',
   reasonError: 'Error',
   reasonInterrupted: 'Interrupted',
+  loopDetectedHint: 'The model seems stuck in a loop. Continue manually',
+  loopDetectedContinue: 'Continue',
   currentModel: 'Current model',
 
   messageBranch: 'Branch into a new conversation',

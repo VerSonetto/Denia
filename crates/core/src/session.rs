@@ -73,6 +73,11 @@ pub enum TurnEndReason {
     Error {
         failure: LlmFailure,
     },
+    /// 死循环保护:模型连续输出完全相同的内容(回复文本或工具调用序列)
+    /// 达到阈值,driver 强制中断本轮。`repeats` 是触发时的连续重复次数。
+    LoopDetected {
+        repeats: u32,
+    },
     /// 崩溃孤儿轮次的合成闭合(对齐 dsh `interrupted`;仅加载时生成,loop 不发射)。
     Interrupted,
 }
@@ -208,6 +213,16 @@ pub struct ToolFailureIdentity {
     pub code: String,
 }
 
+/// 一次工具输出被截断的事实(落盘层统一输出预算产出);模型可见的截断
+/// 提示已并入 `ToolResult.content` 尾部,这里是给 UI 徽标用的结构化数据。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TruncationInfo {
+    /// 截断前的总字符数。
+    pub total_chars: u64,
+    /// 实际保留(展示给模型)的字符数,不含截断提示本身。
+    pub shown_chars: u64,
+}
+
 /// The durable event vocabulary, internally tagged on `type`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "kebab-case")]
@@ -244,6 +259,12 @@ pub enum SessionEvent {
         /// harness 注入的纠错/上下文消息,非用户手打;UI 弱化渲染。
         #[serde(default)]
         injected: bool,
+        /// 注入通道名(workspace-instructions / capability / skill-catalog /
+        /// feedback / gesture-skill / file-notice / quote / runtime-context /
+        /// image 等);None = 真实用户消息或旧日志。通道识别以本字段优先,
+        /// 旧日志回退到文本前缀判断。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        channel: Option<String>,
         /// 用户粘贴/上传的内联图片(仅 vision 模型;旧日志无此字段)。
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         images: Vec<crate::message::ImageData>,
@@ -293,6 +314,9 @@ pub enum SessionEvent {
         /// 工具私有展示载荷(对齐 dsh `tool/result.meta`);核心不解释其形状。
         #[serde(default, skip_serializing_if = "Option::is_none")]
         meta: Option<serde_json::Value>,
+        /// 输出截断事实(统一输出预算产出);None = 未截断。旧日志无此字段。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        truncation: Option<TruncationInfo>,
         /// 工具结果剪枝替换:本事件是对旧 `ToolResult` 事件(seq)的 surface
         /// 替换,旧节点不再进入模型历史与 token-meter 表面(对齐 dsh
         /// `tool/result` 的 `surfaceOp.replace`)。None = 普通追加。
@@ -679,6 +703,7 @@ mod tests {
                     text: "去截图".into(),
                     injected: false,
                     images: Vec::new(),
+                    channel: None,
                 },
             ),
             envelope(
@@ -706,6 +731,7 @@ mod tests {
                         mime: "image/png".into(),
                         data: "AAAA".into(),
                     }],
+                    channel: None,
                 },
             ),
             envelope(
@@ -720,6 +746,7 @@ mod tests {
                     error_identity: None,
                     meta: None,
                     replaces: None,
+                    truncation: None,
                 },
             ),
         ];
@@ -791,6 +818,7 @@ mod tests {
                     text: "hi".into(),
                     injected: false,
                     images: Vec::new(),
+                    channel: None,
                 },
             ),
             envelope(3, SessionEvent::StepStart { turn: 1, step: 1 }),
@@ -837,6 +865,7 @@ mod tests {
                     error_identity: None,
                     meta: None,
                     replaces: None,
+                    truncation: None,
                 },
             ),
             envelope(
@@ -886,6 +915,7 @@ mod tests {
                     text: "hi".into(),
                     injected: false,
                     images: Vec::new(),
+                    channel: None,
                 },
             ),
             envelope(
@@ -915,6 +945,7 @@ mod tests {
                     error_identity: None,
                     meta: None,
                     replaces: None,
+                    truncation: None,
                 },
             ),
             envelope(
@@ -929,6 +960,7 @@ mod tests {
                     error_identity: None,
                     meta: None,
                     replaces: Some(4),
+                    truncation: None,
                 },
             ),
             envelope(
@@ -956,6 +988,7 @@ mod tests {
                     text: "go".into(),
                     injected: false,
                     images: Vec::new(),
+                    channel: None,
                 },
             ),
             envelope(
@@ -1110,6 +1143,7 @@ mod tests {
                 }),
                 meta: Some(serde_json::json!({ "diff": "…" })),
                 replaces: None,
+                truncation: None,
             },
         );
         let json = serde_json::to_string(&env).unwrap();
@@ -1129,6 +1163,7 @@ mod tests {
                     text: "first".into(),
                     injected: false,
                     images: Vec::new(),
+                    channel: None,
                 },
             ),
             envelope(
@@ -1156,6 +1191,7 @@ mod tests {
                     text: "second".into(),
                     injected: false,
                     images: Vec::new(),
+                    channel: None,
                 },
             ),
             envelope(
@@ -1223,6 +1259,7 @@ mod tests {
                     text: "next turn prompt".into(),
                     injected: false,
                     images: Vec::new(),
+                    channel: None,
                 },
             ),
         );
@@ -1245,6 +1282,7 @@ mod tests {
                     text: "hi".into(),
                     injected: false,
                     images: Vec::new(),
+                    channel: None,
                 },
             ),
         ];
@@ -1265,6 +1303,7 @@ mod tests {
                     text: "old request".into(),
                     injected: false,
                     images: Vec::new(),
+                    channel: None,
                 },
             ),
             envelope(
@@ -1300,6 +1339,7 @@ mod tests {
                     text: "now this".into(),
                     injected: false,
                     images: Vec::new(),
+                    channel: None,
                 },
             ),
             envelope(

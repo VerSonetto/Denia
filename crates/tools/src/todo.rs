@@ -11,7 +11,8 @@ use denia_core::session::{SessionEvent, TodoItem, TodoStatus};
 use denia_core::tool::ToolSchema;
 use serde::Deserialize;
 
-use crate::{Tool, ToolContext, ToolOutput, parse_args_lenient};
+use crate::support::{parse_tool_args, tool_error};
+use crate::{Tool, ToolContext, ToolOutput};
 
 /// Deployment policy: may several todos be `in_progress` at once?
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -28,23 +29,13 @@ impl Default for TodoPolicy {
     }
 }
 
-const DESCRIPTION_HEAD: &str = "Record and update a structured task list for the current work. \
-Send the ENTIRE list every call — it REPLACES the previous list (there are no \
-partial updates, no per-item edits). Use it to plan multi-step work and show \
-progress: add one todo per concrete step before you start. ";
+const DESCRIPTION_HEAD: &str = "记录并更新当前工作的结构化任务清单。每次调用必须发送完整列表——本调用整体替换旧列表(没有部分更新、没有单条编辑)。用于规划多步工作并展示进度:开始前把每个具体步骤拆成一条 todo。";
 
-const DESCRIPTION_PARALLEL: &str = "Mark every todo being actively worked on \
-`in_progress` — several at once when work genuinely runs in parallel (e.g. \
-concurrent subagents or background commands), one for sequential work; while \
-work remains, at least one task should be `in_progress`. ";
+const DESCRIPTION_PARALLEL: &str = "正在做的任务标记 in_progress:工作真在并行时(并发子代理、后台命令)可以多条同时 in_progress;只要还有未完成的工作,至少保持一条 in_progress。";
 
-const DESCRIPTION_SINGLE: &str = "Keep AT MOST ONE todo `in_progress` at a \
-time; while work remains, exactly one active task should be `in_progress`. ";
+const DESCRIPTION_SINGLE: &str = "同一时间最多一条 todo 处于 in_progress;只要还有未完成的工作,应恰有一条进行中。";
 
-const DESCRIPTION_TAIL: &str = "Mark a todo `completed` the moment it is done \
-(do not batch completions), and allow no `in_progress` item only once all work \
-is complete. Skip the list for trivial single-step tasks. Statuses: `pending` \
-(not started), `in_progress` (being worked on now), `completed` (finished).";
+const DESCRIPTION_TAIL: &str = "任务完成的当下就标记 completed(不要攒到最后批量标);全部工作完成才允许没有 in_progress 项。琐碎的单步任务不用建清单。状态:pending(未开始)、in_progress(进行中)、completed(已完成)。";
 
 fn describe(allow_parallel: bool) -> String {
     let mut text = String::from(DESCRIPTION_HEAD);
@@ -78,10 +69,10 @@ fn to_todo_list(raw: Vec<TodoArg>, allow_parallel: bool) -> Result<Vec<TodoItem>
     for item in raw {
         let content = item.content.trim().to_string();
         if content.is_empty() {
-            return Err("invalid todo: `content` must be a non-empty string".to_string());
+            return Err("todo 无效:content 必须是非空字符串".to_string());
         }
         if !seen.insert(content.clone()) {
-            return Err(format!("invalid todos: duplicate content {content:?}"));
+            return Err(format!("todo 无效:content 重复:{content:?}"));
         }
         let status = match item.status.as_str() {
             "pending" => TodoStatus::Pending,
@@ -90,13 +81,17 @@ fn to_todo_list(raw: Vec<TodoArg>, allow_parallel: bool) -> Result<Vec<TodoItem>
                 TodoStatus::InProgress
             }
             "completed" => TodoStatus::Completed,
-            other => return Err(format!("invalid todo status: {other:?}")),
+            other => {
+                return Err(format!(
+                    "todo 状态无效:{other:?}(可用:pending/in_progress/completed)"
+                ))
+            }
         };
         todos.push(TodoItem { content, status });
     }
     if !allow_parallel && active > 1 {
         return Err(format!(
-            "invalid todos: at most one task may be in_progress (got {active})"
+            "todo 无效:同时最多一条 in_progress(当前 {active} 条)"
         ));
     }
     Ok(todos)
@@ -120,19 +115,19 @@ impl TodoWriteTool {
                     "properties": {
                         "todos": {
                             "type": "array",
-                            "description": "The COMPLETE task list, replacing any previous list.",
+                            "description": "完整任务列表,整体替换之前的列表。",
                             "items": {
                                 "type": "object",
                                 "additionalProperties": false,
                                 "properties": {
                                     "content": {
                                         "type": "string",
-                                        "description": "What the task is — a short imperative line."
+                                        "description": "任务内容——一句简短的祈使句。"
                                     },
                                     "status": {
                                         "type": "string",
                                         "enum": ["pending", "in_progress", "completed"],
-                                        "description": "pending (not started) | in_progress (now) | completed (done)."
+                                        "description": "pending(未开始)| in_progress(进行中)| completed(已完成)。"
                                     }
                                 },
                                 "required": ["content", "status"]
@@ -160,31 +155,28 @@ impl Tool for TodoWriteTool {
     }
 
     async fn execute(&self, arguments: &str, ctx: &ToolContext) -> ToolOutput {
-        let args: TodoArgs = match parse_args_lenient(arguments) {
+        let args: TodoArgs = match parse_tool_args(arguments) {
             Ok(args) => args,
             Err(error) => {
-                return ToolOutput {
-                    content: format!("invalid arguments: {error}"),
-                    is_error: true,
-                };
+                return tool_error(
+                    format!("参数解析失败:{error}"),
+                    "参数必须是 JSON 对象,必填字段为 todos(数组,每项含 content 与 status)",
+                );
             }
         };
         let todos = match to_todo_list(args.todos, self.policy.allow_parallel_in_progress) {
             Ok(todos) => todos,
             Err(error) => {
-                return ToolOutput {
-                    content: error,
-                    is_error: true,
-                };
+                return tool_error(error, "修正 todos 后重发完整列表");
             }
         };
         // The list is per-session state; a caller with no owning session has
         // nowhere to write it. Reject rather than silently no-op.
         let Some(emit) = &ctx.emit_event else {
-            return ToolOutput {
-                content: "todo_write requires an owning agent session".to_string(),
-                is_error: true,
-            };
+            return tool_error(
+                "todo_write 需要归属的代理会话(当前调用没有会话事件通道)",
+                "该工具只能在代理会话内使用",
+            );
         };
         let count = |status: TodoStatus| todos.iter().filter(|t| t.status == status).count();
         let (pending, in_progress, completed) = (
@@ -193,12 +185,9 @@ impl Tool for TodoWriteTool {
             count(TodoStatus::Completed),
         );
         emit(SessionEvent::TodoWrite { todos });
-        ToolOutput {
-            content: format!(
-                "Updated todo list: {pending} pending, {in_progress} in progress, {completed} completed."
-            ),
-            is_error: false,
-        }
+        ToolOutput::text(format!(
+            "已更新任务列表:{pending} 个待办、{in_progress} 个进行中、{completed} 个已完成。"
+        ))
     }
 }
 
@@ -258,7 +247,7 @@ mod tests {
         assert!(!out.is_error);
         assert_eq!(
             out.content,
-            "Updated todo list: 1 pending, 1 in progress, 1 completed."
+            "已更新任务列表:1 个待办、1 个进行中、1 个已完成。"
         );
         let events = collected.lock().unwrap();
         assert_eq!(events.len(), 1);
@@ -281,21 +270,21 @@ mod tests {
                 &sink(),
             )
             .await;
-        assert!(empty.is_error && empty.content.contains("non-empty"));
+        assert!(empty.is_error && empty.content.contains("非空字符串"));
         let dup = tool
             .execute(
                 r#"{"todos":[{"content":"a","status":"pending"},{"content":"a","status":"pending"}]}"#,
                 &sink(),
             )
             .await;
-        assert!(dup.is_error && dup.content.contains("duplicate"));
+        assert!(dup.is_error && dup.content.contains("重复"));
         let over = tool
             .execute(
                 r#"{"todos":[{"content":"a","status":"in_progress"},{"content":"b","status":"in_progress"}]}"#,
                 &sink(),
             )
             .await;
-        assert!(over.is_error && over.content.contains("at most one"));
+        assert!(over.is_error && over.content.contains("最多一条 in_progress"));
     }
 
     #[tokio::test]
@@ -322,16 +311,16 @@ mod tests {
             )
             .await;
         assert!(out.is_error);
-        assert!(out.content.contains("owning agent session"));
+        assert!(out.content.contains("归属的代理会话"));
     }
 
     #[tokio::test]
     async fn description_matches_policy() {
         let single = TodoWriteTool::default();
-        assert!(single.schema().description.contains("AT MOST ONE"));
+        assert!(single.schema().description.contains("最多一条"));
         let parallel = TodoWriteTool::new(TodoPolicy {
             allow_parallel_in_progress: true,
         });
-        assert!(parallel.schema().description.contains("several at once"));
+        assert!(parallel.schema().description.contains("多条同时"));
     }
 }

@@ -15,6 +15,8 @@ pub mod grep;
 pub mod prompt;
 pub mod recon;
 pub mod shell;
+pub mod support;
+mod todo;
 
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
@@ -39,7 +41,6 @@ pub use recon::{ReconExecute, ReconHub, ReconTool};
 pub use todo::TodoWriteTool;
 
 pub mod permission;
-mod todo;
 
 /// Session-event sink handed to tools that emit log-only state (todo_write).
 /// The agent loop wires it to the session append + broadcast; tools never
@@ -90,6 +91,24 @@ impl ToolContext {
 pub struct ToolOutput {
     pub content: String,
     pub is_error: bool,
+}
+
+impl ToolOutput {
+    /// 成功结果。
+    pub fn text(content: impl Into<String>) -> Self {
+        Self {
+            content: content.into(),
+            is_error: false,
+        }
+    }
+
+    /// 错误结果;错误文本应当可执行(原因 + 修复建议)。
+    pub fn error(content: impl Into<String>) -> Self {
+        Self {
+            content: content.into(),
+            is_error: true,
+        }
+    }
 }
 
 /// A model-facing capability.
@@ -181,7 +200,7 @@ pub fn default_registry_with_browser_and_recon(
 /// must stay inside `cwd`.
 pub(crate) fn resolve_within(cwd: &Path, raw: &str, confined: bool) -> Result<PathBuf, String> {
     if raw.trim().is_empty() {
-        return Err("an empty path is not a path".to_string());
+        return Err("路径不能为空".to_string());
     }
     let mut out = if Path::new(raw).is_absolute() {
         PathBuf::new()
@@ -196,38 +215,27 @@ pub(crate) fn resolve_within(cwd: &Path, raw: &str, confined: bool) -> Result<Pa
             Component::CurDir => {}
             Component::ParentDir => {
                 if !out.pop() {
-                    return Err(format!("path '{raw}' escapes the session workspace"));
+                    return Err(format!("路径 '{raw}' 越出了会话工作区"));
                 }
             }
             Component::Normal(part) => out.push(part),
         }
     }
     if confined && !out.starts_with(cwd) {
-        return Err(format!(
-            "path '{raw}' escapes the session workspace (sandbox on)"
-        ));
+        return Err(format!("路径 '{raw}' 越出了会话工作区(沙箱开启)"));
     }
     Ok(out)
 }
 
 /// 宽容参数解析:只取第一个 JSON 值,忽略尾部垃圾。
 /// 模型偶尔在参数后吐多余字符,硬失败会浪费一整步。
+/// 工具实现请优先用 [`support::parse_tool_args`](数值强转 + 路径别名)。
 pub(crate) fn parse_args_lenient<T: serde::de::DeserializeOwned>(raw: &str) -> Result<T, String> {
     let mut iter = serde_json::Deserializer::from_str(raw.trim()).into_iter::<T>();
     match iter.next() {
         Some(Ok(value)) => Ok(value),
         Some(Err(error)) => Err(error.to_string()),
         None => Err("参数为空".to_string()),
-    }
-}
-
-pub(crate) fn truncate(text: &str, cap: usize) -> String {
-    let mut chars = text.chars();
-    let head: String = chars.by_ref().take(cap).collect();
-    if chars.next().is_some() {
-        format!("{head}\n…[truncated]")
-    } else {
-        head
     }
 }
 
@@ -260,14 +268,5 @@ mod tests {
         let parsed: Args = parse_args_lenient(r#"{"path": "app/src"} 谢谢"#).unwrap();
         assert_eq!(parsed.path, "app/src");
         assert!(parse_args_lenient::<Args>("not json").is_err());
-    }
-
-    #[test]
-    fn truncate_caps_and_marks() {
-        let long = "x".repeat(10);
-        let cut = truncate(&long, 4);
-        assert!(cut.starts_with("xxxx"));
-        assert!(cut.contains("truncated"));
-        assert_eq!(truncate("short", 10), "short");
     }
 }

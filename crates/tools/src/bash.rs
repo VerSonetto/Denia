@@ -9,11 +9,11 @@ use denia_core::tool::ToolSchema;
 use serde::Deserialize;
 
 use crate::permission::{bash_may_write, denial_marker, escalation_hint};
-use crate::{Tool, ToolContext, ToolOutput, parse_args_lenient, shell, truncate};
+use crate::support::{parse_tool_args, tool_error};
+use crate::{Tool, ToolContext, ToolOutput, shell};
 
 const DEFAULT_TIMEOUT_MS: u64 = 120_000;
 const MAX_TIMEOUT_MS: u64 = 600_000;
-const STREAM_CAP: usize = 32_000;
 
 #[derive(Deserialize)]
 struct BashArgs {
@@ -44,15 +44,20 @@ impl BashTool {
                             "type": "string",
                             "description": command_description,
                         },
-                        "timeout_ms": { "type": "integer", "minimum": 1, "maximum": MAX_TIMEOUT_MS },
+                        "timeout_ms": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": MAX_TIMEOUT_MS,
+                            "description": "超时时间(毫秒),默认 120000,最大 600000;长任务请用 run_in_background。"
+                        },
                         "sandbox_permissions": {
                             "type": "string",
                             "enum": ["workspace-write", "danger-full-access"],
-                            "description": "The wider sandbox mode this command needs. Only valid as a one-shot retry of a command the sandbox just denied; requires justification and user approval."
+                            "description": "本次命令需要的更宽沙箱模式;仅用于对刚被沙箱拒绝的命令做一次性重试,必须搭配 justification,且需要用户审批。"
                         },
                         "justification": {
                             "type": "string",
-                            "description": "Required with sandbox_permissions: one sentence for the user explaining why this exact command needs the wider access."
+                            "description": "与 sandbox_permissions 搭配必填:一句话向用户说明为什么这条命令需要更宽的权限。"
                         }
                     },
                     "required": ["command"]
@@ -66,7 +71,7 @@ impl BashTool {
         runtime: std::sync::Arc<dyn crate::capabilities::AgentRuntime>,
     ) -> Self {
         self.runtime = Some(runtime);
-        self.schema.parameters["properties"]["run_in_background"] = serde_json::json!({"type":"boolean","description":"后台执行并立即返回任务 id；用 job_output 读取输出、job_kill 停止。"});
+        self.schema.parameters["properties"]["run_in_background"] = serde_json::json!({"type":"boolean","description":"后台执行并立即返回任务 id;用 job_output 读取输出、job_kill 停止。"});
         self
     }
 }
@@ -84,49 +89,37 @@ impl Tool for BashTool {
     }
 
     async fn execute(&self, arguments: &str, ctx: &ToolContext) -> ToolOutput {
-        if let Ok(value) = parse_args_lenient::<serde_json::Value>(arguments) {
-            if value["run_in_background"].as_bool() == Some(true) {
-                let result = match &self.runtime {
-                    Some(runtime) => runtime.execute("job_start", value, ctx).await,
-                    None => Err("当前部署未启用后台任务".into()),
-                };
-                return match result {
-                    Ok(value) => ToolOutput {
-                        content: value.to_string(),
-                        is_error: false,
-                    },
-                    Err(content) => ToolOutput {
-                        content,
-                        is_error: true,
-                    },
-                };
-            }
+        if let Ok(value) = parse_tool_args::<serde_json::Value>(arguments)
+            && value["run_in_background"].as_bool() == Some(true)
+        {
+            let result = match &self.runtime {
+                Some(runtime) => runtime.execute("job_start", value, ctx).await,
+                None => Err("当前部署未启用后台任务".into()),
+            };
+            return match result {
+                Ok(value) => ToolOutput::text(value.to_string()),
+                Err(content) => ToolOutput::error(content),
+            };
         }
-        let args: BashArgs = match parse_args_lenient(arguments) {
+        let args: BashArgs = match parse_tool_args(arguments) {
             Ok(args) => args,
             Err(error) => {
-                return ToolOutput {
-                    content: format!("invalid arguments: {error}"),
-                    is_error: true,
-                };
+                return tool_error(
+                    format!("参数解析失败:{error}"),
+                    "参数必须是 JSON 对象,必填字段为 command(字符串)",
+                );
             }
         };
-        let timeout = Duration::from_millis(
-            args.timeout_ms
-                .unwrap_or(DEFAULT_TIMEOUT_MS)
-                .min(MAX_TIMEOUT_MS),
-        );
+        let requested_ms = args.timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS).min(MAX_TIMEOUT_MS);
+        let timeout = Duration::from_millis(requested_ms);
 
         let effective = ctx.effective_permission();
         if effective == PermissionMode::ReadOnly && bash_may_write(&args.command) {
-            return ToolOutput {
-                content: format!(
-                    "{}\n{}",
-                    denial_marker(effective),
-                    escalation_hint("command")
-                ),
-                is_error: true,
-            };
+            return ToolOutput::error(format!(
+                "{}\n{}",
+                denial_marker(effective),
+                escalation_hint("command")
+            ));
         }
 
         let mut command = shell::shell_command(&args.command);
@@ -139,10 +132,10 @@ impl Tool for BashTool {
         let mut child = match command.spawn() {
             Ok(child) => child,
             Err(error) => {
-                return ToolOutput {
-                    content: format!("spawn failed: {error}"),
-                    is_error: true,
-                };
+                return tool_error(
+                    format!("命令启动失败:{error}"),
+                    "确认命令在该宿主 shell 上可用;工作目录是会话工作区",
+                );
             }
         };
 
@@ -151,41 +144,40 @@ impl Tool for BashTool {
             biased;
             _ = call_cancel.cancelled() => {
                 let _ = child.kill().await;
-                return ToolOutput {
-                    content: "command aborted".to_string(),
-                    is_error: true,
-                };
+                return tool_error(
+                    "命令被用户中断",
+                    "中断后命令已终止;需要继续时重新发起调用",
+                );
             }
             waited = tokio::time::timeout(timeout, child.wait()) => waited,
         };
         match waited {
             // Drop kills the child via kill_on_drop.
-            Err(_) => ToolOutput {
-                content: format!("command timed out after {}ms", timeout.as_millis()),
-                is_error: true,
-            },
-            Ok(Err(error)) => ToolOutput {
-                content: format!("wait failed: {error}"),
-                is_error: true,
-            },
+            Err(_) => tool_error(
+                format!("命令超时({} ms 未结束)", requested_ms),
+                format!(
+                    "拆小命令分步执行、提高 timeout_ms(上限 {MAX_TIMEOUT_MS}),或用 run_in_background 后台运行"
+                ),
+            ),
+            Ok(Err(error)) => tool_error(
+                format!("等待命令结束失败:{error}"),
+                "请重试一次;持续失败请报告",
+            ),
             Ok(Ok(_)) => match child.wait_with_output().await {
-                Err(error) => ToolOutput {
-                    content: format!("output capture failed: {error}"),
-                    is_error: true,
-                },
+                Err(error) => tool_error(
+                    format!("输出捕获失败:{error}"),
+                    "请重试一次",
+                ),
                 Ok(output) => {
                     // A non-zero exit code is data, not a tool failure.
                     let code = output.status.code().unwrap_or(-1);
-                    let stdout = truncate(&String::from_utf8_lossy(&output.stdout), STREAM_CAP);
-                    let stderr = truncate(&String::from_utf8_lossy(&output.stderr), STREAM_CAP);
-                    let mut content = format!("exit code: {code}\n{stdout}");
+                    let stdout = String::from_utf8_lossy(&output.stdout);
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    let mut content = format!("退出码: {code}\n{stdout}");
                     if !stderr.trim().is_empty() {
                         content.push_str(&format!("\n--- stderr ---\n{stderr}"));
                     }
-                    ToolOutput {
-                        content,
-                        is_error: false,
-                    }
+                    ToolOutput::text(content)
                 }
             },
         }
@@ -250,21 +242,16 @@ mod tests {
         let tool = BashTool::new();
         let ok = tool.execute(r#"{"command":"echo hi"}"#, &ctx(&dir)).await;
         assert!(!ok.is_error);
-        assert!(ok.content.starts_with("exit code: 0"));
+        assert!(ok.content.starts_with("退出码: 0"), "{}", ok.content);
         assert!(ok.content.contains("hi"));
 
-        let failing = if cfg!(windows) {
-            r#"{"command":"exit 3"}"#
-        } else {
-            r#"{"command":"exit 3"}"#
-        };
-        let bad = tool.execute(failing, &ctx(&dir)).await;
+        let bad = tool.execute(r#"{"command":"exit 3"}"#, &ctx(&dir)).await;
         assert!(!bad.is_error, "non-zero exit is data");
-        assert!(bad.content.starts_with("exit code: 3"));
+        assert!(bad.content.starts_with("退出码: 3"), "{}", bad.content);
     }
 
     #[tokio::test]
-    async fn times_out() {
+    async fn times_out_with_actionable_hint() {
         let dir = std::env::temp_dir();
         let tool = BashTool::new();
         let sleeping = if cfg!(windows) {
@@ -274,7 +261,22 @@ mod tests {
         };
         let out = tool.execute(sleeping, &ctx(&dir)).await;
         assert!(out.is_error);
-        assert!(out.content.contains("timed out"));
+        assert!(out.content.contains("超时"), "{}", out.content);
+        assert!(out.content.contains("run_in_background"), "{}", out.content);
+    }
+
+    #[tokio::test]
+    async fn string_timeout_is_accepted() {
+        // 宽容解析:"timeout_ms" 传字符串数字不硬失败。
+        let dir = std::env::temp_dir();
+        let tool = BashTool::new();
+        let command = if cfg!(windows) {
+            r#"{"command":"echo ok","timeout_ms":"10000"}"#
+        } else {
+            r#"{"command":"echo ok","timeout_ms":"10000"}"#
+        };
+        let out = tool.execute(command, &ctx(&dir)).await;
+        assert!(!out.is_error, "{}", out.content);
     }
 
     #[tokio::test]
@@ -312,6 +314,6 @@ mod tests {
         cancel.cancel();
         let out = handle.await.unwrap();
         assert!(out.is_error);
-        assert!(out.content.contains("aborted"));
+        assert!(out.content.contains("中断"), "{}", out.content);
     }
 }
