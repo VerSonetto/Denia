@@ -29,6 +29,12 @@ pub struct RetryPolicy {
     pub max_delay_ms: u64,
     pub jitter_ratio: f64,
     pub retryable_codes: Vec<&'static str>,
+    /// 连接类错误(网络层:连接建立失败/超时)独立退避曲线,学 codex
+    /// `responses_retry.rs`:连接抖动用更长的指数退避(5s→60s),与业务错误
+    /// (4xx/5xx)的短退避分离,且不烧普通重试预算。
+    pub connection_codes: Vec<&'static str>,
+    pub connection_initial_delay_ms: u64,
+    pub connection_max_delay_ms: u64,
 }
 
 impl Default for RetryPolicy {
@@ -52,6 +58,11 @@ impl Default for RetryPolicy {
                 codes::INVALID_REQUEST,
                 codes::STREAM_CLOSED,
             ],
+            // 连接类错误独立退避(对齐 codex INITIAL_CONNECTION_RETRY_DELAY=5s、
+            // MAX_CONNECTION_RETRY_DELAY=60s)。
+            connection_codes: vec![codes::TRANSPORT, codes::TIMEOUT],
+            connection_initial_delay_ms: 5_000,
+            connection_max_delay_ms: 60_000,
         }
     }
 }
@@ -62,24 +73,44 @@ impl RetryPolicy {
         self.retryable_codes.iter().any(|c| *c == code)
     }
 
+    /// 该错误码是否为连接类错误(网络层抖动,独立退避曲线)。
+    pub fn is_connection_error(&self, code: &str) -> bool {
+        self.connection_codes.iter().any(|c| *c == code)
+    }
+
     /// dsh 对齐退避:`min(initial · 2^min(retry-1, 1024), max) · jitter` 再夹 max,
     /// jitter 为 `[1-ratio, 1+ratio]` 对称均匀;`providerRetryAfterMs` 有效时
     /// 优先直接采用(≤ max 时),超过 max 视为"provider 要求等太久"返回 None,
     /// 调用方按 dsh 语义放弃重试。
     pub fn delay_ms(&self, attempt: u32, provider_hint_ms: Option<u64>) -> Option<u64> {
+        self.delay_ms_for(attempt, provider_hint_ms, false)
+    }
+
+    /// 带错误类别的退避:连接类错误走独立(更长)曲线,学 codex。
+    pub fn delay_ms_for(
+        &self,
+        attempt: u32,
+        provider_hint_ms: Option<u64>,
+        connection: bool,
+    ) -> Option<u64> {
+        let (initial, max) = if connection {
+            (self.connection_initial_delay_ms, self.connection_max_delay_ms)
+        } else {
+            (self.initial_delay_ms, self.max_delay_ms)
+        };
         if let Some(hint) = provider_hint_ms {
-            if hint > self.max_delay_ms {
+            if hint > max {
                 return None;
             }
             return Some(hint);
         }
         let shift = (attempt.saturating_sub(1)).min(1024);
-        let exponential = (self.initial_delay_ms as u128)
+        let exponential = (initial as u128)
             .saturating_mul(1u128 << shift)
-            .min(self.max_delay_ms as u128) as u64;
+            .min(max as u128) as u64;
         let jitter = 1.0 - self.jitter_ratio
             + 2.0 * self.jitter_ratio * rand::thread_rng().gen_range(0.0..1.0);
-        Some(((exponential as f64) * jitter).min(self.max_delay_ms as f64) as u64)
+        Some(((exponential as f64) * jitter).min(max as f64) as u64)
     }
 }
 
@@ -105,7 +136,9 @@ where
                 if attempt > policy.max_retries || !policy.is_retryable(&error.code) {
                     return Err(error);
                 }
-                let delay = policy.delay_ms(attempt, error.failure.provider_retry_after_ms);
+                let connection = policy.is_connection_error(&error.code);
+                let delay =
+                    policy.delay_ms_for(attempt, error.failure.provider_retry_after_ms, connection);
                 let Some(delay) = delay else {
                     // dsh 语义:provider 要求的等待超过本地上限 → 放弃重试。
                     tracing::warn!(
@@ -125,6 +158,7 @@ where
                     attempt,
                     delay_ms = delay,
                     code = %error.code,
+                    connection,
                     "retrying model request"
                 );
                 tokio::time::sleep(Duration::from_millis(delay)).await;
