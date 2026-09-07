@@ -20,8 +20,16 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 
 /// 一条模型/控制台发来的浏览器命令(与 ZCode `Wo` discriminated union 同形)。
+///
+/// `rename_all_fields` 把变体字段统一转 camelCase,与前端的 tabId/fromRef/
+/// toRef/doubleClick 等命名对齐(否则 activate 的 tab_id 字段无法反序列化,
+/// 面板切 tab 会 400)。
 #[derive(Debug, Clone, Deserialize)]
-#[serde(tag = "method", rename_all = "camelCase")]
+#[serde(
+    tag = "method",
+    rename_all = "camelCase",
+    rename_all_fields = "camelCase"
+)]
 pub enum BrowserCommand {
     Navigate {
         url: String,
@@ -80,6 +88,9 @@ pub enum BrowserCommand {
         r#ref: Option<String>,
         x: Option<f64>,
         y: Option<f64>,
+        /// 面板滚轮:自定义滚动增量(缺省 360px 一格)。
+        delta_x: Option<f64>,
+        delta_y: Option<f64>,
     },
     Hover {
         tab_id: Option<String>,

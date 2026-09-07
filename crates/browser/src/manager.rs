@@ -79,6 +79,8 @@ pub struct BrowserManager {
     /// 导航视图(tabId -> (url, title)):事件泵写 url,命令写 url+title;
     /// 快照/列表合并覆盖 TabInfo 的启动时值,保证 tab 栏/地址栏即时刷新。
     tab_views: std::sync::Arc<std::sync::Mutex<HashMap<String, (String, String)>>>,
+    /// 当前 screencast 流归属的 tab(事件泵按它过滤帧;StartScreencast 迁移)。
+    screencast_tab: std::sync::Arc<std::sync::Mutex<Option<String>>>,
     /// 事件泵掉线时置位的信号(watch 通道):通知管理器把 Chrome 进程
     /// 与 per-tab 残留状态清干净,别等下一次 ensure_running 才收尸。
     exited_ping: tokio::sync::watch::Sender<bool>,
@@ -109,6 +111,7 @@ impl BrowserManager {
             &self.network_log,
             &self.recon,
             &self.tab_views,
+            &self.screencast_tab,
         )
         .await;
         let _ = self.exited_ping.send(true);
@@ -123,6 +126,7 @@ async fn reap_browser_instance(
     network_log: &std::sync::Arc<std::sync::Mutex<NetworkLog>>,
     recon: &Arc<ReconStore>,
     tab_views: &std::sync::Arc<std::sync::Mutex<HashMap<String, (String, String)>>>,
+    screencast_tab: &std::sync::Arc<std::sync::Mutex<Option<String>>>,
 ) {
     let exited = { inner_slot.lock().await.take() };
     if let Some(inner) = exited {
@@ -136,10 +140,11 @@ async fn reap_browser_instance(
         })
         .await;
     }
-    // 状态与 CDP 会话一起失效:dialog/网络缓冲/导航视图/侦察全部清掉。
+    // 状态与 CDP 会话一起失效:dialog/网络缓冲/导航视图/侦察/screencast 流全清掉。
     pending_dialogs.lock().unwrap().clear();
     network_log.lock().unwrap().clear_all();
     tab_views.lock().unwrap().clear();
+    *screencast_tab.lock().unwrap() = None;
     recon.clear_all();
 }
 
@@ -149,8 +154,14 @@ async fn reap_browser_instance(
 pub enum BrowserEvent {
     /// tab 列表/活跃 tab 变化。
     TabsChanged,
-    /// 某个 tab 的新画面帧(页面 base64 JPEG)。
-    Frame { tab_id: String, data: String },
+    /// 某个 tab 的新画面帧(页面 base64 JPEG);viewport 为页面 CSS 视口尺寸
+    /// (screencast metadata),前端据此把画面点击/滚轮坐标换算成 CDP 坐标。
+    Frame {
+        tab_id: String,
+        data: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        viewport: Option<FrameViewport>,
+    },
     /// tab 出现 JS dialog。
     DialogOpened {
         tab_id: String,
@@ -175,6 +186,13 @@ pub enum BrowserEvent {
     DebuggerResumed { tab_id: String },
     /// 浏览器实例退出。
     Exited,
+}
+
+/// screencast 帧附带的页面视口尺寸(CSS 像素),前端坐标换算用。
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct FrameViewport {
+    pub width: u32,
+    pub height: u32,
 }
 
 const TAB_LIMIT: usize = 32;
@@ -285,6 +303,7 @@ impl BrowserManager {
             network_log: std::sync::Arc::new(std::sync::Mutex::new(NetworkLog::default())),
             recon: ReconStore::new(),
             tab_views: std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
+            screencast_tab: std::sync::Arc::new(std::sync::Mutex::new(None)),
             last_active_url: std::sync::Arc::new(std::sync::Mutex::new(None)),
             exited_ping: tokio::sync::watch::channel(false).0,
             shutting_down: std::sync::atomic::AtomicBool::new(false),
@@ -315,6 +334,16 @@ impl BrowserManager {
     /// 当前导航视图(快照合并用)。
     pub(crate) fn tab_view(&self, tab_id: &str) -> Option<(String, String)> {
         self.tab_views.lock().unwrap().get(tab_id).cloned()
+    }
+
+    /// 读取当前 screencast 流归属的 tab(StartScreencast 迁移判定用)。
+    pub(crate) fn screencast_tab(&self) -> Option<String> {
+        self.screencast_tab.lock().unwrap().clone()
+    }
+
+    /// 把 screencast 流归属切到指定 tab。
+    pub(crate) fn set_screencast_tab(&self, tab_id: Option<&str>) {
+        *self.screencast_tab.lock().unwrap() = tab_id.map(str::to_string);
     }
 
     /// JS 逆向侦察状态句柄(脚本表/断点/暂停/控制台)。
@@ -472,6 +501,7 @@ impl BrowserManager {
         let network_log = self.network_log.clone();
         let recon = self.recon.clone();
         let tab_views = self.tab_views.clone();
+        let screencast_tab_for_pump = self.screencast_tab.clone();
         let exited_pinger = self.exited_ping.clone();
         tokio::spawn(async move {
             Self::event_pump(
@@ -482,6 +512,7 @@ impl BrowserManager {
                 network_log,
                 recon,
                 tab_views,
+                screencast_tab_for_pump,
                 exited_pinger,
             )
             .await;
@@ -494,6 +525,7 @@ impl BrowserManager {
         let network_log = self.network_log.clone();
         let recon = self.recon.clone();
         let tab_views = self.tab_views.clone();
+        let screencast_tab_for_watch = self.screencast_tab.clone();
         let mut exited_rx = self.exited_ping.subscribe();
         tokio::spawn(async move {
             // borrow_and_update:订阅瞬间若已是退出态(pump 先于本任务退出的
@@ -509,6 +541,7 @@ impl BrowserManager {
                 &network_log,
                 &recon,
                 &tab_views,
+                &screencast_tab_for_watch,
             )
             .await;
         });
@@ -807,6 +840,7 @@ impl BrowserManager {
         network_log: std::sync::Arc<std::sync::Mutex<NetworkLog>>,
         recon: Arc<ReconStore>,
         tab_views: std::sync::Arc<std::sync::Mutex<HashMap<String, (String, String)>>>,
+        screencast_tab: std::sync::Arc<std::sync::Mutex<Option<String>>>,
         exited_ping: tokio::sync::watch::Sender<bool>,
     ) {
         while let Some(event) = event_rx.recv().await {
@@ -835,8 +869,34 @@ impl BrowserManager {
                                 Some(&tab_id),
                             )
                             .await;
-                        if !data.is_empty() {
-                            let _ = broadcast.send(BrowserEvent::Frame { tab_id, data });
+                        // 只广播当前 screencast 流归属 tab 的帧:单实例单画面,
+                        // 前端不做过滤(首帧可能早于面板状态刷新,前端过滤会永久丢帧)。
+                        let is_stream_tab = {
+                            let guard = screencast_tab.lock().unwrap();
+                            guard.as_deref() == Some(tab_id.as_str())
+                        };
+                        if is_stream_tab && !data.is_empty() {
+                            // screencastFrame metadata 带页面 CSS 视口尺寸:
+                            // 前端画面点击/滚轮坐标依赖它做 CSS 像素换算。
+                            let viewport = event
+                                .params
+                                .pointer("/metadata/deviceWidth")
+                                .and_then(Value::as_u64)
+                                .zip(
+                                    event
+                                        .params
+                                        .pointer("/metadata/deviceHeight")
+                                        .and_then(Value::as_u64),
+                                )
+                                .map(|(w, h)| FrameViewport {
+                                    width: w as u32,
+                                    height: h as u32,
+                                });
+                            let _ = broadcast.send(BrowserEvent::Frame {
+                                tab_id,
+                                data,
+                                viewport,
+                            });
                         }
                     }
                 }
@@ -1231,6 +1291,13 @@ pub(crate) async fn close_tab_full(inner: &mut Inner, manager: &BrowserManager, 
         manager.recon.clear(tab_id);
         manager.clear_dialog(tab_id);
         inner.viewport.remove(tab_id);
+        // screencast 流归属清理:关闭的 tab 若正在推流,置空(前端空态等重启流)。
+        {
+            let mut guard = manager.screencast_tab.lock().unwrap();
+            if guard.as_deref() == Some(tab_id) {
+                *guard = None;
+            }
+        }
         if inner.active_tab.as_deref() == Some(tab_id) {
             inner.active_tab = inner.tabs.keys().next().cloned();
         }

@@ -16,7 +16,7 @@ use crate::{Tool, ToolContext, ToolOutput, parse_args_lenient};
 const TOOL_DESCRIPTION: &str = r#"控制内嵌浏览器(headless Chrome),可导航、读取页面、交互操作。ZCode 同款命令面:
 - 导航:navigate{url}(仅 http/https)、back{}、forward{}、reload{}
 - 读取:getState{}、snapshot{maxElements?, includeHidden?}(返回可交互元素列表,每个带 ref 编号与稳定定位器 locator/selector;后续交互用 ref 或 locator)、screenshot{fullPage?, clip?}(返回截图,图片自动注入会话)、elementInfo{x,y}
-- 交互:click{ref?|locator?|x,y, button?, doubleClick?}、fill{ref|locator, value}(整体替换输入框内容)、type{ref?|locator?, text}(追加粘贴)、press{key, ref?}、scroll{ref?|x,y}、hover{ref?|x,y}、select{ref, values[]}、check{ref, checked?}、drag{fromRef,toRef}。ref 和 locator 也可直接放 ref 字段:CSS 选择器、#id、[aria-label=...]、text:文本
+- 交互:click{ref?|locator?|x,y, button?, doubleClick?}、fill{ref|locator, value}(整体替换输入框内容)、type{ref?|locator?, text}(追加粘贴)、press{key, ref?}、scroll{ref?|x,y, deltaX?, deltaY?}(滚动,缺省向下 360px) 、hover{ref?|x,y}、select{ref, values[]}、check{ref, checked?}、drag{fromRef,toRef}。ref 和 locator 也可直接放 ref 字段:CSS 选择器、#id、[aria-label=...]、text:文本
 - 等待:waitFor{selector?|text?|textGone?, timeoutMs?}
 - 弹窗:getDialog{}、handleDialog{accept, promptText?}(页面 alert/confirm/prompt 会挂起等待处理)
 - 执行:evaluate{expression}(页面 JS,返回 JSON)
@@ -77,6 +77,8 @@ impl BrowserTool {
                         "tabId": { "type": "string", "description": "目标 tab;缺省 = 当前 tab" },
                         "ref": { "type": "string", "description": "snapshot 给出的元素编号(如 e12);也接受 CSS 选择器/locator/text:文本" },
                         "x": { "type": "number" }, "y": { "type": "number" },
+                        "deltaX": { "type": "number", "description": "scroll:横向滚动增量(像素;缺省 0)" },
+                        "deltaY": { "type": "number", "description": "scroll:纵向滚动增量(像素;缺省 360)" },
                         "width": { "type": "integer" }, "height": { "type": "integer" },
                         "value": { "type": "string", "description": "fill:输入内容" },
                         "text": { "type": "string", "description": "type:文本;handleDialog:prompt 回答" },

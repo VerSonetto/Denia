@@ -271,6 +271,8 @@ async fn dispatch_inner(ctx: &mut Ctx<'_>, command: &BrowserCommand) -> CommandO
             r#ref,
             x,
             y,
+            delta_x,
+            delta_y,
         } => {
             let started = std::time::Instant::now();
             match tab(ctx, tab_id.as_deref()).await {
@@ -281,8 +283,11 @@ async fn dispatch_inner(ctx: &mut Ctx<'_>, command: &BrowserCommand) -> CommandO
                         Ok(point) => point,
                         Err(e) => return e,
                     };
-                    // 默认向下滚 3 格(与 Playwright wheel 语义一致,量由调用方给)
-                    if let Err(e) = dispatch_wheel(ctx, &id, px, py, 0.0, 360.0).await {
+                    // 默认向下滚 3 格(与 Playwright wheel 语义一致,量由调用方给;
+                    // 面板滚轮可显式传 deltaX/deltaY 精确滚动)。
+                    let dx = delta_x.unwrap_or(0.0);
+                    let dy = delta_y.unwrap_or(360.0);
+                    if let Err(e) = dispatch_wheel(ctx, &id, px, py, dx, dy).await {
                         return e;
                     }
                     state_after(ctx, &id, started).await
@@ -587,6 +592,13 @@ async fn dispatch_inner(ctx: &mut Ctx<'_>, command: &BrowserCommand) -> CommandO
             let started = std::time::Instant::now();
             match tab(ctx, tab_id.as_deref()).await {
                 Ok(id) => {
+                    // 单实例单画面:先停掉旧流(若有且不是本 tab),再开新流。
+                    // 否则 Chrome 会持续给旧 tab 发帧,前端画面不跟随切 tab。
+                    if let Some(prev) = ctx.manager.screencast_tab() {
+                        if prev != id {
+                            let _ = ctx.cdp(&prev, "Page.stopScreencast", json!({})).await;
+                        }
+                    }
                     let _ = ctx
                         .cdp(
                             &id,
@@ -600,6 +612,7 @@ async fn dispatch_inner(ctx: &mut Ctx<'_>, command: &BrowserCommand) -> CommandO
                             }),
                         )
                         .await;
+                    ctx.manager.set_screencast_tab(Some(&id));
                     CommandOutcome::ok_value(json!({"streaming": true}), elapsed(&started))
                 }
                 Err(e) => e,
@@ -610,6 +623,7 @@ async fn dispatch_inner(ctx: &mut Ctx<'_>, command: &BrowserCommand) -> CommandO
             match tab(ctx, tab_id.as_deref()).await {
                 Ok(id) => {
                     let _ = ctx.cdp(&id, "Page.stopScreencast", json!({})).await;
+                    ctx.manager.set_screencast_tab(None);
                     CommandOutcome::ok_value(json!({"streaming": false}), elapsed(&started))
                 }
                 Err(e) => e,
@@ -701,7 +715,12 @@ async fn navigate(ctx: &mut Ctx<'_>, url: &str, tab_id: Option<&str>) -> Command
         }
         tokio::time::sleep(Duration::from_millis(SETTLE_POLL_MS)).await;
     }
-    state_after(ctx, &id, started).await
+    let outcome = state_after(ctx, &id, started).await;
+    // 导航后立即广播一次 tab 变化:面板/App 的自动展开与 tab 栏刷新
+    // 不依赖 frameNavigated 事件(该事件靠页面帧到达,headless 下 screencast
+    // 未开时可能永远等不到),保证"AI 打开网页 → 侧边栏立刻展示对应 tab"。
+    ctx.broadcast_tabs_changed();
+    outcome
 }
 
 type ResolveResult = Result<(f64, f64), CommandOutcome>;

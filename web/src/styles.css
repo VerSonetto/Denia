@@ -5102,23 +5102,61 @@ button.btn.form-action {
 }
 
 .browser-tab {
+  display: flex;
+  align-items: center;
+  gap: 4px;
   max-width: 180px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  padding: 5px 12px;
+  padding: 5px 8px 5px 12px;
   border: 1px solid var(--border-l1);
   border-radius: var(--r-pill);
   background: transparent;
   color: var(--label-secondary);
   font-size: 12px;
   cursor: pointer;
+  flex-shrink: 0;
+}
+
+.browser-tab-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .browser-tab.active {
   background: var(--active-fill);
   color: var(--label-primary);
   border-color: var(--border-l3);
+}
+
+/* tab 悬停关闭按钮:默认透明,悬浮/键盘聚焦时显示 */
+.browser-tab-close {
+  flex-shrink: 0;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--label-tertiary);
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.12s ease, background 0.12s ease, color 0.12s ease;
+}
+
+.browser-tab:hover .browser-tab-close,
+.browser-tab:focus-within .browser-tab-close,
+.browser-tab.active .browser-tab-close {
+  opacity: 1;
+}
+
+.browser-tab-close:hover {
+  background: var(--danger-soft);
+  color: var(--danger);
 }
 
 .browser-tab.new {
@@ -5164,8 +5202,34 @@ button.btn.form-action {
   object-fit: contain;
 }
 
+.browser-frame img.interactive {
+  cursor: pointer;
+}
+
 .browser-frame img.picking {
   cursor: crosshair;
+}
+
+/* 画面输入条:点击画面输入框后,从这里输入文本(回车粘贴进页面) */
+.browser-typebar {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.browser-typebar input {
+  flex: 1;
+  padding: 5px 10px;
+  border: 1px solid var(--border-l1);
+  border-radius: var(--r-sm);
+  background: var(--input-major);
+  color: var(--label-primary);
+  font-size: 12px;
+  outline: none;
+}
+
+.browser-typebar input:focus {
+  border-color: var(--border-l3);
 }
 
 .browser-empty {

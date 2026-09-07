@@ -357,7 +357,7 @@ export interface BrowserOutcome {
 /** /api/browser/stream 的一帧事件。 */
 export type BrowserEventFrame =
   | { type: 'tabs-changed' }
-  | { type: 'frame'; tabId: string; data: string }
+  | { type: 'frame'; tabId: string; data: string; viewport?: { width: number; height: number } }
   | { type: 'dialog-opened'; tabId: string; kind: string; message: string }
   | { type: 'dialog-closed'; tabId: string }
   | { type: 'navigated'; tabId: string; url: string; title: string }

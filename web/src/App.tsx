@@ -75,22 +75,64 @@ export default function App() {
   const runningIds = useRunningIds()
 
   const [settingsOpen, setSettingsOpen] = useState(false)
+  // 侧栏归属会话:browserOpenBySession 记忆"每个会话的侧栏开合状态"。
+  // 切换会话时按记忆恢复/收起;AI 触发的自动展开归属到当前活跃会话。
   const [browserOpen, setBrowserOpen] = useState(false)
+  const browserOpenBySessionRef = useRef<Record<string, boolean>>({})
   // ZCode 式自动展开:AI 调 browser 产生画面帧/状态变化时右侧视图自动出现。
   // 用户手动收起只挡当轮:新一轮 AI 轮次开始后重新允许自动展开。
   const browserAutoDismissedRef = useRef(false)
   const browserOpenRef = useRef(false)
+  const activeIdRef = useRef(activeId)
+  useEffect(() => {
+    activeIdRef.current = activeId
+  }, [activeId])
   useEffect(() => {
     browserOpenRef.current = browserOpen
   }, [browserOpen])
+
+  /** 侧栏开合状态归属到指定会话(当前活跃会话)。 */
+  const setBrowserOpenForSession = useCallback(
+    (sessionId: string | null, open: boolean) => {
+      if (sessionId) browserOpenBySessionRef.current[sessionId] = open
+      setBrowserOpen(open && sessionId === activeIdRef.current)
+    },
+    [],
+  )
+
   useEffect(() => {
     const close = subscribeBrowserEvents((event) => {
-      if ((event.type === 'frame' || event.type === 'tabs-changed') && !browserAutoDismissedRef.current && !browserOpenRef.current) {
-        setBrowserOpen(true)
+      // AI 用 browser 工具操作时自动展开侧栏:画面帧 / tab 变化 / 导航完成
+      // 都触发;navigate 命令路径已显式广播 tabs-changed 兜底,这里再加
+      // navigated 覆盖事件驱动导航(SPA 路由/页面自身跳转)的场景。
+      if (
+        (event.type === 'frame' ||
+          event.type === 'tabs-changed' ||
+          event.type === 'navigated') &&
+        !browserAutoDismissedRef.current &&
+        !browserOpenRef.current
+      ) {
+        setBrowserOpenForSession(activeIdRef.current, true)
       }
     })
     return close
-  }, [])
+  }, [setBrowserOpenForSession])
+
+  // 切换会话:侧栏归属跟随——旧会话记住开合,新会话按记忆恢复/收起。
+  const prevActiveForSidebar = useRef(activeId)
+  useEffect(() => {
+    const prev = prevActiveForSidebar.current
+    prevActiveForSidebar.current = activeId
+    if (prev === activeId) return
+    // 记录旧会话当前开合(仅在旧会话是活跃时更新,避免覆盖记忆)。
+    if (prev && browserOpenRef.current) {
+      browserOpenBySessionRef.current[prev] = true
+    } else if (prev && !browserOpenRef.current) {
+      browserOpenBySessionRef.current[prev] = false
+    }
+    // 新会话按记忆恢复;无记忆则收起(侧栏不跨会话残留)。
+    setBrowserOpen(activeId !== null && !!browserOpenBySessionRef.current[activeId])
+  }, [activeId])
   const prevRunningRef = useRef<Record<string, boolean>>({})
   useEffect(() => {
     const freshRun = Object.keys(runningIds).some((id) => !prevRunningRef.current[id])
@@ -708,7 +750,7 @@ export default function App() {
                   className="icon-btn"
                   onClick={() => {
                     browserAutoDismissedRef.current = true
-                    setBrowserOpen(false)
+                    setBrowserOpenForSession(activeId, false)
                   }}
                 >
                   <IconClose size={16} />
