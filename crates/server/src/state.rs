@@ -39,6 +39,14 @@ pub struct ConsoleSettings {
     /// 全部字段带默认值;见 `ConsoleCompactionSettings`。
     #[serde(default)]
     pub compaction: ConsoleCompactionSettings,
+    /// 工具并行执行上限(学 codex `ToolCallRuntime` + dsh `maxParallelToolCalls`)。
+    /// 一次 step 内模型返回的多个工具调用并发执行,受此上限约束。
+    #[serde(default = "default_max_parallel_tool_calls")]
+    pub max_parallel_tool_calls: usize,
+}
+
+fn default_max_parallel_tool_calls() -> usize {
+    10
 }
 
 /// `console.compaction` 段(层叠上下文管理配置,默认对齐 Claude Code
@@ -123,6 +131,12 @@ fn validate_console(value: Value) -> Result<Value, String> {
             c.compact_ratio
         ));
     }
+    if parsed.max_parallel_tool_calls == 0 || parsed.max_parallel_tool_calls > 64 {
+        return Err(format!(
+            "maxParallelToolCalls must be in [1, 64]; got {}",
+            parsed.max_parallel_tool_calls
+        ));
+    }
     serde_json::to_value(parsed).map_err(|e| e.to_string())
 }
 
@@ -137,6 +151,7 @@ pub fn console_settings(settings: &SettingsStore) -> ConsoleSettings {
             theme: "system".to_string(),
             locale: "zh".to_string(),
             compaction: ConsoleCompactionSettings::default(),
+            max_parallel_tool_calls: 10,
         })
 }
 
@@ -541,12 +556,16 @@ pub fn build_state(
         denia_tools::BashTool::new().with_runtime(runtime.clone()),
     ));
     let approval = Arc::new(ServerApprovalBridge::new(live.clone()));
+    let console = console_settings(&settings);
     let driver = Arc::new(
         SessionDriver::new(registry.clone(), Arc::new(tools), system_prompt.handle())
             .with_file_history(file_history.clone())
             .with_approval(approval)
             .with_runtime(runtime.clone())
-            .with_compaction(compaction_settings_from(&console_settings(&settings))),
+            .with_compaction(compaction_settings_from(&console))
+            .with_parallel(denia_agent_loop::ParallelSettings {
+                max_parallel_tool_calls: console.max_parallel_tool_calls,
+            }),
     );
 
     runtime.attach(&driver);
