@@ -59,12 +59,27 @@ fn pressure_ratio(pressure: &ContextPressure) -> Option<f64> {
     Some(projected as f64 / window as f64)
 }
 
+/// 硬上限:投影压力已触及/越过上下文窗口(对齐 codex `token_limit_reached`
+/// 的硬触发语义)——此时无论软阈值 ratio 如何都必须压缩,否则下一次请求
+/// 必然 PTL/被拒。
+fn pressure_at_hard_limit(pressure: &ContextPressure) -> bool {
+    match (pressure.context_window, pressure.projected_tokens) {
+        (Some(window), Some(projected)) if window > 0 => projected >= window,
+        _ => false,
+    }
+}
+
 /// 高压力闸门:是否触发 LLM 总结压缩。
+///
+/// 两级触发(学 codex `run_pre_sampling_compact` + `run_auto_compact`):
+/// 1. **硬上限**:投影压力 ≥ 上下文窗口 → 强制压缩(避免下一次请求 PTL);
+/// 2. **软阈值**:压力占比 ≥ `compact_ratio` → 提前压缩(缓冲语义)。
 pub fn should_compact(pressure: &ContextPressure, settings: &CompactionSettings) -> bool {
     if !settings.compact_enabled {
         return false;
     }
-    pressure_ratio(pressure).is_some_and(|ratio| ratio >= settings.compact_ratio)
+    pressure_at_hard_limit(pressure)
+        || pressure_ratio(pressure).is_some_and(|ratio| ratio >= settings.compact_ratio)
 }
 
 /// 与 token-meter 完全同口径的启发式 token 估算(角色/块开销 + 字符类别
@@ -263,7 +278,6 @@ pub fn format_summary(summary: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use denia_core::message::ChatMessage;
     use denia_core::session::SessionEnvelope;
 
     fn envelope(seq: u64, event: denia_core::session::SessionEvent) -> SessionEnvelope {
@@ -314,6 +328,18 @@ mod tests {
             projected_tokens: None,
         };
         assert!(!should_compact(&no_anchor, &settings));
+    }
+
+    #[test]
+    fn compact_gate_hits_hard_limit_regardless_of_ratio() {
+        let settings = tiny();
+        // 投影压力已越过窗口(硬上限):即使 ratio 阈值很高也必须压缩。
+        assert!(should_compact(&pressure(100_000, 100_000), &settings));
+        assert!(should_compact(&pressure(100_000, 120_000), &settings));
+        // 关闭开关:硬上限也不触发。
+        let mut off = settings;
+        off.compact_enabled = false;
+        assert!(!should_compact(&pressure(100_000, 120_000), &off));
     }
 
     #[test]
