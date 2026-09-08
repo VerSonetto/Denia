@@ -1,7 +1,7 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import { localeRevision, t } from '../i18n'
-import { groupTranscript, type OverviewRow, type TranscriptNode } from '../fold'
+import { groupTranscript, openTurnStartedAt, type OverviewRow, type TranscriptNode } from '../fold'
 import { MarkdownText } from '../markdown/MarkdownText'
 import type { MarkdownLabels } from '../markdown/MarkdownText'
 import { useTypewriter } from '../typewriter'
@@ -58,6 +58,7 @@ export function Transcript({
     if (node.kind === 'assistant') lastAssistantStep.set(node.turn, node.step)
     else if (node.kind === 'turn-end') endedTurns.add(node.turn)
   }
+  const workStartedAt = useMemo(() => openTurnStartedAt(nodes), [nodes])
   return (
     <>
       {rows.map((row, index) =>
@@ -85,6 +86,7 @@ export function Transcript({
           <UserMessageBubble text={message.text} images={message.images} pending />
         </div>
       ))}
+      {workStartedAt !== undefined && <WorkIndicator startedAt={workStartedAt} />}
     </>
   )
 }
@@ -100,6 +102,33 @@ export function formatDuration(ms: number): string {
   if (minutes > 0) return t('durationMinutes', { m: minutes, s: pad(seconds) })
   return t('durationSeconds', { s: seconds })
 }
+
+/**
+ * 运行中指示行:消息流末尾「工作中… + 计时」。
+ * 叶子组件自持 4Hz tick,流式重渲染不牵动;起点取当前 turn 的 turn-start,
+ * 切会话往返计时不重置。
+ */
+const WorkIndicator = memo(function WorkIndicator({ startedAt }: { startedAt: number }) {
+  const [now, setNow] = useState(() => Date.now())
+  useEffect(() => {
+    const interval = window.setInterval(() => setNow(Date.now()), 250)
+    return () => window.clearInterval(interval)
+  }, [])
+  const elapsed = Math.max(0, now - startedAt)
+  return (
+    <div className="work-indicator" role="status">
+      <span>{t('workIndicator')}</span>
+      <span className="work-dots" aria-hidden>
+        <i />
+        <i />
+        <i />
+      </span>
+      <span className="work-elapsed">
+        {elapsed < 60_000 ? `${(elapsed / 1000).toFixed(1)}s` : formatDuration(elapsed)}
+      </span>
+    </div>
+  )
+})
 
 function TurnOverview({ row }: { row: OverviewRow }) {
   const [open, setOpen] = useState(false)

@@ -373,6 +373,16 @@ export function hasOpenTurn(events: SessionEnvelope[]): boolean {
   return open
 }
 
+/** 当前未闭合 turn 的起点(epoch ms);无 open turn 返回 undefined。 */
+export function openTurnStartedAt(nodes: TranscriptNode[]): number | undefined {
+  let started: number | undefined
+  for (const node of nodes) {
+    if (node.kind === 'turn-start') started = node.time
+    else if (node.kind === 'turn-end') started = undefined
+  }
+  return started
+}
+
 /** 增量 fold 的 step-start 时间暂存:turn:step → epoch ms。 */
 const incrementalStepStarts = new Map<string, number>()
 

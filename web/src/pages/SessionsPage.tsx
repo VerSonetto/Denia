@@ -1811,9 +1811,7 @@ export default function SessionsPage({
                   onExit={handlePlanExit}
                 />
               ) : activeSession?.subagent ? <div className="runtime-child-composer"><span>{t('runtimeChildReadonly')}</span><button type="button" className="runtime-child-back-button" onClick={() => activeSession.parent_session && setActiveId(activeSession.parent_session, null)}>{t('runtimeBackParent')}</button></div> : composerCard}
-              {phase === 'active' && (
-                <StatsBar nodes={transcriptNodes} running={running} />
-              )}
+              {phase === 'active' && <StatsBar nodes={transcriptNodes} />}
             </div>
           </div>
         )}
