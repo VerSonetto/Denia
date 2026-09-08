@@ -20,10 +20,13 @@ const TOOL_DESCRIPTION: &str = r#"控制内嵌浏览器(headless Chrome),可导�
 - 等待:waitFor{selector?|text?|textGone?, timeoutMs?}
 - 弹窗:getDialog{}、handleDialog{accept, promptText?}(页面 alert/confirm/prompt 会挂起等待处理)
 - 执行:evaluate{expression}(页面 JS,返回 JSON)
-- tab:newTab{url?}、list{}(未运行时返回空 tabs,不拉起实例)、activate{tabId}、close{tabId?}(缺省 tabId = 当前 tab)
+- tab:newTab{url?}、list{}(未运行时返回空 tabs,不拉起实例)、activate{tabId}、close{tabId?}(缺省 tabId = 当前 tab;未运行时幂等回报已关闭)
 - 视口:viewportSet{width,height}、viewportReset{}
 - 网络抓包:networkList{urlFilter?, max?}(该 tab 捕获的请求:URL/方法/状态码/请求响应头/postData;环形缓冲约 200 条)、networkGetBody{requestId, bodyKind?}(bodyKind 缺省 "response" 取响应体;传 "request" 取 POST 请求体;文本直出,二进制返回 base64 标记)
 - 可视化模式:任意命令可带 visualMode: true,让用户在浏览器侧栏实时看到本次及后续操作;默认 false 不打扰用户
+启动语义:
+- 按需启动:getState 与 navigate/newTab 等交互命令会拉起浏览器
+- 查询与善后命令(list/close/activate/networkList/getDialog)浏览器没跑时原地返回,不拉起实例(收尾确认不会凭空造出 tab)
 稳定性保证:
 - 元素失效自动重定位:ref 过期会按 locator/selector/xpath/文本 回退链自动重绑,并在 1.2s 窗口内自动刷新快照重试,无需重复 snapshot
 - 统一超时:命令总耗时 30s(waitFor 可显式更长,上限 60s),CDP 单请求 30s

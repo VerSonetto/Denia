@@ -63,10 +63,11 @@ export default function ReconPanel({ tabId }: { tabId: string | null }) {
   }
   const refreshRequests = async (_id: string) => {
     try {
+      // 浏览器没跑时后端原地返回空列表(不拉起实例):这里照常收敛为空态。
       const outcome = (await browserCommand({ method: 'networkList', max: 100 })) as BrowserOutcome
       setRequests(((outcome.value as { requests?: unknown[] })?.requests ?? []) as Array<Record<string, unknown>>)
     } catch {
-      /* 浏览器未运行等,忽略 */
+      /* 传输错误等,忽略 */
     }
   }
 

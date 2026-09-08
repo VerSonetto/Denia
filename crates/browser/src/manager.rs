@@ -742,23 +742,25 @@ impl BrowserManager {
 
     /// 命令执行入口(工具与 REST API 共用)。
     ///
-    /// 面板轮询/关画面(list/getDialog/screencast)不自发拉起浏览器,避免
-    /// 侧栏挂载就把 Chrome 带起来。getState 对模型是探活入口,没跑就拉起。
+    /// 被动命令(纯查询 + tab 善后,见 [`Self::is_passive`])在浏览器没跑时
+    /// 原地返回,绝不拉起实例——否则面板轮询/陈旧 tabId 会把模型刚清干净的
+    /// 浏览器重新唤醒,凭空多出一个 about:blank tab。getState 对模型是探活
+    /// 入口,没跑就拉起。
     pub async fn execute(&self, command: BrowserCommand) -> CommandOutcome {
         let started = Instant::now();
         let _command_guard = self.command_gate.lock().await;
-        if Self::is_observe_only(&command) && !self.is_healthy().await {
-            if matches!(command, BrowserCommand::List) {
-                return CommandOutcome::ok_value(json!({ "tabs": [] }), elapsed(&started));
-            }
-            return CommandOutcome::err("backend_unavailable", "浏览器未运行", elapsed(&started));
+        // 执行前是否已在跑:决定被动命令"不拉起",也决定失败收尾时实例是不是
+        // 本次命令刚拉起来的(见下方 tab_not_found 回收)。
+        let was_running = self.is_healthy().await;
+        if !was_running && Self::is_passive(&command) {
+            return Self::offline_outcome(&command, elapsed(&started));
         }
         if let Err(error) = self.get_or_start().await {
             return CommandOutcome::err("backend_unavailable", error, elapsed(&started));
         }
         // 逆向断点暂停会冻结页面:主动命令执行前自动恢复目标 tab(断点保留,
         // 模型导航/交互不会卡死在断点上;面板用户从暂停横幅接管调试节奏)。
-        if !Self::is_observe_only(&command) && self.recon.is_paused(None) {
+        if !Self::is_passive(&command) && self.recon.is_paused(None) {
             let explicit = command.tab_id_probe().map(str::to_string);
             let active = {
                 let inner_guard = self.inner.lock().await;
@@ -807,6 +809,20 @@ impl BrowserManager {
                 break outcome;
             }
         };
+        // 实例是本命令拉起来的,而本命令连目标 tab 都没找到(陈旧 tabId):
+        // 没有任何调用方需要这个实例,立刻回收——否则它会以「凭空多出的
+        // about:blank tab」留在模型视野里,收尾时还得再关一遍。
+        // 其它错误(导航被拒/超时等)保留实例:模型可能要接着排查页面。
+        let orphan_launch = !was_running
+            && outcome
+                .error
+                .as_ref()
+                .is_some_and(|error| matches!(error.code.as_str(), "tab_not_found" | "no_tab"));
+        if orphan_launch {
+            self.on_pump_exit().await;
+            let _ = self.event_broadcast.send(BrowserEvent::Exited);
+            return outcome;
+        }
         // 关闭最后一个 tab 是明确的资源生命周期边界：立即销毁实例，
         // 使 profile 不再被 Chrome 子进程锁住。下一条主动命令会按需重启。
         let no_tabs = {
@@ -1284,18 +1300,57 @@ impl BrowserManager {
 }
 
 impl BrowserManager {
-    /// 观察/善后命令:浏览器没跑时不拉起。
+    /// 被动命令:浏览器没跑时原地返回,绝不拉起实例。
     ///
-    /// getState 不在此列——它对模型是探活入口,没跑就启动。
-    /// list 没跑时返回空 tabs,让收尾纪律可以幂等确认「已无 tab」。
-    fn is_observe_only(command: &BrowserCommand) -> bool {
+    /// 两类命令属于被动:①纯查询(list/networkList/getDialog);②对已死实例
+    /// 的善后(close/activate)。它们都可能在「模型刚关掉最后一个 tab、实例已
+    /// 回收」之后被面板轮询或陈旧 tabId 触发——若按主动命令处理会 get_or_start
+    /// 拉起新 Chrome 并建 about:blank,表现为「关了一个又冒一个新的」。
+    ///
+    /// getState 不在此列:它对模型是探活入口,没跑就启动(唯一会拉起实例的
+    /// 读命令);navigate/newTab 等交互命令同样按需启动。
+    fn is_passive(command: &BrowserCommand) -> bool {
         matches!(
             command,
             BrowserCommand::List
+                | BrowserCommand::Close { .. }
+                | BrowserCommand::Activate { .. }
                 | BrowserCommand::GetDialog { .. }
                 | BrowserCommand::StartScreencast { .. }
                 | BrowserCommand::StopScreencast { .. }
+                | BrowserCommand::NetworkList { .. }
+                | BrowserCommand::NetworkGetBody { .. }
         )
+    }
+
+    /// 被动命令在浏览器未运行时的结果:能安全回答的照常回答(幂等),不能的
+    /// 显式报未运行。判定口径统一为「没有实例就没有 tab / 没有请求 / 没有弹窗」。
+    fn offline_outcome(command: &BrowserCommand, elapsed_ms: u64) -> CommandOutcome {
+        match command {
+            // 收尾确认:没有实例 ⇒ 没有 tab。模型据此判定「已清理干净」。
+            BrowserCommand::List => CommandOutcome::ok_value(json!({ "tabs": [] }), elapsed_ms),
+            // 陈旧 tabId 善后:实例已回收,target 自然不存在,不当作错误
+            // (否则模型收尾时会反复重试一个永远关不掉的 tab)。
+            BrowserCommand::Close { .. } => CommandOutcome::ok_value(
+                json!({ "closed": true, "alreadyClosed": true }),
+                elapsed_ms,
+            ),
+            // 切 tab 对已回收的实例无意义:如实回报未激活,不报错。
+            BrowserCommand::Activate { .. } => {
+                CommandOutcome::ok_value(json!({ "activated": false }), elapsed_ms)
+            }
+            // 抓包缓冲随实例一起回收:没有实例就没有请求记录。
+            BrowserCommand::NetworkList { .. } => {
+                CommandOutcome::ok_value(json!({ "requests": [], "count": 0 }), elapsed_ms)
+            }
+            // 没有实例 ⇒ 没有挂起弹窗。
+            BrowserCommand::GetDialog { .. } => CommandOutcome {
+                dialog: Some(Value::Null),
+                ..CommandOutcome::ok_value(Value::Null, elapsed_ms)
+            },
+            // 其余(取响应体/screencast)需要真实实例才有意义:如实报未运行。
+            _ => CommandOutcome::err("backend_unavailable", "浏览器未运行", elapsed_ms),
+        }
     }
 }
 
@@ -1487,5 +1542,134 @@ impl<'a> Ctx<'a> {
 
     pub(crate) fn broadcast_tabs_changed(&self) {
         self.manager.broadcast(BrowserEvent::TabsChanged);
+    }
+}
+
+#[cfg(test)]
+mod passive_command_tests {
+    use super::*;
+
+    /// 收尾场景的全部命令都必须是「被动」的:模型关掉最后一个 tab 后,
+    /// 面板轮询/收尾确认不得把浏览器重新拉起来(否则凭空多出 about:blank)。
+    #[test]
+    fn cleanup_and_query_commands_never_launch_browser() {
+        for command in [
+            BrowserCommand::List,
+            BrowserCommand::Close { tab_id: None },
+            BrowserCommand::Close {
+                tab_id: Some("stale".to_string()),
+            },
+            BrowserCommand::Activate {
+                tab_id: "stale".to_string(),
+            },
+            BrowserCommand::GetDialog { tab_id: None },
+            BrowserCommand::NetworkList {
+                tab_id: None,
+                url_filter: None,
+                max: None,
+            },
+            BrowserCommand::NetworkGetBody {
+                tab_id: None,
+                request_id: "1".to_string(),
+                body_kind: None,
+            },
+            BrowserCommand::StartScreencast { tab_id: None },
+            BrowserCommand::StopScreencast { tab_id: None },
+        ] {
+            assert!(
+                BrowserManager::is_passive(&command),
+                "{command:?} 必须是被动命令:浏览器未运行时不得拉起实例"
+            );
+        }
+    }
+
+    /// getState 是模型探活入口、navigate/newTab 等交互命令需要实例:
+    /// 它们必须保持「主动」,按需启动语义不能被收窄。
+    #[test]
+    fn launcher_commands_stay_active() {
+        for command in [
+            BrowserCommand::GetState { tab_id: None },
+            BrowserCommand::Navigate {
+                url: "https://example.com".to_string(),
+                tab_id: None,
+            },
+            BrowserCommand::NewTab { url: None },
+            BrowserCommand::Snapshot {
+                tab_id: None,
+                max_elements: None,
+                include_hidden: None,
+            },
+        ] {
+            assert!(
+                !BrowserManager::is_passive(&command),
+                "{command:?} 必须按需拉起浏览器"
+            );
+        }
+    }
+
+    /// 离线口径:list 空 tabs(收尾判定「已干净」)、close 幂等回报已关闭
+    /// (陈旧 tabId 不报错)、networkList 空列表;其余如实报未运行。
+    #[test]
+    fn offline_outcome_is_idempotent_for_cleanup_queries() {
+        let list = BrowserManager::offline_outcome(&BrowserCommand::List, 0);
+        assert!(list.ok, "list 离线应成功");
+        assert_eq!(list.value, Some(json!({ "tabs": [] })));
+
+        let close = BrowserManager::offline_outcome(
+            &BrowserCommand::Close {
+                tab_id: Some("stale".to_string()),
+            },
+            0,
+        );
+        assert!(close.ok, "陈旧 tabId 的 close 不应报错");
+        assert_eq!(
+            close.value,
+            Some(json!({ "closed": true, "alreadyClosed": true }))
+        );
+
+        let network = BrowserManager::offline_outcome(
+            &BrowserCommand::NetworkList {
+                tab_id: None,
+                url_filter: None,
+                max: None,
+            },
+            0,
+        );
+        assert!(network.ok, "networkList 离线应返回空列表而非报错");
+        assert_eq!(
+            network.value,
+            Some(json!({ "requests": [], "count": 0 }))
+        );
+
+        let activate = BrowserManager::offline_outcome(
+            &BrowserCommand::Activate {
+                tab_id: "stale".to_string(),
+            },
+            0,
+        );
+        assert!(activate.ok, "离线 activate 不应报错");
+        assert_eq!(activate.value, Some(json!({ "activated": false })));
+
+        let dialog = BrowserManager::offline_outcome(&BrowserCommand::GetDialog { tab_id: None }, 0);
+        assert!(dialog.ok, "离线 getDialog 应成功");
+        assert_eq!(dialog.dialog, Some(Value::Null));
+
+        // 需要真实实例的命令如实报未运行。
+        let body = BrowserManager::offline_outcome(
+            &BrowserCommand::NetworkGetBody {
+                tab_id: None,
+                request_id: "1".to_string(),
+                body_kind: None,
+            },
+            0,
+        );
+        assert!(!body.ok, "networkGetBody 离线应报未运行");
+        assert_eq!(body.error.as_ref().map(|e| e.code.as_str()), Some("backend_unavailable"));
+
+        let screencast = BrowserManager::offline_outcome(
+            &BrowserCommand::StartScreencast { tab_id: None },
+            0,
+        );
+        assert!(!screencast.ok, "startScreencast 离线应报未运行");
     }
 }

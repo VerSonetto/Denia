@@ -182,7 +182,7 @@ fn register_browser_section(prompt: &mut SystemPrompt) -> Result<(), String> {
         name: "tool:browser".to_string(),
         order: SectionOrder::ToolBrowser.value(),
         text: PromptText::Static(
-            "browser 与 recon 共用一个常驻浏览器实例(与控制台面板同款),打开的 tab 不会随任务结束自动关闭。getState 会按需启动浏览器;list 只查询,浏览器没跑时返回空 tabs,不会拉起实例。每次浏览器任务完成、或确认后续不再使用浏览器时,必须彻底清除浏览器资源:先 list 查看现存 tab,再把本次打开的 tab 逐个 close;关闭最后一个 tab 会彻底回收浏览器进程与全部状态,这是唯一的彻底清除方式。list 显示已无 tab(浏览器已回收)则无需操作;严禁留着打开的 tab 结束任务。\nbrowser 工具默认在后台无界面操作,控制台不展示浏览器画面。仅当用户明确要求看着他操作浏览器(如\"打开给我看\"\"可视化模式\"),或用户的话里明显需要亲眼看到画面(如\"看下这个页面长什么样\"\"演示一下操作\")时,才给命令加 visualMode: true 展开浏览器侧栏;用户没有这类表示时不要开启,常规抓取、点击、检查接口等后台任务保持默认。开启后用户手动收起侧栏即为不要看,不要再重复请求展开。"
+            "browser 与 recon 共用一个常驻浏览器实例(与控制台面板同款),打开的 tab 不会随任务结束自动关闭。启动按需:getState 与 navigate/newTab 等交互命令会拉起浏览器;list/close/activate/networkList/getDialog 是查询与善后命令,浏览器没跑时原地返回(list 返回空 tabs、close 回报已关闭、networkList 返回空列表),绝不拉起实例——收尾时的确认查询不会凭空造出 tab。每次浏览器任务完成、或确认后续不再使用浏览器时,必须彻底清除浏览器资源:先 list 查看现存 tab,再把本次打开的 tab 逐个 close;关闭最后一个 tab 会彻底回收浏览器进程与全部状态,这是唯一的彻底清除方式。判定口径:list 返回空 tabs 即已清理干净(浏览器已回收、无残留 tab),此时立即停止操作,不要再调 getState/navigate 等会启动浏览器的命令;严禁留着打开的 tab 结束任务。\nbrowser 工具默认在后台无界面操作,控制台不展示浏览器画面。仅当用户明确要求看着他操作浏览器(如\"打开给我看\"\"可视化模式\"),或用户的话里明显需要亲眼看到画面(如\"看下这个页面长什么样\"\"演示一下操作\")时,才给命令加 visualMode: true 展开浏览器侧栏;用户没有这类表示时不要开启,常规抓取、点击、检查接口等后台任务保持默认。开启后用户手动收起侧栏即为不要看,不要再重复请求展开。"
                 .to_string(),
         ),
         complete: false,
@@ -507,7 +507,10 @@ mod browser_prompt_tests {
             .expect("tool:browser section registered");
         assert_eq!(section.audience, SectionAudience::Model);
         assert!(section.text.contains("彻底清除浏览器资源"));
-        assert!(section.text.contains("getState 会按需启动"));
+        // 启动语义必须写清:哪些命令拉起实例、哪些只查询不拉起。
+        assert!(section.text.contains("getState 与 navigate/newTab 等交互命令会拉起浏览器"));
+        assert!(section.text.contains("绝不拉起实例"));
+        assert!(section.text.contains("list 返回空 tabs 即已清理干净"));
         assert!(section.text.contains("visualMode"));
         let user_body = denia_system_prompt::render_prompt_for_user(&assembly);
         assert!(!user_body.contains("彻底清除浏览器资源"));
