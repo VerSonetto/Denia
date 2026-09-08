@@ -37,6 +37,8 @@ pub enum SectionOrder {
     DeploymentPersona,
     ToolBash,
     ToolRead,
+    /// 用户消息中 `@路径` 文件引用说明(对照 dsh FILE_REFERENCE 段),紧跟 read 纪律。
+    FileReference,
     ToolWrite,
     ToolGlob,
     ToolGrep,
@@ -47,6 +49,8 @@ pub enum SectionOrder {
     ToolJobs,
     /// 技能工具(skill)的工具纪律段。
     ToolSkill,
+    /// 浏览器工具(browser/recon)的资源回收纪律段;仅在注册了 browser 工具时注入。
+    ToolBrowser,
 }
 
 impl SectionOrder {
@@ -57,6 +61,7 @@ impl SectionOrder {
             Self::DeploymentPersona => 0,
             Self::ToolBash => 1000,
             Self::ToolRead => 1100,
+            Self::FileReference => 1150,
             Self::ToolWrite => 1200,
             Self::ToolGlob => 1300,
             Self::ToolGrep => 1400,
@@ -64,6 +69,7 @@ impl SectionOrder {
             Self::ToolAgents => 1600,
             Self::ToolJobs => 1700,
             Self::ToolSkill => 1800,
+            Self::ToolBrowser => 1900,
         }
     }
 }

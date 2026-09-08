@@ -63,6 +63,17 @@ pub fn register_shipped_prompt(
         complete: false,
         audience: SectionAudience::Model,
     })?;
+    // 对照 dsh FILE_REFERENCE_PROMPT:仅路径占位,内容留在 read/列目录工具后面。
+    prompt.section(PromptSection {
+        name: "context:file-reference".to_string(),
+        order: SectionOrder::FileReference.value(),
+        text: PromptText::Static(
+            "用户消息中带 @ 前缀的是用户明确引用的工作区路径,相对工作区根目录。结尾带 / 的是目录:需要其内容时用 bash 列目录查看;其余是文件:需要其内容时用 read_file 读取,读取前不要声称已查看过内容,也不要猜测内容。路径含空格时用 @\"...\" 表示。"
+                .to_string(),
+        ),
+        complete: false,
+        audience: SectionAudience::Model,
+    })?;
     prompt.section(PromptSection {
         name: "tool:write".to_string(),
         order: SectionOrder::ToolWrite.value(),
@@ -161,6 +172,25 @@ pub fn register_capability_prompt_sections(prompt: &mut SystemPrompt) -> Result<
     Ok(())
 }
 
+/// 浏览器工具(browser/recon)的资源回收纪律段。
+///
+/// 段与 browser schema 严格同步:仅在带 hub 的 builder 里注册(hub 为 Some
+/// 才有工具),无 browser 的部署模型不会看到不存在的工具。机制上关闭最后
+/// 一个 tab 即彻底回收(manager 层),本段只负责让模型主动收尾清理。
+fn register_browser_section(prompt: &mut SystemPrompt) -> Result<(), String> {
+    prompt.section(PromptSection {
+        name: "tool:browser".to_string(),
+        order: SectionOrder::ToolBrowser.value(),
+        text: PromptText::Static(
+            "browser 与 recon 共用一个常驻浏览器实例(与控制台面板同款),打开的 tab 不会随任务结束自动关闭。每次浏览器任务完成、或确认后续不再使用浏览器时,必须彻底清除浏览器资源:先 list 查看现存 tab,再把本次打开的 tab 逐个 close;关闭最后一个 tab 会彻底回收浏览器进程与全部状态,这是唯一的彻底清除方式。list 显示已无 tab(浏览器已回收)则无需操作;严禁留着打开的 tab 结束任务。"
+                .to_string(),
+        ),
+        complete: false,
+        audience: SectionAudience::Model,
+    })?;
+    Ok(())
+}
+
 /// Shipped registry pair: prompt assembly plus executable tools.
 pub fn default_shipped() -> (SystemPrompt, ToolRegistry) {
     let tools = crate::default_registry();
@@ -177,6 +207,7 @@ pub fn default_shipped() -> (SystemPrompt, ToolRegistry) {
 pub fn default_shipped_with_browser(hub: Option<BrowserHub>) -> (SystemPrompt, ToolRegistry) {
     let (mut prompt, tools) = default_shipped();
     if let Some(hub) = hub {
+        register_browser_section(&mut prompt).expect("browser prompt section is valid");
         let tool = Arc::new(crate::BrowserTool::new(hub));
         let schema = tool.schema().clone();
         prompt.tools(move |_| ToolProviderResult {
@@ -239,6 +270,7 @@ pub fn shipped_with_persona_and_browser_and_recon(
 ) -> (SystemPrompt, ToolRegistry) {
     let (mut prompt, mut registry) = shipped_with_persona(persona_text);
     if let Some(hub) = hub {
+        register_browser_section(&mut prompt).expect("browser prompt section is valid");
         let tool = Arc::new(crate::BrowserTool::new(hub));
         let schema = tool.schema().clone();
         prompt.tools(move |_| ToolProviderResult {
@@ -367,27 +399,52 @@ mod tests {
         assert!(!render_context_snapshot(&assembly).is_empty());
         assert_eq!(assembly.tools.len(), 7);
     }
+
+    #[test]
+    fn file_reference_section_is_model_audience() {
+        let (prompt, _tools) = default_shipped();
+        let assembly = prompt
+            .assemble(&AssembleContext {
+                cwd: Some("/tmp/ws".to_string()),
+                ..Default::default()
+            })
+            .unwrap();
+        let section = assembly
+            .sections
+            .iter()
+            .find(|section| section.name == "context:file-reference")
+            .expect("file-reference section registered");
+        assert_eq!(section.audience, SectionAudience::Model);
+        assert!(section.text.contains('@'));
+        // 工具纪律类段不进用户可见副本。
+        let user_body = render_prompt_for_user(&assembly);
+        assert!(!user_body.contains("read_file 读取"));
+    }
 }
 
 #[cfg(test)]
 mod browser_prompt_tests {
     use super::*;
 
+    struct FakeHub;
+    #[async_trait::async_trait]
+    impl crate::browser::BrowserExecute for FakeHub {
+        async fn execute(
+            &self,
+            _command: denia_browser::BrowserCommand,
+        ) -> denia_browser::CommandOutcome {
+            denia_browser::CommandOutcome::ok_value(serde_json::Value::Null, 0)
+        }
+    }
+
+    fn fake_hub() -> crate::BrowserHub {
+        std::sync::Arc::new(FakeHub)
+    }
+
     #[test]
     fn default_shipped_with_browser_includes_schema() {
         // hub 需要 trait 对象;用 BrowserTool 侧的桥接实现 — 这里只验证 schema 进 prompt。
-        // 构造一个假的 BrowserExecute 实现即可。
-        struct FakeHub;
-        #[async_trait::async_trait]
-        impl crate::browser::BrowserExecute for FakeHub {
-            async fn execute(
-                &self,
-                _command: denia_browser::BrowserCommand,
-            ) -> denia_browser::CommandOutcome {
-                denia_browser::CommandOutcome::ok_value(serde_json::Value::Null, 0)
-            }
-        }
-        let hub: crate::BrowserHub = std::sync::Arc::new(FakeHub);
+        let hub = fake_hub();
         let (prompt, registry) = default_shipped_with_browser(Some(hub));
         let assembly = prompt
             .assemble(&denia_system_prompt::AssembleContext::default())
@@ -402,6 +459,62 @@ mod browser_prompt_tests {
             "browser schema missing from prompt tools: {names:?}"
         );
         assert!(registry.get("browser").is_some(), "browser not registered");
+    }
+
+    #[test]
+    fn browser_section_registered_only_with_hub() {
+        // 默认 persona 模板引用 {{cwd}},render 时必须提供,否则插值 fail loud。
+        let context = denia_system_prompt::AssembleContext {
+            cwd: Some("/tmp/ws".to_string()),
+            ..Default::default()
+        };
+        // 带 hub:tool:browser 段注册,Model 受众,不进用户可见副本。
+        let (prompt, _registry) = default_shipped_with_browser(Some(fake_hub()));
+        let assembly = prompt.assemble(&context).expect("assemble");
+        let section = assembly
+            .sections
+            .iter()
+            .find(|section| section.name == "tool:browser")
+            .expect("tool:browser section registered");
+        assert_eq!(section.audience, SectionAudience::Model);
+        assert!(section.text.contains("彻底清除浏览器资源"));
+        let user_body = denia_system_prompt::render_prompt_for_user(&assembly);
+        assert!(!user_body.contains("彻底清除浏览器资源"));
+
+        // persona 变体带 hub 同样有段。
+        let (prompt, _registry) = shipped_with_persona_and_browser_and_recon(
+            "自定义 persona".to_string(),
+            Some(fake_hub()),
+            None,
+        );
+        let assembly = prompt.assemble(&context).expect("assemble");
+        assert!(
+            assembly
+                .sections
+                .iter()
+                .any(|section| section.name == "tool:browser"),
+            "persona+browser variant missing tool:browser section"
+        );
+    }
+
+    #[test]
+    fn browser_section_absent_without_hub() {
+        // 无 browser 工具的部署不注入纪律段:模型不看到不存在的工具。
+        for (prompt, _tools) in [
+            default_shipped(),
+            default_shipped_with_browser(None),
+        ] {
+            let assembly = prompt
+                .assemble(&denia_system_prompt::AssembleContext::default())
+                .expect("assemble");
+            assert!(
+                !assembly
+                    .sections
+                    .iter()
+                    .any(|section| section.name == "tool:browser"),
+                "tool:browser must not be registered without browser tool"
+            );
+        }
     }
 }
 

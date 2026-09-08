@@ -547,6 +547,23 @@ export function pickDirectory(): Promise<{ path: string | null }> {
   return http('/api/fs/pick', { method: 'POST' })
 }
 
+/** `@` 提及候选:相对会话 cwd 的路径条目(目录与文件)。 */
+export interface MentionCandidate {
+  path: string
+  kind: 'file' | 'directory'
+}
+
+/** 搜索会话 cwd 树下的 `@` 提及候选;query 为空 = 列根目录。 */
+export function searchMentions(
+  cwd: string,
+  query: string,
+  signal?: AbortSignal,
+): Promise<{ items: MentionCandidate[] }> {
+  const params = new URLSearchParams({ path: cwd })
+  if (query) params.set('query', query)
+  return http(`/api/fs/mentions?${params.toString()}`, { signal })
+}
+
 export function getSession(id: string, signal?: AbortSignal): Promise<{
   header: SessionHeader
   events: SessionEnvelope[]

@@ -6,6 +6,7 @@ use axum::response::{IntoResponse, Response};
 use serde_json::json;
 
 /// Stable wire error: `{ code, message }` plus optional details.
+#[derive(Debug)]
 pub struct ApiError {
     pub status: StatusCode,
     pub code: String,

@@ -365,6 +365,27 @@ export function IconFolder(props: IconProps) {
   )
 }
 
+/** 普通文件(@ 提及菜单等处的文件条目)。 */
+export function IconFile(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <path
+        d="M5.5 2.5h4.2L13 6.3v7.2a1.2 1.2 0 0 1-1.2 1.2H5.5a1.2 1.2 0 0 1-1.2-1.2V3.7c0-.66.54-1.2 1.2-1.2Z"
+        stroke="currentColor"
+        strokeWidth="1.3"
+        strokeLinejoin="round"
+      />
+      <path
+        d="M9.7 2.5v3.8h3.3"
+        stroke="currentColor"
+        strokeWidth="1.3"
+        strokeLinejoin="round"
+        opacity="0.5"
+      />
+    </Svg>
+  )
+}
+
 /** 收起侧栏:面板左收(lucide panel-left-close)。 */
 export function IconPanelClose(props: IconProps) {
   return (

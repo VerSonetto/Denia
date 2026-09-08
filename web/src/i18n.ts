@@ -400,6 +400,10 @@ const zh = {
   'llm.error.baseURLFormat': 'Base URL 需以 http:// 或 https:// 开头',
   'llm.error.numberPositive': '需为正整数',
 
+  mentionAria: '@ 文件引用',
+  mentionLoading: '搜索中…',
+  mentionEmpty: '无匹配文件或目录',
+  mentionEmptyQuery: '该目录下没有可引用的文件',
   chatPlaceholder: '输入消息…(Enter 发送,Shift+Enter 换行)',
   run: '发送',
   stop: '停止',
@@ -975,6 +979,10 @@ const en: typeof zh = {
   'llm.error.baseURLFormat': 'Base URL must start with http:// or https://',
   'llm.error.numberPositive': 'Must be a positive integer',
 
+  mentionAria: 'Reference files',
+  mentionLoading: 'Searching…',
+  mentionEmpty: 'No matching files or directories',
+  mentionEmptyQuery: 'No files to reference in this directory',
   chatPlaceholder: 'Type a message… (Enter to send, Shift+Enter for newline)',
   run: 'Send',
   stop: 'Stop',

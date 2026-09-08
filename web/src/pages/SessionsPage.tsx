@@ -1,6 +1,7 @@
 import { RuntimePanel } from '../components/RuntimePanel'
 import { useCallback, useEffect, useRef, useState, type ClipboardEvent, type KeyboardEvent, type WheelEvent } from 'react'
 import * as api from '../api'
+import type { MentionCandidate } from '../api'
 import { optimizePromptText } from '../promptOptimizer'
 import {
   addSessionLocal,
@@ -33,6 +34,7 @@ import {
   IconChevron,
   IconClose,
   IconDownload,
+  IconFile,
   IconFolder,
   IconImage,
   IconPlus,
@@ -44,6 +46,7 @@ import {
   IconStop,
 } from '../components/icons'
 import { resolveSessionReasoningEffort } from '../modelCatalog'
+import { activeAtToken, applyMentionInsertion, formatFileMention } from './mention'
 import { TodoPanel } from '../components/TodoPanel'
 import { QueuedMessagePanel } from '../components/QueuedMessagePanel'
 import { ConversationAxis } from '../components/ConversationAxis'
@@ -227,6 +230,124 @@ export default function SessionsPage({
     el.style.height = `${el.scrollHeight}px`
   }
 
+  /* ---- 输入框 @ 文件/文件夹提及(对照 dsh file-reference:候选只含路径,内容留在 read 工具) ---- */
+
+  const [mentionOpen, setMentionOpen] = useState(false)
+  const [mentionItems, setMentionItems] = useState<MentionCandidate[]>([])
+  const [mentionLoading, setMentionLoading] = useState(false)
+  /** 当前查询串(空态提示区分"根目录为空"与"无匹配")。 */
+  const [mentionQuery, setMentionQuery] = useState('')
+  const [mentionActive, setMentionActive] = useState(0)
+  const mentionMenuRef = useRef<HTMLDivElement | null>(null)
+  const mentionDebounceRef = useRef<number | null>(null)
+  const mentionAbortRef = useRef<AbortController | null>(null)
+  // IME 组词阶段不触发检测/选择旁路(对照模型菜单的 isComposing 旁路)。
+  const composingRef = useRef(false)
+  // 候选范围 = 已存活会话的 cwd;无会话或 cwd 失效时不触发。
+  const mentionCwd = activeSession?.cwd_alive === false ? null : (activeSession?.cwd ?? null)
+  // 下钻时显示当前位置(query 含 / 时取目录前缀),对照 dsh 的面包屑头部。
+  const mentionDir = mentionQuery.includes('/')
+    ? mentionQuery.slice(0, mentionQuery.lastIndexOf('/') + 1)
+    : ''
+
+  const closeMention = useCallback(() => {
+    if (mentionDebounceRef.current !== null) {
+      window.clearTimeout(mentionDebounceRef.current)
+      mentionDebounceRef.current = null
+    }
+    mentionAbortRef.current?.abort()
+    mentionAbortRef.current = null
+    setMentionOpen(false)
+    setMentionItems([])
+    setMentionLoading(false)
+  }, [])
+
+  /** 检测光标处 `@` token 并按 150ms 防抖拉候选;token 消失/无 cwd 时关闭。 */
+  const refreshMentions = useCallback(() => {
+    const el = promptRef.current
+    const cwd = mentionCwd
+    if (!el || !cwd) {
+      closeMention()
+      return
+    }
+    const caret = Math.min(el.selectionStart ?? el.value.length, el.value.length)
+    const token = activeAtToken(el.value, caret)
+    if (!token) {
+      closeMention()
+      return
+    }
+    setMentionQuery(token.query)
+    setMentionOpen(true)
+    setMentionLoading(true)
+    if (mentionDebounceRef.current !== null) window.clearTimeout(mentionDebounceRef.current)
+    mentionDebounceRef.current = window.setTimeout(() => {
+      mentionDebounceRef.current = null
+      mentionAbortRef.current?.abort()
+      const controller = new AbortController()
+      mentionAbortRef.current = controller
+      api
+        .searchMentions(cwd, token.query, controller.signal)
+        .then(({ items }) => {
+          if (controller.signal.aborted) return
+          setMentionItems(items)
+          setMentionActive(0)
+          setMentionLoading(false)
+        })
+        .catch(() => {
+          // 后端 400(目录已死等):按无结果收起候选,不打断输入。
+          if (!controller.signal.aborted) {
+            setMentionItems([])
+            setMentionLoading(false)
+          }
+        })
+    }, 150)
+  }, [mentionCwd, closeMention])
+
+  /** 选中候选:用格式化文本替换当前 token,补空格,光标移到其后。 */
+  const pickMention = useCallback(
+    (candidate: MentionCandidate) => {
+      const el = promptRef.current
+      if (!el) return
+      const caret = Math.min(el.selectionStart ?? el.value.length, el.value.length)
+      const token = activeAtToken(el.value, caret)
+      if (!token) return
+      const mention = formatFileMention(candidate, token.quoted)
+      if (mention === undefined) return
+      const insertion = applyMentionInsertion(el.value, caret, token, mention)
+      setPrompt(insertion.text)
+      setOptimizedPrompt(null)
+      originalPromptRef.current = ''
+      closeMention()
+      syncPromptHeight()
+      requestAnimationFrame(() => {
+        el.focus()
+        el.selectionStart = insertion.caret
+        el.selectionEnd = insertion.caret
+      })
+    },
+    [closeMention],
+  )
+
+  // 键盘高亮条目跟随滚动(与模型菜单同款 data-kb 标记)。
+  useEffect(() => {
+    if (!mentionOpen) return
+    mentionMenuRef.current?.querySelector('[data-kb="true"]')?.scrollIntoView({ block: 'nearest' })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mentionOpen, mentionActive, mentionItems])
+
+  // cwd 失效/会话切换时确保菜单关闭。
+  useEffect(() => {
+    if (!mentionCwd) closeMention()
+  }, [mentionCwd, closeMention])
+
+  // 卸载兜底:防抖与在途请求随组件销毁取消。
+  useEffect(() => {
+    return () => {
+      if (mentionDebounceRef.current !== null) window.clearTimeout(mentionDebounceRef.current)
+      mentionAbortRef.current?.abort()
+    }
+  }, [])
+
   useEffect(() => {
     optimizeAbortRef.current?.abort()
     optimizeAbortRef.current = null
@@ -238,6 +359,7 @@ export default function SessionsPage({
     setSending(false)
     setPendingMessages([])
     sendingRef.current = false
+    closeMention()
     setTranscriptNodes([])
     setAxisAnchors([])
     setAxisJump(null)
@@ -253,7 +375,7 @@ export default function SessionsPage({
     }
     const el = scrollRef.current
     if (el !== null) el.scrollTop = 0
-  }, [activeId])
+  }, [activeId, closeMention])
 
   useEffect(() => {
     let cancelled = false
@@ -1131,6 +1253,33 @@ export default function SessionsPage({
   }
 
   const onPromptKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
+    if (mentionOpen) {
+      // IME 组词阶段的按键交给输入法,不做选择/发送旁路。
+      if (composingRef.current) return
+      const count = mentionItems.length
+      if (event.key === 'ArrowDown' && count > 0) {
+        event.preventDefault()
+        setMentionActive((index) => Math.min(count - 1, index + 1))
+        return
+      }
+      if (event.key === 'ArrowUp' && count > 0) {
+        event.preventDefault()
+        setMentionActive((index) => Math.max(0, index - 1))
+        return
+      }
+      // 弹层打开时 Enter/Tab 优先选择候选,不发送。
+      if ((event.key === 'Tab' || event.key === 'Enter') && count > 0) {
+        event.preventDefault()
+        const target = mentionItems[Math.min(mentionActive, count - 1)]
+        if (target) pickMention(target)
+        return
+      }
+      if (event.key === 'Escape') {
+        event.preventDefault()
+        closeMention()
+        return
+      }
+    }
     if (event.key !== 'Enter' || event.shiftKey) return
     event.preventDefault()
     if (optimizing) return
@@ -1298,6 +1447,17 @@ export default function SessionsPage({
           onChange={(event) => {
             setPrompt(event.target.value)
             syncPromptHeight()
+            if (!composingRef.current) refreshMentions()
+          }}
+          onSelect={() => {
+            // 光标移动不产生 onChange,单独检测 @ token。
+            if (!composingRef.current) refreshMentions()
+          }}
+          onCompositionStart={() => {
+            composingRef.current = true
+          }}
+          onCompositionEnd={() => {
+            composingRef.current = false
           }}
           onPaste={(event) => void handlePaste(event)}
           onFocus={() => {
@@ -1307,6 +1467,60 @@ export default function SessionsPage({
           onWheel={onPromptWheel}
         />
       </div>
+      {mentionOpen && (
+        <>
+          <div className="menu-backdrop" onClick={closeMention} />
+          <div
+            className="mention-menu"
+            role="listbox"
+            aria-label={t('mentionAria')}
+            ref={mentionMenuRef}
+          >
+            {mentionDir && <div className="mention-menu-heading">{mentionDir}</div>}
+            {mentionLoading ? (
+              <div className="mention-menu-empty">
+                <IconSpinner size={12} />
+                {t('mentionLoading')}
+              </div>
+            ) : mentionItems.length === 0 ? (
+              <div className="mention-menu-empty">
+                {mentionQuery ? t('mentionEmpty') : t('mentionEmptyQuery')}
+              </div>
+            ) : (
+              mentionItems.map((item, index) => {
+                const active = index === mentionActive
+                const directory = item.kind === 'directory'
+                const slash = item.path.lastIndexOf('/')
+                const name = slash >= 0 ? item.path.slice(slash + 1) : item.path
+                const parent = slash >= 0 ? item.path.slice(0, slash + 1) : ''
+                return (
+                  <button
+                    key={`${item.kind}:${item.path}`}
+                    type="button"
+                    role="option"
+                    aria-selected={active}
+                    data-kb={active || undefined}
+                    className={`mention-menu-item${active ? ' kb' : ''}`}
+                    onMouseEnter={() => setMentionActive(index)}
+                    onClick={() => pickMention(item)}
+                  >
+                    <span className={`mention-menu-icon${directory ? ' dir' : ''}`}>
+                      {directory ? <IconFolder size={13} /> : <IconFile size={13} />}
+                    </span>
+                    <span className="mention-menu-text">
+                      <span className="mention-menu-name">
+                        {name}
+                        {directory ? '/' : ''}
+                      </span>
+                      {parent && <span className="mention-menu-parent">{parent}</span>}
+                    </span>
+                  </button>
+                )
+              })
+            )}
+          </div>
+        </>
+      )}
       <div className="prompt-bar">
         <div className="composer-modes">
           <PermissionSelector

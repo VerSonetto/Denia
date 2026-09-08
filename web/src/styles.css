@@ -2029,6 +2029,110 @@ button {
   cursor: pointer;
 }
 
+/* ---- 输入框 @ 提及候选菜单(视觉与交互对齐 model-menu) ---- */
+
+.mention-menu {
+  position: absolute;
+  left: 16px;
+  right: 16px;
+  bottom: calc(100% + 8px);
+  z-index: 51;
+  max-height: 264px;
+  overflow-y: auto;
+  background: var(--bg-layer-2);
+  border: 1px solid var(--border-l2);
+  border-radius: var(--r-md);
+  box-shadow: var(--shadow-float);
+  padding: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  animation: model-menu-in 0.16s var(--ease);
+}
+
+/* 下钻时的当前位置(q = "src/main" → "src/"),对照 dsh 的面包屑头部。 */
+.mention-menu-heading {
+  flex: none;
+  padding: 4px 8px 6px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--label-caption);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.mention-menu-empty {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 10px 8px;
+  color: var(--label-caption);
+  font-size: 12.5px;
+}
+
+.mention-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  padding: 6px 8px;
+  border: none;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--label-secondary);
+  text-align: left;
+  cursor: pointer;
+  min-width: 0;
+}
+
+.mention-menu-item:hover,
+.mention-menu-item.kb {
+  background: var(--hover-fill);
+  color: var(--label-primary);
+}
+
+/* 目录/文件图标的层次:文件夹略亮,普通文件最弱。 */
+.mention-menu-icon {
+  display: inline-flex;
+  flex: none;
+  color: var(--label-tertiary);
+}
+
+.mention-menu-icon.dir {
+  color: var(--label-secondary);
+}
+
+.mention-menu-text {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+
+.mention-menu-name {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.35;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.mention-menu-parent {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.3;
+  color: var(--label-tertiary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 /* 优化进行中:输入框银光呼吸,锁定编辑状态。 */
 .prompt-panel.optimizing {
   border-color: rgba(210, 220, 255, 0.28);
