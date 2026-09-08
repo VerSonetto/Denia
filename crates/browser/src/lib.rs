@@ -8,6 +8,7 @@
 pub mod cdp;
 pub mod commands;
 pub mod launch;
+pub mod lifecycle;
 pub mod manager;
 pub mod recon;
 pub mod scripts;

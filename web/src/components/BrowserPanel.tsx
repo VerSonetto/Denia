@@ -111,9 +111,9 @@ export default function BrowserPanel() {
 
   /** 空态按钮:显式拉起浏览器并开画面。 */
   const startBrowser = async () => {
-    await run({ method: 'getState' }) // 首条命令会拉起实例
-    // 拉起后立刻确保 active tab 存在(getState 是被动命令,不建首个 tab
-    // 之外的东西;若上一实例把 tab 全关了,这里补一个空白 tab)。
+    await run({ method: 'getState' }) // 探活入口:没跑就拉起实例
+    // 拉起后立刻确保 active tab 存在(启动路径会建首个 tab;
+    // 若上一实例把 tab 全关了,这里补一个空白 tab)。
     const after = await fetchBrowserState().catch(() => null)
     if (after && after.running && after.tabs.length === 0) {
       await run({ method: 'newTab' })

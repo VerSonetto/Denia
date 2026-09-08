@@ -53,6 +53,8 @@ pub(crate) struct Inner {
     #[allow(dead_code)]
     pub(crate) viewport: HashMap<String, (u32, u32)>,
     pub(crate) active_tab: Option<String>,
+    /// 本实例代次:看护任务只收这一代的尸,旧看护不得杀掉新 Chrome。
+    pub(crate) generation: u64,
 }
 
 /// 共享管理器:命令入口 + 事件泵控制。
@@ -81,9 +83,12 @@ pub struct BrowserManager {
     tab_views: std::sync::Arc<std::sync::Mutex<HashMap<String, (String, String)>>>,
     /// 当前 screencast 流归属的 tab(事件泵按它过滤帧;StartScreencast 迁移)。
     screencast_tab: std::sync::Arc<std::sync::Mutex<Option<String>>>,
-    /// 事件泵掉线时置位的信号(watch 通道):通知管理器把 Chrome 进程
-    /// 与 per-tab 残留状态清干净,别等下一次 ensure_running 才收尸。
-    exited_ping: tokio::sync::watch::Sender<bool>,
+    /// 当前槽位里的实例代次(0 = 空槽)。看护订阅它:被更新实例取代或
+    /// 主动清场时立刻退出,不必干等事件泵的退出宣告。
+    live_generation: tokio::sync::watch::Sender<u64>,
+    /// 事件泵宣告「这一代已退出」(边沿:代次数,不是 bool 电平)。
+    /// 看护必须看到宣告代次 == 自己盯着的代次 == live,才允许收尸。
+    exited_generation: tokio::sync::watch::Sender<u64>,
     /// 正在/已经收尸(事件泵看护或 Drop 只执行一次)。
     shutting_down: std::sync::atomic::AtomicBool,
     /// 启动时暂存的 profile 路径(Drop 收尸用;真实实例的在 Inner 里)。
@@ -103,10 +108,14 @@ impl Drop for BrowserManager {
 }
 
 impl BrowserManager {
-    /// 事件泵掉线收尾:终止 Chrome 进程树 + 清 per-tab 状态 + 重置 watch。
+    /// 主动清场:取走当前槽位(无论哪一代)并杀进程树。
+    /// 用于启动前清残留、关到最后一个 tab、关机。不改 exited_generation——
+    /// 那是事件泵的边沿信号,主动清场后 live 会归零,旧看护自行退出。
     async fn on_pump_exit(&self) {
         reap_browser_instance(
             &self.inner,
+            &self.live_generation,
+            None,
             &self.pending_dialogs,
             &self.network_log,
             &self.recon,
@@ -114,38 +123,62 @@ impl BrowserManager {
             &self.screencast_tab,
         )
         .await;
-        let _ = self.exited_ping.send(true);
     }
 }
 
 /// 收尸:杀掉该实例的 Chrome 进程树并清空 per-tab 状态(看护任务与
 /// shutdown 共用;幂等,重复调用只清空数据,不会重复杀进程)。
+///
+/// `expected_generation = None` 表示调用方主动清场,取走无论哪一代;
+/// `Some(g)` 表示看护只许取走自己盯着的那一代——槽位已被更新实例
+/// 占用时直接返回,绝不杀新 Chrome、也不清 sidecar 状态。
 async fn reap_browser_instance(
     inner_slot: &std::sync::Arc<Mutex<Option<Inner>>>,
+    live_generation: &tokio::sync::watch::Sender<u64>,
+    expected_generation: Option<u64>,
     pending_dialogs: &std::sync::Arc<std::sync::Mutex<HashMap<String, Value>>>,
     network_log: &std::sync::Arc<std::sync::Mutex<NetworkLog>>,
     recon: &Arc<ReconStore>,
     tab_views: &std::sync::Arc<std::sync::Mutex<HashMap<String, (String, String)>>>,
     screencast_tab: &std::sync::Arc<std::sync::Mutex<Option<String>>>,
 ) {
-    let exited = { inner_slot.lock().await.take() };
-    if let Some(inner) = exited {
-        // Chrome 是多进程:只 kill 主进程会留下渲染器子进程继续挤占
-        // profile,下次启动即"启动即退出"。按 profile 命令行整组清。
-        let mut process = inner.process;
-        let _ = process.kill().await;
-        let profile = inner.profile_dir.clone();
-        let _ = tokio::task::spawn_blocking(move || {
-            crate::launch::shutdown_profile_processes_sync(&profile)
-        })
-        .await;
-    }
+    let exited = {
+        let mut guard = inner_slot.lock().await;
+        let inner_generation = guard.as_ref().map(|inner| inner.generation);
+        if !crate::lifecycle::may_take_inner(inner_generation, expected_generation) {
+            return;
+        }
+        let taken = guard.take();
+        let _ = live_generation.send_replace(0);
+        taken
+    };
+    let Some(inner) = exited else {
+        return;
+    };
+    // Chrome 是多进程:只 kill 主进程会留下渲染器子进程继续挤占
+    // profile,下次启动即"启动即退出"。按 profile 命令行整组清。
+    let mut process = inner.process;
+    let _ = process.kill().await;
+    let profile = inner.profile_dir.clone();
+    let _ = tokio::task::spawn_blocking(move || {
+        crate::launch::shutdown_profile_processes_sync(&profile)
+    })
+    .await;
     // 状态与 CDP 会话一起失效:dialog/网络缓冲/导航视图/侦察/screencast 流全清掉。
     pending_dialogs.lock().unwrap().clear();
     network_log.lock().unwrap().clear_all();
     tab_views.lock().unwrap().clear();
     *screencast_tab.lock().unwrap() = None;
     recon.clear_all();
+}
+
+/// 启动半途失败:杀掉刚拉起、尚未入槽的 Chrome,避免残留挤占 profile。
+async fn abort_launched_process(mut process: tokio::process::Child, profile: PathBuf) {
+    let _ = process.kill().await;
+    let _ = tokio::task::spawn_blocking(move || {
+        crate::launch::shutdown_profile_processes_sync(&profile)
+    })
+    .await;
 }
 
 /// 面板订阅的推送事件。
@@ -184,6 +217,9 @@ pub enum BrowserEvent {
     },
     /// 逆向:调试器恢复执行。
     DebuggerResumed { tab_id: String },
+    /// 模型请求打开可视化模式:前端收到后展开浏览器侧栏。
+    /// 面板事件流(frame 等)只驱动画面刷新,不再自动展开侧栏。
+    VisualModeRequested,
     /// 浏览器实例退出。
     Exited,
 }
@@ -305,7 +341,8 @@ impl BrowserManager {
             tab_views: std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
             screencast_tab: std::sync::Arc::new(std::sync::Mutex::new(None)),
             last_active_url: std::sync::Arc::new(std::sync::Mutex::new(None)),
-            exited_ping: tokio::sync::watch::channel(false).0,
+            live_generation: tokio::sync::watch::channel(0).0,
+            exited_generation: tokio::sync::watch::channel(0).0,
             shutting_down: std::sync::atomic::AtomicBool::new(false),
             home: home.clone(),
         }
@@ -420,7 +457,7 @@ impl BrowserManager {
         let profile = self.profile_dir();
         // 启动失败常见于 Chrome 在退出竞态中仍持有 profile 锁；清场后
         // 只做一次受控重试，避免把瞬时启动竞态暴露给调用方。
-        let mut launched = match launch::launch_headless(&executable, &profile).await {
+        let launched = match launch::launch_headless(&executable, &profile).await {
             Ok(value) => value,
             Err(first_error) => {
                 tracing::warn!(error = %first_error, "浏览器首次启动失败，清场后重试");
@@ -443,7 +480,7 @@ impl BrowserManager {
                 }
                 Err(error) => {
                     if attempt == 4 {
-                        let _ = launched.process.kill().await;
+                        abort_launched_process(launched.process, profile).await;
                         return Err(error);
                     }
                     tokio::time::sleep(std::time::Duration::from_millis(
@@ -469,12 +506,19 @@ impl BrowserManager {
             dialogs: HashMap::new(),
             viewport: HashMap::new(),
             active_tab: None,
+            generation,
         };
 
         // 同步现有 page targets(重启后 profile 恢复的会话)。
-        Self::refresh_targets(&mut inner).await?;
+        if let Err(error) = Self::refresh_targets(&mut inner).await {
+            abort_launched_process(inner.process, inner.profile_dir).await;
+            return Err(error);
+        }
         if inner.tabs.is_empty() {
-            Self::create_tab_inner(&mut inner, None).await?;
+            if let Err(error) = Self::create_tab_inner(&mut inner, None).await {
+                abort_launched_process(inner.process, inner.profile_dir).await;
+                return Err(error);
+            }
         }
         // 断线重启后恢复导航视图:优先激活上次活跃 tab 对应的 URL
         // (profile 恢复的会话里 URL 相同),其次才取第一个 tab。
@@ -496,13 +540,14 @@ impl BrowserManager {
             let mut guard = self.inner.lock().await;
             *guard = Some(inner);
         }
+        let _ = self.live_generation.send_replace(generation);
         // 事件泵:掉线→广播 Exited;dialog/screencast/导航/逆向侦察→广播。
         let pending_dialogs = self.pending_dialogs.clone();
         let network_log = self.network_log.clone();
         let recon = self.recon.clone();
         let tab_views = self.tab_views.clone();
         let screencast_tab_for_pump = self.screencast_tab.clone();
-        let exited_pinger = self.exited_ping.clone();
+        let exited_generation = self.exited_generation.clone();
         tokio::spawn(async move {
             Self::event_pump(
                 handle_for_pump,
@@ -513,30 +558,49 @@ impl BrowserManager {
                 recon,
                 tab_views,
                 screencast_tab_for_pump,
-                exited_pinger,
+                exited_generation,
+                generation,
             )
             .await;
         });
-        // 看护任务:事件泵退出(浏览器掉线)后立即收尸——杀 Chrome 进程树、
-        // 清 per-tab 状态;不等下一次 ensure_running 才处理。所有需要共享的
-        // 状态(inner/各状态桶)本就是 Arc/Mutex,收尸用独立函数,无需 Arc<Self>。
+        // 看护任务:只收「自己盯着的那一代」。启动清场留下的旧退出信号、
+        // 以及后一次启动换上来的新实例,都不得被本任务杀掉。
         let inner_slot = self.inner.clone();
         let pending_dialogs = self.pending_dialogs.clone();
         let network_log = self.network_log.clone();
         let recon = self.recon.clone();
         let tab_views = self.tab_views.clone();
         let screencast_tab_for_watch = self.screencast_tab.clone();
-        let mut exited_rx = self.exited_ping.subscribe();
+        let live_generation = self.live_generation.clone();
+        let mut live_rx = self.live_generation.subscribe();
+        let mut exited_rx = self.exited_generation.subscribe();
         tokio::spawn(async move {
-            // borrow_and_update:订阅瞬间若已是退出态(pump 先于本任务退出的
-            // 竞态),立即收尸;否则等下一次置位。
-            if !*exited_rx.borrow_and_update() && exited_rx.changed().await.is_ok() {
-                if !*exited_rx.borrow() {
+            loop {
+                let live = *live_rx.borrow();
+                if crate::lifecycle::is_superseded(generation, live) {
                     return;
+                }
+                let declared = *exited_rx.borrow();
+                if crate::lifecycle::should_reap(generation, live, declared) {
+                    break;
+                }
+                tokio::select! {
+                    changed = live_rx.changed() => {
+                        if changed.is_err() {
+                            return;
+                        }
+                    }
+                    changed = exited_rx.changed() => {
+                        if changed.is_err() {
+                            return;
+                        }
+                    }
                 }
             }
             reap_browser_instance(
                 &inner_slot,
+                &live_generation,
+                Some(generation),
                 &pending_dialogs,
                 &network_log,
                 &recon,
@@ -678,12 +742,15 @@ impl BrowserManager {
 
     /// 命令执行入口(工具与 REST API 共用)。
     ///
-    /// 只读/善后命令不自发拉起浏览器:浏览器没跑时直接报 backend_unavailable,
-    /// 避免面板打开/关闭就带起一个 Chrome 进程。
+    /// 面板轮询/关画面(list/getDialog/screencast)不自发拉起浏览器,避免
+    /// 侧栏挂载就把 Chrome 带起来。getState 对模型是探活入口,没跑就拉起。
     pub async fn execute(&self, command: BrowserCommand) -> CommandOutcome {
         let started = Instant::now();
         let _command_guard = self.command_gate.lock().await;
-        if Self::is_passive(&command) && !self.is_healthy().await {
+        if Self::is_observe_only(&command) && !self.is_healthy().await {
+            if matches!(command, BrowserCommand::List) {
+                return CommandOutcome::ok_value(json!({ "tabs": [] }), elapsed(&started));
+            }
             return CommandOutcome::err("backend_unavailable", "浏览器未运行", elapsed(&started));
         }
         if let Err(error) = self.get_or_start().await {
@@ -691,7 +758,7 @@ impl BrowserManager {
         }
         // 逆向断点暂停会冻结页面:主动命令执行前自动恢复目标 tab(断点保留,
         // 模型导航/交互不会卡死在断点上;面板用户从暂停横幅接管调试节奏)。
-        if !Self::is_passive(&command) && self.recon.is_paused(None) {
+        if !Self::is_observe_only(&command) && self.recon.is_paused(None) {
             let explicit = command.tab_id_probe().map(str::to_string);
             let active = {
                 let inner_guard = self.inner.lock().await;
@@ -841,7 +908,8 @@ impl BrowserManager {
         recon: Arc<ReconStore>,
         tab_views: std::sync::Arc<std::sync::Mutex<HashMap<String, (String, String)>>>,
         screencast_tab: std::sync::Arc<std::sync::Mutex<Option<String>>>,
-        exited_ping: tokio::sync::watch::Sender<bool>,
+        exited_generation: tokio::sync::watch::Sender<u64>,
+        generation: u64,
     ) {
         while let Some(event) = event_rx.recv().await {
             // flatten 事件带 CDP sessionId;反查成我们的 tabId(会话期间恒定)。
@@ -1156,15 +1224,21 @@ impl BrowserManager {
                 _ => {}
             }
         }
-        // 浏览器退出:通知管理器收尸(杀进程树 + 清状态),并广播 Exited。
-        // 进程树终止与状态清理由看护任务完成,泵这里只置信号避免重复收尸。
-        let _ = exited_ping.send(true);
+        // 浏览器退出:宣告「这一代」死了。看护对照代次决定是否收尸,
+        // 旧看护看到的是自己那一代,不会误杀后来的实例。
+        let _ = exited_generation.send_replace(generation);
         let _ = broadcast.send(BrowserEvent::Exited);
     }
 
     /// 广播事件(命令执行后调用)。
     pub fn broadcast(&self, event: BrowserEvent) {
         let _ = self.event_broadcast.send(event);
+    }
+
+    /// 请求前端进入可视化模式:展开浏览器侧栏(不拉起浏览器,
+    /// 面板挂载后自行开 screencast / 拉起实例)。
+    pub fn request_visual_mode(&self) {
+        let _ = self.event_broadcast.send(BrowserEvent::VisualModeRequested);
     }
 
     /// 当前状态快照(面板用)。
@@ -1210,12 +1284,14 @@ impl BrowserManager {
 }
 
 impl BrowserManager {
-    /// 不应自发拉起浏览器的命令:面板打开/关闭、轮询状态时发的那些。
-    fn is_passive(command: &BrowserCommand) -> bool {
+    /// 观察/善后命令:浏览器没跑时不拉起。
+    ///
+    /// getState 不在此列——它对模型是探活入口,没跑就启动。
+    /// list 没跑时返回空 tabs,让收尾纪律可以幂等确认「已无 tab」。
+    fn is_observe_only(command: &BrowserCommand) -> bool {
         matches!(
             command,
-            BrowserCommand::GetState { .. }
-                | BrowserCommand::List
+            BrowserCommand::List
                 | BrowserCommand::GetDialog { .. }
                 | BrowserCommand::StartScreencast { .. }
                 | BrowserCommand::StopScreencast { .. }

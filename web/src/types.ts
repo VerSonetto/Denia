@@ -367,6 +367,7 @@ export type BrowserEventFrame =
   | { type: 'navigated'; tabId: string; url: string; title: string }
   | { type: 'debugger-paused'; tabId: string; reason: string; frames: ReconPausedFrameLite[] }
   | { type: 'debugger-resumed'; tabId: string }
+  | { type: 'visual-mode-requested' }
   | { type: 'exited' }
 
 /* ---- JS 逆向工作台(与 Rust recon 模块对齐) ---- */

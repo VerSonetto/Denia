@@ -182,7 +182,7 @@ fn register_browser_section(prompt: &mut SystemPrompt) -> Result<(), String> {
         name: "tool:browser".to_string(),
         order: SectionOrder::ToolBrowser.value(),
         text: PromptText::Static(
-            "browser 与 recon 共用一个常驻浏览器实例(与控制台面板同款),打开的 tab 不会随任务结束自动关闭。每次浏览器任务完成、或确认后续不再使用浏览器时,必须彻底清除浏览器资源:先 list 查看现存 tab,再把本次打开的 tab 逐个 close;关闭最后一个 tab 会彻底回收浏览器进程与全部状态,这是唯一的彻底清除方式。list 显示已无 tab(浏览器已回收)则无需操作;严禁留着打开的 tab 结束任务。"
+            "browser 与 recon 共用一个常驻浏览器实例(与控制台面板同款),打开的 tab 不会随任务结束自动关闭。getState 会按需启动浏览器;list 只查询,浏览器没跑时返回空 tabs,不会拉起实例。每次浏览器任务完成、或确认后续不再使用浏览器时,必须彻底清除浏览器资源:先 list 查看现存 tab,再把本次打开的 tab 逐个 close;关闭最后一个 tab 会彻底回收浏览器进程与全部状态,这是唯一的彻底清除方式。list 显示已无 tab(浏览器已回收)则无需操作;严禁留着打开的 tab 结束任务。\nbrowser 工具默认在后台无界面操作,控制台不展示浏览器画面。仅当用户明确要求看着他操作浏览器(如\"打开给我看\"\"可视化模式\"),或用户的话里明显需要亲眼看到画面(如\"看下这个页面长什么样\"\"演示一下操作\")时,才给命令加 visualMode: true 展开浏览器侧栏;用户没有这类表示时不要开启,常规抓取、点击、检查接口等后台任务保持默认。开启后用户手动收起侧栏即为不要看,不要再重复请求展开。"
                 .to_string(),
         ),
         complete: false,
@@ -426,7 +426,9 @@ mod tests {
 mod browser_prompt_tests {
     use super::*;
 
-    struct FakeHub;
+    struct FakeHub {
+        visual_requests: std::sync::atomic::AtomicUsize,
+    }
     #[async_trait::async_trait]
     impl crate::browser::BrowserExecute for FakeHub {
         async fn execute(
@@ -435,10 +437,37 @@ mod browser_prompt_tests {
         ) -> denia_browser::CommandOutcome {
             denia_browser::CommandOutcome::ok_value(serde_json::Value::Null, 0)
         }
+
+        async fn request_visual_mode(&self) {
+            self.visual_requests
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
     }
 
     fn fake_hub() -> crate::BrowserHub {
-        std::sync::Arc::new(FakeHub)
+        std::sync::Arc::new(FakeHub {
+            visual_requests: std::sync::atomic::AtomicUsize::new(0),
+        })
+    }
+
+    async fn run_browser_tool(hub: crate::BrowserHub, arguments: &str) -> crate::ToolOutput {
+        use denia_core::session::PermissionMode;
+        use tokio_util::sync::CancellationToken;
+
+        let ctx = crate::ToolContext {
+            session_id: None,
+            selection: None,
+            cwd: std::env::temp_dir(),
+            cancel: CancellationToken::new(),
+            confined: true,
+            vision_supported: true,
+            emit_event: None,
+            file_history: None,
+            permission_mode: PermissionMode::WorkspaceWrite,
+            permission_override: None,
+        };
+        let tool = crate::BrowserTool::new(hub);
+        tool.execute(arguments, &ctx).await
     }
 
     #[test]
@@ -478,6 +507,8 @@ mod browser_prompt_tests {
             .expect("tool:browser section registered");
         assert_eq!(section.audience, SectionAudience::Model);
         assert!(section.text.contains("彻底清除浏览器资源"));
+        assert!(section.text.contains("getState 会按需启动"));
+        assert!(section.text.contains("visualMode"));
         let user_body = denia_system_prompt::render_prompt_for_user(&assembly);
         assert!(!user_body.contains("彻底清除浏览器资源"));
 
@@ -515,6 +546,44 @@ mod browser_prompt_tests {
                 "tool:browser must not be registered without browser tool"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn visual_mode_requests_sidebar_before_command() {
+        // visualMode: true → 命令执行前请求一次可视化模式;命令本身正常执行。
+        let hub = std::sync::Arc::new(FakeHub {
+            visual_requests: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let output = run_browser_tool(
+            hub.clone() as crate::BrowserHub,
+            r#"{"method":"navigate","url":"https://example.com","visualMode":true}"#,
+        )
+        .await;
+        assert!(!output.is_error, "command should succeed");
+        assert_eq!(
+            hub.visual_requests.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "visual mode should be requested exactly once"
+        );
+    }
+
+    #[tokio::test]
+    async fn visual_mode_off_by_default() {
+        // 缺省 false:不请求可视化模式,后台操作不打扰用户。
+        let hub = std::sync::Arc::new(FakeHub {
+            visual_requests: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let output = run_browser_tool(
+            hub.clone() as crate::BrowserHub,
+            r#"{"method":"list"}"#,
+        )
+        .await;
+        assert!(!output.is_error, "command should succeed");
+        assert_eq!(
+            hub.visual_requests.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "visual mode must not be requested by default"
+        );
     }
 }
 

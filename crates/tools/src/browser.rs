@@ -15,14 +15,15 @@ use crate::{Tool, ToolContext, ToolOutput, parse_args_lenient};
 
 const TOOL_DESCRIPTION: &str = r#"控制内嵌浏览器(headless Chrome),可导航、读取页面、交互操作。ZCode 同款命令面:
 - 导航:navigate{url}(仅 http/https)、back{}、forward{}、reload{}
-- 读取:getState{}、snapshot{maxElements?, includeHidden?}(返回可交互元素列表,每个带 ref 编号与稳定定位器 locator/selector;后续交互用 ref 或 locator)、screenshot{fullPage?, clip?}(返回截图,图片自动注入会话)、elementInfo{x,y}
+- 读取:getState{}(浏览器没跑时会按需启动)、snapshot{maxElements?, includeHidden?}(返回可交互元素列表,每个带 ref 编号与稳定定位器 locator/selector;后续交互用 ref 或 locator)、screenshot{fullPage?, clip?}(返回截图,图片自动注入会话)、elementInfo{x,y}
 - 交互:click{ref?|locator?|x,y, button?, doubleClick?}、fill{ref|locator, value}(整体替换输入框内容)、type{ref?|locator?, text}(追加粘贴)、press{key, ref?}、scroll{ref?|x,y, deltaX?, deltaY?}(滚动,缺省向下 360px) 、hover{ref?|x,y}、select{ref, values[]}、check{ref, checked?}、drag{fromRef,toRef}。ref 和 locator 也可直接放 ref 字段:CSS 选择器、#id、[aria-label=...]、text:文本
 - 等待:waitFor{selector?|text?|textGone?, timeoutMs?}
 - 弹窗:getDialog{}、handleDialog{accept, promptText?}(页面 alert/confirm/prompt 会挂起等待处理)
 - 执行:evaluate{expression}(页面 JS,返回 JSON)
-- tab:newTab{url?}、list{}、activate{tabId}、close{tabId?}(缺省 tabId = 当前 tab)
+- tab:newTab{url?}、list{}(未运行时返回空 tabs,不拉起实例)、activate{tabId}、close{tabId?}(缺省 tabId = 当前 tab)
 - 视口:viewportSet{width,height}、viewportReset{}
 - 网络抓包:networkList{urlFilter?, max?}(该 tab 捕获的请求:URL/方法/状态码/请求响应头/postData;环形缓冲约 200 条)、networkGetBody{requestId, bodyKind?}(bodyKind 缺省 "response" 取响应体;传 "request" 取 POST 请求体;文本直出,二进制返回 base64 标记)
+- 可视化模式:任意命令可带 visualMode: true,让用户在浏览器侧栏实时看到本次及后续操作;默认 false 不打扰用户
 稳定性保证:
 - 元素失效自动重定位:ref 过期会按 locator/selector/xpath/文本 回退链自动重绑,并在 1.2s 窗口内自动刷新快照重试,无需重复 snapshot
 - 统一超时:命令总耗时 30s(waitFor 可显式更长,上限 60s),CDP 单请求 30s
@@ -32,6 +33,10 @@ const TOOL_DESCRIPTION: &str = r#"控制内嵌浏览器(headless Chrome),可导�
 #[derive(Deserialize)]
 #[allow(dead_code)]
 struct BrowserArgs {
+    /// 可视化模式:让用户在浏览器侧栏实时看到浏览器操作(控制台展开判定用,
+    /// 不参与命令本身;由工具层单独取出)。
+    #[serde(default)]
+    visual_mode: bool,
     #[serde(flatten)]
     command: BrowserCommand,
 }
@@ -42,6 +47,10 @@ pub type BrowserHub = Arc<dyn BrowserExecute + Send + Sync>;
 #[async_trait]
 pub trait BrowserExecute {
     async fn execute(&self, command: BrowserCommand) -> CommandOutcome;
+
+    /// 请求控制台进入可视化模式(展开浏览器侧栏)。默认空实现:
+    /// 不支持侧栏的部署静默忽略,不阻断命令。
+    async fn request_visual_mode(&self) {}
 }
 
 pub struct BrowserTool {
@@ -108,7 +117,8 @@ impl BrowserTool {
                         "urlFilter": { "type": "string", "description": "networkList:按 URL 子串过滤" },
                         "max": { "type": "integer", "description": "networkList:最多返回条数(默认 50,上限 200)" },
                         "requestId": { "type": "string", "description": "networkGetBody:networkList 给出的请求 ID" },
-                        "bodyKind": { "type": "string", "enum": ["response", "request"], "description": "networkGetBody:缺省取响应体;request 取 POST 请求体" }
+                        "bodyKind": { "type": "string", "enum": ["response", "request"], "description": "networkGetBody:缺省取响应体;request 取 POST 请求体" },
+                        "visualMode": { "type": "boolean", "description": "可视化模式:展开浏览器侧栏,让用户实时看到浏览器画面与操作;缺省 false" }
                     },
                     "required": ["method"]
                 }),
@@ -213,6 +223,15 @@ impl Tool for BrowserTool {
             }
         };
         let _ = BrowserArgs::deserialize(&raw); // flatten 解析仅用于校验,失败不阻断
+        // 可视化模式是顶层标志:在命令执行前请求控制台展开侧栏,
+        // 用户看到的首个画面就是本次命令的结果(而非命令结束后才出现)。
+        let visual_mode = raw
+            .get("visualMode")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+        if visual_mode {
+            self.hub.request_visual_mode().await;
+        }
         let wants_screenshot = command_is_screenshot(&command);
         let outcome = self.hub.execute(command).await;
         render_outcome(outcome, ctx, wants_screenshot)
@@ -229,5 +248,9 @@ fn command_is_screenshot(command: &BrowserCommand) -> bool {
 impl BrowserExecute for denia_browser::BrowserManager {
     async fn execute(&self, command: BrowserCommand) -> CommandOutcome {
         denia_browser::BrowserManager::execute(self, command).await
+    }
+
+    async fn request_visual_mode(&self) {
+        denia_browser::BrowserManager::request_visual_mode(self);
     }
 }
