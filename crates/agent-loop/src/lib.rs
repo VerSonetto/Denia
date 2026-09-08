@@ -37,7 +37,7 @@ use async_trait::async_trait;
 use denia_core::config::{LlmCallConfig, ModelSelection};
 use denia_core::error::{LlmFailure, codes};
 use denia_core::session::{
-    ApprovalOutcome, RequestHeaderSnapshot, SessionEnvelope, SessionEvent, TurnEndReason,
+    RequestHeaderSnapshot, SessionEnvelope, SessionEvent, TurnEndReason,
 };
 use denia_llm::LlmRegistry;
 use denia_session::Session;
@@ -86,9 +86,10 @@ pub trait FileHistoryProvider: Send + Sync {
     ) -> Result<(), String>;
 }
 
-/// 审批通道:driver 在遇到工具升权请求时,向宿主请求一次用户决策。
-/// 实现方负责把请求挂到 `LiveSession` 的 pending 表并等待 REST 应答;
-/// 取消 token 发生时实现方应返回 `Cancelled`。
+/// 审批通道:driver 在遇到策略 Ask 决策(越界写文件、计划提交)时,向
+/// 宿主请求一次用户决策。实现方负责把请求挂到 `LiveSession` 的 pending
+/// 表并等待 REST 应答;取消 token 发生时实现方应返回 `Cancelled` 结局。
+/// 计划批准的决策可携带执行档位/模型(由 driver 落会话事件与 TurnState)。
 #[async_trait]
 pub trait ApprovalBridge: Send + Sync {
     async fn request(
@@ -96,7 +97,7 @@ pub trait ApprovalBridge: Send + Sync {
         session_id: &str,
         request_id: &str,
         cancel: CancellationToken,
-    ) -> ApprovalOutcome;
+    ) -> denia_core::session::PlanReviewDecision;
 }
 
 /// Drives user turns on one session at a time.

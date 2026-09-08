@@ -93,31 +93,54 @@ pub enum AbortCause {
     Legacy,
 }
 
-/// 会话当前权限模式(抄 dsh sandbox-mode + permission-preset)。
+/// 会话当前权限模式(四档,自设计策略引擎)。
+///
+/// serde `alias` 承担旧日志兼容:历史 JSONL 里的三档值在反序列化时
+/// 落到语义等价的新档位,新事件只写新值。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum PermissionMode {
+    /// 只读:一切写类操作(文件写、有写副作用的命令)被策略拒绝。
     ReadOnly,
-    WorkspaceWrite,
-    DangerFullAccess,
+    /// 自动编辑:工作区内文件编辑与命令自动放行,越界写文件走审批。
+    #[serde(alias = "workspace-write")]
+    AutoEdit,
+    /// 计划:只读执行面 + `exit_plan` 提交计划等用户审批。
+    Plan,
+    /// 完全访问:全部自动放行,路径可出工作区,不弹审批。
+    #[serde(alias = "danger-full-access")]
+    Full,
 }
 
 impl PermissionMode {
-    /// 是否允许在任意路径写文件(权限最高档)。
+    /// 是否完全访问档(权限最高,无审批、路径不受限)。
     pub fn is_full(self) -> bool {
-        matches!(self, Self::DangerFullAccess)
+        matches!(self, Self::Full)
     }
 
     pub fn as_str(self) -> &'static str {
         match self {
             Self::ReadOnly => "read-only",
-            Self::WorkspaceWrite => "workspace-write",
-            Self::DangerFullAccess => "danger-full-access",
+            Self::AutoEdit => "auto-edit",
+            Self::Plan => "plan",
+            Self::Full => "full",
+        }
+    }
+
+    /// 从字符串解析权限模式;同时接受新值与旧日志三档别名。
+    pub fn parse(value: &str) -> Option<Self> {
+        match value.trim() {
+            "read-only" => Some(Self::ReadOnly),
+            "auto-edit" | "workspace-write" => Some(Self::AutoEdit),
+            "plan" => Some(Self::Plan),
+            "full" | "danger-full-access" => Some(Self::Full),
+            _ => None,
         }
     }
 }
 
-/// 会话审批策略:ask 遇到需要审批的操作时弹给用户;never 直接拒绝。
+/// 审批策略(遗留词汇):仅旧日志的 `approval-policy` 事件仍携带该值;
+/// 新事件不再发射,折叠时按 no-op 处理。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum ApprovalPolicy {
@@ -144,12 +167,25 @@ pub enum ApprovalOutcome {
     Unavailable,
 }
 
-/// 权限预设 → 审批策略的固定映射(抄 dsh base 预设表)。
-pub fn approval_policy_for(mode: PermissionMode) -> ApprovalPolicy {
-    match mode {
-        PermissionMode::DangerFullAccess => ApprovalPolicy::Never,
-        _ => ApprovalPolicy::Ask,
-    }
+/// 计划审批(`exit_plan`)的闭合决策:批准可携带执行档位与模型选择,
+/// 拒绝可携带补充建议(驱动模型同轮修订重提)。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlanReviewDecision {
+    pub outcome: ApprovalOutcome,
+    /// 批准时用户选定的执行档位(仅 auto-edit / full);缺省 auto-edit。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execute_mode: Option<PermissionMode>,
+    /// 批准时用户选定的执行模型;缺省沿用当前 selection。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selection: Option<crate::config::ModelSelection>,
+    /// 所选模型是否可识图(宿主在应答时解析目录后回填,供 driver 同步
+    /// 视觉注入开关);缺省沿用当前值。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vision_supported: Option<bool>,
+    /// 用户补充建议:批准时随执行参考,拒绝时驱动重写。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub feedback: Option<String>,
 }
 
 /// 向用户提问时可选项(denia `ask` 工具,对照 dsh `AskUserQuestionOption`)。
@@ -438,7 +474,8 @@ pub enum SessionEvent {
     PermissionMode {
         mode: PermissionMode,
     },
-    /// 会话审批策略切换(抄 dsh approval/policy);与权限模式一起由预设写。
+    /// 会话审批策略切换(遗留事件):新代码不再发射;变体保留以解析
+    /// 旧日志,折叠为 no-op。
     ApprovalPolicy {
         policy: ApprovalPolicy,
     },

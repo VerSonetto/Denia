@@ -12,11 +12,9 @@
 //! 参数解析走宽容入口;错误统一 `建议:` 格式,给模型可执行的下一步。
 
 use async_trait::async_trait;
-use denia_core::session::PermissionMode;
 use denia_core::tool::ToolSchema;
 use serde::Deserialize;
 
-use crate::permission::{denial_marker, escalation_hint};
 use crate::support::{parse_tool_args, tool_error};
 use crate::{Tool, ToolContext, ToolOutput, resolve_within};
 
@@ -49,16 +47,7 @@ impl EditTool {
                         "path": { "type": "string", "description": "要编辑的文件路径;相对路径锚定会话工作区。" },
                         "old_string": { "type": "string", "description": "要被替换的原文,必须与文件内容逐字符一致(包含缩进、空格与换行)。" },
                         "new_string": { "type": "string", "description": "替换成的新文本。" },
-                        "replace_all": { "type": "boolean", "description": "替换全部出现而不是要求恰好一次(默认 false)。" },
-                        "sandbox_permissions": {
-                            "type": "string",
-                            "enum": ["workspace-write", "danger-full-access"],
-                            "description": "本次文件操作需要的更宽沙箱模式;仅用于对刚被沙箱拒绝的操作做一次性重试,必须搭配 justification,且需要用户审批。"
-                        },
-                        "justification": {
-                            "type": "string",
-                            "description": "与 sandbox_permissions 搭配必填:一句话向用户说明为什么这个文件操作需要更宽的权限。"
-                        }
+                        "replace_all": { "type": "boolean", "description": "替换全部出现而不是要求恰好一次(默认 false)。" }
                     },
                     "required": ["path", "old_string", "new_string"]
                 }),
@@ -95,15 +84,8 @@ impl Tool for EditTool {
                 "整文件替换请用 write_file;old_string 是要被替换的原文字符串",
             );
         }
-        let effective = ctx.effective_permission();
-        if effective == PermissionMode::ReadOnly {
-            return ToolOutput::error(format!(
-                "{}\n{}",
-                denial_marker(effective),
-                escalation_hint("operation")
-            ));
-        }
         // confined 语义与读取类工具一致:沙箱开启时路径必须落在 cwd 内。
+        // (写权限门控在派发处的策略引擎;沙箱锚定在这里兜底。)
         let path = match resolve_within(&ctx.cwd, &args.path, ctx.confined) {
             Ok(path) => path,
             Err(message) => {
@@ -113,13 +95,6 @@ impl Tool for EditTool {
                 );
             }
         };
-        if effective == PermissionMode::WorkspaceWrite && !path.starts_with(&ctx.cwd) {
-            return ToolOutput::error(format!(
-                "{}\n{}",
-                denial_marker(effective),
-                escalation_hint("operation")
-            ));
-        }
         // 读文件是阻塞 IO,丢进 blocking 池;写回同理。
         let text = {
             let path = path.clone();
@@ -271,6 +246,7 @@ fn restore_line_endings(value: &str, crlf: bool) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use denia_core::session::PermissionMode;
     use tokio_util::sync::CancellationToken;
 
     fn temp_root() -> std::path::PathBuf {
@@ -295,8 +271,7 @@ mod tests {
             vision_supported: true,
             emit_event: None,
             file_history: None,
-            permission_mode: PermissionMode::WorkspaceWrite,
-            permission_override: None,
+            permission_mode: PermissionMode::AutoEdit,
             ask: None,
             call_id: None,
         }

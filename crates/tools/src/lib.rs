@@ -13,6 +13,8 @@ mod edit;
 mod files;
 pub mod glob;
 pub mod grep;
+mod plan;
+pub mod permission;
 pub mod prompt;
 pub mod recon;
 pub mod shell;
@@ -34,6 +36,7 @@ pub use edit::EditTool;
 pub use files::{ReadFileTool, WriteFileTool};
 pub use glob::GlobTool;
 pub use grep::GrepTool;
+pub use plan::{ExitPlanArgs, ExitPlanTool};
 pub use prompt::{
     default_shipped, default_shipped_with_browser, default_shipped_with_browser_and_recon,
     default_shipped_with_browser_and_recon_and_ask, register_ask_prompt_section,
@@ -43,8 +46,6 @@ pub use prompt::{
 };
 pub use recon::{ReconExecute, ReconHub, ReconTool};
 pub use todo::TodoWriteTool;
-
-pub mod permission;
 
 /// Session-event sink handed to tools that emit log-only state (todo_write).
 /// The agent loop wires it to the session append + broadcast; tools never
@@ -114,21 +115,13 @@ pub struct ToolContext {
     pub emit_event: Option<SessionEventSink>,
     /// 文件回退备份后端;`None` 表示当前调用不参与文件快照。
     pub file_history: Option<Arc<dyn FileHistoryBackend>>,
-    /// 会话权限模式(抄 dsh sandbox-mode),写文件/命令工具据此判定拒绝。
+    /// 会话权限模式(四档);写类门控由派发处的策略引擎统一执行,
+    /// 工具内部不再自行判权,此值仅供提示词与个别场景参考。
     pub permission_mode: PermissionMode,
-    /// 当前调用一次性升权后的模式;`None` 表示沿用会话权限。
-    pub permission_override: Option<PermissionMode>,
     /// 提问通道(`ask` 工具用);`None` 表示该调用无人可问。
     pub ask: Option<Arc<dyn AskBridge>>,
     /// 当前工具调用 id(`ask` 用它把提问卡片挂到对应工具行上)。
     pub call_id: Option<String>,
-}
-
-impl ToolContext {
-    /// 本调用实际生效的权限:一次性升权优先,否则会话权限。
-    pub fn effective_permission(&self) -> PermissionMode {
-        self.permission_override.unwrap_or(self.permission_mode)
-    }
 }
 
 /// One model-facing tool outcome.
@@ -203,7 +196,7 @@ impl ToolRegistry {
     }
 }
 
-/// The shipped tool set: bash + read_file + write_file + todo_write + glob + grep + edit.
+/// The shipped tool set: bash + read_file + write_file + todo_write + glob + grep + edit + exit_plan.
 pub fn default_registry() -> ToolRegistry {
     let mut registry = ToolRegistry::default();
     registry.register(Arc::new(BashTool::default()));
@@ -213,6 +206,7 @@ pub fn default_registry() -> ToolRegistry {
     registry.register(Arc::new(GlobTool::default()));
     registry.register(Arc::new(GrepTool::default()));
     registry.register(Arc::new(EditTool::default()));
+    registry.register(Arc::new(ExitPlanTool));
     registry
 }
 

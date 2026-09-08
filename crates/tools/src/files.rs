@@ -12,11 +12,9 @@
 use std::io::{BufRead, BufReader};
 
 use async_trait::async_trait;
-use denia_core::session::PermissionMode;
 use denia_core::tool::ToolSchema;
 use serde::Deserialize;
 
-use crate::permission::{denial_marker, escalation_hint};
 use crate::support::{parse_tool_args, tool_error};
 use crate::{Tool, ToolContext, ToolOutput, resolve_within};
 
@@ -337,16 +335,7 @@ impl WriteFileTool {
                     "type": "object",
                     "properties": {
                         "path": { "type": "string", "description": "目标文件路径;相对路径锚定会话工作区。" },
-                        "content": { "type": "string", "description": "完整文件内容(整体覆盖写入)。" },
-                        "sandbox_permissions": {
-                            "type": "string",
-                            "enum": ["workspace-write", "danger-full-access"],
-                            "description": "本次文件操作需要的更宽沙箱模式;仅用于对刚被沙箱拒绝的操作做一次性重试,必须搭配 justification,且需要用户审批。"
-                        },
-                        "justification": {
-                            "type": "string",
-                            "description": "与 sandbox_permissions 搭配必填:一句话向用户说明为什么这个文件操作需要更宽的权限。"
-                        }
+                        "content": { "type": "string", "description": "完整文件内容(整体覆盖写入)。" }
                     },
                     "required": ["path", "content"]
                 }),
@@ -377,15 +366,8 @@ impl Tool for WriteFileTool {
                 );
             }
         };
-        let effective = ctx.effective_permission();
-        if effective == PermissionMode::ReadOnly {
-            return ToolOutput::error(format!(
-                "{}\n{}",
-                denial_marker(effective),
-                escalation_hint("operation")
-            ));
-        }
         // confined 语义与读取类工具一致:沙箱开启时路径必须落在 cwd 内。
+        // (写权限门控在派发处的策略引擎;沙箱锚定在这里兜底。)
         let path = match resolve_within(&ctx.cwd, &args.path, ctx.confined) {
             Ok(path) => path,
             Err(message) => {
@@ -395,13 +377,6 @@ impl Tool for WriteFileTool {
                 );
             }
         };
-        if effective == PermissionMode::WorkspaceWrite && !path.starts_with(&ctx.cwd) {
-            return ToolOutput::error(format!(
-                "{}\n{}",
-                denial_marker(effective),
-                escalation_hint("operation")
-            ));
-        }
         if let Some(parent) = path.parent() {
             if let Err(error) = std::fs::create_dir_all(parent) {
                 return tool_error(
@@ -442,6 +417,7 @@ impl Tool for WriteFileTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use denia_core::session::PermissionMode;
     use std::sync::Arc;
     use tokio_util::sync::CancellationToken;
 
@@ -457,8 +433,7 @@ mod tests {
             vision_supported: true,
             emit_event: None,
             file_history: None,
-            permission_mode: PermissionMode::WorkspaceWrite,
-            permission_override: None,
+            permission_mode: PermissionMode::AutoEdit,
             ask: None,
             call_id: None,
         };
@@ -571,28 +546,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn read_only_denies_write_until_override() {
-        let (_guard, mut ctx) = workspace();
-        ctx.permission_mode = PermissionMode::ReadOnly;
+    async fn confined_write_outside_workspace_is_rejected() {
+        // 写权限门控已上移到策略引擎(exec 派发处);工具内保留沙箱锚定
+        // 兜底:confined 时绝对路径出工作区必须拒绝。
+        let (_guard, ctx) = workspace();
+        let outside = std::env::temp_dir().join("denia-outside-probe.txt");
         let writer = WriteFileTool::new();
-        let denied = writer
-            .execute(r#"{"path":"a.txt","content":"x"}"#, &ctx)
-            .await;
-        assert!(denied.is_error, "{}", denied.content);
-        assert!(
-            denied
-                .content
-                .contains("[sandbox: file access denied under read-only mode]"),
-            "{}",
-            denied.content
+        let raw = format!(
+            r#"{{"path":"{}","content":"x"}}"#,
+            outside.to_string_lossy().replace('\\', "/")
         );
-
-        // 一次性升权为完整权限后同一次调用可写。
-        ctx.permission_override = Some(PermissionMode::DangerFullAccess);
-        let allowed = writer
-            .execute(r#"{"path":"a.txt","content":"x"}"#, &ctx)
-            .await;
-        assert!(!allowed.is_error, "{}", allowed.content);
+        let denied = writer.execute(&raw, &ctx).await;
+        assert!(denied.is_error, "{}", denied.content);
+        assert!(denied.content.contains("工作区"), "{}", denied.content);
     }
 
     #[tokio::test]
@@ -650,8 +616,7 @@ mod tests {
                 vision_supported: true,
                 emit_event: Some(Arc::new(move |event| emitted.lock().unwrap().push(event))),
                 file_history: None,
-                permission_mode: PermissionMode::WorkspaceWrite,
-                permission_override: None,
+                permission_mode: PermissionMode::AutoEdit,
                 ask: None,
                 call_id: None,
             };
@@ -688,8 +653,7 @@ mod tests {
             vision_supported: false,
             emit_event: None,
             file_history: None,
-            permission_mode: PermissionMode::WorkspaceWrite,
-            permission_override: None,
+            permission_mode: PermissionMode::AutoEdit,
             ask: None,
             call_id: None,
         };

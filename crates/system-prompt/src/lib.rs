@@ -53,6 +53,8 @@ pub enum SectionOrder {
     ToolBrowser,
     /// 提问工具(ask)的使用纪律段;仅在注册了 ask 工具时注入。
     ToolAsk,
+    /// 计划呈交工具(exit_plan)的纪律段;仅计划模式注入。
+    ToolPlan,
 }
 
 impl SectionOrder {
@@ -73,6 +75,7 @@ impl SectionOrder {
             Self::ToolSkill => 1800,
             Self::ToolBrowser => 1900,
             Self::ToolAsk => 2000,
+            Self::ToolPlan => 2050,
         }
     }
 }
@@ -83,10 +86,8 @@ pub struct AssembleContext {
     pub cwd: Option<String>,
     pub model: Option<String>,
     pub provider: Option<String>,
-    /// 当前会话权限模式(抄 dsh sandbox policy context)。
+    /// 当前会话权限模式(read-only / auto-edit / plan / full)。
     pub permission_mode: Option<String>,
-    /// 当前会话审批策略(抄 dsh approval policy context)。
-    pub approval_policy: Option<String>,
 }
 
 /// Audience for a system-prompt section.

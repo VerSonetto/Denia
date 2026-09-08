@@ -5,7 +5,9 @@ use super::*;
 use crate::errors::MAX_FEEDBACK;
 use async_trait::async_trait;
 use denia_core::error::LlmError;
-use denia_core::session::{AbortCause, RequestHeaderReason};
+use denia_core::session::{
+    AbortCause, ApprovalOutcome, PermissionMode, PlanReviewDecision, RequestHeaderReason,
+};
 use denia_core::stream::{BlockType, ContentBlock, FinishReason, StreamChunk, TokenUsage};
 use denia_core::tool::ToolSchema;
 use denia_llm::{ChunkStream, GenerateRequest, LlmAdapter, LlmModelInfo, LlmResolvedModelInfo, ProviderInfo};
@@ -1499,4 +1501,311 @@ async fn feedback_injection_carries_channel() {
         _ => false,
     });
     assert!(has_feedback_channel, "feedback injection must carry channel");
+}
+
+/* ---- 权限策略引擎(四档 × Allow/Ask/Deny)集成测试 ---- */
+
+/// 多工具调用脚本:一次 step 返回若干调用。
+fn tool_calls_script(calls: &[(&str, &str, &str)]) -> Vec<StreamChunk> {
+    let mut chunks = vec![StreamChunk::BlockStart {
+        index: 0,
+        block_type: BlockType::ToolCall,
+    }];
+    for (i, (id, name, arguments)) in calls.iter().enumerate() {
+        chunks.push(StreamChunk::ToolCallDelta {
+            index: i as u32,
+            id: id.to_string(),
+            name: Some(name.to_string()),
+            arguments_delta: arguments.to_string(),
+        });
+        chunks.push(StreamChunk::BlockEnd {
+            index: i as u32,
+            block: ContentBlock::ToolCall {
+                id: id.to_string(),
+                name: name.to_string(),
+                arguments: arguments.to_string(),
+            },
+        });
+    }
+    chunks.push(StreamChunk::Finish {
+        reason: FinishReason::ToolCalls,
+    });
+    chunks
+}
+
+/// 桩审批桥:按预置决策回话(不落事件;事件由 driver 落)。
+struct StubApprovalBridge {
+    decision: Mutex<PlanReviewDecision>,
+}
+
+#[async_trait]
+impl crate::ApprovalBridge for StubApprovalBridge {
+    async fn request(
+        &self,
+        _session_id: &str,
+        _request_id: &str,
+        _cancel: CancellationToken,
+    ) -> PlanReviewDecision {
+        self.decision.lock().unwrap().clone()
+    }
+}
+
+fn plan_decision(
+    outcome: ApprovalOutcome,
+    execute_mode: Option<PermissionMode>,
+    feedback: Option<&str>,
+) -> PlanReviewDecision {
+    PlanReviewDecision {
+        outcome,
+        execute_mode,
+        selection: None,
+        vision_supported: None,
+        feedback: feedback.map(str::to_string),
+    }
+}
+
+/// (is_error, content) 工具结果列表。
+fn result_texts(session: &Session) -> Vec<(bool, String)> {
+    session
+        .events()
+        .iter()
+        .filter_map(|envelope| match &envelope.event {
+            SessionEvent::ToolResult {
+                is_error, content, ..
+            } => Some((*is_error, content.clone())),
+            _ => None,
+        })
+        .collect()
+}
+
+/// 最近一次请求头快照的工具名列表(模式过滤的直接证据)。
+fn last_header_tool_names(session: &Session) -> Vec<String> {
+    session
+        .events()
+        .iter()
+        .rev()
+        .find_map(|envelope| match &envelope.event {
+            SessionEvent::RequestHeader { header, .. } => Some(
+                header
+                    .tools
+                    .iter()
+                    .map(|tool| tool.name.clone())
+                    .collect::<Vec<_>>(),
+            ),
+            _ => None,
+        })
+        .unwrap_or_default()
+}
+
+async fn run_simple_turn(driver: &SessionDriver, session: &Arc<Session>, prompt: &str) {
+    driver
+        .run_turn(
+            session,
+            &selection(),
+            prompt,
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            true,
+            CancellationToken::new(),
+            noop_emit(),
+        )
+        .await;
+}
+
+#[tokio::test]
+async fn plan_mode_denies_writes_and_hides_write_schemas() {
+    let (driver, _registry) = driver_with_tools(
+        vec![
+            MockScript::Chunks(tool_calls_script(&[(
+                "call_w",
+                "write_file",
+                r#"{"path":"a.txt","content":"x"}"#,
+            )])),
+            MockScript::Chunks(text_script("planned")),
+        ],
+        |tools| *tools = denia_tools::default_registry(),
+    );
+    let session = temp_session();
+    session.set_permission_mode(PermissionMode::Plan).unwrap();
+    run_simple_turn(&driver, &session, "plan first").await;
+
+    let results = result_texts(&session);
+    assert!(!results.is_empty(), "expected a tool result");
+    assert!(results[0].0, "write must be denied in plan mode");
+    assert!(results[0].1.contains("计划模式"), "{}", results[0].1);
+    // 工作区没有落盘。
+    assert!(
+        !std::path::Path::new(&session.header().cwd).join("a.txt").exists(),
+        "plan mode must not write files"
+    );
+    // schema 面:计划档隐藏 write_file/edit,保留 bash 与 exit_plan。
+    let names = last_header_tool_names(&session);
+    assert!(names.iter().any(|n| n == "exit_plan"), "{names:?}");
+    assert!(names.iter().any(|n| n == "bash"), "{names:?}");
+    assert!(!names.iter().any(|n| n == "write_file"), "{names:?}");
+    assert!(!names.iter().any(|n| n == "edit"), "{names:?}");
+}
+
+#[tokio::test]
+async fn auto_edit_allows_inside_write_and_fails_closed_outside_without_bridge() {
+    let outside = std::env::temp_dir().join(format!(
+        "denia-outside-{}.txt",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let outside_raw = outside.to_string_lossy().replace('\\', "/");
+    let (driver, _registry) = driver_with_tools(
+        vec![
+            MockScript::Chunks(tool_calls_script(&[
+                (
+                    "call_in",
+                    "write_file",
+                    r#"{"path":"a.txt","content":"x"}"#,
+                ),
+                (
+                    "call_out",
+                    "write_file",
+                    &format!(r#"{{"path":"{outside_raw}","content":"y"}}"#),
+                ),
+            ])),
+            MockScript::Chunks(text_script("done")),
+        ],
+        |tools| *tools = denia_tools::default_registry(),
+    );
+    // 非沙箱会话(sandbox=false):越界写在工具层放行,由策略引擎 Ask 兜底;
+    // 沙箱会话的越界写在工具层就被 resolve_within 拒绝,走不到审批。
+    let dir = std::env::temp_dir().join(format!(
+        "denia-loop-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let session = Arc::new(Session::create(
+        &dir,
+        uuid::Uuid::new_v4().to_string(),
+        &dir,
+        false,
+        None,
+    )
+    .unwrap());
+    run_simple_turn(&driver, &session, "write").await;
+
+    let results = result_texts(&session);
+    assert_eq!(results.len(), 2, "each call gets exactly one result");
+    assert!(!results[0].0, "inside write must succeed in auto-edit");
+    assert!(results[1].0, "outside write needs approval");
+    assert!(results[1].1.contains("审批通道"), "{}", results[1].1);
+    assert!(
+        std::path::Path::new(&session.header().cwd).join("a.txt").exists(),
+        "inside write must land"
+    );
+    assert!(!outside.exists(), "outside write must not land");
+    let _ = std::fs::remove_file(&outside);
+}
+
+#[tokio::test]
+async fn plan_approval_switches_mode_and_returns_feedback() {
+    let (driver, _registry) = driver_with_tools(
+        vec![
+            MockScript::Chunks(tool_calls_script(&[(
+                "call_p",
+                "exit_plan",
+                r##"{"plan":"# 计划\n\n- 步骤一"}"##,
+            )])),
+            MockScript::Chunks(text_script("executing")),
+        ],
+        |tools| *tools = denia_tools::default_registry(),
+    );
+    let driver = driver.with_approval(Arc::new(StubApprovalBridge {
+        decision: Mutex::new(plan_decision(
+            ApprovalOutcome::AllowedOnce,
+            Some(PermissionMode::Full),
+            Some("注意兼容旧数据"),
+        )),
+    }));
+    let session = temp_session();
+    session.set_permission_mode(PermissionMode::Plan).unwrap();
+    run_simple_turn(&driver, &session, "submit plan").await;
+
+    let results = result_texts(&session);
+    assert!(!results[0].0, "approval outcome is a normal result");
+    assert!(results[0].1.contains("计划已批准"), "{}", results[0].1);
+    assert!(results[0].1.contains("full"), "{}", results[0].1);
+    assert!(results[0].1.contains("注意兼容旧数据"), "{}", results[0].1);
+    assert_eq!(session.permission_mode(), PermissionMode::Full);
+    // 档位切换有事件可回放。
+    assert!(session.events().iter().any(|envelope| matches!(
+        &envelope.event,
+        SessionEvent::PermissionMode { mode } if *mode == PermissionMode::Full
+    )));
+}
+
+#[tokio::test]
+async fn plan_rejection_with_feedback_drives_rewrite() {
+    let (driver, _registry) = driver_with_tools(
+        vec![
+            MockScript::Chunks(tool_calls_script(&[(
+                "call_p",
+                "exit_plan",
+                r##"{"plan":"# 计划\n\n- 步骤一"}"##,
+            )])),
+            MockScript::Chunks(text_script("revising")),
+        ],
+        |tools| *tools = denia_tools::default_registry(),
+    );
+    let driver = driver.with_approval(Arc::new(StubApprovalBridge {
+        decision: Mutex::new(plan_decision(
+            ApprovalOutcome::Rejected,
+            None,
+            Some("改成只改后端"),
+        )),
+    }));
+    let session = temp_session();
+    session.set_permission_mode(PermissionMode::Plan).unwrap();
+    run_simple_turn(&driver, &session, "submit plan").await;
+
+    let results = result_texts(&session);
+    assert!(!results[0].0);
+    assert!(
+        results[0].1.contains("按以下补充建议修订计划"),
+        "{}",
+        results[0].1
+    );
+    assert!(results[0].1.contains("改成只改后端"), "{}", results[0].1);
+    assert_eq!(session.permission_mode(), PermissionMode::Plan);
+}
+
+#[tokio::test]
+async fn exit_plan_with_empty_plan_never_reaches_approval() {
+    let (driver, _registry) = driver_with_tools(
+        vec![
+            MockScript::Chunks(tool_calls_script(&[(
+                "call_p",
+                "exit_plan",
+                r#"{"plan":"  "}"#,
+            )])),
+            MockScript::Chunks(text_script("retrying")),
+        ],
+        |tools| *tools = denia_tools::default_registry(),
+    );
+    let driver = driver.with_approval(Arc::new(StubApprovalBridge {
+        decision: Mutex::new(plan_decision(
+            ApprovalOutcome::AllowedOnce,
+            Some(PermissionMode::AutoEdit),
+            None,
+        )),
+    }));
+    let session = temp_session();
+    session.set_permission_mode(PermissionMode::Plan).unwrap();
+    run_simple_turn(&driver, &session, "submit plan").await;
+
+    let results = result_texts(&session);
+    assert!(results[0].0, "empty plan is an error");
+    assert!(results[0].1.contains("计划提交参数无效"), "{}", results[0].1);
+    // 档位未被切换:审批桥根本没被调用。
+    assert_eq!(session.permission_mode(), PermissionMode::Plan);
 }

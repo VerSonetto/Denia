@@ -85,6 +85,17 @@ export function IconThink(props: IconProps) {
   )
 }
 
+/** 计划模式专属:剪贴板清单(与 IconThink 星形区分开)。 */
+export function IconPlan(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <path d="M5.5 2.5h-1A1.5 1.5 0 0 0 3 4v9a1.5 1.5 0 0 0 1.5 1.5h7A1.5 1.5 0 0 0 13 13V4a1.5 1.5 0 0 0-1.5-1.5h-1" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
+      <rect x="5.5" y="1.25" width="5" height="2.5" rx="0.75" stroke="currentColor" strokeWidth="1.2" />
+      <path d="M5.75 7.25h4.5M5.75 9.75h4.5M5.75 12.25h2.75" stroke="currentColor" strokeWidth="1.1" strokeLinecap="round" />
+    </Svg>
+  )
+}
+
 export function IconTool(props: IconProps) {
   return (
     <Svg {...props}>

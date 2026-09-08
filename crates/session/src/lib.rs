@@ -28,8 +28,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use denia_core::message::ChatMessage;
 use denia_core::session::{
-    ApprovalPolicy, PermissionMode, SESSION_FORMAT_VERSION, SessionEnvelope, SessionEvent,
-    SessionHeader, SessionHeaderKind, TurnEndReason, approval_policy_for, derive_messages,
+    PermissionMode, SESSION_FORMAT_VERSION, SessionEnvelope, SessionEvent, SessionHeader,
+    SessionHeaderKind, TurnEndReason, derive_messages,
 };
 use denia_core::stream::ContentBlock;
 use denia_token_meter::{ContextBreakdown, ContextMeter, ContextPressure, TurnTokenUsage};
@@ -114,10 +114,8 @@ struct SessionInner {
     /// 当前正在进行的 turn 的 envelope 缓冲;`turn-end` 到来时交给
     /// `meter.fold_turn`,fold 成功则并入精确 usage 累计并更新 anchor。
     pending_turn: Vec<SessionEnvelope>,
-    /// 当前权限模式(由 permission-mode 事件 fold;新会话默认 workspace-write)。
+    /// 当前权限模式(由 permission-mode 事件 fold;新会话默认 auto-edit)。
     permission_mode: PermissionMode,
-    /// 当前审批策略(由 approval-policy 事件 fold;按权限模式默认)。
-    approval_policy: ApprovalPolicy,
 }
 
 /// One live session: header, in-memory log, and its append handle. The log is
@@ -183,8 +181,7 @@ impl Session {
                     last_system_prompt: None,
                     meter: ContextMeter::new(),
                     pending_turn: Vec::new(),
-                    permission_mode: PermissionMode::WorkspaceWrite,
-                    approval_policy: ApprovalPolicy::Ask,
+                    permission_mode: PermissionMode::AutoEdit,
                 }),
             });
         }
@@ -214,8 +211,7 @@ impl Session {
         let mut torn_at: Option<usize> = None;
         let mut last_turn = 0u32;
         let mut last_system_prompt: Option<String> = None;
-        let mut permission_mode = PermissionMode::WorkspaceWrite;
-        let mut approval_policy = ApprovalPolicy::Ask;
+        let mut permission_mode = PermissionMode::AutoEdit;
         let mut meter = ContextMeter::new();
         for line in lines {
             let with_newline = line.len() + 1;
@@ -231,11 +227,7 @@ impl Session {
                         SessionEvent::SystemPrompt { text, .. } => {
                             last_system_prompt = Some(text.clone())
                         }
-                        SessionEvent::PermissionMode { mode } => {
-                            permission_mode = *mode;
-                            approval_policy = approval_policy_for(*mode);
-                        }
-                        SessionEvent::ApprovalPolicy { policy } => approval_policy = *policy,
+                        SessionEvent::PermissionMode { mode } => permission_mode = *mode,
                         _ => {}
                     }
                     meter.apply_one(&envelope);
@@ -274,7 +266,6 @@ impl Session {
                 meter,
                 pending_turn: Vec::new(),
                 permission_mode,
-                approval_policy,
             }),
         };
         session.close_orphaned_turn()?;
@@ -367,14 +358,6 @@ impl Session {
             }
             SessionEvent::PermissionMode { mode } => {
                 inner.permission_mode = *mode;
-                // 权限模式变化时,同步审批策略(固定预设映射)。
-                let policy = approval_policy_for(*mode);
-                if inner.approval_policy != policy {
-                    inner.approval_policy = policy;
-                }
-            }
-            SessionEvent::ApprovalPolicy { policy } => {
-                inner.approval_policy = *policy;
             }
             _ => {}
         }
@@ -397,13 +380,15 @@ impl Session {
         let next_offset =
             inner.offsets.last().copied().unwrap_or(inner.base_offset) + line.len() as u64 + 1;
         inner.offsets.push(next_offset);
-        // 落盘策略:步骤边界/工具结果/todo 快照立即 flush(耐久性边界),
-        // 流式 chunk 只进 buffer,超 16KB 自动落盘(高频帧零系统调用)。
+        // 落盘策略:步骤边界/工具结果/todo 快照/权限切换立即 flush(耐久性
+        // 边界——权限档位是安全语义,必须立即可被磁盘读者看到),流式 chunk
+        // 只进 buffer,超 16KB 自动落盘(高频帧零系统调用)。
         match &envelope.event {
             SessionEvent::TurnEnd { .. }
             | SessionEvent::StepEnd { .. }
             | SessionEvent::ToolResult { .. }
-            | SessionEvent::TodoWrite { .. } => {
+            | SessionEvent::TodoWrite { .. }
+            | SessionEvent::PermissionMode { .. } => {
                 inner.writer.flush()?;
             }
             _ => {
@@ -471,8 +456,7 @@ impl Session {
         inner.offsets.truncate(target_idx);
         inner.last_turn = 0;
         inner.last_system_prompt = None;
-        inner.permission_mode = PermissionMode::WorkspaceWrite;
-        inner.approval_policy = ApprovalPolicy::Ask;
+        inner.permission_mode = PermissionMode::AutoEdit;
         inner.meter = ContextMeter::new();
         inner.pending_turn.clear();
         let kept = inner.events.clone();
@@ -484,10 +468,6 @@ impl Session {
                 }
                 SessionEvent::PermissionMode { mode } => {
                     inner.permission_mode = *mode;
-                    inner.approval_policy = approval_policy_for(*mode);
-                }
-                SessionEvent::ApprovalPolicy { policy } => {
-                    inner.approval_policy = *policy;
                 }
                 _ => {}
             }
@@ -619,29 +599,12 @@ impl Session {
             .permission_mode
     }
 
-    /// 当前审批策略(由事件 fold,默认按权限模式映射)。
-    pub fn approval_policy(&self) -> ApprovalPolicy {
-        self.inner
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner())
-            .approval_policy
-    }
-
-    /// 切换会话权限模式:追加 permission-mode 事件,并随权限预设同步
-    /// 审批策略(仅在策略实际变化时追加 approval-policy 事件)。
+    /// 切换会话权限模式:追加 permission-mode 事件(事件源折叠,O(1) 生效)。
     pub fn set_permission_mode(
         &self,
         mode: PermissionMode,
     ) -> Result<SessionEnvelope, SessionError> {
-        let previous_policy = self.approval_policy();
-        let envelope = self.append(SessionEvent::PermissionMode { mode })?;
-        let target_policy = approval_policy_for(mode);
-        if previous_policy != target_policy {
-            self.append(SessionEvent::ApprovalPolicy {
-                policy: target_policy,
-            })?;
-        }
-        Ok(envelope)
+        self.append(SessionEvent::PermissionMode { mode })
     }
 
     /// The model-facing history projected from the log.
@@ -1794,27 +1757,44 @@ mod tests {
         std::fs::create_dir_all(&cwd).unwrap();
 
         let session = store.create(&cwd, true).unwrap();
-        assert_eq!(session.permission_mode(), PermissionMode::WorkspaceWrite);
-        assert_eq!(session.approval_policy(), ApprovalPolicy::Ask);
+        assert_eq!(session.permission_mode(), PermissionMode::AutoEdit);
 
         session
             .set_permission_mode(PermissionMode::ReadOnly)
             .unwrap();
         assert_eq!(session.permission_mode(), PermissionMode::ReadOnly);
-        assert_eq!(session.approval_policy(), ApprovalPolicy::Ask);
         let id = session.id().to_string();
         drop(session);
 
         let loaded = store.load(&id).unwrap();
         assert_eq!(loaded.permission_mode(), PermissionMode::ReadOnly);
-        assert_eq!(loaded.approval_policy(), ApprovalPolicy::Ask);
 
-        loaded
-            .set_permission_mode(PermissionMode::DangerFullAccess)
-            .unwrap();
-        assert_eq!(loaded.permission_mode(), PermissionMode::DangerFullAccess);
-        assert_eq!(loaded.approval_policy(), ApprovalPolicy::Never);
+        loaded.set_permission_mode(PermissionMode::Full).unwrap();
+        assert_eq!(loaded.permission_mode(), PermissionMode::Full);
         std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn legacy_permission_values_map_to_new_modes() {
+        // 旧日志三档值反序列化时落到语义等价的新档位(serde alias)。
+        use denia_core::session::PermissionMode as PM;
+        let cases = [
+            ("read-only", PM::ReadOnly),
+            ("workspace-write", PM::AutoEdit),
+            ("auto-edit", PM::AutoEdit),
+            ("plan", PM::Plan),
+            ("danger-full-access", PM::Full),
+            ("full", PM::Full),
+        ];
+        for (raw, expected) in cases {
+            assert_eq!(
+                serde_json::from_str::<PM>(&format!("\"{raw}\"")).unwrap(),
+                expected,
+                "legacy value {raw} must map"
+            );
+        }
+        assert!(PM::parse("plan").is_some());
+        assert!(PM::parse("nonsense").is_none());
     }
 
     #[test]

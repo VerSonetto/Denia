@@ -1274,8 +1274,7 @@ mod tests {
             vision_supported: false,
             emit_event: None,
             file_history: None,
-            permission_mode: denia_core::session::PermissionMode::WorkspaceWrite,
-            permission_override: None,
+            permission_mode: denia_core::session::PermissionMode::AutoEdit,
             ask: None,
             call_id: None,
         };

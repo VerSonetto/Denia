@@ -3,6 +3,7 @@ import type {
   CredentialInfo,
   DiscoveredModel,
   ModelCatalog,
+  ModelSelection,
   PermissionMode,
   ProviderInfo,
   SessionEnvelope,
@@ -648,17 +649,28 @@ export function setSessionPermission(
   })
 }
 
-/** 应答一次挂起的审批(抄 dsh ui approval panel)。 */
+/** 应答一次挂起的审批;计划审批(exit_plan)的载荷可带执行档位/模型/建议。 */
+export interface ApprovalDecisionPayload {
+  decision: 'allow-once' | 'reject'
+  /** 计划批准时的执行档位(仅 auto-edit / full)。 */
+  executeMode?: 'auto-edit' | 'full'
+  /** 计划批准时选定的执行模型。 */
+  selection?: ModelSelection
+  /** 用户补充建议。 */
+  feedback?: string
+}
+
 export function answerApproval(
   id: string,
   requestId: string,
-  decision: 'allow-once' | 'reject',
+  payload: ApprovalDecisionPayload | 'allow-once' | 'reject',
 ): Promise<{ ok: boolean }> {
+  const body = typeof payload === 'string' ? { decision: payload } : payload
   return http(
     `/api/sessions/${encodeURIComponent(id)}/approvals/${encodeURIComponent(requestId)}`,
     {
       method: 'POST',
-      body: JSON.stringify({ decision }),
+      body: JSON.stringify(body),
     },
   )
 }

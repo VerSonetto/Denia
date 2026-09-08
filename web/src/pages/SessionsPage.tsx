@@ -1,7 +1,8 @@
 import { RuntimePanel } from '../components/RuntimePanel'
-import { useCallback, useEffect, useRef, useState, type ClipboardEvent, type KeyboardEvent, type WheelEvent } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type ClipboardEvent, type KeyboardEvent, type WheelEvent } from 'react'
 import * as api from '../api'
 import type { MentionCandidate } from '../api'
+import type { ApprovalDecisionPayload } from '../api'
 import { optimizePromptText } from '../promptOptimizer'
 import {
   addSessionLocal,
@@ -25,7 +26,8 @@ import type { TrajectoryQuote } from '../trajectory'
 import { SessionView } from '../components/SessionView'
 import { StatsBar } from '../components/StatsBar'
 import { ComposerModelMenu } from '../components/ComposerModelMenu'
-import { PermissionSelector, loadPermission, type PermissionLevel } from '../components/PermissionSelector'
+import { PermissionSelector, loadPermission } from '../components/PermissionSelector'
+import { PlanReviewPanel } from '../components/PlanReviewPanel'
 import { ApprovalDialog, type ApprovalDecision, type ApprovalRequest } from '../components/ApprovalDialog'
 import { ConfirmDialog } from '../components/ConfirmDialog'
 import { ContextRing } from '../components/ContextRing'
@@ -67,6 +69,7 @@ import type {
   UserMessageImage,
   WorkspaceRecord,
 } from '../types'
+import { normalizePermissionMode } from '../types'
 import { isGenericImageName } from '../userImages'
 
 function normalizeSelection(catalog: ModelCatalog, selection: ModelSelection): ModelSelection {
@@ -106,21 +109,11 @@ function pendingMessageKey(message: { text: string; images?: UserMessageImage[] 
   return `${message.text}\u0000${images.map((image) => `${image.mime}\u0000${image.data}`).join('\u0001')}`
 }
 
-/** dsh 权限模式 → 前端三档枚举。 */
-function permissionLevelFromMode(mode: PermissionMode): PermissionLevel {
-  return mode === 'danger-full-access' ? 'full' : mode
-}
-
-/** 前端三档枚举 → dsh 权限模式。 */
-function permissionModeForLevel(level: PermissionLevel): PermissionMode {
-  return level === 'full' ? 'danger-full-access' : level
-}
-
-/** 从事件流反向找最近一次 permission-mode。 */
-function latestPermissionMode(events: SessionEnvelope[]): PermissionLevel | null {
+/** 从事件流反向找最近一次 permission-mode(旧三档值映射到新四档)。 */
+function latestPermissionMode(events: SessionEnvelope[]): PermissionMode | null {
   for (let index = events.length - 1; index >= 0; index -= 1) {
     const event = events[index]
-    if (event.type === 'permission-mode') return permissionLevelFromMode(event.mode)
+    if (event.type === 'permission-mode') return normalizePermissionMode(event.mode)
   }
   return null
 }
@@ -470,16 +463,16 @@ export default function SessionsPage({
   const [trajQuotes, setTrajQuotes] = useState<TrajectoryQuote[]>([])
   const promptEmpty = !prompt.trim() && pastedImages.length === 0
   const primaryStops = running && promptEmpty
-  const [permission, setPermission] = useState<PermissionLevel>(() => loadPermission())
+  const [permission, setPermission] = useState<PermissionMode>(() => loadPermission())
   const [permissionBusy, setPermissionBusy] = useState(false)
   const [fullAccessConfirm, setFullAccessConfirm] = useState(false)
-  const pendingFullAccessRef = useRef<PermissionLevel | null>(null)
+  const pendingFullAccessRef = useRef<PermissionMode | null>(null)
   const [approvalReq, setApprovalReq] = useState<ApprovalRequest | null>(null)
   const fileInputRef = useRef<HTMLInputElement | null>(null)
 
   /** 切换当前会话权限(活动会话直接写后端;无活动会话先记本地,首次发送时带上)。 */
   const applyPermission = useCallback(
-    (level: PermissionLevel) => {
+    (level: PermissionMode) => {
       if (activeId && level === permission) return
       setPermission(level)
       try {
@@ -493,16 +486,16 @@ export default function SessionsPage({
       if (!activeId) return
       setPermissionBusy(true)
       api
-        .setSessionPermission(activeId, permissionModeForLevel(level))
+        .setSessionPermission(activeId, level)
         .catch((error) => notify('err', error instanceof Error ? error.message : String(error)))
         .finally(() => setPermissionBusy(false))
     },
     [activeId, permission, notify],
   )
 
-  /** 选择权限:完整权限走 dsh 同款风险确认,其余直接写。 */
+  /** 选择权限:完全访问走风险确认,其余直接写。 */
   const requestPermissionChange = useCallback(
-    (level: PermissionLevel) => {
+    (level: PermissionMode) => {
       if (level === 'full' && permission !== 'full') {
         pendingFullAccessRef.current = level
         setFullAccessConfirm(true)
@@ -538,6 +531,48 @@ export default function SessionsPage({
     [approvalReq, activeId, notify],
   )
 
+  /* ---- 计划审批(exit_plan):替换整个输入区的审批面板 ---- */
+
+  /** 挂起审批是 exit_plan 时,从 args_preview 解析计划正文与标题。 */
+  const planReview = useMemo(() => {
+    if (!approvalReq || approvalReq.toolName !== 'exit_plan') return null
+    let planText = ''
+    let title: string | undefined
+    try {
+      const parsed = JSON.parse(approvalReq.argsPreview ?? '{}') as {
+        plan?: unknown
+        title?: unknown
+      }
+      if (typeof parsed.plan === 'string') planText = parsed.plan
+      if (typeof parsed.title === 'string') title = parsed.title
+    } catch {
+      /* 解析失败:面板会显示解析失败提示 */
+    }
+    return { requestId: approvalReq.requestId, planText, title }
+  }, [approvalReq])
+
+  /** 提交计划决策;批准时若换了模型,同步全局模型选择。
+   *  普通函数(非 useCallback):依赖 applySelection/catalog 每渲染重建,
+   *  面板本身随 approvalReq 变化重渲染,无需稳定引用。 */
+  const handlePlanDecision = async (payload: ApprovalDecisionPayload) => {
+    if (!planReview || !activeId) return
+    if (payload.decision === 'allow-once' && payload.selection) {
+      applySelection(payload.selection)
+    }
+    await api.answerApproval(activeId, planReview.requestId, payload)
+  }
+
+  /** 退出计划:切回自动编辑并中断轮次(挂起审批随取消结算为 cancelled)。 */
+  const handlePlanExit = useCallback(() => {
+    if (!activeId) return
+    api
+      .setSessionPermission(activeId, 'auto-edit')
+      .catch((error) => notify('err', error instanceof Error ? error.message : String(error)))
+    api
+      .cancelSession(activeId)
+      .catch((error) => notify('err', error instanceof Error ? error.message : String(error)))
+  }, [activeId, notify])
+
   // 跟随会话事件流:同步服务端权限模式,并监听后端发起的审批请求。
   useEffect(() => {
     if (!activeId) {
@@ -552,7 +587,7 @@ export default function SessionsPage({
       },
       onEnvelope: (event) => {
         if (event.type === 'permission-mode') {
-          setPermission(permissionLevelFromMode(event.mode))
+          setPermission(normalizePermissionMode(event.mode))
         } else if (event.type === 'approval-asked') {
           setApprovalReq({
             requestId: event.request_id,
@@ -1083,8 +1118,8 @@ export default function SessionsPage({
         return false
       }
       markStarted(id)
-      if (wasHero && permission !== 'workspace-write') {
-        await api.setSessionPermission(id, permissionModeForLevel(permission))
+      if (wasHero && permission !== 'auto-edit') {
+        await api.setSessionPermission(id, permission)
       }
       // 附件上传(不限格式):先持久化,再随消息注入路径。
       const uploadedPaths: string[] = []
@@ -1766,7 +1801,16 @@ export default function SessionsPage({
                 />
               )}
               {phase === 'active' && <TodoPanel todos={todos} />}
-              {activeSession?.subagent ? <div className="runtime-child-composer"><span>{t('runtimeChildReadonly')}</span><button type="button" className="runtime-child-back-button" onClick={() => activeSession.parent_session && setActiveId(activeSession.parent_session, null)}>{t('runtimeBackParent')}</button></div> : composerCard}
+              {planReview ? (
+                <PlanReviewPanel
+                  title={planReview.title}
+                  planText={planReview.planText}
+                  catalog={catalog}
+                  selection={selection}
+                  onDecision={handlePlanDecision}
+                  onExit={handlePlanExit}
+                />
+              ) : activeSession?.subagent ? <div className="runtime-child-composer"><span>{t('runtimeChildReadonly')}</span><button type="button" className="runtime-child-back-button" onClick={() => activeSession.parent_session && setActiveId(activeSession.parent_session, null)}>{t('runtimeBackParent')}</button></div> : composerCard}
               {phase === 'active' && (
                 <StatsBar nodes={transcriptNodes} running={running} />
               )}

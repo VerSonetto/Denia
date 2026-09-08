@@ -193,10 +193,22 @@ impl Jobs {
             return Err("启动已取消".into());
         }
         let owner = ctx.session_id.clone().ok_or("缺少会话身份")?;
-        if ctx.effective_permission() == denia_core::session::PermissionMode::ReadOnly
-            && denia_tools::permission::bash_may_write(command)
+        // 只读/计划档禁止有写副作用的后台命令(与前台 bash 同口径)。
+        let mode = ctx.permission_mode;
+        if matches!(
+            mode,
+            denia_core::session::PermissionMode::ReadOnly
+                | denia_core::session::PermissionMode::Plan
+        ) && denia_tools::permission::bash_may_write(command)
         {
-            return Err("只读权限不允许该后台命令".into());
+            return Err(format!(
+                "{mode_label}权限不允许该后台命令",
+                mode_label = if mode == denia_core::session::PermissionMode::Plan {
+                    "计划模式"
+                } else {
+                    "只读"
+                }
+            ));
         }
         let mut records = self.records.lock().unwrap();
         if records
@@ -364,8 +376,7 @@ mod tests {
             vision_supported: false,
             emit_event: None,
             file_history: None,
-            permission_mode: denia_core::session::PermissionMode::WorkspaceWrite,
-            permission_override: None,
+            permission_mode: denia_core::session::PermissionMode::AutoEdit,
             ask: None,
             call_id: None,
         };
@@ -399,8 +410,7 @@ mod tests {
             vision_supported: false,
             emit_event: None,
             file_history: None,
-            permission_mode: denia_core::session::PermissionMode::WorkspaceWrite,
-            permission_override: None,
+            permission_mode: denia_core::session::PermissionMode::AutoEdit,
             ask: None,
             call_id: None,
         };

@@ -428,6 +428,7 @@ pub(crate) fn section_tools(section: &str) -> Option<&'static [&'static str]> {
         "tool:skill" => &["skill"],
         "tool:browser" => &["browser"],
         "tool:ask" => &["ask"],
+        "tool:plan" => &["exit_plan"],
         _ => return None,
     })
 }
@@ -445,7 +446,6 @@ fn assemble_step(
         model: Some(state.selection.model.clone()),
         provider: Some(state.selection.provider.clone()),
         permission_mode: Some(state.session.permission_mode().as_str().to_string()),
-        approval_policy: Some(state.session.approval_policy().as_str().to_string()),
     })?;
     // 扩展工具随实际注册表装配,自定义 SYSTEM.md 热更新不会丢失能力。
     if driver.runtime.is_some() {
@@ -484,6 +484,23 @@ fn assemble_step(
                     None => true,
                 });
         }
+    }
+    // 权限模式决定工具面:计划档隐藏 write_file/edit(执行面只读,bash
+    // 保留给只读命令);非计划档隐藏 exit_plan。schema 与纪律段同进退
+    // (AGENTS.md 同步要求,映射见 `section_tools`)。
+    let mode = state.session.permission_mode();
+    let mode_denies = |name: &str| match mode {
+        denia_core::session::PermissionMode::Plan => name == "write_file" || name == "edit",
+        _ => name == "exit_plan",
+    };
+    if assembly.tools.iter().any(|s| mode_denies(&s.name)) {
+        assembly.tools.retain(|s| !mode_denies(&s.name));
+        assembly
+            .sections
+            .retain(|section| match section_tools(&section.name) {
+                Some(tools) => tools.iter().any(|name| !mode_denies(name)),
+                None => true,
+            });
     }
     let tools_tokens = serde_json::to_string(&assembly.tools)
         .map(|json| denia_token_meter::estimate_tools_tokens(&json))

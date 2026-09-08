@@ -20,8 +20,9 @@ use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use denia_core::config::ModelSelection;
-use denia_core::session::{ApprovalOutcome, PermissionMode, SessionEnvelope, SessionEvent};
-use denia_tools::permission::parse_permission_mode;
+use denia_core::session::{
+    ApprovalOutcome, PermissionMode, PlanReviewDecision, SessionEnvelope, SessionEvent,
+};
 use futures::StreamExt;
 use serde::Deserialize;
 use serde_json::json;
@@ -134,7 +135,7 @@ async fn create_session(
         .map_err(ApiError::from_session)?;
     // 新会话固定写入默认权限事件,让前端/回放都能读到当前档位。
     session
-        .set_permission_mode(PermissionMode::WorkspaceWrite)
+        .set_permission_mode(PermissionMode::AutoEdit)
         .map_err(ApiError::from_session)?;
     if let Some(ws) = &workspace {
         // 会话头 cwd == 工作区路径(构造保证);账本 prepend。attach 失败
@@ -524,7 +525,7 @@ async fn cancel_session(
             .lock()
             .unwrap_or_else(|p| p.into_inner());
         for tx in pending.drain() {
-            let _ = tx.1.send(ApprovalOutcome::Cancelled);
+            let _ = tx.1.send(cancelled_plan_decision());
         }
     }
     // 挂起的提问同样结算为 cancelled:工具立刻返回,模型不必等到超时。
@@ -544,24 +545,35 @@ async fn cancel_session(
     Ok(Json(json!({ "ok": true })))
 }
 
+/// 全字段为空的 Cancelled 决策(取消路径没有附加载荷)。
+fn cancelled_plan_decision() -> PlanReviewDecision {
+    PlanReviewDecision {
+        outcome: ApprovalOutcome::Cancelled,
+        execute_mode: None,
+        selection: None,
+        vision_supported: None,
+        feedback: None,
+    }
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct PermissionBody {
     mode: String,
 }
 
-/// 切换当前会话的权限预设(抄 dsh `/permission <preset>` 的写路径)。
-/// 事件落日志并通过 SSE 广播;driver 在下一次工具调用时读取新模式。
+/// 切换当前会话的权限模式(四档)。事件落日志并通过 SSE 广播;driver
+/// 在下一次工具调用时读取新模式。
 async fn set_session_permission(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
     Json(body): Json<PermissionBody>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let mode = parse_permission_mode(&body.mode).ok_or_else(|| {
+    let mode = PermissionMode::parse(&body.mode).ok_or_else(|| {
         ApiError::bad_request(
             "permission/unknown-mode",
             format!(
-                "unknown permission mode '{}' (expected read-only, workspace-write, or danger-full-access)",
+                "unknown permission mode '{}' (expected read-only, auto-edit, plan, or full)",
                 body.mode
             ),
         )
@@ -570,9 +582,12 @@ async fn set_session_permission(
         .live
         .get_or_load(&state.sessions, &id)
         .map_err(ApiError::from_session)?;
-    live.session
+    let envelope = live
+        .session
         .set_permission_mode(mode)
         .map_err(ApiError::from_session)?;
+    // 广播给 SSE 跟随者:控制台权限档位实时同步(不依赖快照重放)。
+    let _ = live.followers.send(envelope);
     Ok(Json(json!({ "mode": mode.as_str() })))
 }
 
@@ -581,9 +596,19 @@ async fn set_session_permission(
 struct ApprovalAnswerBody {
     /// `allow-once` | `reject`
     decision: String,
+    /// 计划批准时的执行档位(仅 auto-edit / full);普通审批忽略。
+    #[serde(default)]
+    execute_mode: Option<String>,
+    /// 计划批准时选定的执行模型;普通审批忽略。
+    #[serde(default)]
+    selection: Option<ModelSelection>,
+    /// 用户补充建议:批准时随执行参考,拒绝时驱动重写。
+    #[serde(default)]
+    feedback: Option<String>,
 }
 
-/// 应答一次挂起的审批(抄 dsh ui approval panel 的 allow-once/reject)。
+/// 应答一次挂起的审批:普通审批(越界写)只有二值决策;计划审批
+/// (exit_plan)的批准可携带执行档位与模型,拒绝可携带补充建议。
 async fn answer_approval(
     State(state): State<Arc<AppState>>,
     Path((id, request_id)): Path<(String, String)>,
@@ -597,6 +622,48 @@ async fn answer_approval(
                 "approval/bad-decision",
                 "decision must be 'allow-once' or 'reject'",
             ));
+        }
+    };
+    // 执行档位只接受自动编辑/完全访问;计划档作为落点没有意义。
+    let execute_mode = match body.execute_mode.as_deref() {
+        None => None,
+        Some("auto-edit") => Some(PermissionMode::AutoEdit),
+        Some("full") => Some(PermissionMode::Full),
+        Some(other) => {
+            return Err(ApiError::bad_request(
+                "approval/bad-execute-mode",
+                format!("executeMode must be 'auto-edit' or 'full', got '{other}'"),
+            ));
+        }
+    };
+    // 用户指定了执行模型:解析目录校验并回填识图能力,模型无效直接 400,
+    // 不让审批通过后执行阶段才失败。
+    let selection = match &body.selection {
+        None => None,
+        Some(selection) if selection.provider.trim().is_empty() || selection.model.trim().is_empty() => {
+            return Err(ApiError::bad_request(
+                "approval/bad-selection",
+                "selection requires non-empty provider and model",
+            ));
+        }
+        Some(selection) => {
+            let resolved = state
+                .registry
+                .resolve_call(
+                    selection.provider.trim(),
+                    selection.model.trim(),
+                    selection.reasoning_effort.as_deref(),
+                )
+                .await
+                .map_err(ApiError::from_llm)?;
+            Some((
+                ModelSelection {
+                    provider: selection.provider.trim().to_string(),
+                    model: selection.model.trim().to_string(),
+                    reasoning_effort: selection.reasoning_effort.clone(),
+                },
+                model_vision_supported(&resolved),
+            ))
         }
     };
     let Some(live) = state.live.get(&id) else {
@@ -620,7 +687,17 @@ async fn answer_approval(
             "该审批请求不存在或已结算",
         ));
     };
-    let _ = sender.send(outcome);
+    let decision = PlanReviewDecision {
+        outcome,
+        execute_mode,
+        selection: selection.as_ref().map(|(s, _)| s.clone()),
+        vision_supported: selection.as_ref().map(|(_, vision)| *vision),
+        feedback: body
+            .feedback
+            .map(|f| f.trim().to_string())
+            .filter(|f| !f.is_empty()),
+    };
+    let _ = sender.send(decision);
     Ok(Json(json!({ "ok": true })))
 }
 

@@ -406,8 +406,7 @@ mod tests {
             vision_supported: true,
             emit_event: None,
             file_history: None,
-            permission_mode: PermissionMode::WorkspaceWrite,
-            permission_override: None,
+            permission_mode: PermissionMode::AutoEdit,
             ask: bridge,
             call_id: Some("call-1".to_string()),
         }

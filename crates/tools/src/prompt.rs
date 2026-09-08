@@ -31,15 +31,12 @@ pub fn register_shipped_prompt(
         name: "harness:permission".to_string(),
         order: 11,
         text: PromptText::Dynamic(Arc::new(|context| {
-            let mode = context.permission_mode.as_deref().unwrap_or("workspace-write");
-            let approval = context.approval_policy.as_deref().unwrap_or("ask");
-            match approval {
-                "never" => format!(
-                    "当前文件策略:{mode}。审批提示已禁用:需要审批的操作会被自动拒绝——不要请求沙箱升权(不要设置 sandbox_permissions)。"
-                ),
-                _ => format!(
-                    "当前文件策略:{mode}。审批策略:ask。被策略拒绝的操作可以携带 sandbox_permissions 与 justification 重试一次;该重试会弹出用户审批。"
-                ),
+            let mode = context.permission_mode.as_deref().unwrap_or("auto-edit");
+            match mode {
+                "read-only" => "当前权限模式:只读。一切会修改文件或产生写副作用的操作(写文件、编辑、有写副作用的命令)都会被直接拒绝;请只做阅读、检索与分析。".to_string(),
+                "plan" => "当前权限模式:计划。禁止一切写操作与有写副作用的命令;先完成调研,再用 exit_plan 工具提交完整计划,等待用户审批。计划被批准后会话自动切换到执行模式,届时直接开始执行;被拒绝且用户附带了补充建议时,按建议修订后重新提交。".to_string(),
+                "full" => "当前权限模式:完全访问。所有操作自动放行、无需审批,文件写入可以离开工作区;破坏性操作仍要先说明再执行。".to_string(),
+                _ => "当前权限模式:自动编辑。工作区内的文件编辑与命令执行自动放行;写工作区之外的文件会弹出用户审批,等用户放行后继续。".to_string(),
             }
         })),
     })?;
@@ -123,6 +120,7 @@ pub fn register_shipped_prompt(
         complete: false,
         audience: SectionAudience::Model,
     })?;
+    register_plan_prompt_section(prompt)?;
 
     let schemas: Vec<ToolSchema> = tools.schemas();
     prompt.tools(move |_| ToolProviderResult {
@@ -202,6 +200,26 @@ pub fn register_ask_prompt_section(prompt: &mut SystemPrompt) -> Result<(), Stri
         order: SectionOrder::ToolAsk.value(),
         text: PromptText::Static(
             "ask 工具用于真正卡住的时刻:需求自相矛盾、破坏性操作需要拍板、或缺少只有用户才知道的信息。能自己查证的事实(read_file/grep/glob/bash/浏览器)不要问用户;能给出合理默认的决策先做,把假设写进结论再继续——提问不是拖延的借口。一次把同批相关问题问全,不要分多轮反复打断用户;每问一道都要能说清\"答案会改变我的下一步什么\"。\n拿到结局后的动作:answered 按用户选择继续;timed-out 不要原样重复同一问题,据现有信息继续并在结论里写明采用的假设;cancelled 视为不要沿这条路径继续,停下说明当前状态与可选方案;unavailable 自行决策并明确标注假设。用户跳过某题(skipped)时按缺省继续,不要把跳过当成需要再问的信号。"
+                .to_string(),
+        ),
+        complete: false,
+        audience: SectionAudience::Model,
+    })?;
+    Ok(())
+}
+
+/// 计划呈交工具(exit_plan)的纪律段。
+///
+/// 与 `exit_plan` schema 严格同步注册(default_registry 总是带该工具);
+/// 段的动态进退(仅计划模式可见)由 assemble 阶段按权限模式过滤。
+/// 纪律与 description 分工不重叠:description 写调用机制,本段写
+/// "何时提交、计划长什么样、拿到各决策怎么办"的行为准则。
+pub fn register_plan_prompt_section(prompt: &mut SystemPrompt) -> Result<(), String> {
+    prompt.section(PromptSection {
+        name: "tool:plan".to_string(),
+        order: SectionOrder::ToolPlan.value(),
+        text: PromptText::Static(
+            "计划模式的收尾义务:调研完成后必须用 exit_plan 提交结构化计划(plan 用 markdown 写清目标、分步方案、将修改或新建的文件、风险、验证方式),不要把计划散落在回复里等用户自己领会;一次提交完整计划,不要拆成多次试探性提交。提交后本轮阻塞等待用户决策,期间不要继续调用其他工具。拿到决策后的动作:批准 → 按计划直接开始执行,不要再次向用户确认;批准并附带补充建议 → 把建议一并落实;拒绝并附带补充建议 → 按建议修订计划后重新 exit_plan,只改受影响的部分,除非用户要求否则不要推倒重来;拒绝且无建议 → 先用 ask 询问用户的顾虑再修订。计划获批执行时,若发现必须偏离计划(额外破坏性操作、方案走不通),停下来向用户说明现状与建议,不要擅自扩大范围。"
                 .to_string(),
         ),
         complete: false,
@@ -458,7 +476,33 @@ mod tests {
                 .any(|section| section.name == "tool:todo")
         );
         assert!(!render_context_snapshot(&assembly).is_empty());
-        assert_eq!(assembly.tools.len(), 7);
+        // bash/read/write/todo/glob/grep/edit/exit_plan。
+        assert_eq!(assembly.tools.len(), 8);
+    }
+
+    #[test]
+    fn plan_section_follows_tool_grant_rules() {
+        // tool:plan 纪律段两路径:随 exit_plan 注册存在、audience 为 Model、
+        // 不进用户可见副本。
+        let (prompt, _tools) = default_shipped();
+        let assembly = prompt
+            .assemble(&AssembleContext {
+                cwd: Some("/tmp/ws".to_string()),
+                ..Default::default()
+            })
+            .unwrap();
+        let section = assembly
+            .sections
+            .iter()
+            .find(|section| section.name == "tool:plan")
+            .expect("tool:plan section registered with exit_plan");
+        assert_eq!(section.audience, SectionAudience::Model);
+        assert!(section.text.contains("exit_plan"));
+        let user_body = render_prompt_for_user(&assembly);
+        assert!(!user_body.contains("exit_plan"));
+        // schema 同步:exit_plan 在默认部署的工具列表里(模式过滤在 assemble
+        // 阶段,见 agent-loop 的 turn.rs)。
+        assert!(assembly.tools.iter().any(|tool| tool.name == "exit_plan"));
     }
 
     #[test]
@@ -524,8 +568,7 @@ mod browser_prompt_tests {
             vision_supported: true,
             emit_event: None,
             file_history: None,
-            permission_mode: PermissionMode::WorkspaceWrite,
-            permission_override: None,
+            permission_mode: PermissionMode::AutoEdit,
             ask: None,
             call_id: None,
         };

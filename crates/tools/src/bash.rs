@@ -4,11 +4,9 @@ use std::process::Stdio;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use denia_core::session::PermissionMode;
 use denia_core::tool::ToolSchema;
 use serde::Deserialize;
 
-use crate::permission::{bash_may_write, denial_marker, escalation_hint};
 use crate::support::{parse_tool_args, tool_error};
 use crate::{Tool, ToolContext, ToolOutput, shell};
 
@@ -49,15 +47,6 @@ impl BashTool {
                             "minimum": 1,
                             "maximum": MAX_TIMEOUT_MS,
                             "description": "超时时间(毫秒),默认 120000,最大 600000;长任务请用 run_in_background。"
-                        },
-                        "sandbox_permissions": {
-                            "type": "string",
-                            "enum": ["workspace-write", "danger-full-access"],
-                            "description": "本次命令需要的更宽沙箱模式;仅用于对刚被沙箱拒绝的命令做一次性重试,必须搭配 justification,且需要用户审批。"
-                        },
-                        "justification": {
-                            "type": "string",
-                            "description": "与 sandbox_permissions 搭配必填:一句话向用户说明为什么这条命令需要更宽的权限。"
                         }
                     },
                     "required": ["command"]
@@ -112,15 +101,6 @@ impl Tool for BashTool {
         };
         let requested_ms = args.timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS).min(MAX_TIMEOUT_MS);
         let timeout = Duration::from_millis(requested_ms);
-
-        let effective = ctx.effective_permission();
-        if effective == PermissionMode::ReadOnly && bash_may_write(&args.command) {
-            return ToolOutput::error(format!(
-                "{}\n{}",
-                denial_marker(effective),
-                escalation_hint("command")
-            ));
-        }
 
         let mut command = shell::shell_command(&args.command);
         command
@@ -187,6 +167,7 @@ impl Tool for BashTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use denia_core::session::PermissionMode;
     use tokio_util::sync::CancellationToken;
 
     fn ctx(dir: &std::path::Path) -> ToolContext {
@@ -199,8 +180,7 @@ mod tests {
             vision_supported: true,
             emit_event: None,
             file_history: None,
-            permission_mode: PermissionMode::WorkspaceWrite,
-            permission_override: None,
+            permission_mode: PermissionMode::AutoEdit,
             ask: None,
             call_id: None,
         }
@@ -220,22 +200,6 @@ mod tests {
             .and_then(|value| value.as_str())
             .expect("command description");
         assert!(command.contains(std::env::consts::OS));
-    }
-
-    #[tokio::test]
-    async fn read_only_denies_obvious_write_command() {
-        let dir = std::env::temp_dir();
-        let mut context = ctx(&dir);
-        context.permission_mode = PermissionMode::ReadOnly;
-        let tool = BashTool::new();
-        let denied = tool
-            .execute(r#"{"command":"echo hi > out.txt"}"#, &context)
-            .await;
-        assert!(denied.is_error, "{}", denied.content);
-        assert!(denied.content.contains("read-only"), "{}", denied.content);
-
-        let read_only = tool.execute(r#"{"command":"echo hi"}"#, &context).await;
-        assert!(!read_only.is_error, "{}", read_only.content);
     }
 
     #[tokio::test]
@@ -303,8 +267,7 @@ mod tests {
             vision_supported: true,
             emit_event: None,
             file_history: None,
-            permission_mode: PermissionMode::WorkspaceWrite,
-            permission_override: None,
+            permission_mode: PermissionMode::AutoEdit,
             ask: None,
             call_id: None,
         };

@@ -1,63 +1,64 @@
 import { useEffect, useState } from 'react'
 import { t } from '../i18n'
-import { IconCheck, IconChevron, IconEye, IconPencil, IconZap } from './icons'
+import { IconCheck, IconChevron, IconEye, IconPencil, IconPlan, IconZap } from './icons'
+import { normalizePermissionMode } from '../types'
+import type { PermissionMode } from '../types'
 import type { ComponentType } from 'react'
 
 /** i18n 文案键类型(zh 为源键集)。 */
 type MessageKey = Parameters<typeof t>[0]
 
-/** 三种权限等级(与 dsh permission-presets 对齐)。 */
-export type PermissionLevel = 'read-only' | 'workspace-write' | 'full'
-
 const PERMISSION_KEY = 'denia.permission'
 /** 占位期默认 full 迁移标记:只把旧默认清一次,之后用户显式选 full 保留。 */
 const PERMISSION_MIGRATED_KEY = 'denia.permission.migrated'
 
-function loadPermission(): PermissionLevel {
+function loadPermission(): PermissionMode {
   const raw = window.localStorage.getItem(PERMISSION_KEY)
   if (raw === 'full' && !window.localStorage.getItem(PERMISSION_MIGRATED_KEY)) {
-    // 占位期默认 full 且无实际约束;迁移到 dsh 默认 workspace-write。
+    // 占位期默认 full 且无实际约束;迁移到默认自动编辑。
     try {
       window.localStorage.setItem(PERMISSION_MIGRATED_KEY, '1')
-      window.localStorage.setItem(PERMISSION_KEY, 'workspace-write')
+      window.localStorage.setItem(PERMISSION_KEY, 'auto-edit')
     } catch {
       /* storage unavailable */
     }
-    return 'workspace-write'
+    return 'auto-edit'
   }
-  return raw === 'read-only' || raw === 'workspace-write' || raw === 'full' ? raw : 'workspace-write'
+  // 三档时代的 workspace-write 是 auto-edit 的旧名,直接映射。
+  return raw ? normalizePermissionMode(raw) : 'auto-edit'
 }
 
-/** 三档权限的展示元数据:名称为固定英文(不受 i18n 影响),描述仍走 i18n。 */
+/** 四档权限的展示元数据:名称与描述均走 i18n。 */
 const LEVELS: ReadonlyArray<{
-  level: PermissionLevel
+  level: PermissionMode
   icon: ComponentType<{ size?: number }>
-  name: string
+  nameKey: MessageKey
   descKey: MessageKey
 }> = [
-  { level: 'read-only', icon: IconEye, name: 'Read-only', descKey: 'permissionReadOnlyDesc' },
-  { level: 'workspace-write', icon: IconPencil, name: 'Workspace write', descKey: 'permissionWorkspaceWriteDesc' },
-  { level: 'full', icon: IconZap, name: 'Full access', descKey: 'permissionFullDesc' },
+  { level: 'read-only', icon: IconEye, nameKey: 'permissionReadOnly', descKey: 'permissionReadOnlyDesc' },
+  { level: 'auto-edit', icon: IconPencil, nameKey: 'permissionAutoEdit', descKey: 'permissionAutoEditDesc' },
+  { level: 'plan', icon: IconPlan, nameKey: 'permissionPlan', descKey: 'permissionPlanDesc' },
+  { level: 'full', icon: IconZap, nameKey: 'permissionFull', descKey: 'permissionFullDesc' },
 ]
 
-function levelMeta(level: PermissionLevel) {
+function levelMeta(level: PermissionMode) {
   return LEVELS.find((entry) => entry.level === level) ?? LEVELS[1]
 }
 
 /**
- * 权限选择器:左下角(模型选择器左侧),三权限单选。
+ * 权限选择器:左下角(模型选择器左侧),四档单选。
  * 视觉与模型选择器(ComposerModelMenu)对齐:同款透明 chip,
  * 弹层为带图标卡片的菜单,当前项右侧打勾。
- * 审批发生在运行时 —— AI 被策略拒绝后带 sandbox_permissions 重试,
- * 会在输入框上方弹出审批弹窗(见 ApprovalDialog),不在这里配置。
+ * 审批发生在运行时 —— 越界写文件或提交计划(计划模式)时会在
+ * 输入框位置弹出审批面板,不在这里配置。
  */
 export function PermissionSelector({
   value,
   onChange,
   disabled,
 }: {
-  value: PermissionLevel
-  onChange: (level: PermissionLevel) => void
+  value: PermissionMode
+  onChange: (level: PermissionMode) => void
   disabled?: boolean
 }) {
   const [open, setOpen] = useState(false)
@@ -72,8 +73,8 @@ export function PermissionSelector({
     return () => document.removeEventListener('keydown', onKey)
   }, [open])
 
-  const selectPermission = (level: PermissionLevel) => {
-    // 持久化由父级负责:完整权限要先过风险确认,不能在这里提前落盘。
+  const selectPermission = (level: PermissionMode) => {
+    // 持久化由父级负责:完全访问档要先过风险确认,不能在这里提前落盘。
     onChange(level)
     setOpen(false)
   }
@@ -95,7 +96,7 @@ export function PermissionSelector({
         <span className="permission-chip-icon">
           <ActiveIcon size={13} />
         </span>
-        <span className="permission-chip-name">{active.name}</span>
+        <span className="permission-chip-name">{t(active.nameKey)}</span>
         <IconChevron size={11} />
       </button>
       {open && (
@@ -103,7 +104,7 @@ export function PermissionSelector({
           <div className="menu-backdrop" onClick={() => setOpen(false)} />
           <div className="permission-menu" role="menu" aria-label={t('permissionLabel')}>
             <div className="permission-menu-heading">{t('permissionLabel')}</div>
-            {LEVELS.map(({ level, icon: Icon, name, descKey }) => {
+            {LEVELS.map(({ level, icon: Icon, nameKey, descKey }) => {
               const selected = value === level
               return (
                 <button
@@ -118,7 +119,7 @@ export function PermissionSelector({
                     <Icon size={14} />
                   </span>
                   <span className="permission-item-text">
-                    <span className="permission-item-label">{name}</span>
+                    <span className="permission-item-label">{t(nameKey)}</span>
                     <span className="permission-item-desc">{t(descKey)}</span>
                   </span>
                   {selected && (

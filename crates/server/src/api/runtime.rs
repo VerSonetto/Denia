@@ -63,7 +63,6 @@ async fn message(
         emit_event: None,
         file_history: None,
         permission_mode: live.session.permission_mode(),
-        permission_override: None,
         ask: None,
         call_id: None,
     };

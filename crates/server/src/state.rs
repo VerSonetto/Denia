@@ -200,9 +200,11 @@ pub struct LiveSession {
     /// 最近一次被访问(挂载/发消息/follow)的 epoch ms;空闲淘汰依据。
     pub last_touch: AtomicU64,
     pub cancel: std::sync::Mutex<Option<CancellationToken>>,
-    /// 等待用户决策的审批请求(request_id → oneshot)。
-    pub pending_approvals:
-        std::sync::Mutex<HashMap<String, tokio::sync::oneshot::Sender<ApprovalOutcome>>>,
+    /// 等待用户决策的审批请求(request_id → oneshot)。计划审批的决策
+    /// 可携带执行档位/模型/补充建议(PlanReviewDecision)。
+    pub pending_approvals: std::sync::Mutex<
+        HashMap<String, tokio::sync::oneshot::Sender<denia_core::session::PlanReviewDecision>>,
+    >,
     /// 等待用户作答的提问请求(request_id → oneshot)。
     ///
     /// 与审批分表:dsh 用同一 id 空间承担两种交互,重试/多问题批次时
@@ -392,9 +394,24 @@ impl ApprovalBridge for ServerApprovalBridge {
         session_id: &str,
         request_id: &str,
         cancel: CancellationToken,
-    ) -> ApprovalOutcome {
+    ) -> denia_core::session::PlanReviewDecision {
+        use denia_core::session::PlanReviewDecision;
+        let unavailable = || PlanReviewDecision {
+            outcome: ApprovalOutcome::Unavailable,
+            execute_mode: None,
+            selection: None,
+            vision_supported: None,
+            feedback: None,
+        };
+        let cancelled = || PlanReviewDecision {
+            outcome: ApprovalOutcome::Cancelled,
+            execute_mode: None,
+            selection: None,
+            vision_supported: None,
+            feedback: None,
+        };
         let Some(live) = self.live.get(session_id) else {
-            return ApprovalOutcome::Unavailable;
+            return unavailable();
         };
         let (tx, rx) = tokio::sync::oneshot::channel();
         {
@@ -411,9 +428,9 @@ impl ApprovalBridge for ServerApprovalBridge {
                     .lock()
                     .unwrap_or_else(|p| p.into_inner());
                 if let Some(tx) = pending.remove(request_id) {
-                    let _ = tx.send(ApprovalOutcome::Cancelled);
+                    let _ = tx.send(cancelled());
                 }
-                ApprovalOutcome::Cancelled
+                cancelled()
             }
             result = rx => {
                 let _ = live
@@ -421,7 +438,7 @@ impl ApprovalBridge for ServerApprovalBridge {
                     .lock()
                     .unwrap_or_else(|p| p.into_inner())
                     .remove(request_id);
-                result.unwrap_or(ApprovalOutcome::Cancelled)
+                result.unwrap_or_else(|_| cancelled())
             }
         }
     }
@@ -573,7 +590,13 @@ impl Drop for RunningGuard {
                 .lock()
                 .unwrap_or_else(|p| p.into_inner());
             for tx in pending.drain() {
-                let _ = tx.1.send(ApprovalOutcome::Cancelled);
+                let _ = tx.1.send(denia_core::session::PlanReviewDecision {
+                    outcome: ApprovalOutcome::Cancelled,
+                    execute_mode: None,
+                    selection: None,
+                    vision_supported: None,
+                    feedback: None,
+                });
             }
         }
         // 未答提问同样按 cancelled 结算,避免 pending oneshot 泄漏

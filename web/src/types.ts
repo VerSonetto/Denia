@@ -333,8 +333,18 @@ export interface AskResolution {
   reason?: string
 }
 
-/** 当前会话权限模式(与 Rust `PermissionMode` 对齐)。 */
-export type PermissionMode = 'read-only' | 'workspace-write' | 'danger-full-access'
+/** 当前会话权限模式(与 Rust `PermissionMode` 对齐,四档)。 */
+export type PermissionMode = 'read-only' | 'auto-edit' | 'plan' | 'full'
+
+/** 旧日志三档值 → 新四档的显示映射(serde alias 的前端对应)。 */
+export function normalizePermissionMode(raw: string): PermissionMode {
+  if (raw === 'workspace-write') return 'auto-edit'
+  if (raw === 'danger-full-access') return 'full'
+  if (raw === 'read-only' || raw === 'auto-edit' || raw === 'plan' || raw === 'full') {
+    return raw
+  }
+  return 'auto-edit'
+}
 
 export interface SessionHeader {
   subagent?: { label: string; depth: number; mode: string; selection: ModelSelection }
