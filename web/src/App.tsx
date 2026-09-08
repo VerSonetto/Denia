@@ -15,6 +15,7 @@ import {
   setActiveId,
   setConnLost,
   setPendingWsId,
+  replaceRunningIds,
   setRunningStatus,
   useActiveId,
   useConnLost,
@@ -287,10 +288,17 @@ export default function App() {
     }
     source.onmessage = (event) => {
       try {
-        const parsed = JSON.parse(event.data) as { type?: string; id?: string; running?: boolean }
+        const parsed = JSON.parse(event.data) as {
+          type?: string
+          id?: string
+          running?: boolean
+          ids?: string[]
+        }
         if (parsed.type === 'sessions-updated') void refreshList()
         else if (parsed.type === 'settings-updated') applyConsoleSettings()
-        else if (parsed.type === 'running-changed' && parsed.id) {
+        else if (parsed.type === 'running-snapshot' && Array.isArray(parsed.ids)) {
+          replaceRunningIds(parsed.ids.filter((id) => typeof id === 'string'))
+        } else if (parsed.type === 'running-changed' && parsed.id) {
           setRunningStatus(parsed.id, parsed.running === true)
         }
       } catch {

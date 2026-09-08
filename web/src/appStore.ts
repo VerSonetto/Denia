@@ -104,6 +104,16 @@ export function setRunningStatus(id: string, running: boolean) {
   setState({ runningIds: next })
 }
 
+/** SSE 连接快照:整表替换,刷新/重连后还原中断按钮。 */
+export function replaceRunningIds(ids: string[]) {
+  const next: Record<string, boolean> = {}
+  for (const id of ids) next[id] = true
+  const before = state.runningIds
+  const beforeKeys = Object.keys(before)
+  if (beforeKeys.length === ids.length && ids.every((id) => before[id])) return
+  setState({ runningIds: next })
+}
+
 export function useRunningIds(): Record<string, boolean> {
   return useApp((s) => s.runningIds)
 }

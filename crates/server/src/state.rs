@@ -182,6 +182,11 @@ pub enum ServerEvent {
         id: String,
         running: bool,
     },
+    /// `/api/events` 连接时的运行中会话快照(只发给该连接,不走广播)。
+    /// 刷新/重连后前端用它还原中断按钮,不必等下一次增量。
+    RunningSnapshot {
+        ids: Vec<String>,
+    },
     /// 自定义系统提示词文件变更后广播(前端可选订阅)。
     SystemPromptChanged,
 }
@@ -303,6 +308,17 @@ impl LiveSessions {
     /// 读取已加载的 live 会话(不触发磁盘加载)。
     pub fn get(&self, id: &str) -> Option<Arc<LiveSession>> {
         self.inner.lock().unwrap().get(id).cloned()
+    }
+
+    /// 当前正在跑 turn 的会话 id。运行中会话不会被空闲淘汰,只扫内存 live 表。
+    pub fn running_ids(&self) -> Vec<String> {
+        self.inner
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(_, live)| live.running.load(Ordering::SeqCst))
+            .map(|(id, _)| id.clone())
+            .collect()
     }
 
     /// 记录一次外部访问(follow 连接等),防止被空闲淘汰。
@@ -682,4 +698,45 @@ fn spawn_forwarders(
             }
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::Ordering;
+
+    fn temp_root() -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("denia-live-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn running_ids_lists_only_active_turns() {
+        let root = temp_root();
+        let cwd = root.join("work");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let store = SessionStore::open(&root).unwrap();
+        let idle = store.create(&cwd, true).unwrap();
+        let active = store.create(&cwd, true).unwrap();
+        let live = LiveSessions::new(8);
+        let idle_live = live.get_or_load(&store, idle.id()).unwrap();
+        let active_live = live.get_or_load(&store, active.id()).unwrap();
+        active_live.running.store(true, Ordering::SeqCst);
+        let mut ids = live.running_ids();
+        ids.sort();
+        assert_eq!(ids, vec![active.id().to_string()]);
+        drop(idle_live);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn running_snapshot_serializes_for_sse() {
+        let event = ServerEvent::RunningSnapshot {
+            ids: vec!["s1".into(), "s2".into()],
+        };
+        let value = serde_json::to_value(&event).unwrap();
+        assert_eq!(value["type"], "running-snapshot");
+        assert_eq!(value["ids"], serde_json::json!(["s1", "s2"]));
+    }
 }
