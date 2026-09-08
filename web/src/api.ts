@@ -496,7 +496,6 @@ export function listSessions(): Promise<{ sessions: SessionSummary[] }> {
 export function createSession(options: {
   workspaceId?: string
   cwd?: string
-  sandbox?: boolean
 }): Promise<{ session: SessionSummary & { cwd: string } }> {
   return http('/api/sessions', {
     method: 'POST',

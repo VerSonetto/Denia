@@ -79,9 +79,6 @@ struct CreateBody {
     /// 直接指定目录;不挂任何工作区(落"未分组")。
     #[serde(default)]
     cwd: Option<String>,
-    /// Overrides the console `sandbox` default for this session.
-    #[serde(default)]
-    sandbox: Option<bool>,
 }
 
 async fn create_session(
@@ -91,7 +88,6 @@ async fn create_session(
     let body = body.map(|Json(body)| body).unwrap_or(CreateBody {
         workspace_id: None,
         cwd: None,
-        sandbox: None,
     });
     if body.workspace_id.is_some() && body.cwd.is_some() {
         return Err(ApiError::bad_request(
@@ -128,11 +124,9 @@ async fn create_session(
             dir
         }
     };
-    let console = crate::state::console_settings(&state.settings);
-    let sandbox = body.sandbox.unwrap_or(console.sandbox);
     let session = state
         .sessions
-        .create(&cwd, sandbox)
+        .create(&cwd, true)
         .map_err(ApiError::from_session)?;
     // 新会话固定写入默认权限事件,让前端/回放都能读到当前档位。
     session

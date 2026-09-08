@@ -25,9 +25,6 @@ pub const CONSOLE_NS: &str = "console";
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ConsoleSettings {
-    /// Confine file tools to the working directory.
-    #[serde(default = "default_true")]
-    pub sandbox: bool,
     /// `system` | `light` | `dark`.
     #[serde(default = "default_theme")]
     pub theme: String,
@@ -98,10 +95,6 @@ pub fn compaction_settings_from(console: &ConsoleSettings) -> denia_agent_loop::
     }
 }
 
-fn default_true() -> bool {
-    true
-}
-
 fn default_theme() -> String {
     "system".to_string()
 }
@@ -147,7 +140,6 @@ pub fn console_settings(settings: &SettingsStore) -> ConsoleSettings {
         .ok()
         .and_then(|value| serde_json::from_value(value).ok())
         .unwrap_or(ConsoleSettings {
-            sandbox: true,
             theme: "system".to_string(),
             locale: "zh".to_string(),
             compaction: ConsoleCompactionSettings::default(),
@@ -617,7 +609,7 @@ fn register_namespaces(settings: &SettingsStore) -> Result<(), Box<dyn std::erro
     settings.register(
         CONSOLE_NS,
         NamespaceSpec {
-            defaults: json!({ "sandbox": true, "theme": "system", "locale": "zh" }),
+            defaults: json!({ "theme": "system", "locale": "zh" }),
             validate: validate_console,
             secrets: &[],
             applies: Applies::Live,

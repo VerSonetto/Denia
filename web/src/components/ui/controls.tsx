@@ -7,45 +7,6 @@ export interface SelectOption<T extends string = string> {
   hint?: string
 }
 
-function ToggleTrack({ checked }: { checked: boolean }) {
-  return (
-    <span className={`ui-toggle-track${checked ? ' on' : ''}`} aria-hidden="true">
-      <span className="ui-toggle-thumb" />
-    </span>
-  )
-}
-
-/** 自定义开关,替代原生 checkbox。 */
-export function Toggle({
-  checked,
-  onChange,
-  disabled,
-  label,
-  title,
-}: {
-  checked: boolean
-  onChange: (checked: boolean) => void
-  disabled?: boolean
-  label?: string
-  title?: string
-}) {
-  return (
-    <button
-      type="button"
-      className="ui-toggle"
-      role="switch"
-      aria-checked={checked}
-      aria-label={label}
-      title={title ?? label}
-      disabled={disabled}
-      onClick={() => onChange(!checked)}
-    >
-      <ToggleTrack checked={checked} />
-      {label ? <span className="ui-toggle-label">{label}</span> : null}
-    </button>
-  )
-}
-
 /** 分段单选,替代原生 select(选项较少时)。 */
 export function SegmentControl<T extends string>({
   value,
@@ -231,32 +192,5 @@ export function NumberField({
         onChange(Number(digits))
       }}
     />
-  )
-}
-
-/** 表格内紧凑开关,无文字标签。 */
-export function ToggleCell({
-  checked,
-  onChange,
-  disabled,
-  title,
-}: {
-  checked: boolean
-  onChange: (checked: boolean) => void
-  disabled?: boolean
-  title?: string
-}) {
-  return (
-    <button
-      type="button"
-      className="ui-toggle compact"
-      role="switch"
-      aria-checked={checked}
-      title={title}
-      disabled={disabled}
-      onClick={() => onChange(!checked)}
-    >
-      <ToggleTrack checked={checked} />
-    </button>
   )
 }

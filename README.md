@@ -12,7 +12,7 @@ web console in React.
   repair, orphan-turn close), agent loop (turn/step, tool continuation,
   cancellation, step limit), tools (`bash`, `read_file`, `write_file`, all
   auto-executing this phase), session REST + SSE follow API, session-centric
-  console with sandbox toggle.
+  console.
 
 ## Layout
 
@@ -58,15 +58,14 @@ cd web && pnpm dev               # vite dev server on :5173 proxying /api
 ## Sessions
 
 Sessions are append-only JSONL event logs under `$DENIA_HOME/sessions/<id>/`.
-By default a session works inside the sandbox (`$DENIA_HOME/workspace`);
-creating one with `sandbox: false` + a `cwd` opts into a real directory.
-Tools (`bash`, `read_file`, `write_file`) auto-execute this phase.
+A session is bound to a workspace directory (`cwd`). Tools (`bash`,
+`read_file`, `write_file`) auto-execute this phase.
 
 Key API:
 
 ```
 GET    /api/sessions                 list
-POST   /api/sessions {sandbox,cwd?}  create
+POST   /api/sessions {workspaceId|cwd}  create
 GET    /api/sessions/:id             cold history {header, events}
 DELETE /api/sessions/:id
 POST   /api/sessions/:id/prompt      start a turn (202)

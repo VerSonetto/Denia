@@ -3,15 +3,14 @@ import { useCallback, useEffect, useState, type ReactNode } from 'react'
 import * as api from '../api'
 import { t } from '../i18n'
 import type { Notify } from '../App'
-import { IconClose, IconGear, IconPrompt, IconShield, IconSliders } from './icons'
+import { IconClose, IconGear, IconPrompt, IconSliders } from './icons'
 import { LlmPanel } from './llm/LlmPanel'
-import { Toggle } from './ui/controls'
 
-type SettingsTab = 'runtime' | 'general' | 'models' | 'security' | 'appearance'
+type SettingsTab = 'runtime' | 'general' | 'models' | 'appearance'
 
 const CONSOLE_NS = 'console'
 
-const TABS: SettingsTab[] = ['general', 'models', 'runtime', 'security', 'appearance']
+const TABS: SettingsTab[] = ['general', 'models', 'runtime', 'appearance']
 
 function tabIcon(tab: SettingsTab, size = 16) {
   switch (tab) {
@@ -21,8 +20,6 @@ function tabIcon(tab: SettingsTab, size = 16) {
       return <IconPrompt size={size} />
     case 'models':
       return <IconSliders size={size} />
-    case 'security':
-      return <IconShield size={size} />
     case 'appearance':
       return <IconGear size={size} />
   }
@@ -36,8 +33,6 @@ function tabLabel(tab: SettingsTab): string {
       return t('settingsTabGeneral')
     case 'models':
       return t('settingsTabModels')
-    case 'security':
-      return t('settingsTabSecurity')
     case 'appearance':
       return t('settingsTabAppearance')
   }
@@ -51,8 +46,6 @@ function tabNavDesc(tab: SettingsTab): string {
       return t('settingsTabGeneralDesc')
     case 'models':
       return t('settingsTabModelsDesc')
-    case 'security':
-      return t('settingsTabSecurityDesc')
     case 'appearance':
       return t('settingsTabAppearanceDesc')
   }
@@ -66,8 +59,6 @@ function paneTitle(tab: SettingsTab): string {
       return t('systemPromptTitle')
     case 'models':
       return t('settingsPaneModelsTitle')
-    case 'security':
-      return t('catSecurity')
     case 'appearance':
       return t('catAppearance')
   }
@@ -81,8 +72,6 @@ function paneDesc(tab: SettingsTab): string {
       return t('systemPromptHint')
     case 'models':
       return t('settingsPaneModelsDesc')
-    case 'security':
-      return t('sandboxDesc')
     case 'appearance':
       return t('settingsAppearanceHint')
   }
@@ -147,7 +136,6 @@ export function SettingsModal({ notify, onClose }: { notify: Notify; onClose: ()
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
 
-  const [sandbox, setSandbox] = useState(true)
   const [theme, setTheme] = useState('system')
   const [locale, setLocaleState] = useState('zh')
   const [consoleValue, setConsoleValue] = useState<Record<string, unknown>>({})
@@ -168,7 +156,6 @@ export function SettingsModal({ notify, onClose }: { notify: Notify; onClose: ()
       const console = nextDescribe.namespaces.find((n) => n.ns === CONSOLE_NS)
       if (console) {
         setConsoleValue(console.value)
-        setSandbox((console.value.sandbox as boolean) ?? true)
         setTheme((console.value.theme as string) ?? 'system')
         setLocaleState((console.value.locale as string) ?? 'zh')
         setConsoleRevision(console.revision)
@@ -226,7 +213,7 @@ export function SettingsModal({ notify, onClose }: { notify: Notify; onClose: ()
     try {
       const view = await api.replaceNamespace(
         CONSOLE_NS,
-        { ...consoleValue, sandbox, theme, locale },
+        { ...consoleValue, theme, locale },
         consoleRevision,
       )
       setConsoleRevision((view as { revision: number }).revision)
@@ -351,23 +338,6 @@ export function SettingsModal({ notify, onClose }: { notify: Notify; onClose: ()
                 )}
 
                 {tab === 'models' && <LlmPanel notify={notify} />}
-
-                {tab === 'security' && (
-                  <section className="setm-section">
-                    <div className="setm-option-row">
-                      <div className="setm-option-copy">
-                        <div className="setm-option-title">{t('sandboxLabel')}</div>
-                        <div className="setm-option-desc">{t('sandboxDesc')}</div>
-                      </div>
-                      <Toggle checked={sandbox} label="" onChange={setSandbox} />
-                    </div>
-                    <SetmActions>
-                      <SetmBtn disabled={saving} onClick={() => void saveConsole()}>
-                        {t('save')}
-                      </SetmBtn>
-                    </SetmActions>
-                  </section>
-                )}
 
                 {tab === 'appearance' && (
                   <section className="setm-section">

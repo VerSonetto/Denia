@@ -3163,64 +3163,6 @@ button.btn.form-action {
   min-width: 96px;
 }
 
-.ui-toggle {
-  display: inline-flex;
-  align-items: center;
-  gap: 10px;
-  border: none;
-  background: none;
-  padding: 0;
-  cursor: pointer;
-  color: var(--label-primary);
-}
-
-.ui-toggle.compact {
-  justify-content: center;
-}
-
-.ui-toggle-track {
-  position: relative;
-  display: block;
-  width: 36px;
-  height: 20px;
-  border-radius: 999px;
-  background: var(--bg-layer-3);
-  border: 1px solid var(--border-l2);
-  transition: background 0.15s var(--ease), border-color 0.15s var(--ease);
-  flex-shrink: 0;
-}
-
-.ui-toggle-track.on {
-  background: var(--accent);
-  border-color: var(--accent);
-}
-
-.ui-toggle-thumb {
-  position: absolute;
-  top: 50%;
-  left: 3px;
-  width: 14px;
-  height: 14px;
-  border-radius: 50%;
-  background: #fff;
-  transform: translateY(-50%);
-  transition: transform 0.15s var(--ease);
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.18);
-}
-
-.ui-toggle-track.on .ui-toggle-thumb {
-  transform: translate(16px, -50%);
-}
-
-.ui-toggle:disabled {
-  opacity: 0.45;
-  cursor: not-allowed;
-}
-
-.ui-toggle-label {
-  font-size: 13.5px;
-}
-
 .ui-segment {
   display: inline-flex;
   flex-wrap: wrap;
@@ -4783,30 +4725,6 @@ button.btn.form-action {
   box-shadow: 0 0 0 3px var(--accent-soft);
 }
 
-.setm-option-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 20px;
-  padding: 18px 20px;
-  border-radius: 14px;
-  border: 1px solid var(--border-l1);
-  background: var(--setm-inset);
-}
-
-.setm-option-title {
-  font-size: 14px;
-  font-weight: 650;
-  color: var(--label-primary);
-}
-
-.setm-option-desc {
-  margin-top: 4px;
-  font-size: 12.5px;
-  line-height: 1.5;
-  color: var(--label-tertiary);
-}
-
 .setm-field-block {
   display: flex;
   flex-direction: column;
@@ -5070,16 +4988,6 @@ button.btn.form-action {
   border-top: 1px solid var(--border-l1);
 }
 
-.setm-shell .ui-toggle-track {
-  width: 44px;
-  height: 24px;
-}
-
-.setm-shell .ui-toggle-thumb {
-  width: 18px;
-  height: 18px;
-}
-
 @media (max-width: 820px) {
   .setm-backdrop {
     padding: 0;
@@ -5139,11 +5047,6 @@ button.btn.form-action {
   .setm-form-grid.two,
   .setm-form-grid.key {
     grid-template-columns: 1fr;
-  }
-
-  .setm-option-row {
-    flex-direction: column;
-    align-items: flex-start;
   }
 }
 

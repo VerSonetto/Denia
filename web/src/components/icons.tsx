@@ -123,15 +123,6 @@ export function IconEdit(props: IconProps) {
   )
 }
 
-export function IconShield(props: IconProps) {
-  return (
-    <Svg {...props}>
-      <path d="M8 2.5 12.8 4v3.4c0 2.9-2 5.2-4.8 6.1-2.8-.9-4.8-3.2-4.8-6.1V4L8 2.5Z" stroke="currentColor" strokeWidth="1.3" strokeLinejoin="round" />
-      <path d="M5.8 8.1 7.5 9.7l2.8-3" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" fill="none" />
-    </Svg>
-  )
-}
-
 /** 眼睛:只读权限(可看不可改)。 */
 export function IconEye(props: IconProps) {
   return (

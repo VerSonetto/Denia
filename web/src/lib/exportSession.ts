@@ -338,7 +338,6 @@ function toMarkdown(input: ExportInput): string {
   lines.push(`- 会话 ID: \`${header.id}\``)
   lines.push(`- 创建时间: ${formatTime(header.created_at)}`)
   lines.push(`- 工作目录: \`${header.cwd}\``)
-  lines.push(`- 沙箱: ${header.sandbox ? '是' : '否'}`)
   if (header.parent_session) lines.push(`- 分支自: \`${header.parent_session}\``)
   lines.push(`- 共 ${events.length} 条事件`)
   const turnCount = events.filter((e) => e.type === 'turn-end').length
