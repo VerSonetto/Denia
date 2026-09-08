@@ -53,14 +53,14 @@ pub fn schemas() -> Vec<ToolSchema> {
     let specs = [
         (
             "spawn_agent",
-            "创建独立子代理会话，继承工作目录、权限与模型。默认后台返回 childId；完成后通知父会话。",
-            json!({"prompt":{"type":"string"},"description":{"type":"string"},"provider":{"type":"string"},"model":{"type":"string"},"reasoning_effort":{"type":"string"},"run_in_background":{"type":"boolean"},"persona":{"type":"string"},"allowed_tools":{"type":"array","items":{"type":"string"}},"max_depth":{"type":"integer","minimum":1}}),
+            "创建独立子代理会话，继承工作目录、权限与模型。默认后台返回 childId；完成后通知父会话。子代理默认只有只读工具（read_file/glob/grep/skill/browser），写文件、命令、提问、再委派都留在父代理；allowed_tools 只能在这个集合内缩小。",
+            json!({"prompt":{"type":"string"},"description":{"type":"string"},"provider":{"type":"string"},"model":{"type":"string"},"reasoning_effort":{"type":"string"},"run_in_background":{"type":"boolean"},"persona":{"type":"string"},"allowed_tools":{"type":"array","items":{"type":"string"},"description":"子代理可用工具；缺省 read_file/glob/grep/skill/browser，只能缩小不能扩大。"},"max_depth":{"type":"integer","minimum":1}}),
             vec!["prompt"],
         ),
         (
             "fork_agent",
             "以父会话已完成的历史为种子创建子代理；其余行为同 spawn_agent。",
-            json!({"prompt":{"type":"string"},"description":{"type":"string"},"run_in_background":{"type":"boolean"},"persona":{"type":"string"},"allowed_tools":{"type":"array","items":{"type":"string"}},"max_depth":{"type":"integer","minimum":1}}),
+            json!({"prompt":{"type":"string"},"description":{"type":"string"},"run_in_background":{"type":"boolean"},"persona":{"type":"string"},"allowed_tools":{"type":"array","items":{"type":"string"},"description":"子代理可用工具；缺省 read_file/glob/grep/skill，只能缩小不能扩大。"},"max_depth":{"type":"integer","minimum":1}}),
             vec!["prompt"],
         ),
         (

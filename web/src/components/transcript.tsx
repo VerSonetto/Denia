@@ -6,9 +6,10 @@ import { MarkdownText } from '../markdown/MarkdownText'
 import type { MarkdownLabels } from '../markdown/MarkdownText'
 import { useTypewriter } from '../typewriter'
 import { toolCallInput, toolCallSummary } from '../toolDisplay'
-import type { UserMessageImage } from '../types'
+import type { AskAnswer, UserMessageImage } from '../types'
 import { UserMessageBubble } from './UserMessageImages'
 import { BranchMessageButton, CopyMessageButton } from './CopyMessageButton'
+import { AskCard } from './AskCard'
 import {
   IconChevron,
   IconEdit,
@@ -28,6 +29,8 @@ export function Transcript({
   onRewind,
   onFork,
   onLoopContinue,
+  onAskAnswer,
+  onAskCancel,
 }: {
   nodes: TranscriptNode[]
   /** 已发送未获确认的用户消息:渲染为尾部"发送中"行。 */
@@ -38,6 +41,10 @@ export function Transcript({
   onFork?: (seq: number) => void
   /** 死循环提示行点「继续」:自动发送继续消息。 */
   onLoopContinue?: () => void
+  /** 回答一组模型提问(`ask` 工具)。 */
+  onAskAnswer?: (requestId: string, answers: AskAnswer[]) => void
+  /** 取消一组模型提问。 */
+  onAskCancel?: (requestId: string) => void
 }) {
   if (nodes.length === 0 && pendingMessages.length === 0) {
     return <div className="empty-hint">{t('emptyTranscript')}</div>
@@ -61,6 +68,8 @@ export function Transcript({
             onRewind={onRewind}
             onFork={onFork}
             onLoopContinue={onLoopContinue}
+            onAskAnswer={onAskAnswer}
+            onAskCancel={onAskCancel}
             showActions={
               row.node.kind === 'assistant' &&
               endedTurns.has(row.node.turn) &&
@@ -124,6 +133,8 @@ const NodeView = memo(function NodeView({
   onRewind,
   onFork,
   onLoopContinue,
+  onAskAnswer,
+  onAskCancel,
   showActions = false,
 }: {
   node: TranscriptNode
@@ -131,6 +142,8 @@ const NodeView = memo(function NodeView({
   onFork?: (seq: number) => void
   /** 死循环提示行点「继续」:自动发送继续消息。 */
   onLoopContinue?: () => void
+  onAskAnswer?: (requestId: string, answers: AskAnswer[]) => void
+  onAskCancel?: (requestId: string) => void
   /** 已结束轮次的最后一条助手消息:显示复制/分支图标簇。 */
   showActions?: boolean
 }) {
@@ -158,7 +171,7 @@ const NodeView = memo(function NodeView({
     case 'turn-end':
       return <TurnChrome node={node} onLoopContinue={onLoopContinue} />
     case 'tool':
-      return <ToolRow node={node} />
+      return <ToolRow node={node} onAskAnswer={onAskAnswer} onAskCancel={onAskCancel} />
     case 'compaction':
       return <CompactionRow node={node} />
   }
@@ -516,7 +529,15 @@ function skillLoadBody(name: string, content: string, isError: boolean): string 
   }
 }
 
-function ToolRow({ node }: { node: Extract<TranscriptNode, { kind: 'tool' }> }) {
+function ToolRow({
+  node,
+  onAskAnswer,
+  onAskCancel,
+}: {
+  node: Extract<TranscriptNode, { kind: 'tool' }>
+  onAskAnswer?: (requestId: string, answers: AskAnswer[]) => void
+  onAskCancel?: (requestId: string) => void
+}) {
   const [open, setOpen] = useState(false)
   const running = !node.result
   const meta = toolMeta(node.name)
@@ -539,6 +560,27 @@ function ToolRow({ node }: { node: Extract<TranscriptNode, { kind: 'tool' }> }) 
     () => (node.result ? skillLoadBody(node.name, node.result.content, node.result.isError) : null),
     [node.name, node.result],
   )
+  // ask 工具:问答卡片直接展示(不折叠),用户作答后转只读对照。
+  // 等待期卡片必须常驻可见——折叠行会让用户错过提问。
+  if (node.ask) {
+    return (
+      <div className="ask-row">
+        <div className="ask-row-head">
+          <span className="glyph"><IconTool size={14} /></span>
+          <span className="title">{t('askTitle')}</span>
+        </div>
+        <AskCard
+          requestId={node.ask.requestId}
+          questions={node.ask.questions}
+          timeoutMs={node.ask.timeoutMs}
+          startedAt={node.ask.startedAt}
+          resolution={node.ask.resolution}
+          onSubmit={(answers) => onAskAnswer?.(node.ask!.requestId, answers)}
+          onCancel={() => onAskCancel?.(node.ask!.requestId)}
+        />
+      </div>
+    )
+  }
   return (
     <div
       className={`disc-row tool-row${open ? ' open' : ''}${running ? ' running' : ''}`}

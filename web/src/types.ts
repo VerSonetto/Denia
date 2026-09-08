@@ -275,6 +275,63 @@ export type SessionEnvelope =
       request_id: string
       outcome: 'allowed-once' | 'rejected' | 'cancelled' | 'unavailable'
     }
+  | {
+      seq: number
+      time: number
+      type: 'ask-requested'
+      request_id: string
+      call_id: string
+      questions: AskQuestion[]
+      timeout_ms: number
+    }
+  | {
+      seq: number
+      time: number
+      type: 'ask-resolved'
+      request_id: string
+      resolution: AskResolution
+    }
+
+/* ---- ask 工具(模型向用户提问) ---- */
+
+/** 提问的一个可选项(与 Rust `AskOption` 对齐)。 */
+export interface AskOption {
+  label: string
+  description?: string
+  /** 模型推荐项;UI 高亮显示,不靠标签文本约定。 */
+  recommended?: boolean
+}
+
+/** 一个待回答的问题。 */
+export interface AskQuestion {
+  id: string
+  question: string
+  header?: string
+  detail?: string
+  options?: AskOption[]
+  multiSelect?: boolean
+  /** 是否允许自由填写;缺省 true。 */
+  allowCustom?: boolean
+}
+
+/** 一个问题的回答。 */
+export interface AskAnswer {
+  id: string
+  selected: string[]
+  custom?: string
+  /** 用户显式跳过本题。 */
+  skipped?: boolean
+}
+
+/** 提问的结局。 */
+export type AskOutcome = 'answered' | 'timed-out' | 'cancelled' | 'unavailable'
+
+/** 一次提问的闭合结果。 */
+export interface AskResolution {
+  outcome: AskOutcome
+  answers?: AskAnswer[]
+  reason?: string
+}
 
 /** 当前会话权限模式(与 Rust `PermissionMode` 对齐)。 */
 export type PermissionMode = 'read-only' | 'workspace-write' | 'danger-full-access'

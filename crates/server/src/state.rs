@@ -203,6 +203,12 @@ pub struct LiveSession {
     /// 等待用户决策的审批请求(request_id → oneshot)。
     pub pending_approvals:
         std::sync::Mutex<HashMap<String, tokio::sync::oneshot::Sender<ApprovalOutcome>>>,
+    /// 等待用户作答的提问请求(request_id → oneshot)。
+    ///
+    /// 与审批分表:dsh 用同一 id 空间承担两种交互,重试/多问题批次时
+    /// 应答可能误配;这里按 request_id 严格隔离,且答题是一次性原子结算。
+    pub pending_asks:
+        std::sync::Mutex<HashMap<String, tokio::sync::oneshot::Sender<denia_core::session::AskResolution>>>,
 }
 
 /// Live sessions keyed by id; loads (and repairs) on first touch.
@@ -264,6 +270,7 @@ impl LiveSessions {
             last_touch: AtomicU64::new(now_millis()),
             cancel: std::sync::Mutex::new(None),
             pending_approvals: std::sync::Mutex::new(HashMap::new()),
+            pending_asks: std::sync::Mutex::new(HashMap::new()),
         });
         map.insert(id.to_string(), live.clone());
         self.trim_capacity_locked(&mut map);
@@ -420,6 +427,127 @@ impl ApprovalBridge for ServerApprovalBridge {
     }
 }
 
+/// 服务端提问桥:把 `ask` 工具的提问挂到 LiveSession 的 pending 表,
+/// 落 `ask-requested` 事件(刷新页面可恢复挂起卡片),等待 REST 应答。
+///
+/// 与 dsh 的差异(见 `docs/ask-tool.md` 不足分析):
+/// - **有超时**:`timeout_ms` 到点按 `TimedOut` 结算,工具不会永久挂起;
+/// - **结局区分**:超时/取消/无通道各有独立语义,模型知道下一步怎么办;
+/// - **先落盘再等待**:请求进日志后即使前端断线重连也能重建挂起态;
+/// - **单次原子结算**:一个 request_id 只结算一次,重复应答返回 404。
+pub struct ServerAskBridge {
+    live: Arc<LiveSessions>,
+}
+
+impl ServerAskBridge {
+    pub fn new(live: Arc<LiveSessions>) -> Self {
+        Self { live }
+    }
+}
+
+#[async_trait]
+impl denia_tools::AskBridge for ServerAskBridge {
+    async fn ask(
+        &self,
+        session_id: &str,
+        request_id: &str,
+        call_id: &str,
+        questions: &[denia_core::session::AskQuestion],
+        timeout_ms: u64,
+        cancel: CancellationToken,
+    ) -> denia_core::session::AskResolution {
+        use denia_core::session::{AskOutcome, AskResolution, SessionEvent};
+        let Some(live) = self.live.get(session_id) else {
+            return AskResolution {
+                outcome: AskOutcome::Unavailable,
+                answers: Vec::new(),
+                reason: Some("会话不在运行中".to_string()),
+            };
+        };
+        // 子代理不与用户交互:提问语义不成立。
+        //
+        // 主机制在工具授予层——子代理默认只拿到只读工具集
+        // (`denia_tools::SUBAGENT_READ_ONLY_TOOLS`,不含 ask),正常路径
+        // 根本调不到本函数。这里保留一道服务层兜底:万一将来有路径绕过
+        // 授予(如外部直接调用),也不至于把提问挂到一个没人看的会话上。
+        // 与 dsh 的区别:dsh 把这种情况做成终局错误(DELEGATED_CALLER),
+        // 这里按 unavailable 结算并给出可执行的下一步,模型自行决策继续。
+        if live.session.header().subagent.is_some() {
+            return AskResolution {
+                outcome: AskOutcome::Unavailable,
+                answers: Vec::new(),
+                reason: Some(
+                    "子代理不与用户交互,不能提问;请自行决策,并在最终结果中说明未决问题与采用的假设"
+                        .to_string(),
+                ),
+            };
+        }
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        {
+            let mut pending = live.pending_asks.lock().unwrap_or_else(|p| p.into_inner());
+            pending.insert(request_id.to_string(), tx);
+        }
+        // 先落盘再等待:前端重连后按日志恢复挂起卡片。
+        if let Ok(envelope) = live.session.append(SessionEvent::AskRequested {
+            request_id: request_id.to_string(),
+            call_id: call_id.to_string(),
+            questions: questions.to_vec(),
+            timeout_ms,
+        }) {
+            let _ = live.followers.send(envelope);
+        }
+        let settle = |resolution: AskResolution| {
+            if let Ok(envelope) = live.session.append(SessionEvent::AskResolved {
+                request_id: request_id.to_string(),
+                resolution: resolution.clone(),
+            }) {
+                let _ = live.followers.send(envelope);
+            }
+            resolution
+        };
+        let outcome = tokio::select! {
+            _ = cancel.cancelled() => {
+                let mut pending = live.pending_asks.lock().unwrap_or_else(|p| p.into_inner());
+                if let Some(tx) = pending.remove(request_id) {
+                    // 取消与超时同形:应答方已离场,不再有人写这条通道。
+                    let _ = tx.send(AskResolution {
+                        outcome: AskOutcome::Cancelled,
+                        answers: Vec::new(),
+                        reason: None,
+                    });
+                }
+                AskResolution {
+                    outcome: AskOutcome::Cancelled,
+                    answers: Vec::new(),
+                    reason: None,
+                }
+            }
+            _ = tokio::time::sleep(std::time::Duration::from_millis(timeout_ms)) => {
+                let mut pending = live.pending_asks.lock().unwrap_or_else(|p| p.into_inner());
+                pending.remove(request_id);
+                AskResolution {
+                    outcome: AskOutcome::TimedOut,
+                    answers: Vec::new(),
+                    reason: None,
+                }
+            }
+            result = rx => {
+                let _ = live
+                    .pending_asks
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .remove(request_id);
+                result.unwrap_or(AskResolution {
+                    outcome: AskOutcome::Cancelled,
+                    answers: Vec::new(),
+                    reason: None,
+                })
+            }
+        };
+        settle(outcome)
+    }
+}
+
 /// RAII 运行保护:drop 时复位 running、清空 cancel token,并广播
 /// `RunningChanged { running: false }` 给控制台。即使任务 panic,
 /// 会话也不会永久锁死在 running 状态,前端圆点也不会卡死。
@@ -446,6 +574,22 @@ impl Drop for RunningGuard {
                 .unwrap_or_else(|p| p.into_inner());
             for tx in pending.drain() {
                 let _ = tx.1.send(ApprovalOutcome::Cancelled);
+            }
+        }
+        // 未答提问同样按 cancelled 结算,避免 pending oneshot 泄漏
+        // (工具侧会把它渲染成"用户取消",模型据此收束)。
+        {
+            let mut pending = self
+                .live
+                .pending_asks
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
+            for (_, tx) in pending.drain() {
+                let _ = tx.send(denia_core::session::AskResolution {
+                    outcome: denia_core::session::AskOutcome::Cancelled,
+                    answers: Vec::new(),
+                    reason: None,
+                });
             }
         }
         let mut cancel = self.live.cancel.lock().unwrap();
@@ -563,12 +707,16 @@ pub fn build_state(
     tools.replace(Arc::new(
         denia_tools::BashTool::new().with_runtime(runtime.clone()),
     ));
+    // `ask` 工具:控制台部署有应答通道,注册工具并挂桥。
+    tools.register(Arc::new(denia_tools::AskTool::new()));
     let approval = Arc::new(ServerApprovalBridge::new(live.clone()));
+    let ask = Arc::new(ServerAskBridge::new(live.clone()));
     let console = console_settings(&settings);
     let driver = Arc::new(
         SessionDriver::new(registry.clone(), Arc::new(tools), system_prompt.handle())
             .with_file_history(file_history.clone())
             .with_approval(approval)
+            .with_ask(ask)
             .with_runtime(runtime.clone())
             .with_compaction(compaction_settings_from(&console))
             .with_parallel(denia_agent_loop::ParallelSettings {
@@ -703,6 +851,7 @@ fn spawn_forwarders(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use denia_tools::AskBridge as _;
     use std::sync::atomic::Ordering;
 
     fn temp_root() -> std::path::PathBuf {
@@ -738,5 +887,194 @@ mod tests {
         let value = serde_json::to_value(&event).unwrap();
         assert_eq!(value["type"], "running-snapshot");
         assert_eq!(value["ids"], serde_json::json!(["s1", "s2"]));
+    }
+
+    fn ask_questions() -> Vec<denia_core::session::AskQuestion> {
+        use denia_core::session::{AskOption, AskQuestion};
+        vec![AskQuestion {
+            id: "q1".to_string(),
+            question: "继续吗?".to_string(),
+            header: None,
+            detail: None,
+            options: vec![AskOption {
+                label: "继续".to_string(),
+                description: None,
+                recommended: true,
+            }],
+            multi_select: false,
+            allow_custom: true,
+        }]
+    }
+
+    fn ask_setup() -> (std::path::PathBuf, Arc<LiveSessions>, String) {
+        let root = temp_root();
+        let cwd = root.join("work");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let store = SessionStore::open(&root).unwrap();
+        let session = store.create(&cwd, true).unwrap();
+        let id = session.id().to_string();
+        let live = Arc::new(LiveSessions::new(8));
+        live.get_or_load(&store, &id).unwrap();
+        (root, live, id)
+    }
+
+    /// 作答路径:挂起请求 → 外部应答 → 桥返回 Answered,并把结果落进日志。
+    #[tokio::test]
+    async fn ask_bridge_settles_on_answer() {
+        use denia_core::session::{AskAnswer, AskOutcome, AskResolution};
+        let (root, live, id) = ask_setup();
+        let bridge = ServerAskBridge::new(live.clone());
+        let live_for_answer = live.clone();
+        let session_id = id.clone();
+        // 等请求挂起后再应答(桥先落盘 AskRequested,再进 select)。
+        tokio::spawn(async move {
+            loop {
+                let sender = {
+                    let live = live_for_answer.get(&session_id).unwrap();
+                    let mut pending = live.pending_asks.lock().unwrap();
+                    pending.remove("req-1")
+                };
+                if let Some(sender) = sender {
+                    let _ = sender.send(AskResolution {
+                        outcome: AskOutcome::Answered,
+                        answers: vec![AskAnswer {
+                            id: "q1".to_string(),
+                            selected: vec!["继续".to_string()],
+                            custom: None,
+                            skipped: false,
+                        }],
+                        reason: None,
+                    });
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        });
+        let resolution = bridge
+            .ask(
+                &id,
+                "req-1",
+                "call-1",
+                &ask_questions(),
+                5_000,
+                CancellationToken::new(),
+            )
+            .await;
+        assert_eq!(resolution.outcome, AskOutcome::Answered);
+        assert_eq!(resolution.answers[0].selected, vec!["继续".to_string()]);
+        // 请求与结算都落盘:刷新页面能重建挂起态与结果。
+        let events = live.get(&id).unwrap().session.events();
+        assert!(events
+            .iter()
+            .any(|envelope| matches!(&envelope.event, denia_core::session::SessionEvent::AskRequested { request_id, .. } if request_id == "req-1")));
+        assert!(events
+            .iter()
+            .any(|envelope| matches!(&envelope.event, denia_core::session::SessionEvent::AskResolved { request_id, .. } if request_id == "req-1")));
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// 超时路径:无人应答时按 TimedOut 结算,工具不会永久挂起。
+    #[tokio::test]
+    async fn ask_bridge_times_out_without_answer() {
+        use denia_core::session::AskOutcome;
+        let (root, live, id) = ask_setup();
+        let bridge = ServerAskBridge::new(live.clone());
+        let resolution = bridge
+            .ask(
+                &id,
+                "req-2",
+                "call-2",
+                &ask_questions(),
+                30,
+                CancellationToken::new(),
+            )
+            .await;
+        assert_eq!(resolution.outcome, AskOutcome::TimedOut);
+        // 超时后挂起表必须清空,重复应答会得到 404(不覆盖已结算结果)。
+        assert!(live.get(&id).unwrap().pending_asks.lock().unwrap().is_empty());
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// 取消路径:轮次中断时挂起提问立刻结算为 Cancelled。
+    #[tokio::test]
+    async fn ask_bridge_cancels_on_token() {
+        use denia_core::session::AskOutcome;
+        let (root, live, id) = ask_setup();
+        let bridge = ServerAskBridge::new(live.clone());
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        let resolution = bridge
+            .ask(&id, "req-3", "call-3", &ask_questions(), 60_000, cancel)
+            .await;
+        assert_eq!(resolution.outcome, AskOutcome::Cancelled);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// 子代理不与用户交互:提问一律 unavailable,并给出可执行的下一步。
+    #[tokio::test]
+    async fn ask_bridge_refuses_subagent_sessions() {
+        use denia_core::session::{AskOutcome, SubagentDescriptor};
+        let root = temp_root();
+        let cwd = root.join("work");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let store = SessionStore::open(&root).unwrap();
+        let parent = store.create(&cwd, true).unwrap();
+        let child = store
+            .create_subagent(
+                &cwd,
+                true,
+                parent.id(),
+                SubagentDescriptor {
+                    label: "worker".to_string(),
+                    depth: 1,
+                    mode: "default".to_string(),
+                    selection: denia_core::config::ModelSelection {
+                        provider: "test".to_string(),
+                        model: "test".to_string(),
+                        reasoning_effort: None,
+                    },
+                    persona: None,
+                    allowed_tools: None,
+                },
+            )
+            .unwrap();
+        let live = Arc::new(LiveSessions::new(8));
+        live.get_or_load(&store, child.id()).unwrap();
+        let bridge = ServerAskBridge::new(live);
+        let resolution = bridge
+            .ask(
+                child.id(),
+                "req-5",
+                "call-5",
+                &ask_questions(),
+                60_000,
+                CancellationToken::new(),
+            )
+            .await;
+        assert_eq!(resolution.outcome, AskOutcome::Unavailable);
+        let reason = resolution.reason.expect("子代理拒绝必须给出原因");
+        assert!(reason.contains("子代理"), "{reason}");
+        assert!(reason.contains("自行决策"), "{reason}");
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// 无会话时按 unavailable 结算(模型自行决策),而不是硬错误。
+    #[tokio::test]
+    async fn ask_bridge_reports_unavailable_without_session() {
+        use denia_core::session::AskOutcome;
+        let live = Arc::new(LiveSessions::new(8));
+        let bridge = ServerAskBridge::new(live);
+        let resolution = bridge
+            .ask(
+                "missing",
+                "req-4",
+                "call-4",
+                &ask_questions(),
+                1_000,
+                CancellationToken::new(),
+            )
+            .await;
+        assert_eq!(resolution.outcome, AskOutcome::Unavailable);
+        assert!(resolution.reason.is_some());
     }
 }

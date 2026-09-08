@@ -459,6 +459,8 @@ mod tests {
             file_history: None,
             permission_mode: PermissionMode::WorkspaceWrite,
             permission_override: None,
+            ask: None,
+            call_id: None,
         };
         (tempfile_like::TempDir(dir), context)
     }
@@ -650,6 +652,8 @@ mod tests {
                 file_history: None,
                 permission_mode: PermissionMode::WorkspaceWrite,
                 permission_override: None,
+                ask: None,
+                call_id: None,
             };
             let reader = ReadFileTool::new();
             let out = reader.execute(r#"{"path":"pixel.png"}"#, &ctx).await;
@@ -686,6 +690,8 @@ mod tests {
             file_history: None,
             permission_mode: PermissionMode::WorkspaceWrite,
             permission_override: None,
+            ask: None,
+            call_id: None,
         };
         let reader = ReadFileTool::new();
         let out = reader.execute(r#"{"path":"pixel.png"}"#, &ctx).await;

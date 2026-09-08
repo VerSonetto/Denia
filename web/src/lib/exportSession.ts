@@ -146,6 +146,10 @@ function headLine(envelope: SessionEnvelope): string {
       return `approval-asked · tool=${envelope.tool}`
     case 'approval-decided':
       return `approval-decided · ${envelope.outcome}`
+    case 'ask-requested':
+      return `ask-requested · ${envelope.questions.length} 问 · call_id=${envelope.call_id}`
+    case 'ask-resolved':
+      return `ask-resolved · ${envelope.resolution.outcome}`
     case 'compaction-summary':
       return `compaction-summary · turn=${envelope.turn} step=${envelope.step} · replaces ${envelope.replaces_from}..${envelope.replaces_to}`
   }
@@ -311,6 +315,28 @@ function eventBody(envelope: SessionEnvelope): string {
       lines.push(`- request_id: \`${envelope.request_id}\``)
       lines.push(`- outcome: \`${envelope.outcome}\``)
       return lines.join('\n')
+    case 'ask-requested': {
+      lines.push(`- request_id: \`${envelope.request_id}\``)
+      lines.push(`- call_id: \`${envelope.call_id}\``)
+      lines.push(`- timeout_ms: ${envelope.timeout_ms}`)
+      for (const question of envelope.questions) {
+        lines.push(`- 问题 \`${question.id}\`: ${question.question}`)
+        for (const option of question.options ?? []) {
+          lines.push(`  - 选项: ${option.label}${option.recommended ? ' [推荐]' : ''}`)
+        }
+      }
+      return lines.join('\n')
+    }
+    case 'ask-resolved': {
+      lines.push(`- request_id: \`${envelope.request_id}\``)
+      lines.push(`- outcome: \`${envelope.resolution.outcome}\``)
+      for (const answer of envelope.resolution.answers ?? []) {
+        const parts = [...answer.selected]
+        if (answer.custom) parts.push(answer.custom)
+        lines.push(`- 回答 \`${answer.id}\`: ${answer.skipped ? '(跳过)' : parts.join(' / ') || '(空)'}`)
+      }
+      return lines.join('\n')
+    }
     case 'compaction-summary': {
       lines.push(`- replaces_from: ${envelope.replaces_from}`)
       lines.push(`- replaces_to: ${envelope.replaces_to}`)

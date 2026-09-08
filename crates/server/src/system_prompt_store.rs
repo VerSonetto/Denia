@@ -150,16 +150,29 @@ fn build_prompt(
     browser_hub: Option<denia_tools::BrowserHub>,
     recon_hub: Option<denia_tools::ReconHub>,
 ) -> SystemPrompt {
+    // server 部署有应答通道:系统提示词与工具注册必须同步带上 `ask`
+    // (schema + tool:ask 纪律段),模型可见即模型可执行。
     let mut prompt = match (text, browser_hub) {
-        (Some(persona), Some(hub)) => {
-            denia_tools::shipped_with_persona_and_browser_and_recon(persona, Some(hub), recon_hub)
-                .0
+        (Some(persona), Some(hub)) => denia_tools::shipped_with_persona_and_browser_and_recon_and_ask(
+            persona,
+            Some(hub),
+            recon_hub,
+            true,
+        )
+        .0,
+        (Some(persona), None) => denia_tools::shipped_with_persona_and_browser_and_recon_and_ask(
+            persona, None, recon_hub, true,
+        )
+        .0,
+        (None, Some(hub)) => denia_tools::default_shipped_with_browser_and_recon_and_ask(
+            Some(hub),
+            recon_hub,
+            true,
+        )
+        .0,
+        (None, None) => {
+            denia_tools::default_shipped_with_browser_and_recon_and_ask(None, recon_hub, true).0
         }
-        (Some(persona), None) => denia_tools::shipped_with_persona(persona).0,
-        (None, Some(hub)) => {
-            denia_tools::default_shipped_with_browser_and_recon(Some(hub), recon_hub).0
-        }
-        (None, None) => denia_tools::default_shipped().0,
     };
     // server 部署总是注册宿主能力工具(委派/后台任务/技能),其纪律段
     // 归位系统提示词(原先是 [denia 能力上下文] 注入消息里的静态内容)。

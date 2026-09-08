@@ -117,7 +117,7 @@ pub fn register_shipped_prompt(
         name: "tool:todo".to_string(),
         order: SectionOrder::ToolWrite.value() + 1,
         text: PromptText::Static(
-            "多步任务开工前先用 todo_write 拆步骤;每完成一步立即把对应项标 completed 并把下一步标 in_progress,不要攒到最后一起更新;全部做完才允许没有 in_progress 项。"
+            "多步任务开工前先用 todo_write 拆步骤(每步是可直接执行的具体动作,不是笼统阶段名)。\n强制约束:todo 必须与真实进度实时同步——每完成一步,在开始下一步的同一个工具批次里立刻把该项标 completed、把正在做的那项标 in_progress;状态落后于事实等同于谎报进度。禁止攒到最后一次性批量更新,禁止把已完成的工作留在 in_progress,也禁止把没做的事标成 completed。\n任何时刻只有一项 in_progress(工作真并行时例外:并发子代理/后台任务可多条同时 in_progress);全部工作完成才允许没有 in_progress 项。任务范围变化时重发完整列表反映新计划,不要另开一份。琐碎的单步任务不用建清单。"
                 .to_string(),
         ),
         complete: false,
@@ -143,7 +143,7 @@ pub fn register_capability_prompt_sections(prompt: &mut SystemPrompt) -> Result<
         name: "tool:agents".to_string(),
         order: SectionOrder::ToolAgents.value(),
         text: PromptText::Static(
-            "独立任务用 spawn_agent/fork_agent 委派给子代理;send_message 只能在直接父子代理之间收发消息。把可以独立进行的子任务拆给子代理分工合作,不要全部自己做;需要立即拿到结果的前台委派用 run_in_background=false 阻塞等结果,可以并行推进的后台委派保持默认后台运行,子代理完成时会通知父会话。"
+            "独立任务用 spawn_agent/fork_agent 委派给子代理;send_message 只能在直接父子代理之间收发消息。把可以独立进行的子任务拆给子代理分工合作,不要全部自己做;需要立即拿到结果的前台委派用 run_in_background=false 阻塞等结果,可以并行推进的后台委派保持默认后台运行,子代理完成时会通知父会话。子代理默认只有只读工具(read_file/glob/grep/skill/browser):它不写文件、不跑命令、不向用户提问、也不再委派——需要落盘改动或与用户确认的任务留在父代理做,或让子代理只做调查并把结论与待办交回。子代理用 browser 抓取网页同样受浏览器收尾纪律约束(任务完成 list 确认无 tab)。"
                 .to_string(),
         ),
         complete: false,
@@ -191,6 +191,25 @@ fn register_browser_section(prompt: &mut SystemPrompt) -> Result<(), String> {
     Ok(())
 }
 
+/// 提问工具(ask)的使用纪律段。
+///
+/// 与 `ask` schema 严格同步:仅在注册了该工具的部署注入。纪律与 description
+/// 分工不重叠——description 写调用机制与结局语义,本段写"什么时候该问、
+/// 什么时候不该问、拿到各结局怎么办"的行为准则。
+pub fn register_ask_prompt_section(prompt: &mut SystemPrompt) -> Result<(), String> {
+    prompt.section(PromptSection {
+        name: "tool:ask".to_string(),
+        order: SectionOrder::ToolAsk.value(),
+        text: PromptText::Static(
+            "ask 工具用于真正卡住的时刻:需求自相矛盾、破坏性操作需要拍板、或缺少只有用户才知道的信息。能自己查证的事实(read_file/grep/glob/bash/浏览器)不要问用户;能给出合理默认的决策先做,把假设写进结论再继续——提问不是拖延的借口。一次把同批相关问题问全,不要分多轮反复打断用户;每问一道都要能说清\"答案会改变我的下一步什么\"。\n拿到结局后的动作:answered 按用户选择继续;timed-out 不要原样重复同一问题,据现有信息继续并在结论里写明采用的假设;cancelled 视为不要沿这条路径继续,停下说明当前状态与可选方案;unavailable 自行决策并明确标注假设。用户跳过某题(skipped)时按缺省继续,不要把跳过当成需要再问的信号。"
+                .to_string(),
+        ),
+        complete: false,
+        audience: SectionAudience::Model,
+    })?;
+    Ok(())
+}
+
 /// Shipped registry pair: prompt assembly plus executable tools.
 pub fn default_shipped() -> (SystemPrompt, ToolRegistry) {
     let tools = crate::default_registry();
@@ -227,7 +246,29 @@ pub fn default_shipped_with_browser_and_recon(
     browser_hub: Option<BrowserHub>,
     recon_hub: Option<ReconHub>,
 ) -> (SystemPrompt, ToolRegistry) {
+    default_shipped_with_browser_and_recon_and_ask(browser_hub, recon_hub, false)
+}
+
+/// `default_shipped_with_browser_and_recon` + 可选 `ask` 工具。
+///
+/// `ask` 是交互式工具:只有带应答通道的部署(server + 控制台)才注册,
+/// 纪律段与 schema 在同一分支注册,模型不会看到不存在的工具。
+pub fn default_shipped_with_browser_and_recon_and_ask(
+    browser_hub: Option<BrowserHub>,
+    recon_hub: Option<ReconHub>,
+    ask: bool,
+) -> (SystemPrompt, ToolRegistry) {
     let (mut prompt, mut registry) = default_shipped_with_browser(browser_hub);
+    if ask {
+        register_ask_prompt_section(&mut prompt).expect("ask prompt section is valid");
+        let tool = Arc::new(crate::AskTool::new());
+        let schema = tool.schema().clone();
+        prompt.tools(move |_| ToolProviderResult {
+            schemas: vec![schema.clone()],
+            known_names: None,
+        });
+        registry.register(tool);
+    }
     if let Some(hub) = recon_hub {
         let tool = Arc::new(crate::ReconTool::new(hub));
         let schema = tool.schema().clone();
@@ -268,7 +309,27 @@ pub fn shipped_with_persona_and_browser_and_recon(
     hub: Option<BrowserHub>,
     recon_hub: Option<ReconHub>,
 ) -> (SystemPrompt, ToolRegistry) {
+    shipped_with_persona_and_browser_and_recon_and_ask(persona_text, hub, recon_hub, false)
+}
+
+/// `shipped_with_persona_and_browser_and_recon` + 可选 `ask` 工具。
+pub fn shipped_with_persona_and_browser_and_recon_and_ask(
+    persona_text: String,
+    hub: Option<BrowserHub>,
+    recon_hub: Option<ReconHub>,
+    ask: bool,
+) -> (SystemPrompt, ToolRegistry) {
     let (mut prompt, mut registry) = shipped_with_persona(persona_text);
+    if ask {
+        register_ask_prompt_section(&mut prompt).expect("ask prompt section is valid");
+        let tool = Arc::new(crate::AskTool::new());
+        let schema = tool.schema().clone();
+        prompt.tools(move |_| ToolProviderResult {
+            schemas: vec![schema.clone()],
+            known_names: None,
+        });
+        registry.register(tool);
+    }
     if let Some(hub) = hub {
         register_browser_section(&mut prompt).expect("browser prompt section is valid");
         let tool = Arc::new(crate::BrowserTool::new(hub));
@@ -465,6 +526,8 @@ mod browser_prompt_tests {
             file_history: None,
             permission_mode: PermissionMode::WorkspaceWrite,
             permission_override: None,
+            ask: None,
+            call_id: None,
         };
         let tool = crate::BrowserTool::new(hub);
         tool.execute(arguments, &ctx).await
@@ -549,6 +612,96 @@ mod browser_prompt_tests {
                 "tool:browser must not be registered without browser tool"
             );
         }
+    }
+
+    /// 子代理只读集合含 browser:对应的纪律段与 schema 必须一起出现,
+    /// 否则子代理用 browser 抓网页却不知道收尾义务。
+    #[test]
+    fn browser_section_and_schema_available_to_subagents() {
+        assert!(
+            crate::SUBAGENT_READ_ONLY_TOOLS.contains(&"browser"),
+            "browser 应授予子代理"
+        );
+        assert!(
+            !crate::SUBAGENT_READ_ONLY_TOOLS.contains(&"recon"),
+            "recon 是交互态调试工具,不授予子代理"
+        );
+        let (prompt, registry) = default_shipped_with_browser_and_recon_and_ask(
+            Some(fake_hub()),
+            None,
+            true,
+        );
+        let assembly = prompt
+            .assemble(&denia_system_prompt::AssembleContext {
+                cwd: Some("/tmp/ws".to_string()),
+                ..Default::default()
+            })
+            .expect("assemble");
+        assert!(
+            assembly.sections.iter().any(|s| s.name == "tool:browser"),
+            "带 hub 时必须注册 tool:browser 段"
+        );
+        assert!(registry.get("browser").is_some());
+    }
+
+    #[test]
+    fn ask_section_and_schema_register_together() {
+        let context = denia_system_prompt::AssembleContext {
+            cwd: Some("/tmp/ws".to_string()),
+            ..Default::default()
+        };
+        // 带 ask:段注册、audience=Model、不进用户可见副本,schema 同步可见。
+        let (prompt, registry) =
+            default_shipped_with_browser_and_recon_and_ask(None, None, true);
+        let assembly = prompt.assemble(&context).expect("assemble");
+        let section = assembly
+            .sections
+            .iter()
+            .find(|section| section.name == "tool:ask")
+            .expect("tool:ask section registered");
+        assert_eq!(section.audience, SectionAudience::Model);
+        assert!(section.text.contains("真正卡住的时刻"));
+        assert!(section.text.contains("timed-out"));
+        assert!(section.text.contains("cancelled"));
+        assert!(section.text.contains("unavailable"));
+        let names: Vec<&str> = assembly
+            .tools
+            .iter()
+            .map(|tool| tool.name.as_str())
+            .collect();
+        assert!(names.contains(&"ask"), "ask schema missing: {names:?}");
+        assert!(registry.get("ask").is_some(), "ask not registered");
+        let user_body = denia_system_prompt::render_prompt_for_user(&assembly);
+        assert!(!user_body.contains("真正卡住的时刻"));
+
+        // 不带 ask:段与 schema 都不出现。
+        let (prompt, registry) =
+            default_shipped_with_browser_and_recon_and_ask(None, None, false);
+        let assembly = prompt.assemble(&context).expect("assemble");
+        assert!(
+            !assembly
+                .sections
+                .iter()
+                .any(|section| section.name == "tool:ask"),
+            "tool:ask must not be registered without the ask tool"
+        );
+        assert!(
+            !assembly.tools.iter().any(|tool| tool.name == "ask"),
+            "ask schema must not appear without the ask tool"
+        );
+        assert!(registry.get("ask").is_none());
+
+        // persona 变体同样成对。
+        let (prompt, registry) =
+            shipped_with_persona_and_browser_and_recon_and_ask(
+                "自定义 persona".to_string(),
+                None,
+                None,
+                true,
+            );
+        let assembly = prompt.assemble(&context).expect("assemble");
+        assert!(assembly.sections.iter().any(|s| s.name == "tool:ask"));
+        assert!(registry.get("ask").is_some());
     }
 
     #[tokio::test]

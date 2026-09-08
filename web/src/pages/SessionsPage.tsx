@@ -1728,6 +1728,22 @@ export default function SessionsPage({
                 // 死循环保护提示行的「继续」:程序化发送继续消息。
                 void postMessage('继续', { clearInput: false })
               }}
+              onAskAnswer={(requestId, answers) => {
+                if (!activeId) return
+                api
+                  .answerAsk(activeId, requestId, answers)
+                  .catch((error) =>
+                    notify('err', error instanceof Error ? error.message : String(error)),
+                  )
+              }}
+              onAskCancel={(requestId) => {
+                if (!activeId) return
+                api
+                  .cancelAsk(activeId, requestId)
+                  .catch((error) =>
+                    notify('err', error instanceof Error ? error.message : String(error)),
+                  )
+              }}
             />
           ) : (
             <div className="session-hero">

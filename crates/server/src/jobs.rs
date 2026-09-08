@@ -366,6 +366,8 @@ mod tests {
             file_history: None,
             permission_mode: denia_core::session::PermissionMode::WorkspaceWrite,
             permission_override: None,
+            ask: None,
+            call_id: None,
         };
         let job = jobs
             .start(&ctx, "echo hello", "测试", 10_000, 2, 8, 4096)
@@ -399,6 +401,8 @@ mod tests {
             file_history: None,
             permission_mode: denia_core::session::PermissionMode::WorkspaceWrite,
             permission_override: None,
+            ask: None,
+            call_id: None,
         };
         let job = jobs
             .start(

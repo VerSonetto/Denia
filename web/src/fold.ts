@@ -1,4 +1,24 @@
-import type { ContentBlock, SessionEnvelope, StreamChunk, TokenUsage, TurnEndReason, UserMessageImage } from './types'
+import type {
+  AskQuestion,
+  AskResolution,
+  ContentBlock,
+  SessionEnvelope,
+  StreamChunk,
+  TokenUsage,
+  TurnEndReason,
+  UserMessageImage,
+} from './types'
+
+/** `ask` 工具的问答载荷(挂在对应工具行上)。 */
+export interface AskCardData {
+  requestId: string
+  questions: AskQuestion[]
+  timeoutMs: number
+  /** 请求发起时刻(epoch ms),倒计时用。 */
+  startedAt: number
+  /** 已结算时的结果;缺省 = 仍在等待。 */
+  resolution?: AskResolution
+}
 
 /** One rendered block inside an assistant message. */
 export interface UiBlock {
@@ -38,6 +58,8 @@ export type TranscriptNode =
       /** tool-call 事件的 seq;孤儿结果行用 result 事件的 seq。 */
       seq?: number
       result?: { content: string; isError: boolean }
+      /** `ask` 工具的提问载荷:挂在对应工具行上渲染问答卡片。 */
+      ask?: AskCardData
     }
   | { kind: 'turn-start'; turn: number; time: number }
   | {
@@ -255,6 +277,38 @@ export function foldEvents(events: SessionEnvelope[]): TranscriptNode[] {
         }
         tools.set(event.call_id, node)
         nodes.push(node)
+        break
+      }
+      case 'ask-requested': {
+        const node = tools.get(event.call_id)
+        const ask: AskCardData = {
+          requestId: event.request_id,
+          questions: event.questions,
+          timeoutMs: event.timeout_ms,
+          startedAt: event.time,
+        }
+        if (node) {
+          node.ask = ask
+        } else {
+          closeOpen()
+          nodes.push({
+            kind: 'tool',
+            callId: event.call_id,
+            name: 'ask',
+            args: '',
+            seq: event.seq,
+            ask,
+          })
+        }
+        break
+      }
+      case 'ask-resolved': {
+        for (const node of nodes) {
+          if (node.kind === 'tool' && node.ask?.requestId === event.request_id) {
+            node.ask = { ...node.ask, resolution: event.resolution }
+            break
+          }
+        }
         break
       }
       case 'tool-result': {
@@ -500,6 +554,55 @@ function applyEnvelopeStep(
         ...nodes,
         { kind: 'tool', callId: event.call_id, name: event.name, args: event.arguments, seq: event.seq },
       ]
+    // ask 的提问/结算挂到对应工具行(卡片与工具行同体,不产生游离节点)。
+    case 'ask-requested': {
+      const patch = (node: Extract<TranscriptNode, { kind: 'tool' }>) => ({
+        ...node,
+        ask: {
+          requestId: event.request_id,
+          questions: event.questions,
+          timeoutMs: event.timeout_ms,
+          startedAt: event.time,
+          resolution: undefined,
+        },
+      })
+      for (let i = nodes.length - 1; i >= 0; i--) {
+        const node = nodes[i]
+        if (node.kind === 'tool' && node.callId === event.call_id) {
+          const copy = nodes.slice()
+          copy[i] = patch(node)
+          return copy
+        }
+      }
+      // 找不到对应工具行(日志截断等):以孤儿工具行承载卡片。
+      return [
+        ...nodes,
+        {
+          kind: 'tool',
+          callId: event.call_id,
+          name: 'ask',
+          args: '',
+          seq: event.seq,
+          ask: {
+            requestId: event.request_id,
+            questions: event.questions,
+            timeoutMs: event.timeout_ms,
+            startedAt: event.time,
+          },
+        },
+      ]
+    }
+    case 'ask-resolved': {
+      for (let i = nodes.length - 1; i >= 0; i--) {
+        const node = nodes[i]
+        if (node.kind === 'tool' && node.ask?.requestId === event.request_id) {
+          const copy = nodes.slice()
+          copy[i] = { ...node, ask: { ...node.ask, resolution: event.resolution } }
+          return copy
+        }
+      }
+      return nodes
+    }
     case 'compaction-summary':
       return [
         ...nodes,

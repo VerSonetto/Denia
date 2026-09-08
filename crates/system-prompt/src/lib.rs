@@ -51,6 +51,8 @@ pub enum SectionOrder {
     ToolSkill,
     /// 浏览器工具(browser/recon)的资源回收纪律段;仅在注册了 browser 工具时注入。
     ToolBrowser,
+    /// 提问工具(ask)的使用纪律段;仅在注册了 ask 工具时注入。
+    ToolAsk,
 }
 
 impl SectionOrder {
@@ -70,6 +72,7 @@ impl SectionOrder {
             Self::ToolJobs => 1700,
             Self::ToolSkill => 1800,
             Self::ToolBrowser => 1900,
+            Self::ToolAsk => 2000,
         }
     }
 }

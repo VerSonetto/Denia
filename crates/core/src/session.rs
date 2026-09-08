@@ -152,6 +152,91 @@ pub fn approval_policy_for(mode: PermissionMode) -> ApprovalPolicy {
     }
 }
 
+/// 向用户提问时可选项(denia `ask` 工具,对照 dsh `AskUserQuestionOption`)。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AskOption {
+    /// 用户可见的选项标签,也是回答里回传的取值。
+    pub label: String,
+    /// 一句话说明取舍/影响;UI 渲染在标签下方。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// 模型推荐的选项。结构化字段,不靠标签后缀约定(对照 dsh 的
+    /// "(Recommended)" 字符串约定:多语言/全半角括号都会失配)。
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub recommended: bool,
+}
+
+/// 一个待回答的问题。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AskQuestion {
+    /// 调用方给的稳定 id,原样回显在回答里(配对答案与问题)。
+    pub id: String,
+    /// 问题正文。
+    pub question: String,
+    /// 可选短标题(如"确认""选择模式")。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub header: Option<String>,
+    /// 可选补充说明(可含 markdown);渲染在问题与选项之间,不混进选项标签。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    /// 可选选项;为空表示纯自由文本回答。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub options: Vec<AskOption>,
+    /// 是否允许多选。
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub multi_select: bool,
+    /// 是否允许自由文本补充(缺省 true)。
+    #[serde(default = "default_true")]
+    pub allow_custom: bool,
+}
+
+/// 一个问题的回答。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AskAnswer {
+    /// 对应的 `AskQuestion::id`。
+    pub id: String,
+    /// 选中的选项标签(多选可多项;单选 + custom 时为空)。
+    #[serde(default)]
+    pub selected: Vec<String>,
+    /// 自由文本补充。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub custom: Option<String>,
+    /// 用户显式跳过本题(区别于"空回答":模型据此知道是没答还是没看到)。
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub skipped: bool,
+}
+
+/// 一次提问的结局(denia 扩展:dsh 只有 answered/cancelled 两种,
+/// 无超时、无"通道不可用",模型无法区分"没人答"和"答了空")。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum AskOutcome {
+    /// 用户已作答(可能含跳过项)。
+    Answered,
+    /// 等待超时:用户未在预算内作答,模型应据现有信息继续或改道。
+    TimedOut,
+    /// 用户主动取消整组提问。
+    Cancelled,
+    /// 无可用应答通道(如子代理会话、无 UI 的部署)。
+    Unavailable,
+}
+
+/// 一次提问的闭合结果。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AskResolution {
+    pub outcome: AskOutcome,
+    /// 已作答/已跳过的条目;超时与取消时保留已收到的部分。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub answers: Vec<AskAnswer>,
+    /// `Unavailable` 时的原因(可执行提示)。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
 /// One entry in the session's todo list — the unit of the `todo-write`
 /// whole-list snapshot.
 ///
@@ -371,6 +456,21 @@ pub enum SessionEvent {
     ApprovalDecided {
         request_id: String,
         outcome: ApprovalOutcome,
+    },
+    /// 模型向用户发起一组提问(denia `ask` 工具):工具调用阻塞等待应答,
+    /// UI 依据该事件渲染问答卡片;落盘后刷新页面也能恢复挂起态。
+    AskRequested {
+        request_id: String,
+        /// 发起本次提问的工具调用 id(UI 把卡片挂在对应工具行上)。
+        call_id: String,
+        questions: Vec<AskQuestion>,
+        /// 等待预算(毫秒);到点未答按 `TimedOut` 结算。
+        timeout_ms: u64,
+    },
+    /// 一次提问的闭合结果。
+    AskResolved {
+        request_id: String,
+        resolution: AskResolution,
     },
     /// 下一个模型请求的完整头部快照(对齐 dsh `request/header`),在其 step
     /// 内、请求 dispatch 之前落盘。仅日志;最近的快照重建请求形态。

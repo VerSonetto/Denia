@@ -49,6 +49,10 @@ pub fn router() -> Router<Arc<AppState>> {
             "/api/sessions/{id}/approvals/{request_id}",
             post(answer_approval),
         )
+        .route(
+            "/api/sessions/{id}/asks/{request_id}",
+            post(answer_ask),
+        )
         .route("/api/sessions/{id}/fork", post(fork_session))
         .route("/api/sessions/{id}/follow", get(follow_session))
         .route(
@@ -523,6 +527,20 @@ async fn cancel_session(
             let _ = tx.1.send(ApprovalOutcome::Cancelled);
         }
     }
+    // 挂起的提问同样结算为 cancelled:工具立刻返回,模型不必等到超时。
+    {
+        let mut pending = live
+            .pending_asks
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        for (_, tx) in pending.drain() {
+            let _ = tx.send(denia_core::session::AskResolution {
+                outcome: denia_core::session::AskOutcome::Cancelled,
+                answers: Vec::new(),
+                reason: None,
+            });
+        }
+    }
     Ok(Json(json!({ "ok": true })))
 }
 
@@ -603,6 +621,65 @@ async fn answer_approval(
         ));
     };
     let _ = sender.send(outcome);
+    Ok(Json(json!({ "ok": true })))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AskAnswerBody {
+    /// 按 question id 配对的回答;缺项视为未答。
+    answers: Vec<denia_core::session::AskAnswer>,
+    /// true = 用户放弃整组提问(结算为 cancelled)。
+    #[serde(default)]
+    cancel: bool,
+}
+
+/// 应答一次挂起的提问(denia `ask` 工具)。
+///
+/// 结算语义:一次性原子——首个到达的应答结算该 request_id,重复应答返回
+/// 404(不覆盖已生效的回答)。校验回答与原始问题的匹配度(未知 id 忽略、
+/// 未提供的 id 视为未答),并把结果作为普通工具结果回注 agent loop。
+async fn answer_ask(
+    State(state): State<Arc<AppState>>,
+    Path((id, request_id)): Path<(String, String)>,
+    Json(body): Json<AskAnswerBody>,
+) -> Result<impl IntoResponse, ApiError> {
+    use denia_core::session::{AskOutcome, AskResolution};
+    let Some(live) = state.live.get(&id) else {
+        return Err(ApiError::new(
+            StatusCode::NOT_FOUND,
+            "ask/session-not-loaded",
+            "提问所属会话不在运行中或不存在",
+        ));
+    };
+    let sender = {
+        let mut pending = live
+            .pending_asks
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        pending.remove(&request_id)
+    };
+    let Some(sender) = sender else {
+        return Err(ApiError::new(
+            StatusCode::NOT_FOUND,
+            "ask/not-found",
+            "该提问不存在或已结算",
+        ));
+    };
+    let resolution = if body.cancel {
+        AskResolution {
+            outcome: AskOutcome::Cancelled,
+            answers: Vec::new(),
+            reason: None,
+        }
+    } else {
+        AskResolution {
+            outcome: AskOutcome::Answered,
+            answers: body.answers,
+            reason: None,
+        }
+    };
+    let _ = sender.send(resolution);
     Ok(Json(json!({ "ok": true })))
 }
 

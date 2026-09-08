@@ -107,6 +107,8 @@ pub struct SessionDriver {
     system_prompt: Arc<ArcSwap<SystemPrompt>>,
     file_history: Option<Arc<dyn FileHistoryProvider>>,
     approval: Option<Arc<dyn ApprovalBridge>>,
+    /// 提问通道(`ask` 工具用);`None` 时该工具按 unavailable 结算。
+    ask: Option<Arc<dyn denia_tools::AskBridge>>,
     /// 层叠上下文管理:LLM 总结压缩(学 dsh 压力驱动 + Claude Code compact)。
     compaction: CompactionSettings,
     /// 连续压缩失败计数(熔断,学 Claude Code `MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES`)。
@@ -132,6 +134,7 @@ impl SessionDriver {
             runtime: None,
             file_history: None,
             approval: None,
+            ask: None,
             compaction: CompactionSettings::default(),
             compact_failures: AtomicU32::new(0),
             parallel: ParallelSettings::default(),
@@ -169,6 +172,13 @@ impl SessionDriver {
     /// 启用审批通道(抄 dsh ctx.approval);无通道时升权请求 fail-closed。
     pub fn with_approval(mut self, bridge: Arc<dyn ApprovalBridge>) -> Self {
         self.approval = Some(bridge);
+        self
+    }
+
+    /// 启用提问通道(`ask` 工具);无通道时该工具按 `unavailable` 结算,
+    /// 模型仍能自行决策继续(不像 dsh 那样把整次调用变成硬错误)。
+    pub fn with_ask(mut self, bridge: Arc<dyn denia_tools::AskBridge>) -> Self {
+        self.ask = Some(bridge);
         self
     }
 

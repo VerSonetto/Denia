@@ -5,6 +5,7 @@
 //! a Rust error, so one tool call always yields exactly one model-facing
 //! result.
 
+mod ask;
 mod bash;
 mod browser;
 pub mod capabilities;
@@ -26,6 +27,7 @@ use denia_core::session::{PermissionMode, SessionEvent};
 use denia_core::tool::ToolSchema;
 use tokio_util::sync::CancellationToken;
 
+pub use ask::{AskTool, DEFAULT_TIMEOUT_MS as ASK_DEFAULT_TIMEOUT_MS};
 pub use bash::BashTool;
 pub use browser::{BrowserExecute, BrowserHub, BrowserTool};
 pub use edit::EditTool;
@@ -34,8 +36,10 @@ pub use glob::GlobTool;
 pub use grep::GrepTool;
 pub use prompt::{
     default_shipped, default_shipped_with_browser, default_shipped_with_browser_and_recon,
+    default_shipped_with_browser_and_recon_and_ask, register_ask_prompt_section,
     register_capability_prompt_sections, register_shipped_prompt, shipped_with_persona,
     shipped_with_persona_and_browser, shipped_with_persona_and_browser_and_recon,
+    shipped_with_persona_and_browser_and_recon_and_ask,
 };
 pub use recon::{ReconExecute, ReconHub, ReconTool};
 pub use todo::TodoWriteTool;
@@ -46,6 +50,42 @@ pub mod permission;
 /// The agent loop wires it to the session append + broadcast; tools never
 /// touch the session handle directly.
 pub type SessionEventSink = Arc<dyn Fn(SessionEvent) + Send + Sync>;
+
+/// 子代理默认工具集:只读类。
+///
+/// 子代理不与用户交互、也不承担工作区写副作用——提问、写文件、跑命令、
+/// 后台任务一律留在父代理。`allowed_tools` 只能在本集合内进一步缩小,
+/// 不能扩大(见 `agent_runtime::delegate` 的校验)。
+///
+/// `browser` 在此集合内:网页抓取/查看是只读调查手段,子代理做调研时
+/// 常常需要。它带来的资源副作用(常驻 Chrome 实例)由父代理统一收尾——
+/// `tool:browser` 纪律段说明"任务完成后彻底清除",子代理同样受该纪律约束;
+/// 子代理不注册 `recon`(断点调试会冻结页面,属交互态操作)。
+///
+/// 与 dsh 的差异:dsh 让子代理继承父代理的完整工具面,只靠深度与审批兜底;
+/// 这里在授予层直接收口,子代理拿不到交互/写类工具,也就不存在"子代理
+/// 提问没人应答"的问题。
+pub const SUBAGENT_READ_ONLY_TOOLS: &[&str] =
+    &["read_file", "glob", "grep", "skill", "browser"];
+
+/// 提问通道:宿主实现,把 `ask` 工具的提问挂到会话的挂起表并等待用户应答。
+///
+/// 与 [`ApprovalBridge`](denia_agent_loop::ApprovalBridge) 同构,但语义更宽:
+/// 审批是二值决策、由 driver 触发;提问是任意问题组、由模型工具触发,且必须
+/// 有超时与结局区分(见 [`denia_core::session::AskOutcome`])。
+#[async_trait]
+pub trait AskBridge: Send + Sync {
+    /// 阻塞等待用户作答;`cancel` 触发时返回 `Cancelled`。
+    async fn ask(
+        &self,
+        session_id: &str,
+        request_id: &str,
+        call_id: &str,
+        questions: &[denia_core::session::AskQuestion],
+        timeout_ms: u64,
+        cancel: CancellationToken,
+    ) -> denia_core::session::AskResolution;
+}
 
 /// 文件历史后端:写文件类工具在真正落盘前调用,由宿主实现备份原文件。
 #[async_trait]
@@ -78,6 +118,10 @@ pub struct ToolContext {
     pub permission_mode: PermissionMode,
     /// 当前调用一次性升权后的模式;`None` 表示沿用会话权限。
     pub permission_override: Option<PermissionMode>,
+    /// 提问通道(`ask` 工具用);`None` 表示该调用无人可问。
+    pub ask: Option<Arc<dyn AskBridge>>,
+    /// 当前工具调用 id(`ask` 用它把提问卡片挂到对应工具行上)。
+    pub call_id: Option<String>,
 }
 
 impl ToolContext {
@@ -169,6 +213,13 @@ pub fn default_registry() -> ToolRegistry {
     registry.register(Arc::new(GlobTool::default()));
     registry.register(Arc::new(GrepTool::default()));
     registry.register(Arc::new(EditTool::default()));
+    registry
+}
+
+/// Shipped tool set + `ask` 工具(有应答通道的部署注册)。
+pub fn default_registry_with_ask() -> ToolRegistry {
+    let mut registry = default_registry();
+    registry.register(Arc::new(AskTool::new()));
     registry
 }
 

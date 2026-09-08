@@ -141,6 +141,8 @@ fn dispatch_tool_call(
     let cancel = state.cancel.clone();
     let file_history = state.file_history.clone();
     let vision_supported = state.vision_supported;
+    let ask = driver.ask.clone();
+    let call_id = call.id.clone();
     Box::pin(async move {
         if cancel.is_cancelled() {
             return ToolOutput::error("工具调用在派发前已被中断");
@@ -178,6 +180,8 @@ fn dispatch_tool_call(
             file_history,
             permission_mode: current_mode,
             permission_override: None,
+            ask,
+            call_id: Some(call_id),
         };
         let execute = tool.execute(&call.arguments, &context);
         tokio::pin!(execute);
@@ -250,6 +254,8 @@ async fn dispatch_escalated_tool_call(
         file_history: state.file_history.clone(),
         permission_mode: current_mode,
         permission_override,
+        ask: driver.ask.clone(),
+        call_id: Some(call.id.clone()),
     };
     let execute = tool.execute(&call.arguments, &context);
     tokio::pin!(execute);

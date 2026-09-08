@@ -1,4 +1,5 @@
 import type {
+  AskAnswer,
   CredentialInfo,
   DiscoveredModel,
   ModelCatalog,
@@ -660,6 +661,26 @@ export function answerApproval(
       body: JSON.stringify({ decision }),
     },
   )
+}
+
+/** 回答一次挂起的模型提问(`ask` 工具)。 */
+export function answerAsk(
+  id: string,
+  requestId: string,
+  answers: AskAnswer[],
+): Promise<{ ok: boolean }> {
+  return http(`/api/sessions/${encodeURIComponent(id)}/asks/${encodeURIComponent(requestId)}`, {
+    method: 'POST',
+    body: JSON.stringify({ answers }),
+  })
+}
+
+/** 放弃一次挂起的模型提问(结算为 cancelled)。 */
+export function cancelAsk(id: string, requestId: string): Promise<{ ok: boolean }> {
+  return http(`/api/sessions/${encodeURIComponent(id)}/asks/${encodeURIComponent(requestId)}`, {
+    method: 'POST',
+    body: JSON.stringify({ answers: [], cancel: true }),
+  })
 }
 
 /** 上传一个附件(不限格式),返回持久化后的绝对路径与字节数。 */

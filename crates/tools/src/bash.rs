@@ -201,6 +201,8 @@ mod tests {
             file_history: None,
             permission_mode: PermissionMode::WorkspaceWrite,
             permission_override: None,
+            ask: None,
+            call_id: None,
         }
     }
 
@@ -303,6 +305,8 @@ mod tests {
             file_history: None,
             permission_mode: PermissionMode::WorkspaceWrite,
             permission_override: None,
+            ask: None,
+            call_id: None,
         };
         let command = if cfg!(windows) {
             r#"{"command":"ping -n 10 127.0.0.1 >nul"}"#
