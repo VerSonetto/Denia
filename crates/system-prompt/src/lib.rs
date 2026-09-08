@@ -41,6 +41,12 @@ pub enum SectionOrder {
     ToolGlob,
     ToolGrep,
     ToolEdit,
+    /// 宿主能力工具(子代理委派)的工具纪律段;仅在注册了对应工具时注入。
+    ToolAgents,
+    /// 后台任务工具(job 三件套)的工具纪律段。
+    ToolJobs,
+    /// 技能工具(skill)的工具纪律段。
+    ToolSkill,
 }
 
 impl SectionOrder {
@@ -55,6 +61,9 @@ impl SectionOrder {
             Self::ToolGlob => 1300,
             Self::ToolGrep => 1400,
             Self::ToolEdit => 1500,
+            Self::ToolAgents => 1600,
+            Self::ToolJobs => 1700,
+            Self::ToolSkill => 1800,
         }
     }
 }

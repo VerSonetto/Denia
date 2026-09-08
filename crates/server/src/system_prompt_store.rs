@@ -150,14 +150,20 @@ fn build_prompt(
     browser_hub: Option<denia_tools::BrowserHub>,
     recon_hub: Option<denia_tools::ReconHub>,
 ) -> SystemPrompt {
-    match (text, browser_hub) {
+    let mut prompt = match (text, browser_hub) {
         (Some(persona), Some(hub)) => {
-            denia_tools::shipped_with_persona_and_browser_and_recon(persona, Some(hub), recon_hub).0
+            denia_tools::shipped_with_persona_and_browser_and_recon(persona, Some(hub), recon_hub)
+                .0
         }
         (Some(persona), None) => denia_tools::shipped_with_persona(persona).0,
         (None, Some(hub)) => {
             denia_tools::default_shipped_with_browser_and_recon(Some(hub), recon_hub).0
         }
         (None, None) => denia_tools::default_shipped().0,
-    }
+    };
+    // server 部署总是注册宿主能力工具(委派/后台任务/技能),其纪律段
+    // 归位系统提示词(原先是 [denia 能力上下文] 注入消息里的静态内容)。
+    denia_tools::register_capability_prompt_sections(&mut prompt)
+        .expect("capability prompt sections are valid");
+    prompt
 }

@@ -121,6 +121,46 @@ pub fn register_shipped_prompt(
     Ok(())
 }
 
+/// 宿主能力工具(子代理委派 / 后台任务 / 技能)的工具纪律段。
+///
+/// server 部署总是注册这些工具,由 prompt store 在构建系统提示词后显式
+/// 调用本函数归位纪律;无 runtime 的部署(如测试)不注入,模型不会看到
+/// 不存在的工具。此前这段纪律以 `[denia 能力上下文]` 注入消息落盘,
+/// 现在归位到系统提示词的 Model audience(与 tool:bash 等段落同性质)。
+pub fn register_capability_prompt_sections(prompt: &mut SystemPrompt) -> Result<(), String> {
+    prompt.section(PromptSection {
+        name: "tool:agents".to_string(),
+        order: SectionOrder::ToolAgents.value(),
+        text: PromptText::Static(
+            "独立任务用 spawn_agent/fork_agent 委派给子代理;send_message 只能在直接父子代理之间收发消息。把可以独立进行的子任务拆给子代理分工合作,不要全部自己做;需要立即拿到结果的前台委派用 run_in_background=false 阻塞等结果,可以并行推进的后台委派保持默认后台运行,子代理完成时会通知父会话。"
+                .to_string(),
+        ),
+        complete: false,
+        audience: SectionAudience::Model,
+    })?;
+    prompt.section(PromptSection {
+        name: "tool:jobs".to_string(),
+        order: SectionOrder::ToolJobs.value(),
+        text: PromptText::Static(
+            "长时间命令用 job_start 后台运行,job_output 领取输出,job_kill 停止;等待子代理结果用 wait_agent。"
+                .to_string(),
+        ),
+        complete: false,
+        audience: SectionAudience::Model,
+    })?;
+    prompt.section(PromptSection {
+        name: "tool:skill".to_string(),
+        order: SectionOrder::ToolSkill.value(),
+        text: PromptText::Static(
+            "技能目录以独立注入的 <available_skills> 为准;开工前先对照目录检查有没有与当前任务匹配的技能,有匹配的先 load 再动手,没有匹配的就直接处理,不要为了用技能而调用技能。skill 工具 load 后 SKILL.md 全文直接在结果中返回,加载一次即可,不要再用文件读取工具读 SKILL.md;references/scripts 等其余文件用 skill 工具的 resource 操作按返回的 resourceBase 相对路径读取,技能不授予额外权限。"
+                .to_string(),
+        ),
+        complete: false,
+        audience: SectionAudience::Model,
+    })?;
+    Ok(())
+}
+
 /// Shipped registry pair: prompt assembly plus executable tools.
 pub fn default_shipped() -> (SystemPrompt, ToolRegistry) {
     let tools = crate::default_registry();
@@ -362,5 +402,56 @@ mod browser_prompt_tests {
             "browser schema missing from prompt tools: {names:?}"
         );
         assert!(registry.get("browser").is_some(), "browser not registered");
+    }
+}
+
+#[cfg(test)]
+mod capability_prompt_tests {
+    use super::*;
+
+    #[test]
+    fn capability_sections_land_in_model_audience() {
+        let mut prompt = denia_system_prompt::SystemPrompt::new(
+            denia_system_prompt::SystemPromptConfig::default(),
+        );
+        prompt.variable("cwd", |context| context.cwd.clone()).unwrap();
+        prompt.variable("model", |context| context.model.clone()).unwrap();
+        prompt
+            .variable("provider", |context| context.provider.clone())
+            .unwrap();
+        register_capability_prompt_sections(&mut prompt).unwrap();
+        let assembly = prompt
+            .assemble(&AssembleContext {
+                cwd: Some("/tmp/ws".into()),
+                model: Some("mock".into()),
+                provider: Some("mock".into()),
+                ..Default::default()
+            })
+            .unwrap();
+        let body = denia_system_prompt::render_prompt(&assembly);
+        assert!(body.contains("spawn_agent/fork_agent"), "{}", &body[..body.len().min(2000)]);
+        assert!(body.contains("job_start"));
+        assert!(body.contains("<available_skills>"));
+        // Model audience 段不进用户可见副本。
+        let user_body = denia_system_prompt::render_prompt_for_user(&assembly);
+        assert!(!user_body.contains("spawn_agent/fork_agent"));
+        assert!(!user_body.contains("job_start"));
+    }
+
+    #[test]
+    fn default_shipped_has_no_capability_sections() {
+        // 无 runtime 部署(default_shipped)不注入能力纪律段:模型不看到
+        // 不存在的工具。
+        let (prompt, _) = default_shipped();
+        let assembly = prompt
+            .assemble(&AssembleContext {
+                cwd: Some("/tmp/ws".into()),
+                model: Some("mock".into()),
+                provider: Some("mock".into()),
+                ..Default::default()
+            })
+            .unwrap();
+        let body = denia_system_prompt::render_prompt(&assembly);
+        assert!(!body.contains("spawn_agent/fork_agent"));
     }
 }

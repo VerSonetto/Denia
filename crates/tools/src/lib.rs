@@ -34,8 +34,8 @@ pub use glob::GlobTool;
 pub use grep::GrepTool;
 pub use prompt::{
     default_shipped, default_shipped_with_browser, default_shipped_with_browser_and_recon,
-    register_shipped_prompt, shipped_with_persona, shipped_with_persona_and_browser,
-    shipped_with_persona_and_browser_and_recon,
+    register_capability_prompt_sections, register_shipped_prompt, shipped_with_persona,
+    shipped_with_persona_and_browser, shipped_with_persona_and_browser_and_recon,
 };
 pub use recon::{ReconExecute, ReconHub, ReconTool};
 pub use todo::TodoWriteTool;

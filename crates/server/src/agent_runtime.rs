@@ -1045,7 +1045,7 @@ impl AgentRuntime for Runtime {
             .get(session)
             .map(|c| c.parent_id.clone());
         Ok(vec![format!(
-            "[denia 能力上下文]\n始终使用简体中文回复，除非用户明确要求其他语言。\n当前代理：{session}；父代理：{}。独立任务可用 spawn_agent/fork_agent 委派；send_message 仅允许直接父子通信。后台任务用 job_start 启动，job_output 领取，job_kill 停止。可用技能以独立注入的 <available_skills> 目录为准；skill load 的 SKILL.md 全文直接在工具结果中返回，加载一次即可，无需再用文件读取工具读 SKILL.md；references/scripts 等其余文件用 skill resource 按 resourceBase 相对路径读取，技能不授予额外权限。",
+            "[denia 能力上下文]\n始终使用简体中文回复，除非用户明确要求其他语言。\n当前代理：{session}；父代理：{}。",
             parent.as_deref().unwrap_or("无")
         )])
     }
