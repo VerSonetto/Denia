@@ -41,3 +41,10 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 arc-swap = { workspace = true }
 notify = "6"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_System_Threading",
+    "Win32_UI_WindowsAndMessaging",
+] }

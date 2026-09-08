@@ -5,6 +5,7 @@ mod api;
 mod error;
 mod file_history;
 mod jobs;
+mod native_folder_picker;
 mod skills;
 mod state;
 mod system_prompt_store;
@@ -20,6 +21,12 @@ use state::build_state;
 use tracing_subscriber::EnvFilter;
 
 fn main() {
+    // Exclusive CLI mode: native folder picker as this process's first window.
+    // Must run before tracing so stdout stays a single JSON line.
+    if native_folder_picker::is_pick_folder_mode(std::env::args().skip(1)) {
+        native_folder_picker::run_as_cli();
+    }
+
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),

@@ -91,25 +91,11 @@ struct MkdirBody {
 }
 
 /// Opens the OS-native directory chooser on the host and returns the picked
-/// path, or `null` when the user cancels. Blocks only a worker thread while
-/// the dialog is open.
+/// path, or `null` when the user cancels. Windows shows the dialog in a
+/// short-lived child process so the picker can take the foreground.
 async fn pick_dir() -> Result<impl IntoResponse, ApiError> {
-    let picked = tokio::task::spawn_blocking(|| {
-        rfd::FileDialog::new()
-            .set_title("denia: choose a workspace directory")
-            .pick_folder()
-    })
-    .await
-    .map_err(|e| {
-        ApiError::new(
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            "fs/pick-failed",
-            e.to_string(),
-        )
-    })?;
-    Ok(Json(json!({
-        "path": picked.map(|p| p.to_string_lossy().to_string()),
-    })))
+    let path = crate::native_folder_picker::pick_folder().await?;
+    Ok(Json(json!({ "path": path })))
 }
 
 #[derive(Debug, Deserialize)]
@@ -285,7 +271,9 @@ fn fresh_mention_index(root: &Path) -> Option<Arc<Vec<MentionItem>>> {
 }
 
 fn root_mtime(root: &Path) -> Option<SystemTime> {
-    std::fs::metadata(root).ok().and_then(|meta| meta.modified().ok())
+    std::fs::metadata(root)
+        .ok()
+        .and_then(|meta| meta.modified().ok())
 }
 
 /// 全树深度优先扫描(对照 dsh scanWorkspace,但用 DFS 替代 BFS):
@@ -464,10 +452,7 @@ fn list_mention_directory(root: &Path, directory: &str, fragment: &str) -> Vec<M
                     kind: "directory",
                 });
             } else if file_type.is_file() {
-                items.push(MentionItem {
-                    path,
-                    kind: "file",
-                });
+                items.push(MentionItem { path, kind: "file" });
             }
         }
     }
@@ -486,11 +471,7 @@ fn sort_mention_items(items: &mut [MentionItem]) {
 }
 
 fn kind_rank(kind: &str) -> u8 {
-    if kind == "directory" {
-        0
-    } else {
-        1
-    }
+    if kind == "directory" { 0 } else { 1 }
 }
 
 #[cfg(test)]
@@ -499,7 +480,8 @@ mod mention_tests {
 
     /// 一次性测试目录(按 name 隔离,启动时清残留),结束时清理。
     fn scratch(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("denia-mentions-{}-{name}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("denia-mentions-{}-{name}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("create scratch dir");
         dir
@@ -540,8 +522,16 @@ mod mention_tests {
     fn traversal_escape_is_rejected() {
         let root = scratch("escape");
         std::fs::create_dir_all(root.join("a")).unwrap();
-        assert!(mentions_impl(root.to_str().unwrap(), "../").unwrap().is_empty());
-        assert!(mentions_impl(root.to_str().unwrap(), "../..").unwrap().is_empty());
+        assert!(
+            mentions_impl(root.to_str().unwrap(), "../")
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            mentions_impl(root.to_str().unwrap(), "../..")
+                .unwrap()
+                .is_empty()
+        );
         std::fs::remove_dir_all(&root).ok();
     }
 
