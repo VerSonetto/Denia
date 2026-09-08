@@ -737,21 +737,20 @@ impl Runtime {
                 .get("persona")
                 .map(|v| v.as_str().map(str::to_string).ok_or("persona 必须为文本"))
                 .transpose()?,
-            allowed_tools: args
-                .get("allowed_tools")
-                .map(|v| {
-                    serde_json::from_value::<Vec<String>>(v.clone())
-                        .map_err(|_| "allowed_tools 必须为工具名称数组")
-                })
-                .transpose()?
-                .or_else(|| {
-                    parent
-                        .session
-                        .header()
-                        .subagent
-                        .as_ref()
-                        .and_then(|s| s.allowed_tools.clone())
-                }),
+            // 子代理默认只读:不与用户交互、不写工作区、不跑命令。
+            // `allowed_tools` 只能在这个集合内继续缩小;上一级子代理的
+            // 集合是它的上界(继承即收窄,绝不放大)。
+            allowed_tools: Some(match args.get("allowed_tools") {
+                Some(v) => {
+                    let requested: Vec<String> = serde_json::from_value(v.clone())
+                        .map_err(|_| "allowed_tools 必须为工具名称数组")?;
+                    requested
+                }
+                None => denia_tools::SUBAGENT_READ_ONLY_TOOLS
+                    .iter()
+                    .map(|name| (*name).to_string())
+                    .collect(),
+            }),
         };
         if descriptor
             .persona
@@ -760,27 +759,36 @@ impl Runtime {
         {
             return Err("子代理角色提示词过大".into());
         }
-        if let Some(allowed) = &descriptor.allowed_tools {
-            let mut known = denia_tools::default_registry().schemas();
-            known.extend(denia_tools::capabilities::schemas());
-            let names: HashSet<_> = known
+        {
+            let allowed = descriptor
+                .allowed_tools
+                .as_ref()
+                .expect("子代理工具集已在上面填充");
+            // 未知工具名:拒绝(不静默忽略,否则模型以为授权生效了)。
+            let unknown: Vec<&str> = allowed
                 .iter()
-                .map(|s| s.name.as_str())
-                .chain(["browser", "recon"])
+                .map(String::as_str)
+                .filter(|name| !denia_tools::SUBAGENT_READ_ONLY_TOOLS.contains(name))
                 .collect();
-            if allowed.iter().any(|name| !names.contains(name.as_str())) {
-                return Err("子代理工具过滤包含未知工具名称".into());
+            if !unknown.is_empty() {
+                return Err(format!(
+                    "子代理只能使用只读工具({});不支持:{}(写文件/命令/提问/子代理委派留在父代理)",
+                    denia_tools::SUBAGENT_READ_ONLY_TOOLS.join("、"),
+                    unknown.join("、"),
+                ));
             }
+            // 嵌套子代理:不得超出父代理已有的集合。
             if let Some(parent_allowed) = parent
                 .session
                 .header()
                 .subagent
                 .as_ref()
                 .and_then(|s| s.allowed_tools.as_ref())
+                && let Some(extra) = allowed
+                    .iter()
+                    .find(|name| !parent_allowed.contains(name))
             {
-                if allowed.iter().any(|name| !parent_allowed.contains(name)) {
-                    return Err("子代理不能扩大父代理的工具集合".into());
-                }
+                return Err(format!("子代理不能扩大父代理的工具集合:{extra}"));
             }
         }
         let sessions = self.inner.sessions.clone();
@@ -1268,6 +1276,8 @@ mod tests {
             file_history: None,
             permission_mode: denia_core::session::PermissionMode::WorkspaceWrite,
             permission_override: None,
+            ask: None,
+            call_id: None,
         };
         (state, ctx)
     }
@@ -1372,6 +1382,118 @@ mod tests {
             2
         );
     }
+    /// 子代理默认只读:写/命令/提问/再委派类工具不授予;
+    /// allowed_tools 只能在这个集合内缩小,未知或越权一律拒绝。
+    #[tokio::test]
+    async fn subagents_are_read_only_by_default() {
+        let (state, ctx) = setup();
+        // 默认授予:只读集合。
+        let result = state
+            .runtime
+            .execute(
+                "spawn_agent",
+                json!({"prompt":"读代码","description":"只读子代理"}),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        let id = result["childId"].as_str().unwrap();
+        let live = state.live.get(id).unwrap();
+        let allowed = live
+            .session
+            .header()
+            .subagent
+            .as_ref()
+            .unwrap()
+            .allowed_tools
+            .clone()
+            .expect("子代理必须显式记录工具集");
+        let mut allowed = allowed;
+        allowed.sort();
+        let mut expected: Vec<String> = denia_tools::SUBAGENT_READ_ONLY_TOOLS
+            .iter()
+            .map(|name| (*name).to_string())
+            .collect();
+        expected.sort();
+        assert_eq!(allowed, expected, "子代理默认工具集应为只读集合");
+        assert!(allowed.contains(&"browser".to_string()), "browser 是只读调查手段,应授予子代理");
+        for forbidden in [
+            "ask",
+            "write_file",
+            "edit",
+            "bash",
+            "job_start",
+            "spawn_agent",
+            "recon",
+        ] {
+            assert!(
+                !allowed.contains(&forbidden.to_string()),
+                "{forbidden} 不得授予子代理"
+            );
+        }
+
+        // 显式请求写/交互类工具:拒绝。
+        assert!(
+            state
+                .runtime
+                .execute(
+                    "spawn_agent",
+                    json!({"prompt":"写文件","allowed_tools":["write_file"]}),
+                    &ctx
+                )
+                .await
+                .is_err(),
+            "子代理不得被授予 write_file"
+        );
+        assert!(
+            state
+                .runtime
+                .execute(
+                    "spawn_agent",
+                    json!({"prompt":"提问","allowed_tools":["ask"]}),
+                    &ctx
+                )
+                .await
+                .is_err(),
+            "子代理不得被授予 ask"
+        );
+        // 未知工具名同样拒绝(不静默忽略)。
+        assert!(
+            state
+                .runtime
+                .execute(
+                    "spawn_agent",
+                    json!({"prompt":"未知","allowed_tools":["nope"]}),
+                    &ctx
+                )
+                .await
+                .is_err()
+        );
+        // 在只读集合内缩小:允许。
+        let narrowed = state
+            .runtime
+            .execute(
+                "spawn_agent",
+                json!({"prompt":"只读","allowed_tools":["read_file"]}),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        let narrowed_live = state.live.get(narrowed["childId"].as_str().unwrap()).unwrap();
+        assert_eq!(
+            narrowed_live
+                .session
+                .header()
+                .subagent
+                .as_ref()
+                .unwrap()
+                .allowed_tools
+                .clone()
+                .unwrap(),
+            vec!["read_file".to_string()]
+        );
+    }
+
     #[tokio::test]
     async fn admission_interrupt_and_owner_cleanup() {
         let (state, mut ctx) = setup();

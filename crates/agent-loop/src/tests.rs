@@ -36,6 +36,65 @@ fn system_prompt_frames_runtime_authority() {
     assert!(model.contains("/tmp/ws"));
 }
 
+/// 子代理的纪律段必须跟着工具授予走:拿不到的工具,其纪律段不得注入。
+/// 段名到工具的映射(`section_tools`)是唯一权威,新增段忘了登记时本测试
+/// 会失败,而不是让子代理读到不存在的工具纪律。
+#[test]
+fn subagent_sections_follow_tool_grant() {
+    use denia_tools::SUBAGENT_READ_ONLY_TOOLS;
+    // 用 shipped 基础提示词 + capability 段覆盖段名全集;browser 段由
+    // tools 侧的单测覆盖(agent-loop 不依赖 denia-browser)。
+    let (mut prompt, _) = denia_tools::default_shipped();
+    denia_tools::register_capability_prompt_sections(&mut prompt).unwrap();
+    let assembly = prompt
+        .assemble(&denia_system_prompt::AssembleContext {
+            cwd: Some("/tmp/ws".to_string()),
+            ..Default::default()
+        })
+        .unwrap();
+    // 提示词里出现的每个 tool: 段都必须能在映射表里找到归属,
+    // 否则子代理过滤会静默漏掉它。
+    for section in &assembly.sections {
+        if section.name.starts_with("tool:") {
+            assert!(
+                crate::turn::section_tools(&section.name).is_some(),
+                "纪律段 {} 未在 section_tools 登记",
+                section.name
+            );
+        }
+    }
+    // 只读集合下的期望:read/glob/grep/skill/browser 段保留,
+    // bash/write/todo/edit/agents/jobs/ask 段移除。
+    let allowed: Vec<String> = SUBAGENT_READ_ONLY_TOOLS
+        .iter()
+        .map(|name| (*name).to_string())
+        .collect();
+    let kept: Vec<&str> = assembly
+        .sections
+        .iter()
+        .filter(|section| match crate::turn::section_tools(&section.name) {
+            Some(tools) => tools.iter().any(|name| allowed.contains(&name.to_string())),
+            None => true,
+        })
+        .map(|section| section.name.as_str())
+        .filter(|name| name.starts_with("tool:"))
+        .collect();
+    for expected in ["tool:read", "tool:glob", "tool:grep", "tool:skill"] {
+        assert!(kept.contains(&expected), "{expected} 应保留:{kept:?}");
+    }
+    for removed in [
+        "tool:bash",
+        "tool:write",
+        "tool:todo",
+        "tool:edit",
+        "tool:agents",
+        "tool:jobs",
+        "tool:ask",
+    ] {
+        assert!(!kept.contains(&removed), "{removed} 应移除:{kept:?}");
+    }
+}
+
 /// Scripted adapter: each `stream` call pops the next queued chunk run.
 enum MockScript {
     Chunks(Vec<StreamChunk>),

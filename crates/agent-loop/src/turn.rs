@@ -407,6 +407,31 @@ async fn detect_gesture_skill(
     }
 }
 
+/// 工具纪律段名 → 它对应的工具名(可能多个)。
+///
+/// 段与工具严格同步是 AGENTS.md 的硬要求;子代理按 `allowed_tools` 过滤时,
+/// 工具和它的纪律段必须同进退。返回 `None` 表示该段不绑定具体工具
+/// (`harness:`/`context:`/`deployment:` 等),不参与过滤。
+///
+/// 新增 `tool:<族>` 段时必须在此登记,否则子代理会读到不存在的工具纪律
+/// (有单测覆盖:`subagent_sections_follow_tool_grant`)。
+pub(crate) fn section_tools(section: &str) -> Option<&'static [&'static str]> {
+    Some(match section {
+        "tool:bash" => &["bash"],
+        "tool:read" => &["read_file"],
+        "tool:write" | "tool:todo" => &["write_file", "todo_write"],
+        "tool:glob" => &["glob"],
+        "tool:grep" => &["grep"],
+        "tool:edit" => &["edit"],
+        "tool:agents" => &["spawn_agent", "fork_agent", "send_message"],
+        "tool:jobs" => &["job_start", "job_output", "job_kill"],
+        "tool:skill" => &["skill"],
+        "tool:browser" => &["browser"],
+        "tool:ask" => &["ask"],
+        _ => return None,
+    })
+}
+
 /// 装配本 step 的系统提示与工具集。
 /// 系统提示热更新不丢能力(bash schema 回填实际注册表版本);
 /// 子代理 persona 覆盖 + 工具白名单过滤。
@@ -448,6 +473,16 @@ fn assemble_step(
         }
         if let Some(allowed) = &child.allowed_tools {
             assembly.tools.retain(|s| allowed.contains(&s.name));
+            // 纪律段与工具同进退(AGENTS.md 的同步要求):子代理拿不到的工具,
+            // 其纪律段不得注入——否则模型读到 bash/ask/write 的纪律却找不到
+            // 对应工具,既浪费 token 又误导。段名到工具的映射见
+            // `section_tools`;context:/harness: 段不受工具集影响。
+            assembly
+                .sections
+                .retain(|section| match section_tools(&section.name) {
+                    Some(tools) => tools.iter().any(|name| allowed.contains(&name.to_string())),
+                    None => true,
+                });
         }
     }
     let tools_tokens = serde_json::to_string(&assembly.tools)
