@@ -65,6 +65,9 @@ pub struct OpenAiProfile {
     pub default_context_window: Option<u64>,
     #[serde(default)]
     pub default_max_tokens: Option<u64>,
+    /// 附加请求头;值支持 `${REF}` 引用凭据/环境变量(整段占位),每次请求前解析。
+    #[serde(default)]
+    pub headers: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -205,6 +208,74 @@ impl OpenAiCompatAdapter {
     }
 }
 
+/// Resolves one custom-header value: a whole-value `${REF}` placeholder is
+/// resolved through the credential chain (env > file > .env); anything else
+/// (including partial placeholder text) is sent verbatim.
+fn resolve_header_value(credentials: &CredentialStore, raw: &str) -> Result<String, LlmError> {
+    let trimmed = raw.trim();
+    let Some(reference) = trimmed
+        .strip_prefix("\u{24}{")
+        .and_then(|rest| rest.strip_suffix('}'))
+    else {
+        return Ok(raw.to_string());
+    };
+    // 混合文本(多个占位符相连)不解析,原样发送,避免歧义。
+    if reference.is_empty() || reference.contains('\u{24}') {
+        return Ok(raw.to_string());
+    }
+    match credentials.resolve(reference) {
+        Ok(Some(resolved)) => {
+            let value = resolved.value.trim().to_string();
+            if value.is_empty() {
+                return Err(LlmError::new(
+                    codes::INVALID_CREDENTIAL,
+                    format!("the value behind {reference} is empty"),
+                ));
+            }
+            Ok(value)
+        }
+        Ok(None) => Err(LlmError::new(
+            codes::MISSING_CREDENTIAL,
+            format!("store {reference} through the credentials API before calling the model"),
+        )),
+        Err(error) => Err(LlmError::new(codes::MISSING_CREDENTIAL, error.to_string())),
+    }
+}
+
+/// Resolves and validates a profile's custom headers into a ready-to-attach
+/// `HeaderMap`. Invalid names or values fail loudly before the request goes
+/// out (fail loud, never silently skip a misconfigured header).
+pub fn resolve_profile_headers(
+    headers: &BTreeMap<String, String>,
+    credentials: &CredentialStore,
+) -> Result<reqwest::header::HeaderMap, LlmError> {
+    let mut map = reqwest::header::HeaderMap::new();
+    for (name, raw) in headers {
+        if name.trim().is_empty() {
+            return Err(LlmError::new(
+                codes::INVALID_REQUEST,
+                "a custom header name must not be empty",
+            ));
+        }
+        let header_name =
+            reqwest::header::HeaderName::from_bytes(name.as_bytes()).map_err(|_| {
+                LlmError::new(
+                    codes::INVALID_REQUEST,
+                    format!("'{name}' is not a valid HTTP header name"),
+                )
+            })?;
+        let value = resolve_header_value(credentials, raw)?;
+        let header_value = reqwest::header::HeaderValue::from_str(&value).map_err(|_| {
+            LlmError::new(
+                codes::INVALID_REQUEST,
+                format!("header '{name}' has an invalid value"),
+            )
+        })?;
+        map.insert(header_name, header_value);
+    }
+    Ok(map)
+}
+
 #[async_trait]
 impl LlmAdapter for OpenAiCompatAdapter {
     fn provider_info(&self, provider: &str) -> ProviderInfo {
@@ -236,11 +307,13 @@ impl LlmAdapter for OpenAiCompatAdapter {
         }
         // No declared catalog: interrogate the endpoint itself.
         let api_key = self.resolve_api_key(&profile)?;
+        let extra_headers = resolve_profile_headers(&profile.headers, &self.credentials)?;
         let discovered = discover_models(
             &self.http,
             &profile.base_url,
             profile.protocol,
             api_key.as_deref(),
+            &extra_headers,
         )
         .await?;
         Ok(discovered
@@ -340,6 +413,9 @@ impl LlmAdapter for OpenAiCompatAdapter {
                 }
             }
         }
+        // 自定义头最后应用:可覆盖同名内置头(含 authorization,支持自定义认证网关)。
+        let custom_headers = resolve_profile_headers(&profile.headers, &self.credentials)?;
+        builder = builder.headers(custom_headers);
         // 超时合理化(优化项):连接阶段 30s;请求总超时按请求体规模放宽——
         // 大体量请求(xhigh 推理 + 长上下文)提供方处理慢,实测 200K 字符
         // payload 正常 TTFB 21.8s,固定短超时会系统性错杀;30s 仅覆盖
@@ -392,6 +468,7 @@ pub async fn discover_models(
     base_url: &str,
     protocol: WireProtocol,
     api_key: Option<&str>,
+    extra_headers: &reqwest::header::HeaderMap,
 ) -> Result<Vec<DiscoveredModel>, LlmError> {
     if base_url.trim().is_empty() {
         return Err(LlmError::new(
@@ -411,6 +488,9 @@ pub async fn discover_models(
         }
     } else if let Some(api_key) = api_key.filter(|key| !key.trim().is_empty()) {
         builder = builder.header("authorization", format!("Bearer {}", api_key.trim()));
+    }
+    if !extra_headers.is_empty() {
+        builder = builder.headers(extra_headers.clone());
     }
     let response = builder.send().await.map_err(crate::http::transport_error)?;
     if !response.status().is_success() {
@@ -447,4 +527,82 @@ pub async fn discover_models(
                 .map(|owner| format!("{} ({owner})", entry.id)),
         })
         .collect())
+}
+
+#[cfg(test)]
+mod header_tests {
+    use super::{resolve_header_value, resolve_profile_headers};
+    use denia_credentials::CredentialStore;
+    use std::collections::BTreeMap;
+    use std::io::Write;
+
+    const REF: &str = "MY_HEADER_TOKEN_XYZ";
+
+    fn fresh_store() -> CredentialStore {
+        let dir = std::env::temp_dir().join(format!(
+            "denia-llm-headers-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let env_path = dir.join(".env");
+        let mut file = std::fs::File::create(&env_path).unwrap();
+        writeln!(file, "{REF}=secret-123").unwrap();
+        CredentialStore::open(&dir).unwrap()
+    }
+
+    #[test]
+    fn placeholder_resolves_through_credential_chain() {
+        let store = fresh_store();
+        let mut headers = BTreeMap::new();
+        headers.insert("X-Token".to_string(), "\u{24}{MY_HEADER_TOKEN_XYZ}".to_string());
+        let map = resolve_profile_headers(&headers, &store).unwrap();
+        assert_eq!(map.get("x-token").unwrap().to_str().unwrap(), "secret-123");
+    }
+
+    #[test]
+    fn missing_reference_fails_loud() {
+        let store = fresh_store();
+        let mut headers = BTreeMap::new();
+        headers.insert("X-Token".to_string(), "\u{24}{NO_SUCH_REF_ABC}".to_string());
+        let error = resolve_profile_headers(&headers, &store).unwrap_err();
+        assert_eq!(error.code, denia_core::error::codes::MISSING_CREDENTIAL);
+    }
+
+    #[test]
+    fn plain_value_is_sent_verbatim() {
+        let store = fresh_store();
+        let mut headers = BTreeMap::new();
+        headers.insert("X-Foo".to_string(), "bar baz".to_string());
+        let map = resolve_profile_headers(&headers, &store).unwrap();
+        assert_eq!(map.get("x-foo").unwrap().to_str().unwrap(), "bar baz");
+    }
+
+    #[test]
+    fn mixed_placeholder_text_stays_verbatim() {
+        let store = fresh_store();
+        // 多个占位符相连或占位符内嵌文本:不解析,原样发送(避免歧义)。
+        assert_eq!(
+            resolve_header_value(&store, "\u{24}{A}\u{24}{B}").unwrap(),
+            "\u{24}{A}\u{24}{B}"
+        );
+    }
+
+    #[test]
+    fn invalid_header_name_fails_loud() {
+        let store = fresh_store();
+        let mut headers = BTreeMap::new();
+        headers.insert("Bad Name".to_string(), "x".to_string());
+        let error = resolve_profile_headers(&headers, &store).unwrap_err();
+        assert_eq!(error.code, denia_core::error::codes::INVALID_REQUEST);
+    }
+
+    #[test]
+    fn empty_headers_map_is_compatible() {
+        let store = fresh_store();
+        let map = resolve_profile_headers(&BTreeMap::new(), &store).unwrap();
+        assert!(map.is_empty());
+    }
 }

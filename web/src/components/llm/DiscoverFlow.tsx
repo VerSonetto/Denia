@@ -17,6 +17,8 @@ export interface DiscoverParams {
   apiKey?: string
   apiKeyEnv?: string
   protocol: WireProtocol
+  /** 一次性附加请求头(值支持 `${REF}` 引用),仅本次探测使用。 */
+  headers?: Record<string, string>
 }
 
 export function DiscoverFlow({
@@ -54,6 +56,7 @@ export function DiscoverFlow({
         params.apiKey?.trim() || undefined,
         params.apiKey?.trim() ? undefined : params.apiKeyEnv?.trim() || undefined,
         params.protocol,
+        params.headers,
       )
       if (controller.signal.aborted) return
       setModels(found)

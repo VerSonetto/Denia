@@ -13,10 +13,13 @@ use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use denia_core::message::ChatMessage;
-use denia_llm::{GenerateRequest, WireProtocol, build_model_catalog, discover_models};
+use denia_llm::{
+    GenerateRequest, WireProtocol, build_model_catalog, discover_models, resolve_profile_headers,
+};
 use futures::{Stream, StreamExt};
 use serde::Deserialize;
 use serde_json::json;
+use std::collections::BTreeMap;
 
 use crate::error::ApiError;
 use crate::state::AppState;
@@ -55,6 +58,9 @@ struct DiscoverBody {
     /// Credential reference to resolve the key from.
     #[serde(default)]
     api_key_env: Option<String>,
+    /// 一次性附加请求头;值支持 `${REF}` 引用,仅本次探测使用。
+    #[serde(default)]
+    headers: Option<BTreeMap<String, String>>,
 }
 
 async fn discover(
@@ -79,9 +85,21 @@ async fn discover(
             .map(|resolved| resolved.value),
         (None, None) => None,
     };
-    let models = discover_models(&state.http, &body.base_url, protocol, api_key.as_deref())
-        .await
-        .map_err(ApiError::from_llm)?;
+    let extra_headers = match &body.headers {
+        Some(headers) if !headers.is_empty() => {
+            resolve_profile_headers(headers, &state.credentials).map_err(ApiError::from_llm)?
+        }
+        _ => reqwest::header::HeaderMap::new(),
+    };
+    let models = discover_models(
+        &state.http,
+        &body.base_url,
+        protocol,
+        api_key.as_deref(),
+        &extra_headers,
+    )
+    .await
+    .map_err(ApiError::from_llm)?;
     Ok(Json(json!({ "models": models })))
 }
 

@@ -140,6 +140,8 @@ export interface OpenAiProfile {
   }[]
   defaultContextWindow?: number
   defaultMaxTokens?: number
+  /** 附加请求头;值支持 `${REF}` 引用凭据/环境变量(整段占位)。 */
+  headers?: Record<string, string>
 }
 
 /* ---- session vocabulary (snake_case mirrors the Rust serde wire) ---- */

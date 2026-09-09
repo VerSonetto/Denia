@@ -26,12 +26,16 @@ function deriveKeyRef(routeId: string): string {
   return routeId.toUpperCase().replace(/[^A-Z0-9]+/g, '_') + '_API_KEY'
 }
 
+/** HTTP 请求头名称的 token 语法(与后端 reqwest 校验一致)。 */
+const HEADER_NAME_PATTERN = /^[!#%&'*+\-.^_`|~0-9A-Za-z$]+$/
+
 interface FormErrors {
   routeId?: string
   baseURL?: string
   ctx?: string
   maxTokens?: string
   models?: string
+  headers?: string
 }
 
 export function ProviderDrawer({
@@ -68,6 +72,9 @@ export function ProviderDrawer({
     ),
   )
   const [keyValue, setKeyValue] = useState('')
+  const [headers, setHeaders] = useState<{ name: string; value: string }[]>(() =>
+    Object.entries(initial?.headers ?? {}).map(([name, value]) => ({ name, value })),
+  )
   const [errors, setErrors] = useState<FormErrors>({})
   const [busy, setBusy] = useState(false)
   const keyValueRef = useRef<HTMLInputElement | null>(null)
@@ -77,6 +84,32 @@ export function ProviderDrawer({
   const effectiveKeyRef = initial?.apiKeyEnv ?? (routeId.trim() ? deriveKeyRef(routeId.trim()) : '')
   const credentialForRef = credentials[effectiveKeyRef]
   const keyConfigured = keyValue.trim().length > 0 || credentialForRef?.configured === true
+
+  /* ---- 自定义请求头:行增删与就地校验 ---- */
+
+  const updateHeader = (index: number, patch: Partial<{ name: string; value: string }>) => {
+    setHeaders((rows) => rows.map((row, i) => (i === index ? { ...row, ...patch } : row)))
+  }
+
+  const addHeader = () => {
+    setHeaders((rows) => [...rows, { name: '', value: '' }])
+  }
+
+  const removeHeader = (index: number) => {
+    setHeaders((rows) => rows.filter((_, i) => i !== index))
+  }
+
+  /** 只拦「名有内容但非法/值为空」的行;空名行保存时剔除(宽容)。 */
+  const headerError = (): string | undefined => {
+    for (const row of headers) {
+      const name = row.name.trim()
+      if (!name) continue
+      if (!HEADER_NAME_PATTERN.test(name) || !row.value.trim()) {
+        return t('llm.field.headersInvalid')
+      }
+    }
+    return undefined
+  }
 
   /* ---- 校验(提交/步进时全量跑,就地报错) ---- */
 
@@ -95,9 +128,11 @@ export function ProviderDrawer({
     } else if (!/^https?:\/\//i.test(url)) {
       nextErrors.baseURL = t('llm.error.baseURLFormat')
     }
+    const headersErr = headerError()
+    if (headersErr) nextErrors.headers = headersErr
     setErrors((prev) => ({ ...prev, ...nextErrors, models: undefined }))
     return Object.keys(nextErrors).length === 0
-  }, [routeId, baseURL, providers, isNew])
+  }, [routeId, baseURL, providers, isNew, headers])
 
   const validateAll = useCallback((): boolean => {
     const nextErrors: FormErrors = {}
@@ -119,6 +154,8 @@ export function ProviderDrawer({
     if (maxTokens !== undefined && (!Number.isFinite(maxTokens) || maxTokens <= 0)) {
       nextErrors.maxTokens = t('llm.error.numberPositive')
     }
+    const headersErr = headerError()
+    if (headersErr) nextErrors.headers = headersErr
     const seen = new Set<string>()
     for (const entry of models) {
       const modelId = entry.id.trim()
@@ -135,7 +172,7 @@ export function ProviderDrawer({
     }
     setErrors(nextErrors)
     return Object.keys(nextErrors).length === 0
-  }, [routeId, baseURL, providers, isNew, ctxWindow, maxTokens, models])
+  }, [routeId, baseURL, providers, isNew, ctxWindow, maxTokens, models, headers])
 
   /* ---- 保存 ---- */
 
@@ -156,6 +193,12 @@ export function ProviderDrawer({
       }
       if (ctxWindow !== undefined && ctxWindow > 0) profile.defaultContextWindow = ctxWindow
       if (maxTokens !== undefined && maxTokens > 0) profile.defaultMaxTokens = maxTokens
+      const headerEntries = headers
+        .map((row) => ({ name: row.name.trim(), value: row.value.trim() }))
+        .filter((row) => row.name !== '')
+      if (headerEntries.length > 0) {
+        profile.headers = Object.fromEntries(headerEntries.map((row) => [row.name, row.value]))
+      }
       const next = { ...providers, [id]: profile }
       await api.replaceNamespace(OPENAI_NS, { providers: next }, revision)
       notify('ok', t('providerSaved'))
@@ -177,6 +220,7 @@ export function ProviderDrawer({
     models,
     ctxWindow,
     maxTokens,
+    headers,
     providers,
     revision,
     notify,
@@ -225,8 +269,13 @@ export function ProviderDrawer({
       apiKey: keyValue.trim() || undefined,
       apiKeyEnv: keyValue.trim() ? undefined : effectiveKeyRef || undefined,
       protocol,
+      headers: Object.fromEntries(
+        headers
+          .map((row) => [row.name.trim(), row.value.trim()])
+          .filter(([name]) => name !== ''),
+      ),
     }),
-    [baseURL, keyValue, effectiveKeyRef, protocol],
+    [baseURL, keyValue, effectiveKeyRef, protocol, headers],
   )
 
   const stepItems: { id: 1 | 2; label: string }[] = [
@@ -314,6 +363,42 @@ export function ProviderDrawer({
                   }))}
                   onChange={setProtocol}
                 />
+              </Field>
+              <Field
+                label={t('llm.field.headersLabel')}
+                hint={t('llm.field.headersHint')}
+                error={errors.headers}
+              >
+                <div className={styles.headerRows}>
+                  {headers.map((row, index) => (
+                    <div key={index} className={styles.headerRow}>
+                      <TextInput
+                        mono
+                        placeholder={t('llm.field.headerNamePlaceholder')}
+                        value={row.name}
+                        onChange={(name) => updateHeader(index, { name })}
+                      />
+                      <TextInput
+                        mono
+                        placeholder={t('llm.field.headerValuePlaceholder')}
+                        value={row.value}
+                        onChange={(value) => updateHeader(index, { value })}
+                      />
+                      <button
+                        type="button"
+                        className={styles.headerRemove}
+                        title={t('llm.field.headersRemove')}
+                        aria-label={`${t('llm.field.headersRemove')} ${row.name || index + 1}`}
+                        onClick={() => removeHeader(index)}
+                      >
+                        ✕
+                      </button>
+                    </div>
+                  ))}
+                  <button type="button" className={styles.headerAdd} onClick={addHeader}>
+                    + {t('llm.field.headersAdd')}
+                  </button>
+                </div>
               </Field>
               <div className={styles.gridTwo}>
                 <Field label={t('defaultContextWindowLabel')} error={errors.ctx}>

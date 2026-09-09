@@ -640,13 +640,31 @@ pub fn spawn_live_evictor(live: Arc<LiveSessions>, interval_secs: u64, idle_afte
     });
 }
 
-/// Validates by round-tripping through the section's typed shape.
-fn validate_with<T>(value: Value) -> Result<Value, String>
-where
-    T: serde::de::DeserializeOwned + Serialize,
-{
-    let parsed: T = serde_json::from_value(value).map_err(|e| e.to_string())?;
-    serde_json::to_value(parsed).map_err(|e| e.to_string())
+/// Validates the `llm-openai` section: typed round-trip plus per-provider
+/// custom-header sanity (HTTP header-name grammar and header-value rules),
+/// so a misconfigured header fails at save time rather than at request time.
+fn validate_openai(value: Value) -> Result<Value, String> {
+    let section: OpenAiSection = serde_json::from_value(value).map_err(|e| e.to_string())?;
+    for (provider, profile) in &section.providers {
+        for (name, raw) in &profile.headers {
+            reqwest::header::HeaderName::from_bytes(name.as_bytes()).map_err(|_| {
+                format!("provider '{provider}': header name '{name}' is not a valid HTTP header name")
+            })?;
+            // 占位引用形式(整段 `${REF}`)跳过值的静态检查,由请求前解析兜底;
+            // 其余值按 HeaderValue 规则即时拒绝(控制字符等)。
+            let trimmed = raw.trim();
+            let is_placeholder = trimmed
+                .strip_prefix("\u{24}{")
+                .and_then(|rest| rest.strip_suffix('}'))
+                .is_some();
+            if !is_placeholder {
+                reqwest::header::HeaderValue::from_str(raw).map_err(|_| {
+                    format!("provider '{provider}': header '{name}' has an invalid value")
+                })?;
+            }
+        }
+    }
+    serde_json::to_value(section).map_err(|e| e.to_string())
 }
 
 pub fn build_state(
@@ -807,7 +825,7 @@ fn register_namespaces(settings: &SettingsStore) -> Result<(), Box<dyn std::erro
         OPENAI_SETTINGS_NS,
         NamespaceSpec {
             defaults: json!({ "providers": {} }),
-            validate: validate_with::<OpenAiSection>,
+            validate: validate_openai,
             secrets: &[],
             applies: Applies::Live,
         },

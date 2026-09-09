@@ -121,10 +121,11 @@ export function discoverModels(
   apiKey?: string,
   apiKeyEnv?: string,
   protocol?: WireProtocol,
+  headers?: Record<string, string>,
 ): Promise<DiscoveredModel[]> {
   return http<{ models: DiscoveredModel[] }>('/api/llm/discover', {
     method: 'POST',
-    body: JSON.stringify({ baseURL, apiKey, apiKeyEnv, protocol }),
+    body: JSON.stringify({ baseURL, apiKey, apiKeyEnv, protocol, headers }),
   }).then((data) => data.models)
 }
 

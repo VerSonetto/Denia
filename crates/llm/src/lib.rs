@@ -35,7 +35,7 @@ pub use deepseek::{
 };
 pub use openai::{
     OPENAI_SETTINGS_NS, OpenAiCatalogModel, OpenAiCompatAdapter, OpenAiProfile, OpenAiSection,
-    discover_models,
+    discover_models, resolve_profile_headers,
 };
 pub use protocols::{
     AnthropicStream, CompletionsStream, EventTranslator, ResponsesStream, WireProtocol,
