@@ -298,7 +298,7 @@ const zh = {
   editProvider: '编辑',
   providerSaved: '提供方已保存',
   providerRemoved: '提供方已删除',
-  routeIdInvalid: '路由 ID 只能包含小写字母、数字和连字符,且以字母开头',
+  routeIdRequired: '路由 ID 不能为空',
   baseURLRequired: 'Base URL 不能为空',
 
   /* ---- llm 设置面板(供应商/目录/连通性/选择器) ---- */
@@ -321,18 +321,10 @@ const zh = {
   'llm.drawer.edit': '编辑提供方',
   'llm.section.basic': '基本信息',
   'llm.section.key': '密钥与凭据',
-  'llm.step.template': '模板',
   'llm.step.gateway': '网关',
   'llm.step.key': '密钥',
   'llm.drawer.back': '上一步',
   'llm.drawer.next': '下一步',
-
-  'llm.template.openai': 'OpenAI 兼容',
-  'llm.template.openaiHint': '聚合网关、自建代理、第三方中转',
-  'llm.template.deepseek': 'DeepSeek',
-  'llm.template.deepseekHint': '官方 API(chat/completions)',
-  'llm.template.anthropic': 'Anthropic',
-  'llm.template.anthropicHint': '官方 Messages 接口(/v1/messages)',
 
   'llm.field.baseURLHint': '接口根路径,以 /v1 或域名结尾,按网关文档填写。',
   'llm.field.routeIdHint': '网关的稳定标识,保存后不可修改。',
@@ -927,7 +919,7 @@ const en: typeof zh = {
   editProvider: 'Edit',
   providerSaved: 'Provider saved',
   providerRemoved: 'Provider removed',
-  routeIdInvalid: 'Route IDs are lowercase letters, digits, hyphens, led by a letter',
+  routeIdRequired: 'Route ID is required',
   baseURLRequired: 'Base URL is required',
 
   'llm.panel.providers': 'Providers',
@@ -949,18 +941,10 @@ const en: typeof zh = {
   'llm.drawer.edit': 'Edit provider',
   'llm.section.basic': 'Basics',
   'llm.section.key': 'Key and credentials',
-  'llm.step.template': 'Template',
   'llm.step.gateway': 'Gateway',
   'llm.step.key': 'Key',
   'llm.drawer.back': 'Back',
   'llm.drawer.next': 'Next',
-
-  'llm.template.openai': 'OpenAI compatible',
-  'llm.template.openaiHint': 'Aggregator gateways, self-hosted proxies, relays',
-  'llm.template.deepseek': 'DeepSeek',
-  'llm.template.deepseekHint': 'Official API (chat/completions)',
-  'llm.template.anthropic': 'Anthropic',
-  'llm.template.anthropicHint': 'Official Messages API (/v1/messages)',
 
   'llm.field.baseURLHint': 'API root path ending in /v1 or the domain; follow the gateway docs.',
   'llm.field.routeIdHint': 'Stable identifier for the gateway; immutable once saved.',

@@ -17,7 +17,7 @@
 .drawer {
   position: relative;
   z-index: 1;
-  width: min(560px, 100vw);
+  width: min(600px, 100vw);
   height: 100%;
   display: flex;
   flex-direction: column;
@@ -203,66 +203,6 @@
   justify-content: flex-end;
   gap: 10px;
   padding-top: 4px;
-}
-
-/* ---- 模板瓦片 ---- */
-
-.templateList {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-}
-
-.template {
-  display: flex;
-  flex-direction: column;
-  gap: 3px;
-  padding: 14px 16px;
-  border: 1px solid var(--border-l1);
-  border-radius: 14px;
-  background: var(--bg-layer-2);
-  color: var(--label-primary);
-  text-align: left;
-  font-family: inherit;
-  cursor: pointer;
-  transition: border-color 0.15s var(--ease), background 0.15s var(--ease);
-}
-
-.template:hover {
-  border-color: var(--border-l2);
-}
-
-.template:focus-visible {
-  outline: none;
-  border-color: var(--accent-tint);
-  box-shadow: 0 0 0 3px var(--accent-soft);
-}
-
-.templateActive {
-  border-color: var(--accent);
-  background: var(--accent-soft);
-}
-
-.templateName {
-  font-size: 14px;
-  font-weight: 650;
-}
-
-.templateHint {
-  font-size: 12px;
-  line-height: 1.5;
-  color: var(--label-tertiary);
-}
-
-.templateProto {
-  margin-top: 5px;
-  align-self: flex-start;
-  font-family: var(--font-mono);
-  font-size: 10.5px;
-  color: var(--label-caption);
-  border: 1px solid var(--border-l1);
-  border-radius: 999px;
-  padding: 2px 8px;
 }
 
 /* ---- 密钥区 ---- */

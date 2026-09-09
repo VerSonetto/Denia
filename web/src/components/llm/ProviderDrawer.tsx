@@ -1,6 +1,6 @@
 /**
  * 提供方编辑抽屉:
- * - 新增走三步:模板 → 网关 → 密钥(+模型);步骤间做就地校验(fail loud)。
+ * - 新增走两步:网关 → 密钥(+模型);步骤间做就地校验(fail loud)。
  * - 编辑平铺三段,路由 ID 锁死。
  * Esc 关抽屉(拦截冒泡,不连设置弹窗一起关);Cmd/Ctrl+Enter 提交。
  */
@@ -16,14 +16,11 @@ import {
 } from '../../modelCatalog'
 import { Badge, Button, ChipRadio, Field, NumberInput, TextInput } from './atoms/form'
 import { ModelRowsEditor } from './ModelRowsEditor'
-import type { ProviderTemplate } from './types'
-import { PROVIDER_TEMPLATES } from './types'
 import type { Notify } from '../../App'
 import type { CredentialInfo, OpenAiProfile, WireProtocol } from '../../types'
 import styles from './ProviderDrawer.module.css'
 
 const OPENAI_NS = 'llm-openai'
-const ROUTE_ID_PATTERN = /^[a-z][a-z0-9-]*$/
 
 function deriveKeyRef(routeId: string): string {
   return routeId.toUpperCase().replace(/[^A-Z0-9]+/g, '_') + '_API_KEY'
@@ -47,7 +44,7 @@ export function ProviderDrawer({
   onClose,
   onSaved,
 }: {
-  /** 编辑的路由 id;null = 新增三步流程。 */
+  /** 编辑的路由 id;null = 新增两步流程。 */
   route: string | null
   initial: OpenAiProfile | null
   revision: number
@@ -58,8 +55,7 @@ export function ProviderDrawer({
   onSaved: () => void
 }) {
   const isNew = route === null
-  const [step, setStep] = useState<1 | 2 | 3>(1)
-  const [templateId, setTemplateId] = useState<ProviderTemplate['id'] | null>(null)
+  const [step, setStep] = useState<1 | 2>(1)
   const [routeId, setRouteId] = useState(route ?? '')
   const [displayName, setDisplayName] = useState(initial?.displayName ?? '')
   const [baseURL, setBaseURL] = useState(initial?.baseURL ?? '')
@@ -87,8 +83,9 @@ export function ProviderDrawer({
   const validateGateway = useCallback((): boolean => {
     const nextErrors: FormErrors = {}
     const id = routeId.trim()
-    if (!ROUTE_ID_PATTERN.test(id)) {
-      nextErrors.routeId = t('routeIdInvalid')
+    // 只做非空与重复校验,不做字符格式限制(网关 id 常含点、下划线等)。
+    if (!id) {
+      nextErrors.routeId = t('routeIdRequired')
     } else if (isNew && id in providers) {
       nextErrors.routeId = t('llm.error.routeIdExists', { id })
     }
@@ -105,8 +102,8 @@ export function ProviderDrawer({
   const validateAll = useCallback((): boolean => {
     const nextErrors: FormErrors = {}
     const id = routeId.trim()
-    if (!ROUTE_ID_PATTERN.test(id)) {
-      nextErrors.routeId = t('routeIdInvalid')
+    if (!id) {
+      nextErrors.routeId = t('routeIdRequired')
     } else if (isNew && id in providers) {
       nextErrors.routeId = t('llm.error.routeIdExists', { id })
     }
@@ -139,16 +136,6 @@ export function ProviderDrawer({
     setErrors(nextErrors)
     return Object.keys(nextErrors).length === 0
   }, [routeId, baseURL, providers, isNew, ctxWindow, maxTokens, models])
-
-  /* ---- 模板选择:预填协议 / baseURL / 建议 id ---- */
-
-  const applyTemplate = (template: ProviderTemplate) => {
-    setTemplateId(template.id)
-    setProtocol(template.protocol)
-    setBaseURL(template.baseURL)
-    if (!ctxWindow && template.contextWindow) setCtxWindow(template.contextWindow)
-    if (!routeId.trim()) setRouteId(template.id)
-  }
 
   /* ---- 保存 ---- */
 
@@ -201,19 +188,14 @@ export function ProviderDrawer({
 
   const goNext = () => {
     if (step === 1) {
-      if (!templateId) return
-      setStep(2)
-      return
-    }
-    if (step === 2) {
       if (!validateGateway()) return
-      setStep(3)
+      setStep(2)
     }
   }
 
   const goBack = () => {
     setErrors({})
-    setStep((prev) => (prev === 3 ? 2 : 1))
+    setStep(1)
   }
 
   /* ---- 键盘:Esc 关抽屉(preventDefault 阻断弹窗同关);Cmd/Ctrl+Enter 推进/提交 ---- */
@@ -228,7 +210,7 @@ export function ProviderDrawer({
       }
       if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') {
         event.preventDefault()
-        if (isNew && step !== 3) goNext()
+        if (isNew && step !== 2) goNext()
         else void save()
       }
     }
@@ -247,10 +229,9 @@ export function ProviderDrawer({
     [baseURL, keyValue, effectiveKeyRef, protocol],
   )
 
-  const stepItems: { id: 1 | 2 | 3; label: string }[] = [
-    { id: 1, label: t('llm.step.template') },
-    { id: 2, label: t('llm.step.gateway') },
-    { id: 3, label: t('llm.step.key') },
+  const stepItems: { id: 1 | 2; label: string }[] = [
+    { id: 1, label: t('llm.step.gateway') },
+    { id: 2, label: t('llm.step.key') },
   ]
 
   return (
@@ -296,34 +277,8 @@ export function ProviderDrawer({
         )}
 
         <div className={styles.body}>
-          {/* 步骤 1(仅新增):模板 */}
-          {isNew && step === 1 && (
-            <section className={styles.section}>
-              <div className={styles.templateList}>
-                {PROVIDER_TEMPLATES.map((template) => (
-                  <button
-                    key={template.id}
-                    type="button"
-                    className={`${styles.template}${templateId === template.id ? ` ${styles.templateActive}` : ''}`}
-                    aria-pressed={templateId === template.id}
-                    onClick={() => applyTemplate(template)}
-                  >
-                    <span className={styles.templateName}>{t(template.labelKey)}</span>
-                    <span className={styles.templateHint}>{t(template.hintKey)}</span>
-                    <span className={styles.templateProto}>{protocolLabelOf(template.protocol)}</span>
-                  </button>
-                ))}
-              </div>
-              <div className={styles.footRow}>
-                <Button variant="primary" disabled={!templateId} onClick={goNext}>
-                  {t('llm.drawer.next')}
-                </Button>
-              </div>
-            </section>
-          )}
-
-          {/* 步骤 2(编辑时常驻):网关信息 */}
-          {(isNew ? step === 2 : true) && (
+          {/* 步骤 1(新增):网关信息;编辑时常驻 */}
+          {(isNew ? step === 1 : true) && (
             <section className={styles.section}>
               {!isNew && <h4 className={styles.sectionTitle}>{t('llm.section.basic')}</h4>}
               <div className={styles.gridTwo}>
@@ -368,9 +323,8 @@ export function ProviderDrawer({
                   <NumberInput mono value={maxTokens} onChange={setMaxTokens} placeholder="8192" />
                 </Field>
               </div>
-              {isNew && step === 2 && (
+              {isNew && step === 1 && (
                 <div className={styles.footRow}>
-                  <Button onClick={goBack}>{t('llm.drawer.back')}</Button>
                   <Button variant="primary" onClick={goNext}>
                     {t('llm.drawer.next')}
                   </Button>
@@ -379,8 +333,8 @@ export function ProviderDrawer({
             </section>
           )}
 
-          {/* 步骤 3(编辑时常驻):密钥 + 模型 */}
-          {(isNew ? step === 3 : true) && (
+          {/* 步骤 2(新增):密钥 + 模型;编辑时常驻 */}
+          {(isNew ? step === 2 : true) && (
             <>
               <section className={styles.section}>
                 <h4 className={styles.sectionTitle}>{t('llm.section.key')}</h4>
@@ -429,6 +383,11 @@ export function ProviderDrawer({
                   </p>
                 )}
               </section>
+              {isNew && step === 2 && (
+                <div className={styles.footRow}>
+                  <Button onClick={goBack}>{t('llm.drawer.back')}</Button>
+                </div>
+              )}
             </>
           )}
         </div>
@@ -441,7 +400,7 @@ export function ProviderDrawer({
                 {t('cancel')}
               </Button>
             )}
-            {(!isNew || step === 3) && (
+            {(!isNew || step === 2) && (
               <Button variant="primary" disabled={busy} onClick={() => void save()}>
                 {busy ? t('loading') : t('save')}
               </Button>
@@ -451,8 +410,4 @@ export function ProviderDrawer({
       </div>
     </div>
   )
-}
-
-function protocolLabelOf(protocol: WireProtocol): string {
-  return WIRE_PROTOCOLS.find((entry) => entry.id === protocol)?.label ?? 'chat/completions'
 }

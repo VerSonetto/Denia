@@ -3,7 +3,6 @@
 import type {
   CatalogModel,
   OpenAiProfile,
-  WireProtocol,
 } from '../../types'
 
 /** 一条已配置的网关路由(settings llm-openai providers map 的键值对)。 */
@@ -11,49 +10,6 @@ export interface ProviderRoute {
   route: string
   profile: OpenAiProfile
 }
-
-/* ---- 新增提供方模板(三步流程第一步) ---- */
-
-export interface ProviderTemplate {
-  id: 'openai' | 'deepseek' | 'anthropic'
-  protocol: WireProtocol
-  /** 模板预填的 baseURL(用户可改)。 */
-  baseURL: string
-  /** 推荐默认上下文窗口。 */
-  contextWindow?: number
-  /** i18n 键:模板名与一句话说明。 */
-  labelKey: 'llm.template.openai' | 'llm.template.deepseek' | 'llm.template.anthropic'
-  hintKey:
-    | 'llm.template.openaiHint'
-    | 'llm.template.deepseekHint'
-    | 'llm.template.anthropicHint'
-}
-
-export const PROVIDER_TEMPLATES: readonly ProviderTemplate[] = [
-  {
-    id: 'openai',
-    protocol: 'openai-completions',
-    baseURL: '',
-    labelKey: 'llm.template.openai',
-    hintKey: 'llm.template.openaiHint',
-  },
-  {
-    id: 'deepseek',
-    protocol: 'openai-completions',
-    baseURL: 'https://api.deepseek.com',
-    contextWindow: 131_072,
-    labelKey: 'llm.template.deepseek',
-    hintKey: 'llm.template.deepseekHint',
-  },
-  {
-    id: 'anthropic',
-    protocol: 'anthropic-messages',
-    baseURL: 'https://api.anthropic.com',
-    contextWindow: 200_000,
-    labelKey: 'llm.template.anthropic',
-    hintKey: 'llm.template.anthropicHint',
-  },
-]
 
 /* ---- 模型发现(DiscoverFlow) ---- */
 

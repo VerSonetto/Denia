@@ -150,7 +150,7 @@ export function ModelRowsEditor({
                 mono
                 placeholder={
                   defaultContextWindow
-                    ? undefined
+                    ? `${t('contextWindowPlaceholder')} ${formatContextWindow(defaultContextWindow)}`
                     : t('contextWindowPlaceholder')
                 }
                 onChange={(contextWindow) => update(index, { contextWindow })}

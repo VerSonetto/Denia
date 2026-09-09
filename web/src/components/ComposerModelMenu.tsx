@@ -72,6 +72,9 @@ export function ComposerModelMenu({
   const efforts = model?.reasoning?.efforts ?? []
   const activeEffort = resolveSessionReasoningEffort(efforts, selection.reasoningEffort)
   const effortName = activeEffort ? reasoningEffortLabel(activeEffort) : ''
+  // 网关模型名常带厂商标注后缀(如 "qwen3.8-flash (ali)");
+  // 输入框统一显示「模型名 (提供商 id)」,括号内固定是路由 id。
+  const chipLabel = `${(model?.name ?? selection.model).replace(/\s*\([^)]*\)\s*$/, '')} (${selection.provider})`
 
   /* ---- 搜索派生:按模型名 / ID / 描述 / 供应商名匹配,保持分组顺序平铺 ---- */
 
@@ -330,7 +333,7 @@ export function ComposerModelMenu({
         title={t('sessionModelHint')}
         onClick={toggle}
       >
-        <span className="model-chip-label">{model?.name ?? selection.model}</span>
+        <span className="model-chip-label">{chipLabel}</span>
         {efforts.length > 0 && (
           <>
             <span className="model-chip-dot" aria-hidden="true" />
