@@ -244,6 +244,7 @@ fn dispatch_tool_call(
         let current_mode = session.permission_mode();
         let sink_session = session.clone();
         let sink_emit = emit.clone();
+        let goal_session = session.clone();
         let context = denia_tools::ToolContext {
             session_id: Some(session.id().to_string()),
             selection: Some(selection),
@@ -260,6 +261,11 @@ fn dispatch_tool_call(
             permission_mode: current_mode,
             ask,
             call_id: Some(call_id),
+            goal_reader: Some(Arc::new(move || {
+                let goal = goal_session.goal()?;
+                let used = goal_session.goal_tokens_used().unwrap_or(0);
+                Some((goal, used))
+            })),
         };
         let execute = tool.execute(&call.arguments, &context);
         tokio::pin!(execute);

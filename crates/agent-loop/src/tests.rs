@@ -92,6 +92,7 @@ fn subagent_sections_follow_tool_grant() {
         "tool:agents",
         "tool:jobs",
         "tool:ask",
+        "tool:goal",
     ] {
         assert!(!kept.contains(&removed), "{removed} 应移除:{kept:?}");
     }

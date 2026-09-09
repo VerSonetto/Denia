@@ -428,6 +428,7 @@ pub(crate) fn section_tools(section: &str) -> Option<&'static [&'static str]> {
         "tool:skill" => &["skill"],
         "tool:browser" => &["browser"],
         "tool:ask" => &["ask"],
+        "tool:goal" => &["get_goal", "update_goal"],
         "tool:plan" => &["exit_plan"],
         _ => return None,
     })

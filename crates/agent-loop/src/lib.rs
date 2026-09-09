@@ -46,6 +46,7 @@ use denia_tools::{FileHistoryBackend, ToolRegistry};
 use tokio_util::sync::CancellationToken;
 
 pub use compact::{CompactOutcome, CompactionSettings};
+pub use injections::GOAL_CHANNEL;
 pub use loop_guard::LOOP_THRESHOLD;
 
 /// 工具并行执行配置(学 codex `ToolCallRuntime` + dsh `maxParallelToolCalls`)。
