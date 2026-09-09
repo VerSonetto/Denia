@@ -630,6 +630,8 @@ export function postPrompt(
     files?: string[]
     /** 轨迹引用(标题, 正文);以 injected 上下文消息随本轮注入。 */
     quoted?: { title: string; text: string }[]
+    /** 显式直调的技能名(user-invocable);后端以「用户显式调用技能」注入正文。 */
+    skills?: string[]
   },
 ): Promise<unknown> {
   return http(`/api/sessions/${encodeURIComponent(id)}/prompt`, {
@@ -647,6 +649,20 @@ export function setSessionPermission(
     method: 'PUT',
     body: JSON.stringify({ mode }),
   })
+}
+
+/** 会话可用技能条目(`/` 直调候选与输入框 token 装饰共用;字段为后端 camelCase 投影)。 */
+export interface SkillSummary {
+  name: string
+  description: string
+  source: string
+  modelInvocable: boolean
+  userInvocable: boolean
+}
+
+/** 列出会话 cwd 技能目录(分层发现,后端带 mtime 缓存)。 */
+export function listSkills(id: string, signal?: AbortSignal): Promise<{ skills: SkillSummary[] }> {
+  return http(`/api/sessions/${encodeURIComponent(id)}/skills`, { signal })
 }
 
 /** 应答一次挂起的审批;计划审批(exit_plan)的载荷可带执行档位/模型/建议。 */

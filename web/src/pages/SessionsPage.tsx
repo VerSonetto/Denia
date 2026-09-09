@@ -1,5 +1,5 @@
 import { RuntimePanel } from '../components/RuntimePanel'
-import { useCallback, useEffect, useMemo, useRef, useState, type ClipboardEvent, type KeyboardEvent, type WheelEvent } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, Fragment, type ClipboardEvent, type KeyboardEvent, type WheelEvent } from 'react'
 import * as api from '../api'
 import type { MentionCandidate } from '../api'
 import type { ApprovalDecisionPayload } from '../api'
@@ -46,9 +46,22 @@ import {
   IconUndo,
   IconSpinner,
   IconStop,
+  IconSlashCommand,
 } from '../components/icons'
 import { resolveSessionReasoningEffort } from '../modelCatalog'
-import { activeAtToken, applyMentionInsertion, formatFileMention } from './mention'
+import { activeAtToken, formatFileMention } from './mention'
+import { activeSlashToken, collectSkillTokens, parseLeadingCommand } from './slash'
+import {
+  caretOffsetIn,
+  caretRightAfterChip,
+  createSlashChip,
+  renderDraft,
+  selectRange,
+  serializeEditor,
+  setCaretOffset,
+  type SlashChipKind,
+} from './editor'
+import { formatTokens } from '../stats'
 import { TodoPanel } from '../components/TodoPanel'
 import { QueuedMessagePanel } from '../components/QueuedMessagePanel'
 import { ConversationAxis } from '../components/ConversationAxis'
@@ -209,7 +222,9 @@ export default function SessionsPage({
   const [exportOpen, setExportOpen] = useState(false)
   const [exportBusy, setExportBusy] = useState(false)
   const sendingRef = useRef(false)
-  const promptRef = useRef<HTMLTextAreaElement | null>(null)
+  // contentEditable 输入器(原 textarea):DOM 是草稿的事实源,prompt 状态
+  // 只作镜像(input 事件同步),外部写路径统一走 applyDraft 重建 DOM。
+  const promptRef = useRef<HTMLDivElement | null>(null)
   const scrollRef = useRef<HTMLDivElement | null>(null)
   const stickRef = useRef(true)
   const seatRef = useRef<HTMLDivElement | null>(null)
@@ -256,67 +271,67 @@ export default function SessionsPage({
   }, [])
 
   /** 检测光标处 `@` token 并按 150ms 防抖拉候选;token 消失/无 cwd 时关闭。 */
-  const refreshMentions = useCallback(() => {
-    const el = promptRef.current
-    const cwd = mentionCwd
-    if (!el || !cwd) {
-      closeMention()
-      return
-    }
-    const caret = Math.min(el.selectionStart ?? el.value.length, el.value.length)
-    const token = activeAtToken(el.value, caret)
-    if (!token) {
-      closeMention()
-      return
-    }
-    setMentionQuery(token.query)
-    setMentionOpen(true)
-    setMentionLoading(true)
-    if (mentionDebounceRef.current !== null) window.clearTimeout(mentionDebounceRef.current)
-    mentionDebounceRef.current = window.setTimeout(() => {
-      mentionDebounceRef.current = null
-      mentionAbortRef.current?.abort()
-      const controller = new AbortController()
-      mentionAbortRef.current = controller
-      api
-        .searchMentions(cwd, token.query, controller.signal)
-        .then(({ items }) => {
-          if (controller.signal.aborted) return
-          setMentionItems(items)
-          setMentionActive(0)
-          setMentionLoading(false)
-        })
-        .catch(() => {
-          // 后端 400(目录已死等):按无结果收起候选,不打断输入。
-          if (!controller.signal.aborted) {
-            setMentionItems([])
+  const refreshMentions = useCallback(
+    (text: string, caret: number) => {
+      const cwd = mentionCwd
+      if (!cwd) {
+        closeMention()
+        return
+      }
+      const token = activeAtToken(text, caret)
+      if (!token) {
+        closeMention()
+        return
+      }
+      setMentionQuery(token.query)
+      setMentionOpen(true)
+      setMentionLoading(true)
+      if (mentionDebounceRef.current !== null) window.clearTimeout(mentionDebounceRef.current)
+      mentionDebounceRef.current = window.setTimeout(() => {
+        mentionDebounceRef.current = null
+        mentionAbortRef.current?.abort()
+        const controller = new AbortController()
+        mentionAbortRef.current = controller
+        api
+          .searchMentions(cwd, token.query, controller.signal)
+          .then(({ items }) => {
+            if (controller.signal.aborted) return
+            setMentionItems(items)
+            setMentionActive(0)
             setMentionLoading(false)
-          }
-        })
-    }, 150)
-  }, [mentionCwd, closeMention])
+          })
+          .catch(() => {
+            // 后端 400(目录已死等):按无结果收起候选,不打断输入。
+            if (!controller.signal.aborted) {
+              setMentionItems([])
+              setMentionLoading(false)
+            }
+          })
+      }, 150)
+    },
+    [mentionCwd, closeMention],
+  )
 
-  /** 选中候选:用格式化文本替换当前 token,补空格,光标移到其后。 */
+  /** 选中候选:用格式化文本替换当前 token,补空格,光标随插入内容其后。 */
   const pickMention = useCallback(
     (candidate: MentionCandidate) => {
       const el = promptRef.current
-      if (!el) return
-      const caret = Math.min(el.selectionStart ?? el.value.length, el.value.length)
-      const token = activeAtToken(el.value, caret)
+      if (!el || document.activeElement !== el) return
+      const text = serializeEditor(el)
+      const caret = caretOffsetIn(el)
+      const token = activeAtToken(text, caret)
       if (!token) return
       const mention = formatFileMention(candidate, token.quoted)
       if (mention === undefined) return
-      const insertion = applyMentionInsertion(el.value, caret, token, mention)
-      setPrompt(insertion.text)
+      const after = text.slice(caret)
+      const suffix = after.length === 0 || !/^\s/u.test(after) ? ' ' : ''
+      selectRange(el, caret - token.prefix.length, caret)
+      document.execCommand('insertText', false, `${mention}${suffix}`)
+      setPrompt(serializeEditor(el))
       setOptimizedPrompt(null)
       originalPromptRef.current = ''
       closeMention()
       syncPromptHeight()
-      requestAnimationFrame(() => {
-        el.focus()
-        el.selectionStart = insertion.caret
-        el.selectionEnd = insertion.caret
-      })
     },
     [closeMention],
   )
@@ -348,7 +363,7 @@ export default function SessionsPage({
     setOptimizing(false)
     setOptimizedPrompt(null)
     originalPromptRef.current = ''
-    setPrompt('')
+    applyDraft('')
     setSending(false)
     setPendingMessages([])
     sendingRef.current = false
@@ -448,6 +463,177 @@ export default function SessionsPage({
     activeId && (hasStarted || sending || hasHistory || pendingMessages.length > 0),
   )
   const phase = showTranscript ? 'active' : 'hero'
+
+  /* ---- 输入框 `/` 斜杠命令/技能(对照 dsh input-trigger:命令认领行,技能直调注入) ---- */
+
+  /** 弹层候选(命令/技能统一结构,description 为已翻译文案)。 */
+  interface SlashCandidate {
+    name: string
+    kind: 'command' | 'skill'
+    description: string
+    /** 技能仅用户可直调(disable-model-invocation)。 */
+    userOnly: boolean
+  }
+
+  const [slashOpen, setSlashOpen] = useState(false)
+  const [slashItems, setSlashItems] = useState<SlashCandidate[]>([])
+  const [slashActive, setSlashActive] = useState(0)
+  const slashMenuRef = useRef<HTMLDivElement | null>(null)
+  // 技能直调词典(仅 user-invocable;仅模型的直调会被后端 400,不进候选)。
+  const [skillEntries, setSkillEntries] = useState<api.SkillSummary[]>([])
+  // token 词典(命令 + 技能):候选过滤、卡片重建、发送收集共用,kind 决定
+  // 卡片样式身份。
+  const slashKinds = useMemo(() => {
+    const map = new Map<string, SlashChipKind>()
+    map.set('plan', 'command')
+    map.set('compact', 'command')
+    for (const skill of skillEntries) map.set(skill.name, 'skill')
+    return map
+  }, [skillEntries])
+  const slashKindRef = useRef(slashKinds)
+  slashKindRef.current = slashKinds
+
+  /** 外部写路径:把草稿文本重建进编辑器 DOM(命中词典的 token 重建为卡片)。 */
+  const applyDraft = (text: string) => {
+    setPrompt(text)
+    setOptimizedPrompt(null)
+    originalPromptRef.current = ''
+    const el = promptRef.current
+    if (el) {
+      renderDraft(el, text, slashKindRef.current)
+      syncPromptHeight()
+    }
+  }
+
+  const closeSlash = useCallback(() => {
+    setSlashOpen(false)
+    setSlashItems([])
+  }, [])
+
+  /** 检测光标处 `/` token 并按词典出候选(同步,无网络);@ 提及优先,二者互斥。 */
+  const refreshSlash = useCallback(
+    (text: string, caret: number) => {
+      if (inert) {
+        closeSlash()
+        return
+      }
+      const el = promptRef.current
+      // 光标紧贴卡片之后时,序列化里的 `/name` 是卡片的一部分,不再触发弹层。
+      if (!el || caretRightAfterChip(el)) {
+        closeSlash()
+        return
+      }
+      const token = activeSlashToken(text, caret)
+      if (!token) {
+        closeSlash()
+        return
+      }
+      const query = token.query.toLowerCase()
+      const matches = (entry: SlashCandidate) => !query || entry.name.toLowerCase().includes(query)
+      // 组内前缀命中排在子串命中前;命令组恒在技能组前(命令优先于技能)。
+      const ordered = (list: SlashCandidate[]) => [
+        ...list.filter((entry) => !query || entry.name.toLowerCase().startsWith(query)),
+        ...list.filter((entry) => query && !entry.name.toLowerCase().startsWith(query)),
+      ]
+      const commands: SlashCandidate[] = [
+        { name: 'plan', kind: 'command', description: t('cmdPlanDesc'), userOnly: false },
+        { name: 'compact', kind: 'command', description: t('cmdCompactDesc'), userOnly: false },
+      ]
+      const skills: SlashCandidate[] = skillEntries.map((skill) => ({
+        name: skill.name,
+        kind: 'skill',
+        description: skill.description,
+        userOnly: !skill.modelInvocable,
+      }))
+      setSlashItems([...ordered(commands.filter(matches)), ...ordered(skills.filter(matches))])
+      setSlashActive(0)
+      setSlashOpen(true)
+    },
+    [inert, skillEntries, closeSlash],
+  )
+
+  /**
+   * 选中候选:先把 token 区间选中,insertHTML 换成卡片原子元素(原生 undo
+   * 可整体撤销)。Chromium 的 insertHTML 会把光标落在不可编辑元素之前,所以
+   * 插完显式钉到卡片之后再补空格,保证「卡片 + 空格」顺序与光标落点正确。
+   */
+  const pickSlash = useCallback(
+    (candidate: SlashCandidate) => {
+      const el = promptRef.current
+      if (!el || document.activeElement !== el) return
+      const text = serializeEditor(el)
+      const caret = caretOffsetIn(el)
+      const token = activeSlashToken(text, caret)
+      if (!token) return
+      const start = caret - token.prefix.length
+      const after = text.slice(caret)
+      const trailing = after.length === 0 || !/^\s/u.test(after) ? ' ' : ''
+      selectRange(el, start, caret)
+      document.execCommand('insertHTML', false, createSlashChip(candidate.name, candidate.kind).outerHTML)
+      setCaretOffset(el, start + candidate.name.length + 1)
+      if (trailing) {
+        document.execCommand('insertText', false, trailing)
+        setCaretOffset(el, start + candidate.name.length + 1 + trailing.length)
+      }
+      setPrompt(serializeEditor(el))
+      setOptimizedPrompt(null)
+      originalPromptRef.current = ''
+      closeSlash()
+      syncPromptHeight()
+    },
+    [closeSlash],
+  )
+
+  /** input/selectionchange 共用的菜单触发检测:序列化草稿 + 光标偏移。 */
+  const refreshMenus = useCallback(() => {
+    const el = promptRef.current
+    if (!el) return
+    const text = serializeEditor(el)
+    const caret = caretOffsetIn(el)
+    refreshMentions(text, caret)
+    refreshSlash(text, caret)
+  }, [refreshMentions, refreshSlash])
+  const refreshMenusRef = useRef(refreshMenus)
+  refreshMenusRef.current = refreshMenus
+
+  // 光标移动(点击/方向键/Home/End)不产生 input 事件:用 selectionchange
+  // 驱动 @ 与 / 的触发检测。卡片原子性由 contenteditable=false 原生保证。
+  useEffect(() => {
+    const onSelectionChange = () => {
+      const el = promptRef.current
+      if (!el || document.activeElement !== el || composingRef.current) return
+      refreshMenusRef.current()
+    }
+    document.addEventListener('selectionchange', onSelectionChange)
+    return () => document.removeEventListener('selectionchange', onSelectionChange)
+  }, [])
+
+  // 键盘高亮条目跟随滚动(与 @ 提及菜单同款 data-kb 标记)。
+  useEffect(() => {
+    if (!slashOpen) return
+    slashMenuRef.current?.querySelector('[data-kb="true"]')?.scrollIntoView({ block: 'nearest' })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [slashOpen, slashActive, slashItems])
+
+  // 发送后输入框被程序清空(不走 onChange):兜底收起弹层。
+  useEffect(() => {
+    if (slashOpen && !prompt) closeSlash()
+  }, [slashOpen, prompt, closeSlash])
+
+  // 会话切换时刷新技能词典(装饰与候选共用);失败静默,菜单仍有命令组。
+  useEffect(() => {
+    if (!activeId) {
+      setSkillEntries([])
+      return
+    }
+    const controller = new AbortController()
+    api
+      .listSkills(activeId, controller.signal)
+      .then(({ skills }) => setSkillEntries(skills.filter((skill) => skill.userInvocable)))
+      .catch(() => {})
+    return () => controller.abort()
+  }, [activeId])
+
 
   /* ---- 粘贴图片 / 附件上传 / 权限与审批 ---- */
 
@@ -636,7 +822,7 @@ export default function SessionsPage({
   }, [])
 
   const handlePaste = useCallback(
-    async (event: ClipboardEvent<HTMLTextAreaElement>) => {
+    async (event: ClipboardEvent<HTMLElement>) => {
       if (optimizing) return
       const items = event.clipboardData?.items
       if (!items) return
@@ -673,6 +859,21 @@ export default function SessionsPage({
     },
     [ensureVision, readFileAsDataUrl, optimizing],
   )
+
+  /** 编辑器粘贴:图片走识图流程,其余一律降级纯文本(保持节点结构纪律)。 */
+  const onEditorPaste = (event: ClipboardEvent<HTMLDivElement>) => {
+    const items = event.clipboardData?.items
+    if (
+      items &&
+      Array.from(items).some((item) => item.kind === 'file' && item.type.startsWith('image/'))
+    ) {
+      void handlePaste(event)
+      return
+    }
+    event.preventDefault()
+    const text = event.clipboardData?.getData('text/plain') ?? ''
+    if (text) document.execCommand('insertText', false, text)
+  }
 
   const onPickFiles = useCallback((event: React.ChangeEvent<HTMLInputElement>) => {
     const files = event.target.files
@@ -977,9 +1178,8 @@ export default function SessionsPage({
         signal: controller.signal,
       })
       if (activeId !== sessionId || optimizeAbortRef.current !== controller) return
-      setPrompt(optimized)
+      applyDraft(optimized)
       setOptimizedPrompt(optimized)
-      syncPromptHeight()
       notify('ok', t('optimizeDone'))
     } catch (error) {
       if (controller.signal.aborted || optimizeAbortRef.current !== controller) return
@@ -995,9 +1195,7 @@ export default function SessionsPage({
 
   const handleUndoOptimize = () => {
     if (!optimizedPrompt) return
-    setPrompt(originalPromptRef.current)
-    setOptimizedPrompt(null)
-    syncPromptHeight()
+    applyDraft(originalPromptRef.current)
   }
 
   const confirmRewind = useCallback(async () => {
@@ -1006,9 +1204,7 @@ export default function SessionsPage({
     try {
       const result = await api.rewindSession(activeId, rewindReq.seq)
       // 恢复目标消息文本/图片到输入框,方便修改后重发。
-      setPrompt(result.toMessage ?? rewindReq.text)
-      setOptimizedPrompt(null)
-      originalPromptRef.current = ''
+      applyDraft(result.toMessage ?? rewindReq.text)
       if (rewindReq.images && rewindReq.images.length > 0) {
         setPastedImages(
           rewindReq.images.map((image) => ({
@@ -1087,9 +1283,15 @@ export default function SessionsPage({
       ...previous,
       { id: `queue-${queueSeqRef.current}`, text },
     ])
-    setPrompt('')
-    setOptimizedPrompt(null)
-    originalPromptRef.current = ''
+    applyDraft('')
+    setPastedImages([])
+    setAttachments([])
+    setTrajQuotes([])
+  }
+
+  /** 清空输入区(文本/优化缓存/图片/附件/轨迹引用),手动发送与命令消费共用。 */
+  const clearComposerState = () => {
+    applyDraft('')
     setPastedImages([])
     setAttachments([])
     setTrajQuotes([])
@@ -1121,6 +1323,48 @@ export default function SessionsPage({
       if (wasHero && permission !== 'auto-edit') {
         await api.setSessionPermission(id, permission)
       }
+      // 斜杠命令裁定(单一发送咽喉:手动发送/队列自动发送/立即发送共用);
+      // 命令优先于技能(对齐 dsh matchEnter 的行认领)。
+      const command = parseLeadingCommand(text)
+      let body = text
+      if (command?.kind === 'plan') {
+        if (permission !== 'plan') {
+          await api.setSessionPermission(id, 'plan')
+          setPermission('plan')
+          try {
+            window.localStorage.setItem('denia.permission', 'plan')
+          } catch {
+            /* storage unavailable */
+          }
+          notify('ok', t('slashPlanOn'))
+        } else {
+          notify('ok', t('slashPlanAlready'))
+        }
+        const rest = (command.rest ?? '').trim()
+        if (!rest) {
+          // 裸 /plan:只切模式,不发消息;手动发送时清空输入区(队列刷新不清)。
+          if (options?.clearInput !== false) clearComposerState()
+          return true
+        }
+        body = rest
+      } else if (command?.kind === 'compact') {
+        if ((command.rest ?? '').trim()) throw new Error(t('slashCompactNoArgs'))
+        const result = await api.compactSession(id)
+        if (result.ok && result.outcome) {
+          notify('ok', t('contextCompactDone', { saved: formatTokens(result.outcome.savedTokens) }))
+        } else {
+          notify('ok', t('contextCompactNothing'))
+        }
+        if (options?.clearInput !== false) clearComposerState()
+        return true // 裸 /compact:直接压缩,不发消息
+      }
+      // 技能直调:首行裸 /name 由后端 skill_gesture 注入(collectSkillTokens
+      // 已剔除该场景防双重注入);其余命中 user-invocable 词典的 token 收进
+      // skills 数组,由后端以「用户显式调用技能」注入。
+      const skillNames = collectSkillTokens(
+        body,
+        skillEntries.map((skill) => skill.name),
+      )
       // 附件上传(不限格式):先持久化,再随消息注入路径。
       const uploadedPaths: string[] = []
       for (const attachment of attachments) {
@@ -1138,28 +1382,24 @@ export default function SessionsPage({
         }
       }
       await api.postPrompt(id, {
-        prompt: text,
+        prompt: body,
         provider: selection?.provider,
         model: selection?.model,
         reasoningEffort: selection?.reasoningEffort,
         images: pastedImages.map(({ name, mime, data }) => ({ name, mime, data })),
         files: uploadedPaths,
         quoted: trajQuotes.map(({ title, text }) => ({ title, text })),
+        skills: skillNames.length > 0 ? skillNames : undefined,
       })
       // 发送成功后立即打开 follow,收流式增量;不要等 running SSE 才建连。
       ensureFollowing(id)
       const sentImages: UserMessageImage[] = pastedImages.map(({ mime, data }) => ({ mime, data }))
       // 收到 202:服务端已接单,立即乐观反馈(running 也由服务端 SSE 推送)。
-      pushPending(text, sentImages.length > 0 ? sentImages : undefined)
+      pushPending(body, sentImages.length > 0 ? sentImages : undefined)
       setRunningStatus(id, true)
       if (options?.clearInput !== false) {
         // 仅"输入框发送"清空输入区;队列自动发送不清空(用户可能正在打字)。
-        setPrompt('')
-        setOptimizedPrompt(null)
-        originalPromptRef.current = ''
-        setPastedImages([])
-        setAttachments([])
-        setTrajQuotes([])
+        clearComposerState()
       }
       ok = true
     } catch (error) {
@@ -1272,12 +1512,9 @@ export default function SessionsPage({
     }
   }
 
-  /** 编辑:把消息回填到输入框并移出队列。 */
+  /** 编辑:把消息回填到输入框并移出队列(卡片随词典重建)。 */
   const editQueued = (message: QueuedMessage) => {
-    setPrompt(message.text)
-    setOptimizedPrompt(null)
-    originalPromptRef.current = ''
-    syncPromptHeight()
+    applyDraft(message.text)
     setQueuedMessages((previous) => previous.filter((item) => item.id !== message.id))
     promptRef.current?.focus()
   }
@@ -1287,7 +1524,7 @@ export default function SessionsPage({
     setQueuedMessages((previous) => previous.filter((item) => item.id !== message.id))
   }
 
-  const onPromptKeyDown = (event: KeyboardEvent<HTMLTextAreaElement>) => {
+  const onPromptKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
     if (mentionOpen) {
       // IME 组词阶段的按键交给输入法,不做选择/发送旁路。
       if (composingRef.current) return
@@ -1315,6 +1552,36 @@ export default function SessionsPage({
         return
       }
     }
+    if (slashOpen) {
+      // IME 组词阶段的按键交给输入法,不做选择/发送旁路。
+      if (composingRef.current) return
+      const count = slashItems.length
+      if (event.key === 'ArrowDown' && count > 0) {
+        event.preventDefault()
+        setSlashActive((index) => Math.min(count - 1, index + 1))
+        return
+      }
+      if (event.key === 'ArrowUp' && count > 0) {
+        event.preventDefault()
+        setSlashActive((index) => Math.max(0, index - 1))
+        return
+      }
+      // 弹层打开时 Enter/Tab 优先选择候选,不发送。
+      if ((event.key === 'Tab' || event.key === 'Enter') && count > 0) {
+        event.preventDefault()
+        const target = slashItems[Math.min(slashActive, count - 1)]
+        if (target) pickSlash(target)
+        return
+      }
+      if (event.key === 'Escape') {
+        event.preventDefault()
+        closeSlash()
+        return
+      }
+    }
+    // 卡片原子性(contenteditable=false)由浏览器原生保证:光标进不去、
+    // Backspace/Delete/选择删除均整卡处理,无需任何拦截。
+    if (composingRef.current || event.nativeEvent.isComposing) return
     if (event.key !== 'Enter' || event.shiftKey) return
     event.preventDefault()
     if (optimizing) return
@@ -1325,7 +1592,7 @@ export default function SessionsPage({
     if (!sending) void send()
   }
 
-  const onPromptWheel = (event: WheelEvent<HTMLTextAreaElement>) => {
+  const onPromptWheel = (event: WheelEvent<HTMLDivElement>) => {
     const el = scrollRef.current
     const field = promptRef.current
     if (el === null || field === null) return
@@ -1465,36 +1732,45 @@ export default function SessionsPage({
         </div>
       )}
       <div className="prompt-scroll">
-        <textarea
+        <div
           ref={promptRef}
-          rows={1}
-          placeholder={
+          className="prompt-editor"
+          contentEditable={!inert && !optimizing}
+          suppressContentEditableWarning
+          role="textbox"
+          aria-multiline="true"
+          aria-label={inert ? t('heroChooseWorkspace') : t('chatPlaceholder')}
+          aria-readonly={inert || optimizing}
+          data-placeholder={
             inert
               ? t('placeholderWorkspace')
               : phase === 'hero'
                 ? t('placeholderHero')
                 : t('chatPlaceholder')
           }
-          value={prompt}
-          aria-label={inert ? t('heroChooseWorkspace') : t('chatPlaceholder')}
-          readOnly={inert || optimizing}
-          aria-readonly={optimizing}
-          onChange={(event) => {
-            setPrompt(event.target.value)
+          spellCheck={false}
+          onInput={() => {
+            // DOM 是草稿事实源:同步 prompt 镜像 + 触发检测(IME 组词期间
+            // 只同步状态,不刷新弹层)。Chrome 删空后常残留 <br>,清掉让
+            // :empty 占位符回归。
+            const el = promptRef.current
+            if (!el) return
+            const text = serializeEditor(el)
+            if (!composingRef.current && !text && el.childNodes.length > 0) el.replaceChildren()
+            setPrompt(text)
             syncPromptHeight()
-            if (!composingRef.current) refreshMentions()
-          }}
-          onSelect={() => {
-            // 光标移动不产生 onChange,单独检测 @ token。
-            if (!composingRef.current) refreshMentions()
+            if (!composingRef.current) refreshMenus()
           }}
           onCompositionStart={() => {
             composingRef.current = true
           }}
           onCompositionEnd={() => {
             composingRef.current = false
+            const el = promptRef.current
+            if (el) setPrompt(serializeEditor(el))
+            refreshMenus()
           }}
-          onPaste={(event) => void handlePaste(event)}
+          onPaste={onEditorPaste}
           onFocus={() => {
             if (inert) onOpenPicker()
           }}
@@ -1536,6 +1812,10 @@ export default function SessionsPage({
                     aria-selected={active}
                     data-kb={active || undefined}
                     className={`mention-menu-item${active ? ' kb' : ''}`}
+                    onMouseDown={(mouseEvent) => {
+                      // 阻止菜单夺焦:编辑器必须保住光标/选区,execCommand 才能落点。
+                      mouseEvent.preventDefault()
+                    }}
                     onMouseEnter={() => setMentionActive(index)}
                     onClick={() => pickMention(item)}
                   >
@@ -1550,6 +1830,67 @@ export default function SessionsPage({
                       {parent && <span className="mention-menu-parent">{parent}</span>}
                     </span>
                   </button>
+                )
+              })
+            )}
+          </div>
+        </>
+      )}
+      {slashOpen && (
+        <>
+          <div className="menu-backdrop" onClick={closeSlash} />
+          <div
+            className="mention-menu"
+            role="listbox"
+            aria-label={t('slashAria')}
+            ref={slashMenuRef}
+          >
+            {slashItems.length === 0 ? (
+              <div className="mention-menu-empty">{t('slashEmpty')}</div>
+            ) : (
+              slashItems.map((item, index) => {
+                const active = index === slashActive
+                const header =
+                  index === 0 || slashItems[index - 1].kind !== item.kind ? (
+                    <div className="slash-menu-group" role="presentation">
+                      {item.kind === 'command' ? t('slashGroupCommands') : t('slashGroupSkills')}
+                    </div>
+                  ) : null
+                return (
+                  <Fragment key={`${item.kind}:${item.name}`}>
+                    {header}
+                    <button
+                      type="button"
+                      role="option"
+                      aria-selected={active}
+                      data-kb={active || undefined}
+                      className={`mention-menu-item${active ? ' kb' : ''}`}
+                      onMouseDown={(mouseEvent) => {
+                        // 阻止菜单夺焦:编辑器必须保住光标/选区,execCommand 才能落点。
+                        mouseEvent.preventDefault()
+                      }}
+                      onMouseEnter={() => setSlashActive(index)}
+                      onClick={() => pickSlash(item)}
+                    >
+                      <span className="mention-menu-icon">
+                        {item.kind === 'command' ? (
+                          <IconSlashCommand name={item.name} size={13} />
+                        ) : (
+                          /* 技能:统一四角星,不按名字区分。 */
+                          <IconSparkles size={13} />
+                        )}
+                      </span>
+                      <span className="mention-menu-text">
+                        <span className="mention-menu-name-row">
+                          <span className="mention-menu-name">/{item.name}</span>
+                          {item.userOnly && (
+                            <span className="slash-badge">{t('slashBadgeUserOnly')}</span>
+                          )}
+                        </span>
+                        <span className="slash-menu-desc">{item.description}</span>
+                      </span>
+                    </button>
+                  </Fragment>
                 )
               })
             )}

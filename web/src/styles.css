@@ -2127,12 +2127,15 @@ button {
   overflow-y: auto;
 }
 
-.prompt-panel textarea {
-  display: block;
-  width: 100%;
+/*
+ * contentEditable 输入器(替代 textarea):DOM 是草稿事实源,卡片是
+ * contenteditable=false 的原子内联元素。排版基线必须与面板一致。
+ */
+.prompt-panel .prompt-editor {
+  min-height: 48px;
+  padding: 4px 16px 0;
   border: none;
   outline: none;
-  resize: none;
   overflow: hidden;
   background: transparent;
   color: var(--label-primary);
@@ -2140,15 +2143,20 @@ button {
   font-family: inherit;
   font-size: 14px;
   line-height: 24px;
-  min-height: 48px;
-  padding: 4px 16px 0;
+  white-space: pre-wrap;
+  word-break: normal;
+  overflow-wrap: break-word;
+  cursor: text;
 }
 
-.prompt-panel textarea::placeholder {
+/* 空态占位(编辑器无法用 ::placeholder,借 :empty + data-placeholder)。 */
+.prompt-panel .prompt-editor:empty::before {
+  content: attr(data-placeholder);
   color: var(--label-caption);
+  pointer-events: none;
 }
 
-.prompt-panel.pick-target textarea {
+.prompt-panel.pick-target .prompt-editor {
   color: var(--label-tertiary);
   cursor: pointer;
 }
@@ -2257,6 +2265,139 @@ button {
   text-overflow: ellipsis;
 }
 
+/* ---- 输入框 `/` 斜杠命令/技能(菜单复用 mention-menu;卡片用镜像层实现) ---- */
+
+/* 斜杠菜单分组标题(命令/技能),视觉对齐 mention-menu-heading。 */
+.slash-menu-group {
+  flex: none;
+  padding: 5px 8px 3px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--label-caption);
+}
+
+.mention-menu-name-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.mention-menu-name-row .mention-menu-name {
+  flex: none;
+}
+
+/* 「仅用户直调」徽标(disable-model-invocation 的技能)。 */
+.slash-badge {
+  flex: none;
+  padding: 1px 6px;
+  border-radius: var(--r-pill);
+  background: var(--accent-soft);
+  color: var(--label-tertiary);
+  font-size: 10.5px;
+  line-height: 1.4;
+}
+
+.slash-menu-desc {
+  font-size: 11.5px;
+  line-height: 1.3;
+  color: var(--label-tertiary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/*
+ * 卡片:contenteditable=false 的原子内联元素(图标 + 名字;序列化为 `/name`)。
+ *
+ * 皮肤「幽灵 ghost」:无底无框,识别交给图标(提亮到 secondary 当锚点)+ mono
+ * 名字,让卡片几乎融进正文;hover 才浮出淡底,补上「这是一个可删除的实体」
+ * 的边界感。对比旧灰胶囊:视觉噪声最低,长句阅读最顺,也不再和 @ 提及
+ * 菜单、工作区胶囊撞脸。
+ *
+ * 对齐口径:胶囊的几何中心 == 同行文字的视觉中心。
+ * 推导:卡片高度取一行行高(`1lh`,即 .prompt-editor 的 line-height),
+ * 再用 vertical-align: top 把 margin box 顶边贴到所在行框的顶边——高度
+ * 相等则中心重合,即得「卡片中心 == 行框中心」;而单行行框的上下半
+ * leading 恒对称,行框中心又恰好是文字 em 盒(ascent/descent)的中心。
+ * 于是胶囊中心与文字中心严格重合,且**不依赖任何字体度量**(CJK/拉丁混
+ * 排、mono 与正文字号不同都不影响)。
+ *
+ * 因此:卡片自身不带 border、垂直 margin 必须为 0——top 对齐按 margin
+ * box 计算,有 border 或垂直 margin 都会把中心从行框顶推开。视觉胶囊
+ * (背景/描边/圆角)画在 ::before 上,垂直居中于卡片即可。
+ */
+.slash-chip {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  /* 必须等于行框高;与 .prompt-editor 的 line-height 保持一致(1lh 自动跟随)。 */
+  height: 24px;
+  height: 1lh;
+  /* 垂直 margin 恒 0,否则 vertical-align: top 的基准被推开。 */
+  margin: 0 2px;
+  /* 无框皮肤:内边距收到 4px,靠 mono 与正文的字形差拉开距离。 */
+  padding: 0 4px;
+  vertical-align: top;
+  /* 字号继承同行文字:`1lh` 以自身 font-size 解析,写死会与行高脱钩。 */
+  font-size: inherit;
+  line-height: inherit;
+  white-space: nowrap;
+  user-select: none;
+}
+
+/*
+ * 皮肤本体:垂直居中于卡片,即居中于同行文字;默认完全透明(只占位),
+ * hover 时浮出 hover-fill 淡底——保留「可点/可删」的 affordance,又不
+ * 在静态阅读时制造噪声。留着这层是为了以后换皮肤只改这里。
+ */
+.slash-chip::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 50%;
+  height: 20px;
+  transform: translateY(-50%);
+  border-radius: 999px;
+  background: transparent;
+  border: 1px solid transparent;
+  transition: background 0.12s var(--ease);
+}
+
+.slash-chip:hover::before {
+  background: var(--hover-fill);
+}
+
+/* ::before 是定位元素,会盖住静态内容;内容提上来压在胶囊之上。 */
+.slash-chip > span {
+  position: relative;
+}
+
+/*
+ * 去掉前导 `/` 后,图标就是卡片的视觉锚点(也是唯一的边界提示),配色
+ * 从 tertiary 提到 secondary 并不再压透明度——但要压住不越过正文:正文是
+ * primary,这里停在中景,「能一眼扫到,又不抢读」。
+ */
+.slash-chip-icon {
+  display: inline-flex;
+  flex: none;
+  color: var(--label-secondary);
+}
+
+.slash-chip-label {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 500;
+  letter-spacing: 0.01em;
+  /* 行高压到 1em:flex 居中按 item 盒算,半 leading 越接近 0 越贴合视觉中心。 */
+  line-height: 1;
+  color: var(--label-primary);
+}
+
 /* 优化进行中:输入框银光呼吸,锁定编辑状态。 */
 .prompt-panel.optimizing {
   border-color: rgba(210, 220, 255, 0.28);
@@ -2267,7 +2408,7 @@ button {
   animation: optimize-glow 1.6s ease-in-out infinite;
 }
 
-.prompt-panel.optimizing textarea {
+.prompt-panel.optimizing .prompt-editor {
   color: var(--label-secondary);
   cursor: wait;
   text-shadow: 0 0 14px rgba(210, 225, 255, 0.35);
