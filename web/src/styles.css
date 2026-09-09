@@ -1279,8 +1279,13 @@ button {
 
 .stats-pill-button {
   border: none;
-  font: inherit;
   cursor: pointer;
+  /* 不能用 font: inherit 简写:同优先级且位于 .stats-pill 之后,会把
+     .stats-pill 的 font-size/line-height 覆盖回 body 默认值,导致胶囊变大。 */
+  /* 去掉原生控件外观:button 的 UA 样式带 appearance:auto,即使背景色被
+     CSS 覆盖,系统原生高光/边框仍会叠加,视觉上比其他胶囊更厚更浓。 */
+  appearance: none;
+  -webkit-appearance: none;
 }
 
 .cache-card {
