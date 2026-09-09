@@ -49,6 +49,17 @@ pub struct TurnTokenUsage {
     pub reasoning_tokens: u64,
 }
 
+impl TurnTokenUsage {
+    /// 计费口径的全量 token(五分量之和);goal 预算记账用同一口径。
+    pub fn total(&self) -> u64 {
+        self.uncached_input_tokens
+            .saturating_add(self.output_tokens)
+            .saturating_add(self.cache_read_tokens)
+            .saturating_add(self.cache_write_tokens)
+            .saturating_add(self.reasoning_tokens)
+    }
+}
+
 /// 上下文压力投影(对齐 dsh `contextPressure` 的 wire 形状,字段各自
 /// last-wins、可缺省,None 时不序列化)。
 ///

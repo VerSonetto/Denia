@@ -28,8 +28,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use denia_core::message::ChatMessage;
 use denia_core::session::{
-    PermissionMode, SESSION_FORMAT_VERSION, SessionEnvelope, SessionEvent, SessionHeader,
-    SessionHeaderKind, TurnEndReason, derive_messages,
+    GoalOp, GoalState, PermissionMode, SESSION_FORMAT_VERSION, SessionEnvelope, SessionEvent,
+    SessionHeader, SessionHeaderKind, TurnEndReason, apply_goal_op, derive_messages,
 };
 use denia_core::stream::ContentBlock;
 use denia_token_meter::{ContextBreakdown, ContextMeter, ContextPressure, TurnTokenUsage};
@@ -116,6 +116,8 @@ struct SessionInner {
     pending_turn: Vec<SessionEnvelope>,
     /// 当前权限模式(由 permission-mode 事件 fold;新会话默认 auto-edit)。
     permission_mode: PermissionMode,
+    /// 当前会话目标(goal 事件折叠;None = 无目标)。
+    goal: Option<GoalState>,
 }
 
 /// One live session: header, in-memory log, and its append handle. The log is
@@ -182,6 +184,7 @@ impl Session {
                     meter: ContextMeter::new(),
                     pending_turn: Vec::new(),
                     permission_mode: PermissionMode::AutoEdit,
+                    goal: None,
                 }),
             });
         }
@@ -212,6 +215,7 @@ impl Session {
         let mut last_turn = 0u32;
         let mut last_system_prompt: Option<String> = None;
         let mut permission_mode = PermissionMode::AutoEdit;
+        let mut goal: Option<GoalState> = None;
         let mut meter = ContextMeter::new();
         for line in lines {
             let with_newline = line.len() + 1;
@@ -231,6 +235,9 @@ impl Session {
                         _ => {}
                     }
                     meter.apply_one(&envelope);
+                    if let SessionEvent::Goal { op } = &envelope.event {
+                        goal = apply_goal_op(goal, op, envelope.time, meter.turn_usage().total());
+                    }
                     events.push(envelope)
                 }
                 Err(_) => {
@@ -266,6 +273,7 @@ impl Session {
                 meter,
                 pending_turn: Vec::new(),
                 permission_mode,
+                goal,
             }),
         };
         session.close_orphaned_turn()?;
@@ -374,6 +382,12 @@ impl Session {
             inner.meter.fold_turn(&slice);
         }
         inner.meter.apply_one(&envelope);
+        // goal 折叠放在 meter 维护之后:`Set` 的记账基数取此刻的精确累计,
+        // 与 load 回放(`apply_one` 之后折叠)时序一致。
+        if let SessionEvent::Goal { op } = &envelope.event {
+            let total = inner.meter.turn_usage().total();
+            inner.goal = apply_goal_op(inner.goal.take(), op, envelope.time, total);
+        }
 
         let line = serde_json::to_string(&envelope)?;
         writeln!(inner.writer, "{line}")?;
@@ -388,7 +402,9 @@ impl Session {
             | SessionEvent::StepEnd { .. }
             | SessionEvent::ToolResult { .. }
             | SessionEvent::TodoWrite { .. }
-            | SessionEvent::PermissionMode { .. } => {
+            | SessionEvent::PermissionMode { .. }
+            | SessionEvent::Goal { .. }
+            | SessionEvent::CommandRun { .. } => {
                 inner.writer.flush()?;
             }
             _ => {
@@ -457,6 +473,7 @@ impl Session {
         inner.last_turn = 0;
         inner.last_system_prompt = None;
         inner.permission_mode = PermissionMode::AutoEdit;
+        inner.goal = None;
         inner.meter = ContextMeter::new();
         inner.pending_turn.clear();
         let kept = inner.events.clone();
@@ -480,6 +497,10 @@ impl Session {
                 inner.meter.fold_turn(&slice);
             }
             inner.meter.apply_one(envelope);
+            if let SessionEvent::Goal { op } = &envelope.event {
+                let total = inner.meter.turn_usage().total();
+                inner.goal = apply_goal_op(inner.goal.take(), op, envelope.time, total);
+            }
         }
 
         // 回退审计:独立于 session.jsonl 追加,物理截断不会抹掉这段记录。
@@ -597,6 +618,38 @@ impl Session {
             .lock()
             .unwrap_or_else(|poison| poison.into_inner())
             .permission_mode
+    }
+
+    /// 当前会话目标(goal 事件折叠,O(1));`None` = 无目标。
+    pub fn goal(&self) -> Option<GoalState> {
+        self.inner
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .goal
+            .clone()
+    }
+
+    /// 目标记账(减法):激活后的 token 消耗 = 会话精确累计 − 激活时快照。
+    /// 无目标时返回 `None`。
+    pub fn goal_tokens_used(&self) -> Option<u64> {
+        let inner = self
+            .inner
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let goal = inner.goal.as_ref()?;
+        Some(
+            inner
+                .meter
+                .turn_usage()
+                .total()
+                .saturating_sub(goal.base_tokens),
+        )
+    }
+
+    /// 写一个 goal 操作事件(事件源折叠,O(1) 生效);调用方负责在写前
+    /// 校验状态转换合法(fold 端对非法转换做忽略兜底)。
+    pub fn apply_goal(&self, op: GoalOp) -> Result<SessionEnvelope, SessionError> {
+        self.append(SessionEvent::Goal { op })
     }
 
     /// 切换会话权限模式:追加 permission-mode 事件(事件源折叠,O(1) 生效)。
@@ -1795,6 +1848,49 @@ mod tests {
         }
         assert!(PM::parse("plan").is_some());
         assert!(PM::parse("nonsense").is_none());
+    }
+
+    #[test]
+    fn goal_events_fold_last_wins_and_survive_reload() {
+        use denia_core::session::{GoalOp, GoalStatus};
+        let root = temp_root();
+        let store = SessionStore::open(&root).unwrap();
+        let session = store.create(&root, true).unwrap();
+        assert_eq!(session.goal(), None);
+        assert_eq!(session.goal_tokens_used(), None);
+
+        session
+            .apply_goal(GoalOp::Set {
+                objective: "修完回归".into(),
+                token_budget: Some(1_000),
+            })
+            .unwrap();
+        let goal = session.goal().expect("goal should exist");
+        assert_eq!(goal.status, GoalStatus::Active);
+        assert_eq!(goal.token_budget, Some(1_000));
+        assert_eq!(goal.base_tokens, 0, "新会话激活基数为零");
+        assert_eq!(session.goal_tokens_used(), Some(0));
+
+        session.apply_goal(GoalOp::Round).unwrap();
+        session.apply_goal(GoalOp::Pause).unwrap();
+        assert_eq!(session.goal().unwrap().status, GoalStatus::Paused);
+        assert_eq!(session.goal().unwrap().rounds_started, 1);
+
+        // fork 种子继承:goal 事件随日志前缀复制到新会话。
+        let fork = store.create(&root, true).unwrap();
+        fork.seed_from(&session.events()).unwrap();
+        let inherited = fork.goal().expect("fork should inherit goal");
+        assert_eq!(inherited.objective, "修完回归");
+        assert_eq!(inherited.rounds_started, 1);
+
+        // 清除与重载持久化。
+        session.apply_goal(GoalOp::Clear).unwrap();
+        assert_eq!(session.goal(), None);
+        let id = session.id().to_string();
+        drop(session);
+        let loaded = store.load(&id).unwrap();
+        assert_eq!(loaded.goal(), None, "清除后的重载保持无目标");
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]

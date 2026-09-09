@@ -295,6 +295,239 @@ pub enum TodoStatus {
     Completed,
 }
 
+/// 会话目标的生命周期状态(工作逻辑对照 codex thread goals;codex 的
+/// `usage_limited` 是账号配额概念,denia 走 API key 无此反馈,不设)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum GoalStatus {
+    /// 进行中:harness 会在会话空闲时自动续跑(goal 轮)。
+    Active,
+    /// 已暂停:用户手动暂停或中止了运行中的轮次,等待恢复。
+    Paused,
+    /// 受阻:模型标记无法推进,或执行连续失败达到上限。
+    Blocked,
+    /// 预算耗尽:tokens_used 达到 token_budget;只允许一次收尾轮。
+    BudgetLimited,
+    /// 已完成:模型标记目标达成;终态,只能清除后重建。
+    Complete,
+}
+
+impl GoalStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Active => "active",
+            Self::Paused => "paused",
+            Self::Blocked => "blocked",
+            Self::BudgetLimited => "budget-limited",
+            Self::Complete => "complete",
+        }
+    }
+
+    /// 中文状态标签(模型侧注入与工具结果的统一口径)。
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Active => "进行中",
+            Self::Paused => "已暂停",
+            Self::Blocked => "受阻",
+            Self::BudgetLimited => "预算已用尽",
+            Self::Complete => "已完成",
+        }
+    }
+}
+
+/// 会话目标的持久化快照(`goal` 事件折叠后的当前值)。
+///
+/// 记账采用减法:`tokens_used = 会话累计 token - base_tokens`,因此
+/// `base_tokens` 记录目标激活时刻的会话累计;pause/resume 不重置总账,
+/// 一个目标生命周期内的花费连续累计。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GoalState {
+    pub objective: String,
+    pub status: GoalStatus,
+    /// token 预算(可选);`None` = 不限,续跑只受轮数上限约束。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_budget: Option<u64>,
+    /// 受阻原因(blocked 时的 hover 提示与模型侧上下文)。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocked_reason: Option<String>,
+    /// 目标激活时刻的会话累计 token 快照(减法记账基数)。
+    #[serde(default)]
+    pub base_tokens: u64,
+    /// 已发起的 goal 续跑轮数(含预算收尾轮;用户手动轮次不计)。
+    #[serde(default)]
+    pub rounds_started: u32,
+    pub created_at: u64,
+    pub updated_at: u64,
+}
+
+/// 目标操作(事件负载)。状态机转换见 [`apply_goal_op`]:合法转换生效,
+/// 非法转换在折叠时忽略(回放健壮性);调用方(API/工具)应在写事件前
+/// 校验转换合法性并显式报错,两层各司其职。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum GoalOp {
+    /// 创建目标(仅当当前无目标;已存在时忽略——用户先清除再重建)。
+    Set {
+        objective: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        token_budget: Option<u64>,
+    },
+    /// 编辑目标文本与/或预算。blocked/budget-limited 下编辑视为用户重新
+    /// 出发,状态回到 active;paused 保持暂停;complete 忽略(终态)。
+    Edit {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        objective: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        token_budget: Option<u64>,
+    },
+    /// 暂停(仅 active 生效)。
+    Pause,
+    /// 恢复(paused/blocked → active;budget-limited/complete 拒绝)。
+    Resume,
+    /// goal 续跑轮 +1(由续跑发起方在 turn 开始前写)。
+    Round,
+    /// 模型标记目标达成。
+    Complete,
+    /// 标记受阻(模型无法推进;连续执行失败达到上限时也走这里)。
+    Block {
+        #[serde(default)]
+        reason: String,
+    },
+    /// token 预算耗尽(active → budget-limited);随后至多发起一轮收尾。
+    BudgetLimit,
+    /// 清除目标(唯一回到"无目标"的操作)。
+    Clear,
+}
+
+/// 目标状态机的集中折叠:返回操作后的新状态;`None` 输入仅接受 `Set`,
+/// `None` 输出仅由 `Clear` 产生。`activation_tokens` 是 `Set` 时刻的会话
+/// 累计 token(减法记账基数),由持有 meter 的折叠方传入。
+pub fn apply_goal_op(
+    current: Option<GoalState>,
+    op: &GoalOp,
+    now: u64,
+    activation_tokens: u64,
+) -> Option<GoalState> {
+    let touch = |mut goal: GoalState| {
+        goal.updated_at = now;
+        goal
+    };
+    match op {
+        GoalOp::Set {
+            objective,
+            token_budget,
+        } => {
+            // 已有目标时忽略——例外:complete 是终态,用户重新设置目标
+            // (GoalBar 已不可见)视为直接重开,替换旧目标。
+            if current
+                .as_ref()
+                .is_some_and(|goal| goal.status != GoalStatus::Complete)
+            {
+                return current;
+            }
+            Some(GoalState {
+                objective: objective.clone(),
+                status: GoalStatus::Active,
+                // 0 与缺省同义:不设预算(否则 0 预算会立刻耗尽)。
+                token_budget: token_budget.filter(|budget| *budget > 0),
+                blocked_reason: None,
+                base_tokens: activation_tokens,
+                rounds_started: 0,
+                created_at: now,
+                updated_at: now,
+            })
+        }
+        GoalOp::Edit {
+            objective,
+            token_budget,
+        } => {
+            let Some(mut goal) = current.clone() else {
+                return None;
+            };
+            if goal.status == GoalStatus::Complete {
+                return Some(goal);
+            }
+            if let Some(text) = objective {
+                if text.trim().is_empty() {
+                    return Some(goal);
+                }
+                goal.objective = text.trim().to_string();
+            }
+            // Some(0) 显式清除预算;其余非零值更新。
+            if let Some(budget) = token_budget {
+                goal.token_budget = if *budget == 0 { None } else { Some(*budget) };
+            }
+            // 用户编辑 = 重新出发:受阻/预算耗尽回到进行中;暂停保持暂停。
+            if matches!(
+                goal.status,
+                GoalStatus::Blocked | GoalStatus::BudgetLimited
+            ) {
+                goal.status = GoalStatus::Active;
+                goal.blocked_reason = None;
+            }
+            Some(touch(goal))
+        }
+        GoalOp::Pause => {
+            let Some(mut goal) = current.clone() else {
+                return None;
+            };
+            if goal.status == GoalStatus::Active {
+                goal.status = GoalStatus::Paused;
+            }
+            Some(touch(goal))
+        }
+        GoalOp::Resume => {
+            let Some(mut goal) = current.clone() else {
+                return None;
+            };
+            if matches!(goal.status, GoalStatus::Paused | GoalStatus::Blocked) {
+                goal.status = GoalStatus::Active;
+                goal.blocked_reason = None;
+            }
+            Some(touch(goal))
+        }
+        GoalOp::Round => {
+            let Some(mut goal) = current.clone() else {
+                return None;
+            };
+            goal.rounds_started = goal.rounds_started.saturating_add(1);
+            Some(touch(goal))
+        }
+        GoalOp::Complete => {
+            let Some(mut goal) = current.clone() else {
+                return None;
+            };
+            if goal.status != GoalStatus::Complete {
+                goal.status = GoalStatus::Complete;
+                goal.blocked_reason = None;
+            }
+            Some(touch(goal))
+        }
+        GoalOp::Block { reason } => {
+            let Some(mut goal) = current.clone() else {
+                return None;
+            };
+            if goal.status != GoalStatus::Complete {
+                goal.status = GoalStatus::Blocked;
+                goal.blocked_reason =
+                    (!reason.trim().is_empty()).then(|| reason.trim().to_string());
+            }
+            Some(touch(goal))
+        }
+        GoalOp::BudgetLimit => {
+            let Some(mut goal) = current.clone() else {
+                return None;
+            };
+            if goal.status == GoalStatus::Active {
+                goal.status = GoalStatus::BudgetLimited;
+            }
+            Some(touch(goal))
+        }
+        GoalOp::Clear => None,
+    }
+}
+
 /// 为何写入 `request-header` 快照(对齐 dsh `RequestHeaderReason`)。
 ///
 /// - `initial` — 日志里第一条 header(全新会话的第一次请求);
@@ -464,11 +697,26 @@ pub enum SessionEvent {
         #[serde(default)]
         post_tokens: u64,
     },
-    /// Whole-list todo snapshot; latest write wins on replay. Log-only UI
-    /// state — never part of the derived model history.
-    TodoWrite {
-        todos: Vec<TodoItem>,
-    },
+/// Whole-list todo snapshot; latest write wins on replay. Log-only UI
+/// state — never part of the derived model history.
+TodoWrite {
+    todos: Vec<TodoItem>,
+},
+/// 会话目标(goal 模式)的一次操作。日志持久、可回放、fork 随种子继承,
+/// 不进入模型历史;模型侧的目标感知走 `channel: "goal"` 注入消息。
+/// 投影语义见 [`apply_goal_op`]:操作即意图,状态机集中折叠。
+Goal {
+    op: GoalOp,
+},
+/// 本地斜杠命令的回显(如 `/goal <目标>`):落日志获得真实 seq,前端
+/// 按序渲染为右对齐命令气泡——命令的"发送"必须有可见且排序正确的
+/// 结果。仅日志;不进入模型历史,也不携带任何目标状态语义。
+CommandRun {
+    /// 命令名(如 `goal`)。
+    name: String,
+    /// 用户输入的完整原文(含 `/name` 前缀)。
+    text: String,
+},
     /// 会话权限模式切换(抄 dsh sandbox/mode):日志持久、可回放,
     /// 不进入模型历史;driver 读 fold 后的当前值做策略判断。
     PermissionMode {
@@ -1207,6 +1455,99 @@ mod tests {
             serde_json::from_str::<TurnEndReason>(&json).unwrap(),
             reason
         );
+    }
+
+    /// goal 状态机转换矩阵 + 事件 round-trip。
+    #[test]
+    fn goal_op_state_machine_and_round_trip() {
+        let base = |status| GoalState {
+            objective: "修完回归".into(),
+            status,
+            token_budget: None,
+            blocked_reason: None,
+            base_tokens: 100,
+            rounds_started: 2,
+            created_at: 1,
+            updated_at: 1,
+        };
+        // Set 仅在无目标时生效。
+        assert_eq!(
+            apply_goal_op(None, &GoalOp::Set { objective: "x".into(), token_budget: Some(5) }, 7, 42)
+                .unwrap()
+                .objective,
+            "x"
+        );
+        let seeded = apply_goal_op(None, &GoalOp::Set { objective: "x".into(), token_budget: Some(5) }, 7, 42).unwrap();
+        assert_eq!(seeded.base_tokens, 42);
+        assert_eq!(seeded.status, GoalStatus::Active);
+        assert_eq!(
+            apply_goal_op(Some(seeded.clone()), &GoalOp::Set { objective: "y".into(), token_budget: None }, 8, 9)
+                .unwrap()
+                .objective,
+            "x",
+            "已有目标时 Set 忽略"
+        );
+        // Round 累计;Pause/Resume 矩阵。
+        assert_eq!(
+            apply_goal_op(Some(base(GoalStatus::Active)), &GoalOp::Round, 3, 0).unwrap().rounds_started,
+            3
+        );
+        assert_eq!(
+            apply_goal_op(Some(base(GoalStatus::Active)), &GoalOp::Pause, 3, 0).unwrap().status,
+            GoalStatus::Paused
+        );
+        assert_eq!(
+            apply_goal_op(Some(base(GoalStatus::Paused)), &GoalOp::Resume, 3, 0).unwrap().status,
+            GoalStatus::Active
+        );
+        assert_eq!(
+            apply_goal_op(Some(base(GoalStatus::BudgetLimited)), &GoalOp::Resume, 3, 0).unwrap().status,
+            GoalStatus::BudgetLimited,
+            "预算耗尽状态 resume 拒绝"
+        );
+        // Edit:受阻/预算耗尽回 active;complete 终态忽略;暂停保持。
+        let edited = apply_goal_op(
+            Some(base(GoalStatus::Blocked)),
+            &GoalOp::Edit { objective: Some("新目标".into()), token_budget: Some(10) },
+            4,
+            0,
+        )
+        .unwrap();
+        assert_eq!((edited.status, edited.objective.as_str(), edited.token_budget),
+            (GoalStatus::Active, "新目标", Some(10)));
+        assert_eq!(
+            apply_goal_op(Some(base(GoalStatus::Paused)), &GoalOp::Edit { objective: None, token_budget: None }, 4, 0)
+                .unwrap()
+                .status,
+            GoalStatus::Paused,
+            "暂停中编辑保持暂停"
+        );
+        assert_eq!(
+            apply_goal_op(Some(base(GoalStatus::Complete)), &GoalOp::Edit { objective: Some("z".into()), token_budget: None }, 4, 0)
+                .unwrap()
+                .objective,
+            "修完回归",
+            "complete 终态忽略编辑"
+        );
+        // BudgetLimit 仅 active 生效;Clear 回 None。
+        assert_eq!(
+            apply_goal_op(Some(base(GoalStatus::Paused)), &GoalOp::BudgetLimit, 5, 0).unwrap().status,
+            GoalStatus::Paused
+        );
+        assert_eq!(
+            apply_goal_op(Some(base(GoalStatus::Active)), &GoalOp::BudgetLimit, 5, 0).unwrap().status,
+            GoalStatus::BudgetLimited
+        );
+        assert_eq!(apply_goal_op(Some(base(GoalStatus::Active)), &GoalOp::Clear, 6, 0), None);
+        assert_eq!(apply_goal_op(None, &GoalOp::Clear, 6, 0), None);
+        // 事件序列化:tag + kebab-case。
+        let env = envelope(9, SessionEvent::Goal { op: GoalOp::Block { reason: "卡住了".into() } });
+        let json = serde_json::to_string(&env).unwrap();
+        assert!(json.contains(r#""type":"goal""#), "{json}");
+        assert!(json.contains(r#""kind":"block""#), "{json}");
+        assert_eq!(serde_json::from_str::<SessionEnvelope>(&json).unwrap(), env);
+        let round = envelope(10, SessionEvent::Goal { op: GoalOp::Round });
+        assert!(serde_json::to_string(&round).unwrap().contains(r#""kind":"round""#));
     }
 
     #[test]
