@@ -812,6 +812,16 @@ fn register_namespaces(settings: &SettingsStore) -> Result<(), Box<dyn std::erro
         json!({}),
     )?;
     settings.register(
+        "goals",
+        NamespaceSpec {
+            defaults: serde_json::to_value(crate::agent_runtime::GoalsConfig::default())?,
+            validate: crate::agent_runtime::validate_goals_config,
+            secrets: &[],
+            applies: Applies::Live,
+        },
+        json!({}),
+    )?;
+    settings.register(
         CONSOLE_NS,
         NamespaceSpec {
             defaults: json!({ "theme": "system", "locale": "zh" }),

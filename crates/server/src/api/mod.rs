@@ -6,6 +6,7 @@ mod browser_recon;
 mod credentials;
 mod events;
 mod fs;
+mod goal;
 mod llm;
 mod runtime;
 mod sessions;
@@ -28,6 +29,7 @@ pub fn router() -> Router<Arc<AppState>> {
         .merge(credentials::router())
         .merge(llm::router())
         .merge(sessions::router())
+        .merge(goal::router())
         .merge(runtime::router())
         .merge(workspaces::router())
         .merge(uploads::router())

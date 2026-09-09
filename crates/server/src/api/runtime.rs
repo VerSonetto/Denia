@@ -65,6 +65,7 @@ async fn message(
         permission_mode: live.session.permission_mode(),
         ask: None,
         call_id: None,
+        goal_reader: None,
     };
     Ok(Json(
         state

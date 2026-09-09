@@ -6,7 +6,7 @@ use crate::{
 use async_trait::async_trait;
 use denia_core::{
     config::ModelSelection,
-    session::{SessionEnvelope, SessionEvent, SubagentDescriptor},
+    session::{GoalOp, SessionEnvelope, SessionEvent, SubagentDescriptor},
 };
 use denia_tools::{ToolContext, capabilities::AgentRuntime};
 use serde::{Deserialize, Serialize};
@@ -79,6 +79,42 @@ pub fn validate_config(value: Value) -> Result<Value, String> {
     }
     serde_json::to_value(c).map_err(|e| e.to_string())
 }
+
+/// goals 模式配置(工作逻辑对照 codex `[goals]`;轮数上限对齐 dsh
+/// `maxGoalRounds`)。
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(default, rename_all = "camelCase", deny_unknown_fields)]
+pub struct GoalsConfig {
+    /// 全局 token 预算上限:设置目标预算时超过此值被拒绝(codex
+    /// `max_goal_token_budget`)。
+    pub max_goal_token_budget: u64,
+    /// 每个目标的续跑轮数上限;耗尽后停止自动续跑(状态保持 active,
+    /// resume 被拒),对齐 dsh 256 轮语义。
+    pub max_rounds: u32,
+    /// 连续执行失败(Error/LoopDetected)达到该次数即标记 blocked
+    /// (codex `stop_active_goal_after_repeated_execution_failures`)。
+    pub max_consecutive_failures: u32,
+}
+impl Default for GoalsConfig {
+    fn default() -> Self {
+        Self {
+            max_goal_token_budget: 10_000_000,
+            max_rounds: 256,
+            max_consecutive_failures: 3,
+        }
+    }
+}
+pub fn validate_goals_config(value: Value) -> Result<Value, String> {
+    let c: GoalsConfig =
+        serde_json::from_value(value).map_err(|e| format!("goals 配置无效：{e}"))?;
+    if !(1..=100_000_000).contains(&c.max_goal_token_budget)
+        || !(1..=10_000).contains(&c.max_rounds)
+        || !(1..=16).contains(&c.max_consecutive_failures)
+    {
+        return Err("goals 配置超出允许范围".into());
+    }
+    serde_json::to_value(c).map_err(|e| e.to_string())
+}
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct Child {
@@ -106,6 +142,8 @@ struct Inner {
     paused: Mutex<HashSet<String>>,
     admission: tokio::sync::Mutex<()>,
     reserved: Mutex<HashSet<String>>,
+    /// goal 轮连续失败计数(会话级内存护栏;成功轮清零,blocked 后移除)。
+    goal_failures: Mutex<HashMap<String, u32>>,
     registry: Arc<denia_llm::LlmRegistry>,
     workspaces: Arc<crate::workspace::WorkspaceRegistry>,
     pub jobs: Arc<Jobs>,
@@ -167,6 +205,7 @@ impl Runtime {
                 paused: Mutex::new(HashSet::new()),
                 admission: tokio::sync::Mutex::new(()),
                 reserved: Mutex::new(HashSet::new()),
+                goal_failures: Mutex::new(HashMap::new()),
                 registry,
                 workspaces,
                 jobs: Jobs::new(),
@@ -215,6 +254,14 @@ impl Runtime {
             .and_then(|s| serde_json::from_value(s).ok())
             .unwrap_or_default()
     }
+    pub fn goals_config(&self) -> GoalsConfig {
+        self.inner
+            .settings
+            .resolved("goals")
+            .ok()
+            .and_then(|s| serde_json::from_value(s).ok())
+            .unwrap_or_default()
+    }
     pub fn human_turn(&self, id: &str, selection: &ModelSelection) {
         self.inner.paused.lock().unwrap().remove(id);
         self.inner
@@ -223,6 +270,8 @@ impl Runtime {
             .unwrap()
             .insert(id.into(), selection.clone());
         self.inner.wakes.lock().unwrap().insert(id.into(), 0);
+        // 用户的真实轮次 = 模型重新获得成功执行:goal 失败计数清零。
+        self.inner.goal_failures.lock().unwrap().remove(id);
     }
     fn is_active(&self, id: &str) -> bool {
         self.inner
@@ -480,6 +529,205 @@ impl Runtime {
         self.on_idle(id);
         Ok(())
     }
+    /// 写一个 goal 操作事件(阻塞 fs → spawn_blocking)并推给 follow 订阅者。
+    async fn publish_goal(
+        live: &Arc<crate::state::LiveSession>,
+        op: GoalOp,
+    ) -> Result<SessionEnvelope, String> {
+        let owned = live.clone();
+        let envelope = tokio::task::spawn_blocking(move || -> Result<SessionEnvelope, String> {
+            let envelope = owned.session.apply_goal(op).map_err(|e| e.to_string())?;
+            owned.session.flush().map_err(|e| e.to_string())?;
+            Ok(envelope)
+        })
+        .await
+        .map_err(|e| e.to_string())??;
+        let _ = live.followers.send(envelope.clone());
+        Ok(envelope)
+    }
+
+    fn turn_failure_summary(reason: &denia_core::session::TurnEndReason) -> String {
+        match reason {
+            denia_core::session::TurnEndReason::Error { failure } => {
+                format!("{}({})", failure.message, failure.code)
+            }
+            denia_core::session::TurnEndReason::LoopDetected { repeats } => {
+                format!("死循环保护触发(连续重复 {repeats} 次)")
+            }
+            _ => "执行失败".into(),
+        }
+    }
+
+    /// goal 续跑入口:turn 结束(idle)或状态恢复后调用。目标 active 且
+    /// 预算/轮次/失败护栏都放行时,自动发起新的 goal 轮(对照 codex
+    /// `continue_active_goal_for_idle_thread`);与 inbox 唤醒通过 running
+    /// CAS 自然互斥,后到者放弃,等下一轮 on_idle 收敛。
+    pub fn continue_goal(&self, id: &str) {
+        let runtime = self.clone();
+        let id = id.to_string();
+        tokio::spawn(async move {
+            if let Err(error) = runtime.continue_goal_inner(&id).await {
+                tracing::warn!(session = %id, %error, "goal 续跑检查失败");
+            }
+        });
+    }
+
+    async fn continue_goal_inner(&self, id: &str) -> Result<(), String> {
+        let live = self.live(id).await?;
+        if live.session.header().subagent.is_some() {
+            return Ok(());
+        }
+        let Some(goal) = live.session.goal() else {
+            return Ok(());
+        };
+        if goal.status != denia_core::session::GoalStatus::Active {
+            return Ok(());
+        }
+        let config = self.goals_config();
+
+        // 上一轮结局分类(设置 goal 后还没有任何 turn 视为正常,直接开跑)。
+        let last_reason = live.session.events().iter().rev().find_map(|e| match &e.event {
+            SessionEvent::TurnEnd { reason, .. } => Some(reason.clone()),
+            _ => None,
+        });
+        match &last_reason {
+            // 用户手动停止:目标自动暂停,等用户恢复——避免"停不下来"。
+            Some(denia_core::session::TurnEndReason::Aborted { .. }) => {
+                Self::publish_goal(&live, GoalOp::Pause).await?;
+                return Ok(());
+            }
+            // 执行失败:计数 +1;达到上限标记 blocked,未达限等用户处理
+            // (自动重试大概率再失败,烧预算)。
+            Some(
+                reason @ (denia_core::session::TurnEndReason::Error { .. }
+                | denia_core::session::TurnEndReason::LoopDetected { .. }),
+            ) => {
+                let failures = {
+                    let mut map = self.inner.goal_failures.lock().unwrap();
+                    let count = map.entry(id.to_string()).or_default();
+                    *count += 1;
+                    *count
+                };
+                if failures >= config.max_consecutive_failures {
+                    self.inner.goal_failures.lock().unwrap().remove(id);
+                    let summary = Self::turn_failure_summary(reason);
+                    Self::publish_goal(
+                        &live,
+                        GoalOp::Block {
+                            reason: format!("连续 {failures} 轮执行失败,最近一次:{summary}"),
+                        },
+                    )
+                    .await?;
+                }
+                return Ok(());
+            }
+            Some(_) => {
+                self.inner.goal_failures.lock().unwrap().remove(id);
+            }
+            None => {}
+        }
+
+        // 预算检查:耗尽 → budget_limited + 最后一轮收尾(收尾轮结束后
+        // 状态非 active,自然停止;用户提高预算会回到 active)。
+        let used = live.session.goal_tokens_used().unwrap_or(0);
+        let wrapup = goal
+            .token_budget
+            .is_some_and(|budget| used >= budget);
+        if wrapup {
+            Self::publish_goal(&live, GoalOp::BudgetLimit).await?;
+        } else if goal.rounds_started >= config.max_rounds {
+            // 轮次耗尽:状态保持 active,不再续跑(dsh 语义:resume 被拒)。
+            return Ok(());
+        }
+
+        // selection 回推(仿 resume_pending:内存优先,日志 RequestHeader 兜底)。
+        let selection = self
+            .inner
+            .selections
+            .lock()
+            .unwrap()
+            .get(id)
+            .cloned()
+            .or_else(|| {
+                live.session.events().iter().rev().find_map(|e| {
+                    if let SessionEvent::RequestHeader {
+                        header: snapshot, ..
+                    } = &e.event
+                    {
+                        Some(ModelSelection {
+                            provider: snapshot.config.provider.clone(),
+                            model: snapshot.config.model.clone(),
+                            reasoning_effort: snapshot.config.reasoning_effort.clone(),
+                        })
+                    } else {
+                        None
+                    }
+                })
+            });
+        let Some(selection) = selection else {
+            return Ok(());
+        };
+        if live
+            .running
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
+            return Ok(());
+        }
+        let guard = RunningGuard::new(live.clone(), self.inner.events.clone());
+        let token = CancellationToken::new();
+        *live.cancel.lock().unwrap() = Some(token.clone());
+        let _ = self.inner.events.send(ServerEvent::RunningChanged {
+            id: id.into(),
+            running: true,
+        });
+
+        // Round 事件:轮次推进落盘。续跑提示不再单独落 goal-round 消息——
+        // 目标状态块(channel "goal")携带轮次与用量,每轮用量变化使注入
+        // 内容自动更新一次,避免同一轮出现两条重复的"[denia 目标]"消息。
+        let round = goal.rounds_started + 1;
+        let _round_envelope = Self::publish_goal(&live, GoalOp::Round).await?;
+        tracing::debug!(session = id, round = round, "goal 轮次推进");
+
+        let vision_supported = self
+            .inner
+            .registry
+            .resolve_call(
+                &selection.provider,
+                &selection.model,
+                selection.reasoning_effort.as_deref(),
+            )
+            .await
+            .map(|r| r.info.input_modalities.iter().any(|m| m == "image"))
+            .unwrap_or(false);
+        let driver = self
+            .inner
+            .driver
+            .get()
+            .and_then(Weak::upgrade)
+            .ok_or("会话驱动器尚未就绪")?;
+        let followers = live.followers.clone();
+        let emit: Arc<dyn Fn(&SessionEnvelope) + Send + Sync> = Arc::new(move |e| {
+            let _ = followers.send(e.clone());
+        });
+        driver
+            .run_turn(
+                &live.session,
+                &selection,
+                "",
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                vision_supported,
+                token,
+                emit,
+            )
+            .await;
+        drop(guard);
+        self.on_idle(id);
+        Ok(())
+    }
+
     pub fn on_idle(&self, id: &str) {
         self.inner.reserved.lock().unwrap().remove(id);
         let aborted = self.inner.live.get(id).is_some_and(|l| {
@@ -518,6 +766,9 @@ impl Runtime {
                 self.wake(&queued_id);
             }
         }
+        // goal 续跑检查:active 目标在会话空闲时自动开新轮(子代理无 goal,
+        // 内部自检跳过;与 inbox 唤醒靠 running CAS 互斥)。
+        self.continue_goal(id);
         let runtime = self.clone();
         let id = id.to_string();
         tokio::spawn(async move {
@@ -1277,6 +1528,7 @@ mod tests {
             permission_mode: denia_core::session::PermissionMode::AutoEdit,
             ask: None,
             call_id: None,
+            goal_reader: None,
         };
         (state, ctx)
     }
@@ -1544,6 +1796,191 @@ mod tests {
             .await
             .unwrap();
         assert!(state.sessions.load(id).is_err());
+    }
+
+    /// goal 模式端到端:设置目标后空闲会话自动续跑,跑到轮次上限自动停;
+    /// 状态转换 fail loud;清除后回归无目标。
+    #[tokio::test]
+    async fn goal_rounds_auto_continue_and_stop_at_max_rounds() {
+        let (state, _) = setup();
+        state
+            .settings
+            .update("goals", json!({"maxRounds": 2}), None)
+            .unwrap();
+        let state = Arc::new(state);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let router = crate::api::router().with_state(state.clone());
+        let server = tokio::spawn(async move {
+            axum::serve(listener, router).await.unwrap();
+        });
+        let client = reqwest::Client::new();
+        let created: Value = client
+            .post(format!("{base}/api/sessions"))
+            .json(&json!({"cwd": state.home}))
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let id = created["session"]["id"].as_str().unwrap().to_string();
+        let goal_url = format!("{base}/api/sessions/{id}/goal");
+
+        // 预热一轮:goal 续跑的 selection 依赖请求头回推(先跑过普通轮)。
+        let status = client
+            .post(format!("{base}/api/sessions/{id}/prompt"))
+            .json(&json!({"prompt":"预热","provider":"runtime-test","model":"done"}))
+            .send()
+            .await
+            .unwrap()
+            .status();
+        assert_eq!(status, axum::http::StatusCode::ACCEPTED);
+        tokio::time::timeout(std::time::Duration::from_secs(15), async {
+            loop {
+                let live = state.live.get(&id).unwrap();
+                if !live.running.load(Ordering::SeqCst)
+                    && live.session.next_turn_number() > 1
+                {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+            }
+        })
+        .await
+        .unwrap();
+
+        // 初始:无目标;非法转换 fail loud。
+        let view: Value = client.get(&goal_url).send().await.unwrap().json().await.unwrap();
+        assert!(view["goal"].is_null());
+        assert_eq!(
+            client
+                .post(&goal_url)
+                .json(&json!({"action":"pause"}))
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            axum::http::StatusCode::BAD_REQUEST
+        );
+
+        // 设置目标:空闲会话立即自动续跑,跑到轮次上限(maxRounds=2)停止。
+        client
+            .post(&goal_url)
+            .json(&json!({"action":"set","objective":"验证 goal 续跑","tokenBudget":123}))
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(20), async {
+            loop {
+                let live = state.live.get(&id).unwrap();
+                let rounds = live.session.goal().map(|g| g.rounds_started).unwrap_or(0);
+                if rounds >= 2 && !live.running.load(Ordering::SeqCst) {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let live = state.live.get(&id).unwrap();
+        let goal = live.session.goal().unwrap();
+        assert_eq!(goal.rounds_started, 2, "跑满两轮后必须停止");
+        assert_eq!(
+            goal.status,
+            denia_core::session::GoalStatus::Active,
+            "轮次耗尽保持 active(不自动续,但状态不谎报)"
+        );
+        let events = live.session.events();
+        // 目标状态块(channel=goal)在每轮内容变化时注入一次:轮次与
+        // 用量随轮推进,状态块逐轮更新;不再有单独的 goal-round 消息。
+        let injected = events
+            .iter()
+            .filter(|e| {
+                matches!(
+                    &e.event,
+                    SessionEvent::UserMessage {
+                        channel: Some(c),
+                        injected: true,
+                        ..
+                    } if c == "goal"
+                )
+            })
+            .count();
+        assert_eq!(injected, 2, "每轮一条 goal 状态注入");
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| matches!(&e.event, SessionEvent::Goal { op: GoalOp::Round }))
+                .count(),
+            2
+        );
+        assert!(events.iter().any(|e| matches!(
+            &e.event,
+            SessionEvent::UserMessage { text, .. }
+                if text.contains("[denia 目标]") && text.contains("已发起续跑轮数:1")
+        )));
+        assert!(events.iter().any(|e| matches!(
+            &e.event,
+            SessionEvent::UserMessage { text, .. } if text.contains("已发起续跑轮数:2")
+        )));
+
+        // 暂停/恢复/清除的状态转换。
+        let view: Value = client
+            .post(&goal_url)
+            .json(&json!({"action":"pause"}))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(view["goal"]["status"], "paused");
+        assert_eq!(
+            client
+                .post(&goal_url)
+                .json(&json!({"action":"pause"}))
+                .send()
+                .await
+                .unwrap()
+                .status(),
+            axum::http::StatusCode::BAD_REQUEST
+        );
+        let view: Value = client
+            .post(&goal_url)
+            .json(&json!({"action":"resume"}))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(view["goal"]["status"], "active");
+        let view: Value = client
+            .post(&goal_url)
+            .json(&json!({"action":"clear"}))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert!(view["goal"].is_null());
+        // 预算超出全局上限:拒绝(fail loud)。
+        client
+            .post(&goal_url)
+            .json(&json!({"action":"set","objective":"预算校验","tokenBudget":999_999_999}))
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .err()
+            .expect("预算超上限必须失败");
+        server.abort();
     }
     #[tokio::test]
     async fn cancelled_start_leaves_no_child_and_config_rejects_invalid() {
