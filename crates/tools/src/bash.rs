@@ -102,15 +102,35 @@ impl Tool for BashTool {
         let requested_ms = args.timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS).min(MAX_TIMEOUT_MS);
         let timeout = Duration::from_millis(requested_ms);
 
-        let mut command = shell::shell_command(&args.command);
-        command
-            .current_dir(&ctx.cwd)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true);
-        let mut child = match command.spawn() {
+        let spawn_once = || {
+            let mut command = shell::shell_command(&args.command);
+            command
+                .current_dir(&ctx.cwd)
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .kill_on_drop(true);
+            command.spawn()
+        };
+        let mut child = match spawn_once() {
             Ok(child) => child,
+            Err(error)
+                if error.kind() == std::io::ErrorKind::NotFound =>
+            {
+                // os error 2/3:shell 可执行文件路径失效(如 Store 版
+                // PowerShell 更新后按版本目录整体换路径)。清缓存重解析
+                // 并重试一次;仍失败才是真错误。
+                shell::invalidate_windows_shell_cache();
+                match spawn_once() {
+                    Ok(child) => child,
+                    Err(retry_error) => {
+                        return tool_error(
+                            format!("命令启动失败:{retry_error}"),
+                            "确认命令在该宿主 shell 上可用;工作目录是会话工作区",
+                        );
+                    }
+                }
+            }
             Err(error) => {
                 return tool_error(
                     format!("命令启动失败:{error}"),

@@ -6,12 +6,17 @@
 
 use std::path::{Path, PathBuf};
 #[cfg(windows)]
-use std::sync::OnceLock;
+use std::sync::atomic::{AtomicUsize, Ordering};
+#[cfg(windows)]
+use std::sync::Mutex;
 
 use tokio::process::Command;
 
 #[cfg(windows)]
-static WINDOWS_SHELL: OnceLock<PathBuf> = OnceLock::new();
+static WINDOWS_SHELL: Mutex<Option<PathBuf>> = Mutex::new(None);
+/// 最近一次缓存解析的生成号;spawn 失败时递增,触发下次调用重新解析。
+#[cfg(windows)]
+static SHELL_EPOCH: AtomicUsize = AtomicUsize::new(0);
 
 /// Resolved shell facts for model-facing tool descriptions.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -151,9 +156,36 @@ pub fn shell_command(command: &str) -> Command {
     }
 }
 
+/// Marks the cached shell path as stale; the next resolution re-scans.
+///
+/// Store 版 PowerShell(WindowsApps)更新会按版本目录整体换路径,长驻进程
+/// 缓存的可执行文件路径会失效(os error 3),必须允许后续调用重新解析。
 #[cfg(windows)]
-fn windows_shell_executable() -> &'static Path {
-    WINDOWS_SHELL.get_or_init(resolve_windows_shell)
+pub fn invalidate_windows_shell_cache() {
+    SHELL_EPOCH.fetch_add(1, Ordering::Release);
+}
+
+#[cfg(windows)]
+fn windows_shell_executable() -> PathBuf {
+    let epoch = SHELL_EPOCH.load(Ordering::Acquire);
+    let mut cached = WINDOWS_SHELL.lock().expect("shell cache poisoned");
+    match &*cached {
+        Some(path) => {
+            // 缓存代数仍一致且文件仍在 → 直接复用;文件被删除时降级重解析。
+            let still_valid =
+                SHELL_EPOCH.load(Ordering::Acquire) == epoch && path.is_file();
+            if still_valid {
+                return path.clone();
+            }
+            if SHELL_EPOCH.load(Ordering::Acquire) == epoch {
+                *cached = None;
+            }
+        }
+        None => {}
+    }
+    let path = resolve_windows_shell();
+    *cached = Some(path.clone());
+    path
 }
 
 #[cfg(windows)]
@@ -299,6 +331,16 @@ fn candidate_pwsh_paths() -> Vec<PathBuf> {
     if let Ok(program_files) = std::env::var("ProgramFiles") {
         candidates.push(PathBuf::from(program_files).join("PowerShell/7/pwsh.exe"));
     }
+    // Store 版 PowerShell 的执行别名:跨版本更新保持不变,优先于
+    // PATH 里按版本号命名的 WindowsApps 包目录(更新后旧目录会被删除)。
+    if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+        candidates.push(
+            PathBuf::from(local)
+                .join("Microsoft")
+                .join("WindowsApps")
+                .join("pwsh.exe"),
+        );
+    }
     if let Ok(path) = std::env::var("PATH") {
         for entry in path.split(';') {
             let trimmed = entry.trim().trim_matches('"');
@@ -358,6 +400,48 @@ mod tests {
             shell.display()
         );
         assert!(shell.is_file(), "{}", shell.display());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn cache_hit_and_invalidation_reparse() {
+        // 首次解析并缓存。
+        let first = super::windows_shell_executable();
+        assert!(first.is_file());
+        // 命中缓存:同一路径。
+        let second = super::windows_shell_executable();
+        assert_eq!(first, second);
+        // 失效后重新解析:结果仍是一个存在的可执行文件(缓存自愈)。
+        super::invalidate_windows_shell_cache();
+        let third = super::windows_shell_executable();
+        assert!(third.is_file());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn store_alias_candidate_preferred_over_versioned_path() {
+        // 候选顺序:Store 别名目录必须在 PATH 版本目录之前——
+        // Store 更新按版本目录换路径,别名不受影响。
+        let candidates = super::candidate_pwsh_paths();
+        let alias = std::path::PathBuf::from(std::env::var_os("LOCALAPPDATA").unwrap())
+            .join("Microsoft")
+            .join("WindowsApps")
+            .join("pwsh.exe");
+        let alias_index = candidates
+            .iter()
+            .position(|c| c.as_os_str() == alias.as_os_str())
+            .expect("WindowsApps 别名应始终在候选列表中");
+        let versioned = candidates.iter().position(|c| {
+            c.to_string_lossy()
+                .to_ascii_lowercase()
+                .contains("windowsapps\\microsoft.powershell_")
+        });
+        if let Some(versioned) = versioned {
+            assert!(
+                alias_index < versioned,
+                "WindowsApps 别名({alias_index})应排在版本目录({versioned})之前"
+            );
+        }
     }
 
     #[test]
