@@ -152,6 +152,10 @@ function headLine(envelope: SessionEnvelope): string {
       return `ask-resolved · ${envelope.resolution.outcome}`
     case 'compaction-summary':
       return `compaction-summary · turn=${envelope.turn} step=${envelope.step} · replaces ${envelope.replaces_from}..${envelope.replaces_to}`
+    case 'request-header':
+      return `request-header · turn=${envelope.turn} step=${envelope.step} · ${envelope.reason} · ${envelope.header.config.provider}/${envelope.header.config.model}`
+    case 'request-context':
+      return `request-context · turn=${envelope.turn} step=${envelope.step} · ${envelope.provider}/${envelope.model}`
   }
 }
 
@@ -348,6 +352,22 @@ function eventBody(envelope: SessionEnvelope): string {
       lines.push('```')
       lines.push(fenceSafe(envelope.summary))
       lines.push('```')
+      return lines.join('\n')
+    }
+    case 'request-header': {
+      const config = envelope.header.config
+      lines.push(`- reason: ${envelope.reason}`)
+      lines.push(`- provider: ${config.provider}`)
+      lines.push(`- model: ${config.model}`)
+      if (config.reasoningEffort) lines.push(`- reasoning_effort: ${config.reasoningEffort}`)
+      return lines.join('\n')
+    }
+    case 'request-context': {
+      lines.push(`- provider: ${envelope.provider}`)
+      lines.push(`- model: ${envelope.model}`)
+      if (envelope.contextWindow !== undefined) {
+        lines.push(`- context_window: ${envelope.contextWindow}`)
+      }
       return lines.join('\n')
     }
   }

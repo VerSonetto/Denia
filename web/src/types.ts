@@ -291,6 +291,26 @@ export type SessionEnvelope =
       request_id: string
       resolution: AskResolution
     }
+  | {
+      seq: number
+      time: number
+      type: 'request-header'
+      turn: number
+      step: number
+      header: { config: { provider: string; model: string; reasoningEffort?: string } }
+      reason: 'initial' | 'resume' | 'change' | 'series'
+      starts_series?: boolean
+    }
+  | {
+      seq: number
+      time: number
+      type: 'request-context'
+      turn: number
+      step: number
+      provider: string
+      model: string
+      contextWindow?: number
+    }
 
 /* ---- ask 工具(模型向用户提问) ---- */
 

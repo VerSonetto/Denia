@@ -131,6 +131,24 @@ function latestPermissionMode(events: SessionEnvelope[]): PermissionMode | null 
   return null
 }
 
+/** 从事件流反向找最近一次请求头,恢复该会话最后实际使用的模型。 */
+function latestRequestSelection(events: SessionEnvelope[]): ModelSelection | null {
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index]
+    if (event.type === 'request-header') {
+      const { provider, model, reasoningEffort } = event.header.config
+      if (!provider || !model) return null
+      return { provider, model, reasoningEffort }
+    }
+    if (event.type === 'request-context') {
+      // 老日志可能只有 request-context(路由元数据),无思考强度可恢复。
+      if (!event.provider || !event.model) return null
+      return { provider: event.provider, model: event.model }
+    }
+  }
+  return null
+}
+
 /** 从事件流恢复仍未结算的审批请求(approval-asked 未被对应 decided 关闭)。 */
 function latestPendingApproval(events: SessionEnvelope[]): ApprovalRequest | null {
   let pending: ApprovalRequest | null = null
@@ -179,6 +197,7 @@ export default function SessionsPage({
   runningRef.current = running
 
   const [catalog, setCatalog] = useState<ModelCatalog | null>(null)
+  const catalogRef = useRef<ModelCatalog | null>(null)
   const [prompt, setPrompt] = useState('')
   const [selection, setSelection] = useState<ModelSelection | null>(null)
   const [wsMenuOpen, setWsMenuOpen] = useState(false)
@@ -390,7 +409,10 @@ export default function SessionsPage({
     api
       .getCatalog()
       .then((next) => {
-        if (!cancelled) setCatalog(next)
+        if (!cancelled) {
+          catalogRef.current = next
+          setCatalog(next)
+        }
       })
       .catch((error) => {
         if (!cancelled) {
@@ -760,16 +782,37 @@ export default function SessionsPage({
   }, [activeId, notify])
 
   // 跟随会话事件流:同步服务端权限模式,并监听后端发起的审批请求。
+  // 模型选择恢复:切换会话时,把编辑器上的模型切到该会话日志里最后一次
+  // 实际使用的模型(request-header 快照),而不是沿用上一会话/localStorage
+  // 的记忆;只在切换后的第一次快照恢复,之后的重放快照不覆盖手动选择。
+  const restoredSelectionRef = useRef<string | null>(null)
   useEffect(() => {
     if (!activeId) {
       setApprovalReq(null)
       return
     }
+    restoredSelectionRef.current = null
     const unsubscribe = attach(activeId, {
       onSnapshot: (_header, events) => {
         const mode = latestPermissionMode(events)
         if (mode) setPermission(mode)
         setApprovalReq(latestPendingApproval(events))
+        if (restoredSelectionRef.current === null) {
+          const logged = latestRequestSelection(events)
+          const current = catalogRef.current
+          // 目录未就绪时不消耗恢复机会,等后续自愈快照重试。
+          if (current) {
+            restoredSelectionRef.current = activeId
+            if (
+              logged &&
+              current.groups.some(
+                (g) => g.id === logged.provider && g.models.some((m) => m.id === logged.model),
+              )
+            ) {
+              setSelection(normalizeSelection(current, logged))
+            }
+          }
+        }
       },
       onEnvelope: (event) => {
         if (event.type === 'permission-mode') {
