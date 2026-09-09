@@ -259,6 +259,21 @@ export type SessionEnvelope =
       todos: TodoItem[]
     }
   | { seq: number; time: number; type: 'permission-mode'; mode: PermissionMode }
+  | {
+      seq: number
+      time: number
+      type: 'goal'
+      op: GoalOp
+    }
+  | {
+      seq: number
+      time: number
+      type: 'command-run'
+      /** 命令名(如 goal)。 */
+      name: string
+      /** 用户输入的完整原文。 */
+      text: string
+    }
   | { seq: number; time: number; type: 'approval-policy'; policy: 'ask' | 'never' }
   | {
       seq: number
@@ -357,6 +372,21 @@ export interface AskResolution {
 
 /** 当前会话权限模式(与 Rust `PermissionMode` 对齐,四档)。 */
 export type PermissionMode = 'read-only' | 'auto-edit' | 'plan' | 'full'
+
+/** 会话目标状态(与 Rust `GoalStatus` 对齐)。 */
+export type GoalStatus = 'active' | 'paused' | 'blocked' | 'budget-limited' | 'complete'
+
+/** 会话目标操作(与 Rust `GoalOp` 对齐,内部 tag `kind`)。 */
+export type GoalOp =
+  | { kind: 'set'; objective: string; token_budget?: number }
+  | { kind: 'edit'; objective?: string; token_budget?: number }
+  | { kind: 'pause' }
+  | { kind: 'resume' }
+  | { kind: 'round' }
+  | { kind: 'complete' }
+  | { kind: 'block'; reason?: string }
+  | { kind: 'budget-limit' }
+  | { kind: 'clear' }
 
 /** 旧日志三档值 → 新四档的显示映射(serde alias 的前端对应)。 */
 export function normalizePermissionMode(raw: string): PermissionMode {

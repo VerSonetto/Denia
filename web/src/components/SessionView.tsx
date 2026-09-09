@@ -75,6 +75,7 @@ export function SessionView({
   onLoopContinue,
   onAskAnswer,
   onAskCancel,
+  onGoalTouch,
 }: {
   id: string
   /** 内容视图:对话 transcript 或轨迹台账(共用同一事件流订阅)。 */
@@ -106,6 +107,8 @@ export function SessionView({
   onAskAnswer?: (requestId: string, answers: AskAnswer[]) => void
   /** 取消一组模型提问。 */
   onAskCancel?: (requestId: string) => void
+  /** 目标状态可能变化(goal 事件 / 轮次闭合 / 快照重建):父级刷新 GoalBar。 */
+  onGoalTouch?: () => void
 }) {
   const [nodes, setNodes] = useState<TranscriptNode[]>([])
   // 原始事件流:轨迹视图的 fold 源(与 transcript 共用一次订阅)。
@@ -126,6 +129,8 @@ export function SessionView({
   jumpSettledRef.current = onJumpSettled
   const todosChangeRef = useRef(onTodosChange)
   todosChangeRef.current = onTodosChange
+  const goalTouchRef = useRef(onGoalTouch)
+  goalTouchRef.current = onGoalTouch
   const pendingCountRef = useRef(pendingMessages.length)
   pendingCountRef.current = pendingMessages.length
 
@@ -185,6 +190,7 @@ export function SessionView({
         setNodes(foldEvents(snapshot))
         publishTodos(snapshot)
         settlePending(snapshot)
+        goalTouchRef.current?.()
         setLoading(false)
       },
       onEnvelope: (envelope) => {
@@ -192,6 +198,10 @@ export function SessionView({
         queueRef.current.push(envelope)
         if (envelope.type === 'todo-write' || envelope.type === 'user-message') {
           publishTodos([...eventsRef.current, ...queueRef.current])
+        }
+        // 目标状态或轮次记账变化:父级重拉服务端权威的 goal 视图。
+        if (envelope.type === 'goal' || envelope.type === 'turn-end') {
+          goalTouchRef.current?.()
         }
         if (rafRef.current === undefined) {
           rafRef.current = window.requestAnimationFrame(flush)

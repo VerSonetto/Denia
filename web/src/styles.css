@@ -6689,3 +6689,181 @@ button.btn.form-action {
 .plan-review-submit:hover {
   opacity: 0.9;
 }
+
+/* ---- 会话目标条(goal 模式,对照 dsh GoalBar:composer-stack 内 36px 横条) ---- */
+
+.goal-bar {
+  box-sizing: border-box;
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  height: 36px;
+  padding: 3px 4px 3px 12px;
+  border: 1px solid var(--border-l1);
+  border-radius: var(--r-md);
+  background: var(--bg-layer-1);
+  transition: border-color 0.15s var(--ease), background 0.15s var(--ease);
+}
+
+.goal-bar:hover {
+  border-color: var(--border-l2);
+}
+
+.goal-icon {
+  display: inline-flex;
+  align-items: center;
+  color: var(--label-secondary);
+  flex: none;
+}
+
+.goal-status-label {
+  flex: none;
+  color: var(--label-tertiary);
+  font-size: 12px;
+  line-height: 16px;
+  white-space: nowrap;
+}
+
+.goal-objective {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--label-primary);
+  font-size: 13px;
+  line-height: 18px;
+}
+
+.goal-budget-pill {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  padding: 1px 8px;
+  border-radius: var(--r-pill);
+  background: var(--accent-soft);
+  color: var(--label-tertiary);
+  font-size: 11px;
+  line-height: 16px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.goal-bar[data-goal-status='blocked'] .goal-status-label,
+.goal-bar[data-goal-status='budget-limited'] .goal-status-label {
+  color: var(--warn-fg);
+}
+
+.goal-spacer {
+  flex: 1;
+}
+
+.goal-error {
+  flex: none;
+  max-width: 40%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--danger);
+  font-size: 12px;
+  line-height: 16px;
+}
+
+.goal-action {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--r-pill);
+  background: transparent;
+  color: var(--label-secondary);
+  cursor: pointer;
+  transition: background 0.15s var(--ease), color 0.15s var(--ease), opacity 0.15s var(--ease);
+}
+
+.goal-action:hover {
+  background: var(--hover-fill);
+  color: var(--label-primary);
+}
+
+.goal-action:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.goal-action:disabled:hover {
+  background: transparent;
+  color: var(--label-secondary);
+}
+
+.goal-action-danger:hover {
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
+/* 编辑态:条内内联表单(dsh GoalBar 同款交互)。 */
+
+.goal-objective-input {
+  flex: 1;
+  min-width: 0;
+  height: 26px;
+  padding: 0 8px;
+  border: 1px solid var(--border-l2);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--label-primary);
+  font-size: 13px;
+  line-height: 18px;
+}
+
+.goal-objective-input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.goal-budget-input {
+  flex: none;
+  width: 132px;
+  height: 26px;
+  padding: 0 8px;
+  border: 1px solid var(--border-l2);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--label-primary);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.goal-budget-input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+/* ---- 本地斜杠命令回显行(/goal 等不落日志的命令:"发送"要有可见结果) ---- */
+
+.command-echo {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 70%;
+  padding: 6px 14px;
+  border-radius: var(--r-pill);
+  background: var(--accent-soft);
+  color: var(--label-secondary);
+  font-family: ui-monospace, 'Cascadia Mono', Consolas, monospace;
+  font-size: 13px;
+  line-height: 20px;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+  text-align: left;
+}
+
+.command-echo svg {
+  flex: none;
+  opacity: 0.7;
+}

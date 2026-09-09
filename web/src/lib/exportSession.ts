@@ -140,6 +140,10 @@ function headLine(envelope: SessionEnvelope): string {
       return `todo-write · ${envelope.todos.length} 项`
     case 'permission-mode':
       return `permission-mode · ${envelope.mode}`
+    case 'goal':
+      return `goal · ${envelope.op.kind}`
+    case 'command-run':
+      return `command-run · /${envelope.name}`
     case 'approval-policy':
       return `approval-policy · ${envelope.policy}`
     case 'approval-asked':
@@ -296,6 +300,13 @@ function eventBody(envelope: SessionEnvelope): string {
     }
     case 'permission-mode':
       lines.push(`- mode: \`${envelope.mode}\``)
+      return lines.join('\n')
+    case 'goal':
+      lines.push(`- op: \`${envelope.op.kind}\``)
+      return lines.join('\n')
+    case 'command-run':
+      lines.push(`- command: \`/${envelope.name}\``)
+      lines.push(`- text: ${safeText(envelope.text).replace(/\n/g, ' ')}`)
       return lines.join('\n')
     case 'approval-policy':
       lines.push(`- policy: \`${envelope.policy}\``)

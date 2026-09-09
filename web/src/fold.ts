@@ -81,6 +81,13 @@ export type TranscriptNode =
       postTokens?: number
       seq: number
     }
+  | {
+      /** 本地斜杠命令回显(如 /goal):右对齐命令气泡,按事件 seq 排序。 */
+      kind: 'command-echo'
+      name: string
+      text: string
+      seq: number
+    }
 
 function toUiBlock(block: ContentBlock): UiBlock {
   switch (block.type) {
@@ -194,6 +201,10 @@ export function foldEvents(events: SessionEnvelope[]): TranscriptNode[] {
       case 'agent-delivery':
         closeOpen()
         nodes.push({ kind: 'context-injection', text: event.text, seq: event.seq })
+        break
+      case 'command-run':
+        closeOpen()
+        nodes.push({ kind: 'command-echo', name: event.name, text: event.text, seq: event.seq })
         break
       case 'turn-start':
         closeOpen()
@@ -486,6 +497,11 @@ function applyEnvelopeStep(
   switch (event.type) {
     case 'agent-delivery':
       return [...nodes, { kind: 'context-injection', text: event.text, seq: event.seq }]
+    case 'command-run':
+      return [
+        ...nodes,
+        { kind: 'command-echo', name: event.name, text: event.text, seq: event.seq },
+      ]
     case 'turn-start':
       return [...nodes, { kind: 'turn-start', turn: event.turn, time: event.time }]
     case 'user-message':

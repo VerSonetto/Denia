@@ -903,3 +903,51 @@ export function subscribeEvents(onEvent: (type: string) => void): () => void {
   }
   return () => source.close()
 }
+
+/** 会话目标(goal 模式)投影;服务端权威口径(减法记账的用量含在内)。 */
+export interface GoalState {
+  objective: string
+  status: 'active' | 'paused' | 'blocked' | 'budget-limited' | 'complete'
+  tokenBudget?: number
+  blockedReason?: string
+  baseTokens: number
+  roundsStarted: number
+  createdAt: number
+  updatedAt: number
+}
+
+export interface GoalView {
+  goal: GoalState | null
+  tokensUsed: number
+  maxRounds: number
+  maxGoalTokenBudget: number
+}
+
+export type GoalAction = 'set' | 'edit' | 'pause' | 'resume' | 'clear'
+
+/** 读取当前会话的目标状态与用量。 */
+export function getGoal(id: string): Promise<GoalView> {
+  return http(`/api/sessions/${encodeURIComponent(id)}/goal`)
+}
+
+/** 操作当前会话目标(set/edit/pause/resume/clear);失败 fail loud。
+ * selection 随用户操作记录到服务端:goal 自动续跑据此回推模型
+ * (新会话日志里还没有 request-header,没有它第一轮无从发起)。
+ * echoText 为斜杠命令原文:落 command-run 事件,前端按 seq 回显。 */
+export function goalAction(
+  id: string,
+  body: { action: GoalAction; objective?: string; tokenBudget?: number },
+  selection?: { provider?: string; model?: string; reasoningEffort?: string },
+  echoText?: string,
+): Promise<GoalView> {
+  return http(`/api/sessions/${encodeURIComponent(id)}/goal`, {
+    method: 'POST',
+    body: JSON.stringify({
+      ...body,
+      provider: selection?.provider,
+      model: selection?.model,
+      reasoningEffort: selection?.reasoningEffort,
+      echoText,
+    }),
+  })
+}

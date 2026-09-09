@@ -63,6 +63,7 @@ import {
 } from './editor'
 import { formatTokens } from '../stats'
 import { TodoPanel } from '../components/TodoPanel'
+import { GoalBar } from '../components/GoalBar'
 import { QueuedMessagePanel } from '../components/QueuedMessagePanel'
 import { ConversationAxis } from '../components/ConversationAxis'
 import {
@@ -231,6 +232,8 @@ export default function SessionsPage({
   // 轮次轴跳转请求:点击未加载刻度时递增 nonce 触发视图翻页定位。
   const [axisJump, setAxisJump] = useState<{ seq: number; nonce: number } | null>(null)
   const [todos, setTodos] = useState<TodoItem[]>([])
+  // 当前会话的目标视图(goal 模式);服务端权威,goal/turn-end 事件触发重拉。
+  const [goalView, setGoalView] = useState<api.GoalView | null>(null)
   // 消息队列:AI 运行中输入的新消息,等本轮结束后自动发送。
   const [queuedMessages, setQueuedMessages] = useState<QueuedMessage[]>([])
   const queueSeqRef = useRef(0)
@@ -374,6 +377,54 @@ export default function SessionsPage({
       mentionAbortRef.current?.abort()
     }
   }, [])
+
+  /* ---- 会话目标(goal 模式):服务端权威视图 + 事件触发的重拉 ---- */
+
+  const refreshGoal = useCallback(
+    (id: string) => {
+      api
+        .getGoal(id)
+        .then(setGoalView)
+        .catch(() => setGoalView(null))
+    },
+    [],
+  )
+
+  /** 裸 /goal 的查看结果(多行 toast)。 */
+  const goalSummaryText = (view: api.GoalView): string => {
+    const goal = view.goal
+    if (!goal) return t('goalNone')
+    const budget = goal.tokenBudget !== undefined
+      ? `${formatTokens(view.tokensUsed)}/${formatTokens(goal.tokenBudget)}`
+      : formatTokens(view.tokensUsed)
+    const statusLabel =
+      goal.status === 'active'
+        ? t('goalPhaseActive')
+        : goal.status === 'paused'
+          ? t('goalPhasePaused')
+          : goal.status === 'blocked'
+            ? t('goalPhaseBlocked')
+            : goal.status === 'budget-limited'
+              ? t('goalPhaseBudgetLimited')
+              : t('goalPhaseComplete')
+    return t('goalSummary', {
+      objective: goal.objective,
+      status: statusLabel,
+      budget,
+      rounds: String(goal.roundsStarted),
+      maxRounds: String(view.maxRounds),
+    })
+  }
+
+  // 会话切换:拉取当前目标;SessionView 的 onGoalTouch(goal 事件/轮次
+  // 闭合/快照)也走这里,用量与状态始终以服务端为准。
+  useEffect(() => {
+    if (!activeId) {
+      setGoalView(null)
+      return
+    }
+    refreshGoal(activeId)
+  }, [activeId, refreshGoal])
 
   useEffect(() => {
     optimizeAbortRef.current?.abort()
@@ -560,6 +611,7 @@ export default function SessionsPage({
       const commands: SlashCandidate[] = [
         { name: 'plan', kind: 'command', description: t('cmdPlanDesc'), userOnly: false },
         { name: 'compact', kind: 'command', description: t('cmdCompactDesc'), userOnly: false },
+        { name: 'goal', kind: 'command', description: t('cmdGoalDesc'), userOnly: false },
       ]
       const skills: SlashCandidate[] = skillEntries.map((skill) => ({
         name: skill.name,
@@ -1400,6 +1452,38 @@ export default function SessionsPage({
         }
         if (options?.clearInput !== false) clearComposerState()
         return true // 裸 /compact:直接压缩,不发消息
+      } else if (command?.kind === 'goal') {
+        // /goal [<objective>|edit <objective>|pause|resume|clear](对照 dsh /goal 命令语法)
+        // 命令原文随请求落 command-run 事件:回显按真实 seq 排进对话流。
+        const rest = (command.rest ?? '').trim()
+        const sub = rest.split(/\s+/u, 1)[0] ?? ''
+        try {
+          if (!rest) {
+            // 裸 /goal:查看当前目标(本地只读,无副作用不落事件)。
+            const view = await api.getGoal(id)
+            notify('ok', view.goal ? goalSummaryText(view) : t('goalNone'))
+          } else if (sub === 'pause' || sub === 'resume' || sub === 'clear') {
+            if (rest !== sub) throw new Error(t('slashGoalTrailing'))
+            await api.goalAction(id, { action: sub }, selection ?? undefined, text)
+            notify('ok', sub === 'pause' ? t('goalPaused') : sub === 'resume' ? t('goalResumed') : t('goalCleared'))
+            refreshGoal(id)
+          } else if (sub === 'edit') {
+            const objective = rest.slice('edit'.length).trim()
+            if (!objective) throw new Error(t('slashGoalNeedObjective'))
+            await api.goalAction(id, { action: 'edit', objective }, selection ?? undefined, text)
+            notify('ok', t('goalEdited'))
+            refreshGoal(id)
+          } else {
+            // 其余文本整体作为新目标(set;complete 目标直接覆盖重开)。
+            await api.goalAction(id, { action: 'set', objective: rest }, selection ?? undefined, text)
+            notify('ok', t('goalCreated'))
+            refreshGoal(id)
+          }
+        } catch (error) {
+          notify('err', error instanceof Error ? error.message : String(error))
+        }
+        if (options?.clearInput !== false) clearComposerState()
+        return true // /goal 系列都是本地命令,不发消息
       }
       // 技能直调:首行裸 /name 由后端 skill_gesture 注入(collectSkillTokens
       // 已剔除该场景防双重注入);其余命中 user-invocable 词典的 token 收进
@@ -2128,6 +2212,9 @@ export default function SessionsPage({
               view={view}
               pendingMessages={pendingMessages}
               onTodosChange={setTodos}
+              onGoalTouch={() => {
+                if (activeId) refreshGoal(activeId)
+              }}
               onPendingSettled={settlePending}
               onNotFound={() => {
                 // 会话已被删除(其他窗口/流 404):清空视图。
@@ -2185,6 +2272,14 @@ export default function SessionsPage({
                 />
               )}
               {phase === 'active' && <TodoPanel todos={todos} />}
+              {phase === 'active' && activeId && !activeSession?.subagent && (
+                <GoalBar
+                  sessionId={activeId}
+                  view={goalView}
+                  selection={selection ?? undefined}
+                  onChanged={() => refreshGoal(activeId)}
+                />
+              )}
               {planReview ? (
                 <PlanReviewPanel
                   title={planReview.title}

@@ -17,6 +17,7 @@ import {
   IconPrompt,
   IconRead,
   IconSearch,
+  IconSlashCommand,
   IconTerminal,
   IconThink,
   IconTool,
@@ -190,6 +191,16 @@ const NodeView = memo(function NodeView({
       )
     case 'context-injection':
       return <ContextInjectionRow text={node.text} />
+    case 'command-echo':
+      // 本地斜杠命令回显(如 /goal):右对齐"指令输入"行,按事件 seq 排序。
+      return (
+        <div className="user-row">
+          <div className="command-echo">
+            <IconSlashCommand name={node.name} size={13} />
+            <span>{node.text}</span>
+          </div>
+        </div>
+      )
     case 'system-prompt':
       return <SystemPromptRow text={node.text} />
     case 'assistant':

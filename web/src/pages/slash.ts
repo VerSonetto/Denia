@@ -91,18 +91,18 @@ export function collectSkillTokens(text: string, names: readonly string[]): stri
 
 /** 首行开头的内置命令判定结果。 */
 export interface LeadingCommand {
-  kind: 'plan' | 'compact'
+  kind: 'plan' | 'compact' | 'goal'
   /** token 之后的正文;undefined = 裸命令(token 后无任何字符)。 */
   rest?: string
 }
 
 /**
  * 解析首行开头的内置命令(命令优先于技能,对齐 dsh matchEnter 的行认领):
- * `/plan`、`/compact` 位于文本最前,后随空白或结尾才算;`/plans`、正文中部
- * 的 `/plan` 不算。仅前导空白被容忍。
+ * `/plan`、`/compact`、`/goal` 位于文本最前,后随空白或结尾才算;`/plans`、
+ * 正文中的 `/plan` 不算。仅前导空白被容忍。
  */
 export function parseLeadingCommand(text: string): LeadingCommand | undefined {
-  const match = /^\/(plan|compact)(?:$|[\s]([\s\S]*)$)/u.exec(text.replace(/^\s+/u, ''))
+  const match = /^\/(plan|compact|goal)(?:$|[\s]([\s\S]*)$)/u.exec(text.replace(/^\s+/u, ''))
   if (!match) return undefined
-  return { kind: match[1] as 'plan' | 'compact', rest: match[2] }
+  return { kind: match[1] as LeadingCommand['kind'], rest: match[2] }
 }
