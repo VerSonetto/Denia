@@ -2,6 +2,8 @@
 
 import type { ReactNode } from 'react'
 
+import { COMMAND_GLYPHS } from '../lib/slashGlyphs'
+
 type IconProps = { size?: number }
 
 function Svg({
@@ -56,6 +58,29 @@ export function IconTerminal(props: IconProps) {
   return (
     <Svg {...props}>
       <path d="m3 4.5 3 3-3 3M8 11.5h5" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
+    </Svg>
+  )
+}
+
+/**
+ * slash 内置命令图标:按名字取专属 glyph(plan/compact 各有语义),未登记
+ * 的命令回退终端符。数据源与输入框卡片共用 lib/slashGlyphs,不在这里另画。
+ */
+export function IconSlashCommand({ name, size = 13 }: IconProps & { name: string }) {
+  const glyph = COMMAND_GLYPHS[name]
+  if (!glyph) return <IconTerminal size={size} />
+  return (
+    <Svg size={size}>
+      {glyph.paths.map((d) => (
+        <path
+          key={d}
+          d={d}
+          stroke="currentColor"
+          strokeWidth={glyph.stroke}
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        />
+      ))}
     </Svg>
   )
 }
