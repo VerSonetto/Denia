@@ -106,6 +106,7 @@ mod tests {
             permission_mode: PermissionMode::Plan,
             ask: None,
             call_id: None,
+            goal_reader: None,
         }
     }
 

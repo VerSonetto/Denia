@@ -203,6 +203,7 @@ mod tests {
             permission_mode: PermissionMode::AutoEdit,
             ask: None,
             call_id: None,
+            goal_reader: None,
         }
     }
 
@@ -290,6 +291,7 @@ mod tests {
             permission_mode: PermissionMode::AutoEdit,
             ask: None,
             call_id: None,
+            goal_reader: None,
         };
         let command = if cfg!(windows) {
             r#"{"command":"ping -n 10 127.0.0.1 >nul"}"#

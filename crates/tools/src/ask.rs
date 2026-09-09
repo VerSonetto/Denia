@@ -409,6 +409,7 @@ mod tests {
             permission_mode: PermissionMode::AutoEdit,
             ask: bridge,
             call_id: Some("call-1".to_string()),
+            goal_reader: None,
         }
     }
 

@@ -121,6 +121,7 @@ pub fn register_shipped_prompt(
         audience: SectionAudience::Model,
     })?;
     register_plan_prompt_section(prompt)?;
+    register_goal_prompt_section(prompt)?;
 
     let schemas: Vec<ToolSchema> = tools.schemas();
     prompt.tools(move |_| ToolProviderResult {
@@ -220,6 +221,25 @@ pub fn register_plan_prompt_section(prompt: &mut SystemPrompt) -> Result<(), Str
         order: SectionOrder::ToolPlan.value(),
         text: PromptText::Static(
             "计划模式的收尾义务:调研完成后必须用 exit_plan 提交结构化计划(plan 用 markdown 写清目标、分步方案、将修改或新建的文件、风险、验证方式),不要把计划散落在回复里等用户自己领会;一次提交完整计划,不要拆成多次试探性提交。提交后本轮阻塞等待用户决策,期间不要继续调用其他工具。拿到决策后的动作:批准 → 按计划直接开始执行,不要再次向用户确认;批准并附带补充建议 → 把建议一并落实;拒绝并附带补充建议 → 按建议修订计划后重新 exit_plan,只改受影响的部分,除非用户要求否则不要推倒重来;拒绝且无建议 → 先用 ask 询问用户的顾虑再修订。计划获批执行时,若发现必须偏离计划(额外破坏性操作、方案走不通),停下来向用户说明现状与建议,不要擅自扩大范围。"
+                .to_string(),
+        ),
+        complete: false,
+        audience: SectionAudience::Model,
+    })?;
+    Ok(())
+}
+
+/// 会话目标工具(get_goal/update_goal)的纪律段。
+///
+/// 与 `default_registry` 严格同步:两个工具在所有部署注册,本段同样总是
+/// 注入(与 tool:bash 等基础段同性质)。目标详情(objective/状态/用量)
+/// 走 `channel: "goal"` 上下文注入,无目标的会话模型不会看到目标语境。
+pub fn register_goal_prompt_section(prompt: &mut SystemPrompt) -> Result<(), String> {
+    prompt.section(PromptSection {
+        name: "tool:goal".to_string(),
+        order: SectionOrder::ToolGoal.value(),
+        text: PromptText::Static(
+            "会话存在目标时,一切工作以达成目标为先:每轮开始时先看最新的 [denia 目标] 状态注入(目标、状态、轮次与预算用量),评估当前进展再决定并执行下一步,不要原地等待指示。目标真正达成时立刻用 update_goal 的 complete 标记,不要把已完成的目标挂着续跑;被外部条件卡住(缺凭据、依赖方不可用、需要用户拍板)且无法绕开时,用 blocked 标记并写清阻塞条件,不要空转烧预算。用户插话是对目标的 steering:按新指示调整方向,必要时用 update_goal 的 edit 同步目标文本。get_goal 用于在动手前确认目标状态与预算用量。不要虚构目标状态,一切以 get_goal 返回为准。"
                 .to_string(),
         ),
         complete: false,
@@ -476,8 +496,8 @@ mod tests {
                 .any(|section| section.name == "tool:todo")
         );
         assert!(!render_context_snapshot(&assembly).is_empty());
-        // bash/read/write/todo/glob/grep/edit/exit_plan。
-        assert_eq!(assembly.tools.len(), 8);
+        // bash/read/write/todo/glob/grep/edit/exit_plan/get_goal/update_goal。
+        assert_eq!(assembly.tools.len(), 10);
     }
 
     #[test]
@@ -503,6 +523,34 @@ mod tests {
         // schema 同步:exit_plan 在默认部署的工具列表里(模式过滤在 assemble
         // 阶段,见 agent-loop 的 turn.rs)。
         assert!(assembly.tools.iter().any(|tool| tool.name == "exit_plan"));
+    }
+
+    #[test]
+    fn goal_section_follows_registry_and_audience_rules() {
+        // tool:goal 纪律段两路径:goal 工具随 default_registry 总是注册,
+        // 段总是存在、audience 为 Model、不进用户可见副本;子代理白名单
+        // 过滤(不含 get_goal/update_goal)由 section_tools 映射承担,
+        // agent-loop 的 subagent_sections_follow_tool_grant 测试覆盖。
+        let (prompt, registry) = default_shipped();
+        let assembly = prompt
+            .assemble(&AssembleContext {
+                cwd: Some("/tmp/ws".to_string()),
+                ..Default::default()
+            })
+            .unwrap();
+        let section = assembly
+            .sections
+            .iter()
+            .find(|section| section.name == "tool:goal")
+            .expect("tool:goal section registered with default registry");
+        assert_eq!(section.audience, SectionAudience::Model);
+        assert!(section.text.contains("update_goal"));
+        let user_body = render_prompt_for_user(&assembly);
+        assert!(!user_body.contains("update_goal"));
+        assert!(registry.get("get_goal").is_some());
+        assert!(registry.get("update_goal").is_some());
+        assert!(assembly.tools.iter().any(|tool| tool.name == "get_goal"));
+        assert!(assembly.tools.iter().any(|tool| tool.name == "update_goal"));
     }
 
     #[test]
@@ -571,6 +619,7 @@ mod browser_prompt_tests {
             permission_mode: PermissionMode::AutoEdit,
             ask: None,
             call_id: None,
+            goal_reader: None,
         };
         let tool = crate::BrowserTool::new(hub);
         tool.execute(arguments, &ctx).await

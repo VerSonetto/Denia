@@ -11,6 +11,7 @@ mod browser;
 pub mod capabilities;
 mod edit;
 mod files;
+mod goal;
 pub mod glob;
 pub mod grep;
 mod plan;
@@ -35,6 +36,7 @@ pub use browser::{BrowserExecute, BrowserHub, BrowserTool};
 pub use edit::EditTool;
 pub use files::{ReadFileTool, WriteFileTool};
 pub use glob::GlobTool;
+pub use goal::{GetGoalTool, UpdateGoalTool};
 pub use grep::GrepTool;
 pub use plan::{ExitPlanArgs, ExitPlanTool};
 pub use prompt::{
@@ -122,6 +124,9 @@ pub struct ToolContext {
     pub ask: Option<Arc<dyn AskBridge>>,
     /// 当前工具调用 id(`ask` 用它把提问卡片挂到对应工具行上)。
     pub call_id: Option<String>,
+    /// 会话目标读取器(`get_goal` 用);`None` 表示当前调用无法读取
+    /// 会话目标状态。返回 `(当前目标快照, 激活后的 token 用量)`。
+    pub goal_reader: Option<Arc<dyn Fn() -> Option<(denia_core::session::GoalState, u64)> + Send + Sync>>,
 }
 
 /// One model-facing tool outcome.
@@ -207,6 +212,8 @@ pub fn default_registry() -> ToolRegistry {
     registry.register(Arc::new(GrepTool::default()));
     registry.register(Arc::new(EditTool::default()));
     registry.register(Arc::new(ExitPlanTool));
+    registry.register(Arc::new(GetGoalTool::default()));
+    registry.register(Arc::new(UpdateGoalTool::default()));
     registry
 }
 

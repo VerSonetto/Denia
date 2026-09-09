@@ -213,6 +213,7 @@ mod tests {
             permission_mode: PermissionMode::AutoEdit,
             ask: None,
             call_id: None,
+            goal_reader: None,
         }
     }
 
@@ -229,6 +230,7 @@ mod tests {
             permission_mode: PermissionMode::AutoEdit,
             ask: None,
             call_id: None,
+            goal_reader: None,
         }
     }
 

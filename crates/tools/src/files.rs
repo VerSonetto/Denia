@@ -436,6 +436,7 @@ mod tests {
             permission_mode: PermissionMode::AutoEdit,
             ask: None,
             call_id: None,
+            goal_reader: None,
         };
         (tempfile_like::TempDir(dir), context)
     }
@@ -619,6 +620,7 @@ mod tests {
                 permission_mode: PermissionMode::AutoEdit,
                 ask: None,
                 call_id: None,
+                goal_reader: None,
             };
             let reader = ReadFileTool::new();
             let out = reader.execute(r#"{"path":"pixel.png"}"#, &ctx).await;
@@ -656,6 +658,7 @@ mod tests {
             permission_mode: PermissionMode::AutoEdit,
             ask: None,
             call_id: None,
+            goal_reader: None,
         };
         let reader = ReadFileTool::new();
         let out = reader.execute(r#"{"path":"pixel.png"}"#, &ctx).await;
