@@ -2913,6 +2913,148 @@ button {
   font-family: inherit;
 }
 
+/* ---- edit 的行级 diff(工具行展开后的正文) ---- */
+
+.diff-card {
+  background: var(--code-block);
+  border: 1px solid var(--border-l1);
+  border-radius: var(--r-sm);
+  overflow: hidden;
+}
+
+.diff-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 10px;
+  border-bottom: 1px solid var(--border-l1);
+  font-size: 11px;
+  color: var(--label-tertiary);
+  min-width: 0;
+}
+
+.diff-head .diff-path {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--label-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+
+.diff-head .diff-anchor {
+  flex: none;
+  font-size: 10.5px;
+  color: var(--label-caption);
+}
+
+/* 增删计数:删除在前、新增在后,与 git diff 的 −/+ 一致。 */
+.diff-stat {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.diff-head .diff-stat {
+  margin-left: auto;
+}
+
+.diff-stat.compact {
+  gap: 5px;
+  font-size: 10.5px;
+  padding-left: 4px;
+}
+
+.diff-stat .del {
+  color: var(--error-fg);
+  font-style: normal;
+}
+
+.diff-stat .add {
+  color: var(--success-fg);
+  font-style: normal;
+}
+
+.diff-body {
+  max-height: 260px;
+  overflow-y: auto;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  line-height: 1.55;
+  /* 长行横向滚动而不是整体换行:diff 的对齐感来自行的完整性。 */
+  overflow-x: auto;
+}
+
+.diff-line {
+  display: flex;
+  align-items: flex-start;
+  min-width: max-content;
+  padding-right: 10px;
+}
+
+.diff-line .diff-gutter {
+  flex: none;
+  width: 34px;
+  padding: 0 6px;
+  text-align: right;
+  color: var(--label-caption);
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+  user-select: none;
+}
+
+.diff-line .diff-sign {
+  flex: none;
+  width: 12px;
+  text-align: center;
+  color: var(--label-caption);
+  user-select: none;
+}
+
+.diff-line .diff-text {
+  white-space: pre;
+  color: var(--label-secondary);
+}
+
+.diff-line.add {
+  background: color-mix(in srgb, var(--success-fg) 12%, transparent);
+}
+
+.diff-line.add .diff-text {
+  color: var(--success-fg);
+}
+
+.diff-line.add .diff-sign {
+  color: var(--success-fg);
+}
+
+.diff-line.del {
+  background: color-mix(in srgb, var(--error-fg) 12%, transparent);
+}
+
+.diff-line.del .diff-text {
+  color: var(--error-fg);
+}
+
+.diff-line.del .diff-sign {
+  color: var(--error-fg);
+}
+
+.diff-line.fold {
+  color: var(--label-caption);
+  background: var(--hover-fill);
+}
+
+.diff-line.fold .diff-text {
+  color: var(--label-caption);
+  padding-left: 4px;
+}
+
 .btn-send {
   display: flex;
   align-items: center;

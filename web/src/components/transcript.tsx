@@ -5,7 +5,8 @@ import { groupTranscript, openTurnStartedAt, type OverviewRow, type TranscriptNo
 import { MarkdownText } from '../markdown/MarkdownText'
 import type { MarkdownLabels } from '../markdown/MarkdownText'
 import { useTypewriter } from '../typewriter'
-import { toolCallInput, toolCallSummary } from '../toolDisplay'
+import { toolCallInput, toolCallSummary, editDiff, writeDiff, type EditDiff } from '../toolDisplay'
+import { DiffCard, DiffStat } from './DiffCard'
 import type { AskAnswer, UserMessageImage } from '../types'
 import { UserMessageBubble } from './UserMessageImages'
 import { BranchMessageButton, CopyMessageButton } from './CopyMessageButton'
@@ -560,6 +561,31 @@ function firstLine(text: string, max = 90): string {
   }
 }
 
+/**
+ * 工具行的 diff:文件类工具(edit / write_file)才有。
+ *
+ * - edit:old_string → new_string,起点行号从工具结果里抠出;
+ * - write_file:整文件覆盖写,新内容即结果(旧内容不来自参数,详见
+ *   [`writeDiff`]),缺省按"纯新增"展示。
+ */
+function toolDiff(name: string, args: string, result?: string): EditDiff | null {
+  if (name === 'edit') return editDiff(name, args, editStartLine(result))
+  if (name === 'write_file') return writeDiff(name, args)
+  return null
+}
+
+/**
+ * 从 edit 的工具结果里抠出起始行号(形如"…首次替换发生在第 42 行")。
+ * 拿不到就返回 1:diff 退化为相对行号,不影响展示。
+ */
+function editStartLine(content?: string): number | undefined {
+  if (!content) return undefined
+  const match = content.match(/第\s*(\d+)\s*行/)
+  if (!match) return undefined
+  const line = Number(match[1])
+  return Number.isFinite(line) && line > 0 ? line : undefined
+}
+
 /** skill load 的 SKILL.md 正文随工具结果 JSON 返回;展开时按 markdown 渲染
  * 而不是裸 JSON。解析失败或非 load 结果(list/resource)返回 null 走原 pre。 */
 function skillLoadBody(name: string, content: string, isError: boolean): string | null {
@@ -584,12 +610,25 @@ function ToolRow({
   const [open, setOpen] = useState(false)
   const running = !node.result
   const meta = toolMeta(node.name)
+  // 文件类工具(edit/write_file)整行围绕"改了哪个文件、改了几行"组织:
+  // 头部显示文件名,右侧挂 diff 增删徽标,展开后是 diff 本身。
+  // 按 args/结果缓存:流式补参数时只在引用变化时重算。
+  const diff = useMemo(() => toolDiff(node.name, node.args, node.result?.content), [
+    node.name,
+    node.args,
+    node.result?.content,
+  ])
   const argSummary = toolCallSummary(node.name, node.args)
+  // 头部摘要:文件类工具一律显示文件名(不是 old_string/content 原文)。
+  const headSummary = diff ? diff.path : argSummary
   const summary = running
-    ? argSummary
+    ? headSummary
     : node.result!.isError
       ? firstLine(node.result!.content)
-      : argSummary || firstLine(node.result!.content)
+      : headSummary || firstLine(node.result!.content)
+  // 成功时 diff 已经把"改了什么"说全了,不再重复 out 那句结果文案;
+  // 失败时保留 out(错误原因要看得见),diff 作为"打算改什么"的对照。
+  const showOut = node.result !== undefined && (node.result.isError || !diff)
   const inputBody = toolCallInput(node.name, node.args)
   // Hook 常驻组件顶层:条件 JSX 内挂 hook 会在展开/收起时改变 hook 数量。
   const labels = useMemo<MarkdownLabels>(
@@ -646,20 +685,25 @@ function ToolRow({
         >
           {summary}
         </span>
+        {diff && !node.result?.isError && <DiffStat diff={diff} compact />}
       </button>
       {open && (
         <div className="disc-body">
-          {inputBody && (
-            <div className="code-card">
-              <div className="banner">in</div>
-              <pre>{inputBody}</pre>
-            </div>
+          {diff ? (
+            <DiffCard diff={diff} />
+          ) : (
+            inputBody && (
+              <div className="code-card">
+                <div className="banner">in</div>
+                <pre>{inputBody}</pre>
+              </div>
+            )
           )}
-          {node.result && (
+          {showOut && (
             <div className="code-card">
               <div className="banner">
                 out
-                {node.result.isError ? (
+                {node.result!.isError ? (
                   <span style={{ color: 'var(--error)' }}>error</span>
                 ) : (
                   <span style={{ color: 'var(--success)' }}>ok</span>
@@ -670,8 +714,8 @@ function ToolRow({
                   <MarkdownText text={skillBody} streaming={false} labels={labels} />
                 </div>
               ) : (
-                <pre className={node.result.isError ? 'err' : ''}>
-                  {node.result.content}
+                <pre className={node.result!.isError ? 'err' : ''}>
+                  {node.result!.content}
                 </pre>
               )}
             </div>
