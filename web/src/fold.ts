@@ -204,6 +204,9 @@ export function foldEvents(events: SessionEnvelope[]): TranscriptNode[] {
     }
   }
 
+  // 上一次已显示的 system-prompt 全文(内容去重依据,见下方 case)。
+  let lastSystemPrompt: string | null = null
+
   for (const event of events) {
     switch (event.type) {
       case 'agent-delivery':
@@ -232,8 +235,15 @@ export function foldEvents(events: SessionEnvelope[]): TranscriptNode[] {
         }
         break
       case 'system-prompt':
+        // 后端按 step 判重,而 step 是本 turn 内计数,每轮第一个 step 恒为
+        // 1 —— 于是内容一字未变的 system-prompt 每轮都记一条。这里按内容
+        // 去重:只在与上一次不同时才显示(切模型 / 改系统提示词 / 换 persona
+        // 都会让文本变化,那些必须显示)。
         closeOpen()
-        nodes.push({ kind: 'system-prompt', text: event.text })
+        if (lastSystemPrompt !== event.text) {
+          lastSystemPrompt = event.text
+          nodes.push({ kind: 'system-prompt', text: event.text })
+        }
         break
       case 'step-start':
         stepStarts.set(`${event.turn}:${event.step}`, event.time)
@@ -387,6 +397,11 @@ export function foldEvents(events: SessionEnvelope[]): TranscriptNode[] {
     }
   }
   closeOpen()
+  // 冷启动(切会话/重拉快照)是全量权威结果:把增量路径的暂存对齐到它,
+  // 否则换会话后模块级暂存还留着上一个会话的值,新会话首条 system-prompt
+  // 可能因与旧会话文本相同而被误吞,todo 也会比对出假变化。
+  incrementalLastTodos = lastTodos
+  incrementalLastSystemPrompt = lastSystemPrompt
   return nodes
 }
 
@@ -415,6 +430,9 @@ const incrementalStepStarts = new Map<string, number>()
 
 /** 增量 fold 的清单快照暂存:供下一次 todo_write 卡片比对变化。 */
 let incrementalLastTodos: TodoSnapshotItem[] | undefined
+
+/** 增量 fold 的 system-prompt 暂存:与冷启动路径同规则的内容去重依据。 */
+let incrementalLastSystemPrompt: string | null = null
 
 /**
  * Incremental fold: applies one envelope to an existing node list without
@@ -537,6 +555,10 @@ function applyEnvelopeStep(
         },
       ]
     case 'system-prompt':
+      // 与冷启动路径同规则:内容未变则不新增节点(后端按 step 判重,而
+      // step 是本 turn 内计数,每轮恒为 1,导致未变化的提示词每轮都记)。
+      if (incrementalLastSystemPrompt === event.text) return nodes
+      incrementalLastSystemPrompt = event.text
       return [...nodes, { kind: 'system-prompt', text: event.text }]
     case 'step-start':
       incrementalStepStarts.set(`${event.turn}:${event.step}`, event.time)
