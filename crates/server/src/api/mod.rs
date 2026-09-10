@@ -6,6 +6,7 @@ mod browser_recon;
 mod credentials;
 mod events;
 mod fs;
+mod global_rules;
 mod goal;
 mod llm;
 mod runtime;
@@ -36,4 +37,5 @@ pub fn router() -> Router<Arc<AppState>> {
         .merge(fs::router())
         .merge(events::router())
         .merge(system_prompt::router())
+        .merge(global_rules::router())
 }

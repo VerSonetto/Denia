@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use async_trait::async_trait;
 use denia_agent_loop::{ApprovalBridge, SessionDriver};
-use denia_core::session::ApprovalOutcome;
+use denia_core::session::{ApprovalOutcome, PermissionMode};
 use denia_credentials::{CredentialEvent, CredentialStore};
 use denia_llm::{LlmRegistry, OPENAI_SETTINGS_NS, OpenAiCompatAdapter, OpenAiSection, RetryPolicy};
 use denia_session::{Session, SessionError, SessionStore};
@@ -40,11 +40,23 @@ pub struct ConsoleSettings {
     /// 一次 step 内模型返回的多个工具调用并发执行,受此上限约束。
     #[serde(default = "default_max_parallel_tool_calls")]
     pub max_parallel_tool_calls: usize,
+    /// 新建会话的默认权限模式(四档,但不含 plan —— 计划模式是用户
+    /// 在某次会话里显式进入的临时档位,不适合当全局默认值)。
+    #[serde(default = "default_permission_mode")]
+    pub default_permission_mode: String,
 }
 
 fn default_max_parallel_tool_calls() -> usize {
     10
 }
+
+/// 出厂默认权限模式:自动编辑(与会话日志的初始档位一致)。
+pub fn default_permission_mode() -> String {
+    PermissionMode::AutoEdit.as_str().to_string()
+}
+
+/// 设置里可选的新建会话默认档位(剔除 plan,见字段注释)。
+pub const SELECTABLE_DEFAULT_PERMISSION_MODES: [&str; 3] = ["read-only", "auto-edit", "full"];
 
 /// `console.compaction` 段(层叠上下文管理配置,默认对齐 Claude Code
 /// auto-compact 缓冲语义)。
@@ -130,7 +142,27 @@ fn validate_console(value: Value) -> Result<Value, String> {
             parsed.max_parallel_tool_calls
         ));
     }
+    // 计划模式只在会话内显式进入,不允许设为新建会话的默认档位。
+    let Some(mode) = PermissionMode::parse(&parsed.default_permission_mode) else {
+        return Err(format!(
+            "defaultPermissionMode must be one of {}; got '{}'",
+            SELECTABLE_DEFAULT_PERMISSION_MODES.join(", "),
+            parsed.default_permission_mode
+        ));
+    };
+    if mode == PermissionMode::Plan {
+        return Err(
+            "defaultPermissionMode must not be 'plan' (plan mode is entered per session)".to_string(),
+        );
+    }
     serde_json::to_value(parsed).map_err(|e| e.to_string())
+}
+
+/// 新建会话采用的权限模式:解析控制台默认值,非法值回落自动编辑。
+pub fn console_default_permission_mode(settings: &SettingsStore) -> PermissionMode {
+    PermissionMode::parse(&console_settings(settings).default_permission_mode)
+        .filter(|mode| *mode != PermissionMode::Plan)
+        .unwrap_or(PermissionMode::AutoEdit)
 }
 
 /// Reads the resolved console settings, tolerating an absent provider.
@@ -144,6 +176,7 @@ pub fn console_settings(settings: &SettingsStore) -> ConsoleSettings {
             locale: "zh".to_string(),
             compaction: ConsoleCompactionSettings::default(),
             max_parallel_tool_calls: 10,
+            default_permission_mode: default_permission_mode(),
         })
 }
 

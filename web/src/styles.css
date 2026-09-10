@@ -4941,6 +4941,119 @@ button.btn.form-action {
   color: var(--label-tertiary);
 }
 
+.setm-cards {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.setm-card {
+  border-radius: 12px;
+  border: 1px solid var(--border-l1);
+  background: var(--setm-inset);
+  overflow: hidden;
+  transition: border-color 0.15s var(--ease);
+}
+
+.setm-card.open {
+  background: var(--bg-layer-2);
+  border-color: var(--border-l2);
+}
+
+.setm-card-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  padding: 12px 14px;
+  border: none;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.15s var(--ease);
+}
+
+.setm-card-head:hover {
+  background: var(--hover-fill);
+}
+
+.setm-card-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1;
+}
+
+.setm-card-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--label-primary);
+}
+
+/* 折叠时把说明压成一行摘要,标题行不至于撑高。 */
+.setm-card-hint {
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--label-tertiary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.setm-card-summary {
+  flex: none;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: 1px solid var(--border-l1);
+  background: var(--bg-layer-1);
+  font-size: 11.5px;
+  color: var(--label-secondary);
+}
+
+.setm-card-chevron {
+  flex: none;
+  display: inline-flex;
+  color: var(--label-tertiary);
+  transition: transform 0.15s var(--ease);
+}
+
+.setm-card.open .setm-card-chevron {
+  transform: rotate(90deg);
+}
+
+.setm-card-body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 2px 14px 14px;
+}
+
+.setm-card-desc {
+  margin: 0;
+  font-size: 12.5px;
+  line-height: 1.55;
+  color: var(--label-tertiary);
+}
+
+.setm-card-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  font-size: 12px;
+  color: var(--label-tertiary);
+}
+
+.setm-card-meta code {
+  padding: 2px 6px;
+  border-radius: 6px;
+  background: var(--bg-layer-1);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--label-secondary);
+}
+
 .setm-callout {
   margin: 0;
   padding: 10px 12px;

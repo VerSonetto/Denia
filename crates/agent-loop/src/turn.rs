@@ -418,6 +418,7 @@ async fn detect_gesture_skill(
 pub(crate) fn section_tools(section: &str) -> Option<&'static [&'static str]> {
     Some(match section {
         "tool:bash" => &["bash"],
+        "tool:ls" => &["ls"],
         "tool:read" => &["read_file"],
         "tool:write" | "tool:todo" => &["write_file", "todo_write"],
         "tool:glob" => &["glob"],

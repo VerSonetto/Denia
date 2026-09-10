@@ -29,7 +29,7 @@ function loadPermission(): PermissionMode {
 }
 
 /** 四档权限的展示元数据:名称与描述均走 i18n。 */
-const LEVELS: ReadonlyArray<{
+export const PERMISSION_LEVELS: ReadonlyArray<{
   level: PermissionMode
   icon: ComponentType<{ size?: number }>
   nameKey: MessageKey
@@ -42,7 +42,7 @@ const LEVELS: ReadonlyArray<{
 ]
 
 function levelMeta(level: PermissionMode) {
-  return LEVELS.find((entry) => entry.level === level) ?? LEVELS[1]
+  return PERMISSION_LEVELS.find((entry) => entry.level === level) ?? PERMISSION_LEVELS[1]
 }
 
 /**
@@ -104,7 +104,7 @@ export function PermissionSelector({
           <div className="menu-backdrop" onClick={() => setOpen(false)} />
           <div className="permission-menu" role="menu" aria-label={t('permissionLabel')}>
             <div className="permission-menu-heading">{t('permissionLabel')}</div>
-            {LEVELS.map(({ level, icon: Icon, nameKey, descKey }) => {
+            {PERMISSION_LEVELS.map(({ level, icon: Icon, nameKey, descKey }) => {
               const selected = value === level
               return (
                 <button
@@ -135,6 +135,24 @@ export function PermissionSelector({
       )}
     </div>
   )
+}
+
+/** 是否已由用户显式选过权限档位(决定控制台默认值能否覆盖)。 */
+export function hasStoredPermission(): boolean {
+  return window.localStorage.getItem(PERMISSION_KEY) !== null
+}
+
+/**
+ * 落盘权限档位:设置里的默认档位保存后同步写入,让新草稿态的输入框
+ * 立刻跟随新默认值(会话内仍以会话日志里的档位为准)。
+ */
+export function storePermission(level: PermissionMode): void {
+  try {
+    window.localStorage.setItem(PERMISSION_KEY, level)
+    if (level === 'full') window.localStorage.setItem(PERMISSION_MIGRATED_KEY, '1')
+  } catch {
+    /* storage unavailable */
+  }
 }
 
 export { loadPermission }

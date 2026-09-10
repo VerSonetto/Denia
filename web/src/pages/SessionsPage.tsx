@@ -26,7 +26,11 @@ import type { TrajectoryQuote } from '../trajectory'
 import { SessionView } from '../components/SessionView'
 import { StatsBar } from '../components/StatsBar'
 import { ComposerModelMenu } from '../components/ComposerModelMenu'
-import { PermissionSelector, loadPermission } from '../components/PermissionSelector'
+import {
+  PermissionSelector,
+  loadPermission,
+  hasStoredPermission,
+} from '../components/PermissionSelector'
 import { PlanReviewPanel } from '../components/PlanReviewPanel'
 import { ApprovalDialog, type ApprovalDecision, type ApprovalRequest } from '../components/ApprovalDialog'
 import { ConfirmDialog } from '../components/ConfirmDialog'
@@ -130,6 +134,22 @@ function latestPermissionMode(events: SessionEnvelope[]): PermissionMode | null 
     if (event.type === 'permission-mode') return normalizePermissionMode(event.mode)
   }
   return null
+}
+
+/**
+ * 设置里的"默认权限模式":无本地显式记忆时的输入框初始档位。
+ * 计划模式不出现在设置里,取到也回落自动编辑(与后端校验一致)。
+ */
+async function consoleDefaultPermission(): Promise<PermissionMode> {
+  try {
+    const describe = await api.getSettings()
+    const console = describe.namespaces.find((ns) => ns.ns === 'console')
+    const raw = console?.value.defaultPermissionMode
+    const mode = typeof raw === 'string' ? normalizePermissionMode(raw) : 'auto-edit'
+    return mode === 'plan' ? 'auto-edit' : mode
+  } catch {
+    return 'auto-edit'
+  }
 }
 
 /** 从事件流反向找最近一次请求头,恢复该会话最后实际使用的模型。 */
@@ -723,12 +743,34 @@ export default function SessionsPage({
   const [trajQuotes, setTrajQuotes] = useState<TrajectoryQuote[]>([])
   const promptEmpty = !prompt.trim() && pastedImages.length === 0
   const primaryStops = running && promptEmpty
-  const [permission, setPermission] = useState<PermissionMode>(() => loadPermission())
+  // 用户显式选过档位 → 用本地记忆;否则跟随设置里的"默认权限模式"
+  // (异步拉取,见下方 default-permission 效应)。会话级档位优先,由事件流覆盖。
+  const [permission, setPermission] = useState<PermissionMode>(() =>
+    hasStoredPermission() ? loadPermission() : 'auto-edit',
+  )
   const [permissionBusy, setPermissionBusy] = useState(false)
   const [fullAccessConfirm, setFullAccessConfirm] = useState(false)
   const pendingFullAccessRef = useRef<PermissionMode | null>(null)
   const [approvalReq, setApprovalReq] = useState<ApprovalRequest | null>(null)
   const fileInputRef = useRef<HTMLInputElement | null>(null)
+
+  // 设置里的默认档位只在"当前没有已加载会话 + 用户没显式选过"时生效
+  // (会话级档位由 attach 的 onSnapshot/onEnvelope 覆盖,优先级更高)。
+  // 保存设置后经 SSE `settings-updated`(App 侧 bumpCatalogTick)重拉,
+  // 改动立刻反映到新草稿的输入框档位上。
+  const noSessionRef = useRef(activeId === null)
+  noSessionRef.current = activeId === null
+  const loadDefaultPermission = useCallback(() => {
+    if (hasStoredPermission()) return
+    void consoleDefaultPermission().then((mode) => {
+      // 异步落地期间若已切入/创建了会话,会话日志的档位说了算,不覆盖。
+      if (!noSessionRef.current) return
+      setPermission(mode)
+    })
+  }, [])
+  useEffect(() => {
+    loadDefaultPermission()
+  }, [loadDefaultPermission, catalogTick])
 
   /** 切换当前会话权限(活动会话直接写后端;无活动会话先记本地,首次发送时带上)。 */
   const applyPermission = useCallback(

@@ -1,12 +1,18 @@
 //! The `bash` tool: one shell command per call.
+//!
+//! 有 [`ShellHub`] 的部署走**常驻 shell**(同一会话的多次调用共享工作目录、
+//! 变量与环境),没有则退回一次性进程。形态差异的取舍见
+//! [`crate::shell_session`] 的模块文档。
 
 use std::process::Stdio;
+use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
 use denia_core::tool::ToolSchema;
 use serde::Deserialize;
 
+use crate::shell_session::ShellHub;
 use crate::support::{parse_tool_args, tool_error};
 use crate::{Tool, ToolContext, ToolOutput, shell};
 
@@ -23,7 +29,8 @@ struct BashArgs {
 /// Runs one shell command in the session workspace.
 pub struct BashTool {
     schema: ToolSchema,
-    runtime: Option<std::sync::Arc<dyn crate::capabilities::AgentRuntime>>,
+    runtime: Option<Arc<dyn crate::capabilities::AgentRuntime>>,
+    hub: Option<ShellHub>,
 }
 
 impl BashTool {
@@ -32,6 +39,7 @@ impl BashTool {
         let command_description = shell::bash_command_param_description(&runtime);
         Self {
             runtime: None,
+            hub: None,
             schema: ToolSchema {
                 name: "bash".to_string(),
                 description: shell::bash_tool_description(&runtime),
@@ -62,6 +70,78 @@ impl BashTool {
         self.runtime = Some(runtime);
         self.schema.parameters["properties"]["run_in_background"] = serde_json::json!({"type":"boolean","description":"后台执行并立即返回任务 id;用 job_output 读取输出、job_kill 停止。"});
         self
+    }
+
+    /// 挂上常驻 shell 注册表;不挂则每次调用都新起一个一次性进程。
+    ///
+    /// 描述随形态一起换:`常驻`与`每次新进程`是两句互斥的话,模型看到的必须
+    /// 与真实执行方式一致(项目铁律:模型可见 == 模型可执行)。
+    pub fn with_shell_hub(mut self, hub: ShellHub) -> Self {
+        self.schema.description = shell::persistent_bash_tool_description(&shell::shell_runtime());
+        self.hub = Some(hub);
+        self
+    }
+
+    /// 常驻 shell 路径:同一会话复用同一个进程,状态跨调用保留。
+    async fn execute_persistent(
+        &self,
+        hub: &ShellHub,
+        session_id: &str,
+        command: &str,
+        timeout_ms: u64,
+        ctx: &ToolContext,
+    ) -> ToolOutput {
+        // 起进程是阻塞操作,丢进 blocking 池;已有 shell 时这里只是查表。
+        let spawned = {
+            let hub = hub.clone();
+            let key = session_id.to_string();
+            let cwd = ctx.cwd.clone();
+            tokio::task::spawn_blocking(move || hub.get_or_spawn(&key, &cwd)).await
+        };
+        let shell = match spawned {
+            Ok(Ok(shell)) => shell,
+            Ok(Err(message)) => {
+                return tool_error(
+                    message,
+                    "确认宿主 shell 可执行文件可用;工作目录是会话工作区",
+                );
+            }
+            Err(join_error) => {
+                return tool_error(format!("持久 shell 启动任务失败:{join_error}"), "请重试一次");
+            }
+        };
+
+        let runner = {
+            let shell = Arc::clone(&shell);
+            let command = command.to_string();
+            let timeout = Duration::from_millis(timeout_ms);
+            tokio::task::spawn_blocking(move || shell.run(&command, timeout))
+        };
+
+        tokio::select! {
+            biased;
+            _ = ctx.cancel.cancelled() => {
+                // 阻塞在读取上没法协作式取消,直接把 shell 杀掉:等它的那次
+                // 读取会以"进程已退出"收尾,不会留下半条命令的脏状态。
+                // 读取任务本身随即自然结束,这里不必再 await(也无法取消)。
+                shell.kill();
+                tool_error(
+                    "命令被用户中断",
+                    "该会话的持久 shell 已终止,下一条命令会重开一个干净 shell",
+                )
+            }
+            result = runner => match result {
+                Ok(Ok(captured)) => ToolOutput::text(format!(
+                    "退出码: {}\n{}",
+                    captured.exit_code.unwrap_or(-1),
+                    captured.text
+                )),
+                Ok(Err(message)) => ToolOutput::error(format!("[工具错误] {message}")),
+                Err(join_error) => {
+                    tool_error(format!("命令执行任务失败:{join_error}"), "请重试一次")
+                }
+            },
+        }
     }
 }
 
@@ -101,6 +181,14 @@ impl Tool for BashTool {
         };
         let requested_ms = args.timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS).min(MAX_TIMEOUT_MS);
         let timeout = Duration::from_millis(requested_ms);
+
+        // 挂了常驻 shell 注册表且当前调用归属某个会话 → 走持久路径。
+        // 没有会话身份的调用(单测、无宿主的裸跑)退回一次性进程。
+        if let (Some(hub), Some(session_id)) = (&self.hub, ctx.session_id.as_deref()) {
+            return self
+                .execute_persistent(hub, session_id, &args.command, requested_ms, ctx)
+                .await;
+        }
 
         let spawn_once = || {
             let mut command = shell::shell_command(&args.command);

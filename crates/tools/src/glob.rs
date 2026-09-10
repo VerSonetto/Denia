@@ -1,6 +1,8 @@
 //! The `glob` tool: discover files by glob pattern.
 //!
 //! 走 `ignore` 的 gitignore 语法 overrides(dsh 同款语义):
+//! - `path` 接受绝对路径与相对路径(相对路径锚定会话工作区),统一走
+//!   [`resolve_within`],沙箱开启时越界即拒绝;
 //! - 无 "/" 的模式按 basename 匹配**任意深度**(`*.rs` ≈ `**/*.rs`);
 //! - 结果只含文件、不含目录;按修改时间降序(新鲜优先);
 //! - 默认包含隐藏与忽略文件(VCS 元数据目录除外),与 dsh glob 契约一致;
@@ -93,7 +95,7 @@ impl Drop for TopNBatch {
 struct GlobArgs {
     /// 匹配文件路径的 glob 模式(gitignore 语法;无 "/" 时匹配任意深度 basename)。
     pattern: String,
-    /// 搜索目录;相对路径锚定会话工作区。
+    /// 搜索目录;绝对路径原样使用,相对路径锚定会话工作区。
     #[serde(default)]
     path: Option<String>,
     /// 最多返回的路径数(默认 100,上限 5000)。
@@ -114,7 +116,7 @@ impl GlobTool {
         Self {
             schema: ToolSchema {
                 name: "glob".to_string(),
-                description: "按 glob 模式查找文件,返回匹配的文件路径(不含目录),按修改时间从新到旧排序。模式里没有 \"/\" 时匹配任意深度的文件名,所以 \"*.rs\" 会搜索整棵树。默认包含隐藏文件,VCS 元数据目录(.git 等)排除。结果多时用 offset/max_results 分页。".to_string(),
+                description: "按 glob 模式查找文件,返回匹配的文件路径(不含目录),按修改时间从新到旧排序。模式里没有 \"/\" 时匹配任意深度的文件名,所以 \"*.rs\" 会搜索整棵树。path 可传绝对路径或相对工作区的相对路径,缺省为会话工作区。默认包含隐藏文件,VCS 元数据目录(.git 等)排除。结果路径以会话工作区为基准显示(工作区外的结果给绝对路径)。结果多时用 offset/max_results 分页。".to_string(),
                 parameters: serde_json::json!({
                     "type": "object",
                     "properties": {
@@ -124,7 +126,7 @@ impl GlobTool {
                         },
                         "path": {
                             "type": "string",
-                            "description": "搜索目录,默认会话工作区;相对路径锚定会话工作区。"
+                            "description": "搜索目录,默认会话工作区。绝对路径与相对路径都可用:相对路径锚定会话工作区(如 \"src\" 或 \"./src\")。"
                         },
                         "max_results": {
                             "type": "integer",
@@ -177,13 +179,13 @@ impl Tool for GlobTool {
             Ok(path) => path,
             Err(message) => {
                 return ToolOutput::error(format!(
-                    "[工具错误] {message}\n建议:相对路径锚定会话工作区;确认目录存在"
+                    "[工具错误] {message}\n建议:path 可写绝对路径或相对工作区的相对路径;沙箱开启时路径必须在工作区内"
                 ));
             }
         };
         if !root.is_dir() {
             return ToolOutput::error(format!(
-                "[工具错误] '{}' 不是目录\n建议:path 参数必须是存在的目录;找文件请用 grep 或 read_file",
+                "[工具错误] '{}' 不是目录\n建议:path 必须指向存在的目录(绝对或相对工作区均可);找文件的内容请用 grep 或 read_file",
                 root.display()
             ));
         }
@@ -200,7 +202,10 @@ impl Tool for GlobTool {
         let result = tokio::task::spawn_blocking(move || {
             let mut builder = WalkBuilder::new(&root);
             builder
-                .hidden(true) // 包含隐藏文件(dsh glob 契约),VCS 目录单独排除
+                // 注意极性:`hidden` 是"过滤器开关",true = 把隐藏条目滤掉。
+                // 这里要包含隐藏文件(dsh glob 契约:/--hidden/),所以传 false;
+                // VCS 元数据目录不走这条,在 visitor 里按 basename 单独剪枝。
+                .hidden(false)
                 .parents(false)
                 .git_ignore(false)
                 .git_exclude(false)
@@ -379,6 +384,62 @@ mod tests {
         file.write_all(b"x").unwrap();
     }
 
+    /// 绝对路径塞进 JSON:统一写成正斜杠(Windows 上同样合法),免去转义。
+    fn json_path(path: &Path) -> String {
+        path.to_string_lossy().replace('\\', "/")
+    }
+
+    #[tokio::test]
+    async fn relative_path_is_anchored_at_workspace_and_absolute_path_is_accepted() {
+        let root = temp_root();
+        touch(&root.join("src/a.rs"));
+        touch(&root.join("src/deep/b.rs"));
+        let ctx = context(root.clone());
+        let tool = GlobTool::new();
+
+        // 相对路径锚定工作区。
+        let out = tool
+            .execute(r#"{"pattern":"*.rs","path":"src"}"#, &ctx)
+            .await;
+        assert!(!out.is_error, "{}", out.content);
+        assert!(out.content.contains("src/a.rs"), "{}", out.content);
+
+        // 同一个目录写成绝对路径,必须得到同样的结果(输出仍以工作区为基准)。
+        let raw = format!(
+            r#"{{"pattern":"a.rs","path":"{}"}}"#,
+            json_path(&root.join("src"))
+        );
+        let out = tool.execute(&raw, &ctx).await;
+        assert!(!out.is_error, "{}", out.content);
+        assert_eq!(out.content.trim(), "src/a.rs", "{}", out.content);
+
+        // 工作区根本身写成绝对路径也可用(等于缺省 path)。
+        let raw = format!(r#"{{"pattern":"*.rs","path":"{}"}}"#, json_path(&root));
+        let out = tool.execute(&raw, &ctx).await;
+        assert!(!out.is_error, "{}", out.content);
+        assert!(out.content.contains("src/a.rs"), "{}", out.content);
+        assert!(out.content.contains("src/deep/b.rs"), "{}", out.content);
+
+        std::fs::remove_dir_all(&ctx.cwd).unwrap();
+    }
+
+    #[tokio::test]
+    async fn absolute_path_outside_workspace_is_rejected() {
+        let root = temp_root();
+        let outside = temp_root();
+        touch(&root.join("a.rs"));
+        touch(&outside.join("b.rs"));
+        let ctx = context(root.clone());
+        let tool = GlobTool::new();
+        let raw = format!(r#"{{"pattern":"*.rs","path":"{}"}}"#, json_path(&outside));
+        let out = tool.execute(&raw, &ctx).await;
+        assert!(out.is_error, "{}", out.content);
+        assert!(out.content.contains("越出了会话工作区"), "{}", out.content);
+        assert!(out.content.contains("建议:"), "{}", out.content);
+        std::fs::remove_dir_all(&ctx.cwd).unwrap();
+        std::fs::remove_dir_all(&outside).unwrap();
+    }
+
     #[tokio::test]
     async fn matches_basename_at_any_depth() {
         let root = temp_root();
@@ -422,6 +483,31 @@ mod tests {
         assert!(!out.is_error);
         assert!(out.content.contains("src/keep.txt"));
         assert!(!out.content.contains(".git"), "{}", out.content);
+        std::fs::remove_dir_all(&ctx.cwd).unwrap();
+    }
+
+    /// 回归保护:描述承诺"包含隐藏文件",实现就必须真的包含。
+    ///
+    /// `ignore::WalkBuilder::hidden` 是过滤器开关——传 true 是把隐藏条目**滤掉**,
+    /// 不是"打开隐藏"。这里曾写成 `.hidden(true)` 并配注释"包含隐藏文件",
+    /// 于是模型按描述去找 `.github/workflows/*.yml` 会颗粒无收,还以为文件不存在。
+    #[tokio::test]
+    async fn hidden_files_are_included_except_under_vcs_directories() {
+        let root = temp_root();
+        touch(&root.join(".github/workflows/ci.yml"));
+        touch(&root.join(".gitignore"));
+        touch(&root.join("src/keep.rs"));
+        let ctx = context(root.clone());
+        let tool = GlobTool::new();
+        let out = tool.execute(r#"{"pattern":"*"}"#, &ctx).await;
+        assert!(!out.is_error, "{}", out.content);
+        assert!(
+            out.content.contains(".github/workflows/ci.yml"),
+            "隐藏目录下的文件必须出现在结果里:{}",
+            out.content
+        );
+        assert!(out.content.contains(".gitignore"), "{}", out.content);
+        assert!(out.content.contains("src/keep.rs"), "{}", out.content);
         std::fs::remove_dir_all(&ctx.cwd).unwrap();
     }
 

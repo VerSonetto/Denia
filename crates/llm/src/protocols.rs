@@ -429,19 +429,19 @@ impl CompletionsStream {
 impl EventTranslator for CompletionsStream {
     fn feed(&mut self, data: &str) -> Result<Vec<StreamChunk>, LlmFailure> {
         let trimmed = data.trim();
-        if trimmed == DONE_MARKER {
-            self.saw_done = true;
-            return Ok(Vec::new());
+        match sentinel(trimmed) {
+            Some(Sentinel::Done) => {
+                self.saw_done = true;
+                return Ok(Vec::new());
+            }
+            Some(Sentinel::Other) => return Ok(Vec::new()),
+            None => {}
         }
         if trimmed.is_empty() {
             return Ok(Vec::new());
         }
-        let wire: WireChunk = serde_json::from_str(trimmed).map_err(|error| {
-            LlmFailure::new(
-                codes::MALFORMED_RESPONSE,
-                format!("malformed SSE payload: {error}"),
-            )
-        })?;
+        let wire: WireChunk =
+            serde_json::from_str(trimmed).map_err(|error| malformed(error, trimmed))?;
         Ok(self.inner.feed(&wire, self.style))
     }
 
@@ -474,11 +474,58 @@ struct CallState {
     arguments: String,
 }
 
-fn malformed(detail: impl std::fmt::Display) -> LlmFailure {
+/// SSE 收尾哨兵。规范只规定 `[DONE]`,但网关实现风格各异:`[done]`、`[Done]`、
+/// `[END]` 等都实测出现过。这类载荷不是 JSON,一旦送进解析器就会以
+/// `expected value at line 1 column 2` 炸掉整步(排查时连上游发了什么都看不到)。
+#[derive(Debug, PartialEq, Eq)]
+enum Sentinel {
+    /// 会话终止(`[DONE]` 及大小写变体)。
+    Done,
+    /// 其它方括号标识符(心跳 / 非标准终止符):与本轮内容无关,忽略。
+    Other,
+}
+
+/// 识别 `[IDENT]` 形态的哨兵;不是这种形态就返回 `None`,照常走 JSON 解析。
+fn sentinel(data: &str) -> Option<Sentinel> {
+    let inner = data.strip_prefix('[')?.strip_suffix(']')?;
+    let is_identifier = !inner.is_empty()
+        && inner
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
+    if !is_identifier {
+        return None;
+    }
+    // 以规范常量 `[DONE]` 为准做大小写不敏感比较,`[done]`/`[Done]` 一并认。
+    let is_done = DONE_MARKER
+        .strip_prefix('[')
+        .and_then(|marker| marker.strip_suffix(']'))
+        .is_some_and(|token| token.eq_ignore_ascii_case(inner));
+    Some(if is_done {
+        Sentinel::Done
+    } else {
+        Sentinel::Other
+    })
+}
+
+/// 畸形帧报错必须带原文:只有 serde 列号时,前端与日志都无法判断上游到底
+/// 发了什么(实测为此反复误判)。原文截断到一行可读长度,换行转义。
+fn malformed(detail: impl std::fmt::Display, raw: &str) -> LlmFailure {
     LlmFailure::new(
         codes::MALFORMED_RESPONSE,
-        format!("malformed SSE payload: {detail}"),
+        format!("malformed SSE payload: {detail} (raw data: {})", payload_preview(raw)),
     )
+}
+
+/// 报错里附带的原文预览长度上限(保留一行可读)。
+const PAYLOAD_PREVIEW_MAX: usize = 240;
+
+fn payload_preview(raw: &str) -> String {
+    let flat = raw.trim().replace(['\n', '\r'], "\\n");
+    let mut preview: String = flat.chars().take(PAYLOAD_PREVIEW_MAX).collect();
+    if flat.chars().count() > PAYLOAD_PREVIEW_MAX {
+        preview.push('…');
+    }
+    preview
 }
 
 /// OpenAI Responses SSE → chunks. Text/reasoning blocks stream via delta
@@ -567,11 +614,38 @@ impl ResponsesStream {
             reasoning_tokens: usage["output_tokens_details"]["reasoning_tokens"].as_u64(),
         }
     }
+
+    /// 网关没发 `response.completed`、只在流尾补了 `[DONE]` 时,按已收到的
+    /// 内容收口(有工具调用 → ToolCalls,否则 Stop)。一个块都没流过就什么都不做,
+    /// 留给 `finish()` 按 STREAM_CLOSED 报错——真实的截断不能被悄悄吞掉。
+    fn complete_on_sentinel(&mut self) -> Vec<StreamChunk> {
+        if self.completed || !self.saw_block {
+            return Vec::new();
+        }
+        let mut out = Vec::new();
+        self.completed = true;
+        self.close_text(&mut out);
+        self.close_reasoning(&mut out);
+        self.finish = Some(if self.had_tool_call {
+            FinishReason::ToolCalls
+        } else {
+            FinishReason::Stop
+        });
+        out
+    }
 }
 
 impl EventTranslator for ResponsesStream {
     fn feed(&mut self, data: &str) -> Result<Vec<StreamChunk>, LlmFailure> {
-        let value: serde_json::Value = serde_json::from_str(data.trim()).map_err(malformed)?;
+        let trimmed = data.trim();
+        // 不少网关在 Responses 流尾沿用 chat-completions 的收尾习惯补 `data: [DONE]`。
+        match sentinel(trimmed) {
+            Some(Sentinel::Done) => return Ok(self.complete_on_sentinel()),
+            Some(Sentinel::Other) => return Ok(Vec::new()),
+            None => {}
+        }
+        let value: serde_json::Value =
+            serde_json::from_str(trimmed).map_err(|error| malformed(error, trimmed))?;
         let event_type = value["type"].as_str().unwrap_or_default().to_string();
         let mut out = Vec::new();
         match event_type.as_str() {
@@ -843,7 +917,21 @@ impl AnthropicStream {
 
 impl EventTranslator for AnthropicStream {
     fn feed(&mut self, data: &str) -> Result<Vec<StreamChunk>, LlmFailure> {
-        let value: serde_json::Value = serde_json::from_str(data.trim()).map_err(malformed)?;
+        let trimmed = data.trim();
+        // Messages 协议用 `message_stop` 收尾;网关额外补 `data: [DONE]` 时
+        // 按同一语义收口,别把收尾哨兵当畸形帧。
+        match sentinel(trimmed) {
+            Some(Sentinel::Done) => {
+                if self.saw_block {
+                    self.stopped = true;
+                }
+                return Ok(Vec::new());
+            }
+            Some(Sentinel::Other) => return Ok(Vec::new()),
+            None => {}
+        }
+        let value: serde_json::Value =
+            serde_json::from_str(trimmed).map_err(|error| malformed(error, trimmed))?;
         let event_type = value["type"].as_str().unwrap_or_default().to_string();
         let mut out = Vec::new();
         match event_type.as_str() {
@@ -1427,6 +1515,135 @@ mod tests {
             chunks.last().unwrap(),
             StreamChunk::Finish {
                 reason: FinishReason::Stop
+            }
+        ));
+    }
+
+    #[test]
+    fn done_sentinel_is_case_insensitive_and_brackets_are_ignored() {
+        // 网关大小写不一(`[done]`)或发非标准方括号哨兵,都不能炸掉整步。
+        let mut translator = CompletionsStream::new(UsageStyle::OpenAi);
+        translator
+            .feed(r#"{"choices":[{"delta":{"content":"hi"}}]}"#)
+            .unwrap();
+        assert!(translator.feed("[done]").unwrap().is_empty());
+        assert!(translator.feed("[END]").unwrap().is_empty());
+        let chunks = translator.finish().unwrap();
+        assert!(matches!(
+            chunks.last().unwrap(),
+            StreamChunk::Finish {
+                reason: FinishReason::Stop
+            }
+        ));
+    }
+
+    #[test]
+    fn responses_stream_tolerates_trailing_done_sentinel() {
+        // 网关没发 response.completed、只在流尾补 [DONE]:按已收到内容收口。
+        let mut translator = ResponsesStream::default();
+        let chunks = feed_all(
+            &mut translator,
+            &[
+                r#"{"type":"response.output_text.delta","delta":"你好"}"#,
+                r#"{"type":"response.output_item.done","item":{"type":"message"}}"#,
+                DONE_MARKER,
+            ],
+        );
+        assert!(matches!(
+            chunks.last().unwrap(),
+            StreamChunk::Finish {
+                reason: FinishReason::Stop
+            }
+        ));
+        assert!(chunks.iter().any(|chunk| matches!(
+            chunk,
+            StreamChunk::BlockEnd {
+                block: ContentBlock::Text { text },
+                ..
+            } if text == "你好"
+        )));
+    }
+
+    #[test]
+    fn responses_sentinel_without_any_output_still_fails_loud() {
+        // 一个块都没流过就收到 [DONE]:真实的截断不能被悄悄吞掉。
+        let mut translator = ResponsesStream::default();
+        translator.feed(DONE_MARKER).unwrap();
+        let error = translator.finish().unwrap_err();
+        assert_eq!(error.code, codes::STREAM_CLOSED);
+    }
+
+    #[test]
+    fn anthropic_stream_tolerates_trailing_done_sentinel() {
+        let mut translator = AnthropicStream::default();
+        let chunks = feed_all(
+            &mut translator,
+            &[
+                r#"{"type":"message_start","message":{"usage":{"input_tokens":3}}}"#,
+                r#"{"type":"content_block_start","index":0,"content_block":{"type":"text"}}"#,
+                r#"{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hi"}}"#,
+                r#"{"type":"content_block_stop","index":0}"#,
+                DONE_MARKER,
+            ],
+        );
+        assert!(matches!(
+            chunks.last().unwrap(),
+            StreamChunk::Finish {
+                reason: FinishReason::Stop
+            }
+        ));
+    }
+
+    #[test]
+    fn malformed_frame_error_carries_raw_payload() {
+        // 只有 serde 列号时没法定位上游到底发了什么;报错必须带原文。
+        let mut translator = CompletionsStream::new(UsageStyle::OpenAi);
+        let error = translator.feed(r#"{"choices":[{"delta":"#).unwrap_err();
+        assert_eq!(error.code, codes::MALFORMED_RESPONSE);
+        assert!(error.message.contains("raw data:"), "{}", error.message);
+        assert!(error.message.contains(r#"{"choices":[{"delta":"#), "{}", error.message);
+    }
+
+    #[test]
+    fn responses_malformed_frame_error_carries_raw_payload() {
+        let mut translator = ResponsesStream::default();
+        let error = translator.feed("{not json").unwrap_err();
+        assert_eq!(error.code, codes::MALFORMED_RESPONSE);
+        assert!(error.message.contains("raw data:"), "{}", error.message);
+        assert!(error.message.contains("{not json"), "{}", error.message);
+    }
+
+    #[test]
+    fn completion_stream_survives_indexless_tool_call_and_lowercase_done() {
+        // 回归(会话 31d16f67):网关流完推理后在 tool_calls 帧上省掉 index,
+        // 并用 `[done]` 收尾。旧实现两处都判致命,整个 step 作废。
+        let mut translator = CompletionsStream::new(UsageStyle::OpenAi);
+        let chunks = feed_all(
+            &mut translator,
+            &[
+                r#"{"choices":[{"delta":{"reasoning_content":"先看一下脚本。"}}]}"#,
+                r#"{"choices":[{"delta":{"tool_calls":[{"id":"call_1","type":"function","function":{"name":"bash","arguments":"{\"command\":"}}]}}]}"#,
+                r#"{"choices":[{"delta":{"tool_calls":[{"function":{"arguments":"\"Get-ChildItem scripts\"}"}}]}}]}"#,
+                r#"{"choices":[{"delta":{},"finish_reason":"tool_calls"}]}"#,
+                "[done]",
+            ],
+        );
+        let tool = chunks
+            .iter()
+            .find_map(|chunk| match chunk {
+                StreamChunk::BlockEnd {
+                    block: ContentBlock::ToolCall { name, arguments, .. },
+                    ..
+                } => Some((name.clone(), arguments.clone())),
+                _ => None,
+            })
+            .expect("工具调用必须被完整拼出来");
+        assert_eq!(tool.0, "bash");
+        assert_eq!(tool.1, r#"{"command":"Get-ChildItem scripts"}"#);
+        assert!(matches!(
+            chunks.last().unwrap(),
+            StreamChunk::Finish {
+                reason: FinishReason::ToolCalls
             }
         ));
     }

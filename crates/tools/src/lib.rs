@@ -14,11 +14,13 @@ mod files;
 mod goal;
 pub mod glob;
 pub mod grep;
+mod ls;
 mod plan;
 pub mod permission;
 pub mod prompt;
 pub mod recon;
 pub mod shell;
+pub mod shell_session;
 pub mod support;
 mod todo;
 
@@ -38,6 +40,7 @@ pub use files::{ReadFileTool, WriteFileTool};
 pub use glob::GlobTool;
 pub use goal::{GetGoalTool, UpdateGoalTool};
 pub use grep::GrepTool;
+pub use ls::LsTool;
 pub use plan::{ExitPlanArgs, ExitPlanTool};
 pub use prompt::{
     default_shipped, default_shipped_with_browser, default_shipped_with_browser_and_recon,
@@ -47,6 +50,7 @@ pub use prompt::{
     shipped_with_persona_and_browser_and_recon_and_ask,
 };
 pub use recon::{ReconExecute, ReconHub, ReconTool};
+pub use shell_session::{Captured, PersistentShell, ShellHub};
 pub use todo::TodoWriteTool;
 
 /// Session-event sink handed to tools that emit log-only state (todo_write).
@@ -60,6 +64,10 @@ pub type SessionEventSink = Arc<dyn Fn(SessionEvent) + Send + Sync>;
 /// 后台任务一律留在父代理。`allowed_tools` 只能在本集合内进一步缩小,
 /// 不能扩大(见 `agent_runtime::delegate` 的校验)。
 ///
+/// `ls`/`glob`/`grep` 三件套在此集合内:探索工作区是子代理调研的日常,
+/// 而它们都是只读、进程内、无资源副作用的工具——正好也是父代理最希望
+/// 子代理"别用 bash 去干"的那三件事。
+///
 /// `browser` 在此集合内:网页抓取/查看是只读调查手段,子代理做调研时
 /// 常常需要。它带来的资源副作用(常驻 Chrome 实例)由父代理统一收尾——
 /// `tool:browser` 纪律段说明"任务完成后彻底清除",子代理同样受该纪律约束;
@@ -69,7 +77,7 @@ pub type SessionEventSink = Arc<dyn Fn(SessionEvent) + Send + Sync>;
 /// 这里在授予层直接收口,子代理拿不到交互/写类工具,也就不存在"子代理
 /// 提问没人应答"的问题。
 pub const SUBAGENT_READ_ONLY_TOOLS: &[&str] =
-    &["read_file", "glob", "grep", "skill", "browser"];
+    &["read_file", "ls", "glob", "grep", "skill", "browser"];
 
 /// 提问通道:宿主实现,把 `ask` 工具的提问挂到会话的挂起表并等待用户应答。
 ///
@@ -201,13 +209,14 @@ impl ToolRegistry {
     }
 }
 
-/// The shipped tool set: bash + read_file + write_file + todo_write + glob + grep + edit + exit_plan.
+/// The shipped tool set: bash + read_file + write_file + todo_write + ls + glob + grep + edit + exit_plan.
 pub fn default_registry() -> ToolRegistry {
     let mut registry = ToolRegistry::default();
     registry.register(Arc::new(BashTool::default()));
     registry.register(Arc::new(ReadFileTool::default()));
     registry.register(Arc::new(WriteFileTool::default()));
     registry.register(Arc::new(TodoWriteTool::default()));
+    registry.register(Arc::new(LsTool::default()));
     registry.register(Arc::new(GlobTool::default()));
     registry.register(Arc::new(GrepTool::default()));
     registry.register(Arc::new(EditTool::default()));
@@ -247,23 +256,39 @@ pub fn default_registry_with_browser_and_recon(
 
 /// Resolves one raw path for a tool call.
 ///
-/// Relative paths anchor at `cwd`. Absolute paths are accepted as-is when
-/// the session is not confined; with the sandbox on, every resolved path
-/// must stay inside `cwd`.
+/// 绝对路径(`C:\…`、`\\server\share\…`、`/…`)与相对路径(`src/main.rs`、
+/// `./a/b`)同样接受,这是模型两种写法都能落到正确位置的前提:
+/// - 相对路径锚定 `cwd`;绝对路径从根起算,**盘符/UNC 前缀原样保留**;
+/// - 两种形式都按组件消解 `.` 与 `..`,弹到根之外即拒绝;
+/// - 盘符相对路径(`D:foo`)锚定的是该盘当前目录而非会话工作区,语义含糊,
+///   明确拒绝而不是静默落到别处(fail loud);
+/// - `confined`(沙箱)开启时解析结果必须落在 `cwd` 内,否则拒绝;
+///   Windows 路径大小写不敏感,`d:/work` 与 `D:\work` 视为同一位置。
 pub(crate) fn resolve_within(cwd: &Path, raw: &str, confined: bool) -> Result<PathBuf, String> {
-    if raw.trim().is_empty() {
+    let raw = raw.trim();
+    if raw.is_empty() {
         return Err("路径不能为空".to_string());
     }
-    let mut out = if Path::new(raw).is_absolute() {
+    let raw_path = Path::new(raw);
+    if !raw_path.is_absolute() && matches!(raw_path.components().next(), Some(Component::Prefix(_)))
+    {
+        return Err(format!(
+            "路径 '{raw}' 是盘符相对路径(如 \"D:foo\"),不受支持"
+        ));
+    }
+    // 绝对路径从零起算(首个 Prefix/RootDir 负责落根),相对路径从 cwd 起算。
+    let mut out = if raw_path.is_absolute() {
         PathBuf::new()
     } else {
         cwd.to_path_buf()
     };
-    for component in Path::new(raw).components() {
+    for component in raw_path.components() {
         match component {
-            Component::Prefix(_) | Component::RootDir => {
-                out = PathBuf::from(component.as_os_str());
-            }
+            // Prefix 与 RootDir 必须 `push` 拼接:`PathBuf::push` 的语义是
+            // 「带根无前缀者替换除前缀外的全部」,所以 `C:` + `\` 得到 `C:\`。
+            // 整体替换(`out = PathBuf::from(...)`)会把盘符吃掉——`D:\a\b`
+            // 解析成 `\a\b`,沙箱内被误判越界、沙箱外静默指向当前盘的同名路径。
+            Component::Prefix(_) | Component::RootDir => out.push(component.as_os_str()),
             Component::CurDir => {}
             Component::ParentDir => {
                 if !out.pop() {
@@ -273,10 +298,40 @@ pub(crate) fn resolve_within(cwd: &Path, raw: &str, confined: bool) -> Result<Pa
             Component::Normal(part) => out.push(part),
         }
     }
-    if confined && !out.starts_with(cwd) {
+    if confined && !within(cwd, &out) {
         return Err(format!("路径 '{raw}' 越出了会话工作区(沙箱开启)"));
     }
     Ok(out)
+}
+
+/// 沙箱边界判定:`out` 是否落在 `base` 之内。
+///
+/// 按组件比较(不是字符串前缀,`/work` 不会误吞 `/workshop`);Windows 上
+/// 再按 ASCII 折叠比较一次,免得模型写的小写盘符/目录名被误判为越界。
+/// 判错的方向是"多拒绝一次",不会放大权限。
+fn within(base: &Path, out: &Path) -> bool {
+    if out.starts_with(base) {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        let mut out_components = out.components();
+        for base_component in base.components() {
+            match out_components.next() {
+                Some(component)
+                    if component
+                        .as_os_str()
+                        .eq_ignore_ascii_case(base_component.as_os_str()) => {}
+                _ => return false,
+            }
+        }
+        // base 组件全部命中即算在内;base 为空路径时不算(避免把任意路径都当"在空边界内")。
+        return base.components().count() > 0;
+    }
+    #[cfg(not(windows))]
+    {
+        false
+    }
 }
 
 /// 宽容参数解析:只取第一个 JSON 值,忽略尾部垃圾。
@@ -309,6 +364,86 @@ mod tests {
         // Unconfined sessions may leave the workspace.
         assert!(resolve_within(&cwd, "../elsewhere", false).is_ok());
         assert!(resolve_within(&cwd, "", true).is_err());
+        assert!(resolve_within(&cwd, "   ", true).is_err());
+    }
+
+    /// 绝对路径与相对路径必须都能解析:相对锚定 cwd,绝对保留盘符/根,
+    /// `.`/`..` 在组件层消解,越界按 confined 放行或拒绝。
+    #[test]
+    fn resolve_within_handles_absolute_and_relative_forms() {
+        let cwd = if cfg!(windows) {
+            PathBuf::from("D:\\work")
+        } else {
+            PathBuf::from("/work")
+        };
+        // 相对路径 + `.` / `..` 消解。
+        assert_eq!(
+            resolve_within(&cwd, "src/main.rs", true).unwrap(),
+            cwd.join("src/main.rs")
+        );
+        assert_eq!(
+            resolve_within(&cwd, "./src/../lib.rs", true).unwrap(),
+            cwd.join("lib.rs")
+        );
+        assert_eq!(resolve_within(&cwd, ".", true).unwrap(), cwd);
+
+        if cfg!(windows) {
+            // 工作区内的绝对路径必须可用(旧实现吃掉盘符后会被误判越界)。
+            assert_eq!(
+                resolve_within(&cwd, "D:\\work\\src\\main.rs", true).unwrap(),
+                PathBuf::from("D:\\work\\src\\main.rs")
+            );
+            // 正斜杠 + 小写盘符:Windows 大小写不敏感,不该误拒。
+            assert_eq!(
+                resolve_within(&cwd, "d:/work/src/main.rs", true).unwrap(),
+                PathBuf::from("d:/work/src/main.rs")
+            );
+            // 绝对路径里的 `..` 在边界内消解。
+            assert_eq!(
+                resolve_within(&cwd, "D:\\work\\src\\..\\lib.rs", true).unwrap(),
+                PathBuf::from("D:\\work\\lib.rs")
+            );
+            // 工作区之外的绝对路径:沙箱拒绝……
+            assert!(resolve_within(&cwd, "C:\\Users\\me\\x.txt", true).is_err());
+            // ……非沙箱放行,且盘符完好(旧实现会变成 `\Users\me\x.txt`)。
+            assert_eq!(
+                resolve_within(&cwd, "C:\\Users\\me\\x.txt", false).unwrap(),
+                PathBuf::from("C:\\Users\\me\\x.txt")
+            );
+            // UNC 前缀保留服务器与共享名。
+            assert_eq!(
+                resolve_within(&cwd, "\\\\srv\\share\\a", false).unwrap(),
+                PathBuf::from("\\\\srv\\share\\a")
+            );
+            // 盘符相对路径语义含糊,直接拒绝而不是静默落到该盘当前目录。
+            assert!(resolve_within(&cwd, "D:foo", false).is_err());
+        } else {
+            assert_eq!(
+                resolve_within(&cwd, "/work/src/main.rs", true).unwrap(),
+                PathBuf::from("/work/src/main.rs")
+            );
+            assert!(resolve_within(&cwd, "/etc/passwd", true).is_err());
+            assert!(resolve_within(&cwd, "/etc/passwd", false).is_ok());
+        }
+    }
+
+    #[test]
+    fn within_is_component_wise_and_case_insensitive_on_windows() {
+        if cfg!(windows) {
+            // 组件比较,不是字符串前缀。
+            assert!(!within(Path::new("D:\\work"), Path::new("D:\\workshop\\a")));
+            assert!(within(Path::new("D:\\work"), Path::new("D:\\work\\a")));
+            assert!(within(Path::new("D:\\work"), Path::new("D:\\work")));
+            // 大小写折叠。
+            assert!(within(
+                Path::new("D:\\Code\\Work"),
+                Path::new("d:\\code\\work\\a.rs")
+            ));
+            assert!(!within(Path::new("D:\\work"), Path::new("E:\\work")));
+        } else {
+            assert!(!within(Path::new("/work"), Path::new("/workshop/a")));
+            assert!(within(Path::new("/work"), Path::new("/work/a")));
+        }
     }
 
     #[test]

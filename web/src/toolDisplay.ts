@@ -67,6 +67,12 @@ export function toolCallSummary(name: string, args: string): string {
         if (path) return shortPath(path)
         break
       }
+      case 'ls': {
+        const path = readString(parsed, 'path')
+        const depth = parsed['depth']
+        const label = path ? shortPath(path) : '.'
+        return typeof depth === 'number' && depth > 1 ? `${label}  depth ${depth}` : label
+      }
       case 'bash': {
         const command = readString(parsed, 'command')
         if (command) return command.length > 90 ? `${command.slice(0, 90)}…` : command
@@ -95,6 +101,10 @@ export function toolCallInput(name: string, args: string): string | null {
   if (!parsed) return args.trim() || null
   switch (name) {
     case 'read_file': {
+      const path = readString(parsed, 'path')
+      return path ? shortPath(path) : null
+    }
+    case 'ls': {
       const path = readString(parsed, 'path')
       return path ? shortPath(path) : null
     }

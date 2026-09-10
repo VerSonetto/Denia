@@ -45,7 +45,17 @@ pub fn register_shipped_prompt(
         name: "tool:bash".to_string(),
         order: SectionOrder::ToolBash.value(),
         text: PromptText::Static(
-            "每次查看 bash 结果中的退出码；失败时先排查再继续。命令语法须与本机 shell 方言一致。"
+            "bash 只用来跑命令:构建、测试、git、装依赖、启动进程。四件探索类的事一律不许走 bash——列目录用 ls,按路径模式找文件用 glob,搜文件内容用 grep,读文本用 read_file。禁止范围按动作界定,不看命令叫什么名:PowerShell 的 Get-ChildItem(含 -Recurse/Filter/Include)、Select-String、Get-Content 与 bash 的 ls、find、grep/rg、cat 一样都不许写。原因:shell 检索命令不读 .gitignore,会连着 node_modules 与构建产物一起扫,比专用工具慢几个数量级;列目录/找文件/搜内容不是\"一次性看一眼\",而是每轮对话都会重复发生的高频动作。此外:每次调用都新起一个 shell 进程,不保留工作目录与变量;命令语法须与本机 shell 方言一致;每次查看退出码,失败时先排查再继续。"
+                .to_string(),
+        ),
+        complete: false,
+        audience: SectionAudience::Model,
+    })?;
+    prompt.section(PromptSection {
+        name: "tool:ls".to_string(),
+        order: SectionOrder::ToolLs.value(),
+        text: PromptText::Static(
+            "用 ls 查看一个目录里有哪些条目——不要用 shell 的 ls/dir/Get-ChildItem。默认只列一层;确实要看更深时显式给 depth(上限 5),不要用 shell 递归摊平整棵树。"
                 .to_string(),
         ),
         complete: false,
@@ -55,17 +65,20 @@ pub fn register_shipped_prompt(
         name: "tool:read".to_string(),
         order: SectionOrder::ToolRead.value(),
         text: PromptText::Static(
-            "用 read_file 查看文本文件,不要用 bash 的 cat/type。大文件可分段读取。".to_string(),
+            "用 read_file 查看文本文件,不要用 bash 的 cat/type,也不要写 PowerShell 的 Get-Content。大文件可分段读取。".to_string(),
         ),
         complete: false,
         audience: SectionAudience::Model,
     })?;
-    // 对照 dsh FILE_REFERENCE_PROMPT:仅路径占位,内容留在 read/列目录工具后面。
+    // 对照 dsh context/file-reference 的 FILE_REFERENCE_PROMPT。dsh 原文对目录只写
+    // "list it"(工具无关,因为它没有列目录工具);denia 有 ls,所以这里点名 ls——
+    // 但要留神别再退回"用 bash 列目录":这条段落在工具纪律段之前注入,点名 bash
+    // 等于抢在收口段前面给模型授权。
     prompt.section(PromptSection {
         name: "context:file-reference".to_string(),
         order: SectionOrder::FileReference.value(),
         text: PromptText::Static(
-            "用户消息中带 @ 前缀的是用户明确引用的工作区路径,相对工作区根目录。结尾带 / 的是目录:需要其内容时用 bash 列目录查看;其余是文件:需要其内容时用 read_file 读取,读取前不要声称已查看过内容,也不要猜测内容。路径含空格时用 @\"...\" 表示。"
+            "用户消息中带 @ 前缀的是用户明确引用的工作区路径,相对工作区根目录。结尾带 / 的是目录:需要其内容时用 ls 查看;其余是文件:需要其内容时用 read_file 读取,读取前不要声称已查看过内容,也不要猜测内容。路径含空格时用 @\"...\" 表示。"
                 .to_string(),
         ),
         complete: false,
@@ -84,7 +97,7 @@ pub fn register_shipped_prompt(
         name: "tool:glob".to_string(),
         order: SectionOrder::ToolGlob.value(),
         text: PromptText::Static(
-            "用 glob 工具——不要用 shell 的 find——按路径模式找文件。无 \"/\" 的模式在任意深度匹配 basename,所以 \"*.rs\" 搜整棵树;结果只含文件、按修改时间排序。"
+            "用 glob 工具——不要用 shell 的 find,也不要写 PowerShell 的 Get-ChildItem -Recurse——按路径模式找文件。无 \"/\" 的模式在任意深度匹配 basename,所以 \"*.rs\" 搜整棵树;结果只含文件、按修改时间排序。只想看目录里有什么就用 ls,不要拿 glob 绕。"
                 .to_string(),
         ),
         complete: false,
@@ -94,7 +107,7 @@ pub fn register_shipped_prompt(
         name: "tool:grep".to_string(),
         order: SectionOrder::ToolGrep.value(),
         text: PromptText::Static(
-            "用 grep 工具——不要用 shell 的 grep/rg——全文搜索;搜索大目录可加 include 收窄,命中上限后收窄 pattern 再看更多;命中的文件用 read_file 读上下文。"
+            "用 grep 工具——不要用 shell 的 grep/rg/findstr,也不要写 PowerShell 的 Select-String——全文搜索;搜索大目录可加 include 收窄,命中上限后收窄 pattern 再看更多;命中的文件用 read_file 读上下文。"
                 .to_string(),
         ),
         complete: false,
@@ -496,8 +509,152 @@ mod tests {
                 .any(|section| section.name == "tool:todo")
         );
         assert!(!render_context_snapshot(&assembly).is_empty());
-        // bash/read/write/todo/glob/grep/edit/exit_plan/get_goal/update_goal。
-        assert_eq!(assembly.tools.len(), 10);
+        // bash/read/write/todo/ls/glob/grep/edit/exit_plan/get_goal/update_goal。
+        assert_eq!(assembly.tools.len(), 11);
+    }
+
+    /// 全量兜底:出厂提示词里**任何一处**都不许把探索动作推给 bash。
+    ///
+    /// 上一轮只审了工具 schema 与 `tool:` 纪律段,漏了出厂 persona
+    /// (`deployment:persona`,order 0)和 `context:file-reference`——两处都写着
+    /// "用 bash 列目录",而它们注入得比收口段更早。这里把 persona、全部段落、
+    /// 上下文快照、全部工具描述拼成一份语料统一查,避免再漏。
+    #[test]
+    fn shipped_prompt_never_steers_exploration_to_bash() {
+        let (prompt, _registry) = default_shipped();
+        let assembly = prompt
+            .assemble(&AssembleContext {
+                cwd: Some("/tmp/ws".to_string()),
+                ..Default::default()
+            })
+            .expect("assemble");
+        let mut corpus = denia_system_prompt::default_persona_template().to_string();
+        corpus.push_str(&render_prompt(&assembly));
+        corpus.push_str(&render_context_snapshot(&assembly));
+        for schema in &assembly.tools {
+            corpus.push_str(&schema.description);
+            corpus.push_str(&schema.parameters.to_string());
+        }
+        for banned in [
+            "bash 列目录",
+            "先用 bash",
+            "用 bash 列",
+            "bash 找文件",
+            "bash 搜",
+            "bash 读取",
+        ] {
+            assert!(
+                !corpus.contains(banned),
+                "出厂提示词又把探索动作推给 bash({banned})"
+            );
+        }
+    }
+
+    /// 手动核对入口:打印模型实际看到的探索类纪律段与 bash 工具描述。
+    ///
+    /// `cargo test -p denia-tools --lib -- --ignored --nocapture print_exploration_discipline`
+    ///
+    /// 改这几个段的文案时用它对照,比隔着 UI 猜模型看到什么靠谱。
+    #[test]
+    #[ignore]
+    fn print_exploration_discipline() {
+        let (prompt, _registry) = default_shipped();
+        let assembly = prompt
+            .assemble(&AssembleContext {
+                cwd: Some("/tmp/ws".to_string()),
+                ..Default::default()
+            })
+            .expect("assemble");
+        eprintln!(
+            "\n===== deployment:persona (出厂模板,order 0) =====\n{}",
+            denia_system_prompt::default_persona_template()
+        );
+        for name in [
+            "context:file-reference",
+            "tool:bash",
+            "tool:ls",
+            "tool:glob",
+            "tool:grep",
+            "tool:read",
+        ] {
+            if let Some(section) = assembly.sections.iter().find(|section| section.name == name) {
+                eprintln!("\n===== {name} =====\n{}", section.text);
+            }
+        }
+        for tool in ["bash", "ls"] {
+            if let Some(schema) = assembly.tools.iter().find(|schema| schema.name == tool) {
+                eprintln!("\n===== {tool} schema =====\n{}", schema.description);
+            }
+        }
+    }
+
+    #[test]
+    fn ls_section_registered_and_user_invisible() {
+        // tool:ls 纪律段:默认 shipped 注册存在、audience 为 Model、
+        // 不进用户可见副本;文案必须给出可执行的替代与禁止事项。
+        let (prompt, registry) = default_shipped();
+        assert!(registry.get("ls").is_some(), "ls 工具必须随 shipped 注册");
+        let assembly = prompt
+            .assemble(&AssembleContext {
+                cwd: Some("/tmp/ws".to_string()),
+                ..Default::default()
+            })
+            .expect("assemble");
+        let section = assembly
+            .sections
+            .iter()
+            .find(|section| section.name == "tool:ls")
+            .expect("tool:ls section registered with the ls tool");
+        assert_eq!(section.audience, SectionAudience::Model);
+        assert!(section.text.contains("Get-ChildItem"), "{}", section.text);
+        assert!(section.text.contains("depth"), "{}", section.text);
+        let user_body = denia_system_prompt::render_prompt_for_user(&assembly);
+        assert!(!user_body.contains("不要用 shell 的 ls"), "tool:ls 段泄进了用户可见副本");
+    }
+
+    #[test]
+    fn bash_section_bans_shell_exploration_in_every_dialect() {
+        // 收口总纲必须按"动作"界定而不是按 POSIX 命令名:PowerShell 宿主上
+        // 模型写的是 Get-ChildItem/Select-String/Get-Content,只禁 ls/find/grep
+        // 等于没禁。四件探索类动作各自的专用工具也要点到。
+        let (prompt, _registry) = default_shipped();
+        let assembly = prompt
+            .assemble(&AssembleContext {
+                cwd: Some("/tmp/ws".to_string()),
+                ..Default::default()
+            })
+            .expect("assemble");
+        let section = assembly
+            .sections
+            .iter()
+            .find(|section| section.name == "tool:bash")
+            .expect("tool:bash section registered");
+        for needle in [
+            // 专用工具出口。
+            "ls",
+            "glob",
+            "grep",
+            "read_file",
+            // POSIX 侧命令名。
+            "find",
+            "cat",
+            // PowerShell 侧命令名——缺了这些,条文在 Windows 宿主上命中不了。
+            "Get-ChildItem",
+            "Select-String",
+            "Get-Content",
+            // 收口口径:按动作界定,不看命令名。
+            "按动作界定",
+            // 理由要写清,否则模型把它当风格偏好而不是性能约束。
+            ".gitignore",
+        ] {
+            assert!(
+                section.text.contains(needle),
+                "tool:bash 段缺少 {needle}:{}",
+                section.text
+            );
+        }
+        let user_body = denia_system_prompt::render_prompt_for_user(&assembly);
+        assert!(!user_body.contains("按动作界定"), "tool:bash 段泄进了用户可见副本");
     }
 
     #[test]

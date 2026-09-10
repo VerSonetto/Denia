@@ -133,9 +133,10 @@ async fn create_session(
         .sessions
         .create(&cwd, true)
         .map_err(ApiError::from_session)?;
-    // 新会话固定写入默认权限事件,让前端/回放都能读到当前档位。
+    // 新会话写入控制台默认权限档位(计划模式不可作默认值,见
+    // `validate_console`),让前端/回放都能读到当前档位。
     session
-        .set_permission_mode(PermissionMode::AutoEdit)
+        .set_permission_mode(crate::state::console_default_permission_mode(&state.settings))
         .map_err(ApiError::from_session)?;
     if let Some(ws) = &workspace {
         // 会话头 cwd == 工作区路径(构造保证);账本 prepend。attach 失败

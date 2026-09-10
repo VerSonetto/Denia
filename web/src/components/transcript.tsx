@@ -13,6 +13,7 @@ import { AskCard } from './AskCard'
 import {
   IconChevron,
   IconEdit,
+  IconFolder,
   IconGlob,
   IconPrompt,
   IconRead,
@@ -537,6 +538,8 @@ function toolMeta(name: string): { title: string; icon: ReactNode } {
       return { title: 'Grep', icon: <IconSearch size={14} /> }
     case 'glob':
       return { title: 'Glob', icon: <IconGlob size={14} /> }
+    case 'ls':
+      return { title: 'Ls', icon: <IconFolder size={14} /> }
     case 'edit':
       return { title: 'Edit', icon: <IconEdit size={14} /> }
     default:

@@ -809,6 +809,32 @@ export function resetSystemPrompt(): Promise<SystemPromptView> {
   return http('/api/system-prompt', { method: 'DELETE' })
 }
 
+/**
+ * 全局规则(用户级 AGENTS.md,位于 `<home>/AGENTS.md`)。
+ *
+ * 与工作区内的 AGENTS.md 是同一套发现机制的两份文件:全局那份作用域
+ * 最宽、最先注入,模型侧标签 `~/AGENTS.md`。这里只管可编辑的正文。
+ */
+export interface GlobalRulesView {
+  text: string
+  source: 'file' | 'default'
+  /** 模型可见的来源标签(符号路径)。 */
+  displayPath: string
+  path: string
+}
+
+export function getGlobalRules(): Promise<GlobalRulesView> {
+  return http('/api/global-rules')
+}
+
+/** 保存全局规则;传空串等同清空(删除文件回到"未设置")。 */
+export function saveGlobalRules(text: string): Promise<GlobalRulesView> {
+  return http('/api/global-rules', {
+    method: 'PUT',
+    body: JSON.stringify({ text }),
+  })
+}
+
 /** 一个可回退的用户消息 checkpoint。 */
 export interface Checkpoint {
   seq: number

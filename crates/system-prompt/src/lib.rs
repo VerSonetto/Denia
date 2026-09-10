@@ -36,6 +36,8 @@ pub enum SectionOrder {
     HarnessIdentity,
     DeploymentPersona,
     ToolBash,
+    /// 列目录工具(ls)的纪律段;紧跟 bash 收口段,是"看目录里有什么"的专用入口。
+    ToolLs,
     ToolRead,
     /// 用户消息中 `@路径` 文件引用说明(对照 dsh FILE_REFERENCE 段),紧跟 read 纪律。
     FileReference,
@@ -67,6 +69,7 @@ impl SectionOrder {
             Self::HarnessIdentity => -1000,
             Self::DeploymentPersona => 0,
             Self::ToolBash => 1000,
+            Self::ToolLs => 1050,
             Self::ToolRead => 1100,
             Self::FileReference => 1150,
             Self::ToolWrite => 1200,
@@ -421,10 +424,15 @@ impl SystemPrompt {
 }
 
 /// 出厂 persona 模板;`SYSTEM.md` 为空时沿用。含身份句,与自定义替换目标一致。
+///
+/// 这份模板是 prompt 里**第一个**被读到的段落(order 0),所以它说的每一句
+/// 都比后面的工具纪律段更有分量——它一旦点名 bash,后面 `tool:bash` 段的收口
+/// 就会被压过去。规矩句里只用专用工具名(ls/glob/grep/read_file)。
 pub fn default_persona_template() -> &'static str {
     "你是由 denia 驱动的 AI 编码 agent。\n\n\
      你是运行在 denia 里的编码 agent。工作目录是 {{cwd}}（相对路径以它为根）。\
-     规矩：不要猜文件路径；读取失败时先用 bash 列目录再重试；每步聚焦一件事；能回答时就停止调用工具。\
+     规矩：不要猜文件路径；读取失败时先用 ls 列目录再重试；按模式找文件用 glob，搜文件内容用 grep，读文本用 read_file。\
+     每步聚焦一件事；能回答时就停止调用工具。\
      始终使用简体中文回复，除非用户明确要求其他语言。"
 }
 
@@ -603,5 +611,25 @@ mod tests {
             render_context_snapshot(&assembly),
             format!("{RUNTIME_CONTEXT_HEADER}\n\nMode: read-only.")
         );
+    }
+
+    /// 出厂 persona 是 prompt 里第一个被读到的段落(order 0),比后面的工具纪律段
+    /// 更有分量。它一旦点名 bash 干探索类动作,"列目录/找文件/搜内容走专用工具"
+    /// 的收口就会被它压过去——这里锁死规矩句只用专用工具名。
+    #[test]
+    fn default_persona_never_steers_exploration_to_bash() {
+        let persona = default_persona_template();
+        for banned in ["bash 列目录", "用 bash", "先用 bash", "bash 找", "bash 搜"] {
+            assert!(
+                !persona.contains(banned),
+                "出厂 persona 把探索动作推给了 bash({banned}):{persona}"
+            );
+        }
+        for needle in ["先用 ls 列目录", "glob", "grep", "read_file"] {
+            assert!(
+                persona.contains(needle),
+                "出厂 persona 缺少专用工具出口 {needle}:{persona}"
+            );
+        }
     }
 }

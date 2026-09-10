@@ -56,24 +56,67 @@ pub fn shell_runtime() -> ShellRuntime {
     }
 }
 
-/// Model-facing `bash` tool description with host and shell variables filled in.
+/// 一次性 shell 与长驻 shell 共用的可执行文件解析。
+///
+/// 长驻 shell 也必须走这份缓存(而不是自己写 `pwsh`):Store 版 PowerShell
+/// 更新会整体换版本目录,硬编码名字会指到不存在的路径。
+pub fn shell_executable_path() -> std::path::PathBuf {
+    #[cfg(windows)]
+    {
+        windows_shell_executable()
+    }
+    #[cfg(not(windows))]
+    {
+        std::path::PathBuf::from("bash")
+    }
+}
+
+/// Model-facing `bash` tool description(一次性进程版)with host and shell
+/// variables filled in.
+///
+/// 示例只挑**真该跑 shell**的动作(构建/测试/进程/环境变量)。这里曾把
+/// `Get-ChildItem` / `Get-Content` 当示例——本意是演示 PowerShell 方言,
+/// 实际成了"用 bash 列目录、读文件"的正面示范,把模型推进了最慢的那条路。
+/// 方言示例必须与专用工具的职责边界无交集。
+///
+/// 末段是**形态**引导。这里曾写"每次调用都新起一个 shell 进程……一条命令做完
+/// 一件事"——前半句是事实,后半句是在教模型别分步,直接催生了平均 564 字符的
+/// 巨型内联脚本。一次性进程下正确的对策是**落成脚本文件**,不是压成一行。
 pub fn bash_tool_description(runtime: &ShellRuntime) -> String {
+    format!(
+        "{}{}",
+        bash_description_head(runtime),
+        "每次调用都是一个新进程:工作目录、变量、函数都不保留,状态要靠命令自己带(写绝对路径,或把 cd 与后续动作放进同一条命令)。逻辑成段时,**用 write_file 把它落成一个脚本文件再执行**——改一行只改文件,比反复重发整段命令既稳又省;不要为了\"一次到位\"把多步逻辑压成一条长命令。"
+    )
+}
+
+/// 常驻 shell 版的描述:状态跨调用保留,所以不必也不该"一条命令做完"。
+pub fn persistent_bash_tool_description(runtime: &ShellRuntime) -> String {
+    format!(
+        "{}{}",
+        bash_description_head(runtime),
+        "这个 shell 是**常驻**的:工作目录、变量、函数、环境变量都跨调用保留,本会话后续的 bash 调用接着上一次的状态继续。所以按步骤下命令:先 cd 一次,后面就不用再 cd;想先看结果再决定下一步,就分两次调用;逻辑确实成段时,同样可以 write_file 落成脚本文件再执行它。不要为了\"一次到位\"把多步逻辑压成一条长命令。"
+    )
+}
+
+/// 两版描述的共同前缀:宿主事实 + 方言约束 + 不诱导的示例。
+fn bash_description_head(runtime: &ShellRuntime) -> String {
     let (examples, avoid) = if runtime.dialect == "powershell" {
         (
-            "Get-ChildItem; Get-Content .\\src\\lib.rs; $env:USERPROFILE",
-            "bash/sh/cmd 语法(ls、cat、export、cmd /c)",
+            "git status; cargo test; Get-Process; $env:USERPROFILE",
+            "bash/cmd 写法(如 export A=1、echo $A、cmd /c)",
         )
     } else {
         (
-            "ls; cat src/lib.rs; echo $HOME",
-            "PowerShell 语法(Get-ChildItem、$env:VAR、cmd /c)",
+            "git status; cargo test; ps aux; echo $HOME",
+            "PowerShell 写法(如 $env:A、Get-Process、cmd /c)",
         )
     };
     format!(
-        "在会话工作区执行一条 shell 命令,返回退出码、stdout 与 stderr。\n\
+        "在会话工作区执行一条 shell 命令,返回退出码与输出(stdout/stderr 合并)。\n\
          宿主:{os}({arch});shell:{shell}({executable})。\n\
          command 只能用 {dialect} 语法,不要写{avoid}。\n\
-         本机示例:{examples}。",
+         本机示例:{examples}。\n",
         os = runtime.os,
         arch = runtime.arch,
         shell = runtime.shell_label,
@@ -85,19 +128,15 @@ pub fn bash_tool_description(runtime: &ShellRuntime) -> String {
 }
 
 /// JSON Schema `command` property description for the `bash` tool.
+///
+/// 不给"列目录/读文件"类示例:模型会把参数示例当成首选写法照抄。
 pub fn bash_command_param_description(runtime: &ShellRuntime) -> String {
-    let example = if runtime.dialect == "powershell" {
-        "Get-ChildItem"
-    } else {
-        "ls -la"
-    };
     format!(
-        "{os}({arch})上 {shell} 的单条 {dialect} 命令行。示例:{example}。",
+        "{os}({arch})上 {shell} 的单条 {dialect} 命令行,在会话工作区执行。示例:git status",
         dialect = runtime.dialect,
         shell = runtime.shell_label,
         os = runtime.os,
         arch = runtime.arch,
-        example = example,
     )
 }
 
@@ -452,5 +491,45 @@ mod tests {
         assert!(description.contains(runtime.arch));
         assert!(description.contains(&runtime.shell_label));
         assert!(description.contains(runtime.dialect));
+    }
+
+    /// 回归保护:bash 描述不能再拿"列目录/读文件"当示例。
+    ///
+    /// 模型会把参数示例当成首选写法照抄。这里曾写
+    /// `本机示例:Get-ChildItem; Get-Content .\src\lib.rs`——本意是演示
+    /// PowerShell 方言,实际成了用 bash 列目录、读文件的正面示范,而这两件事
+    /// 都有专用工具(ls / read_file),shell 版本还会扫进 .gitignore 忽略的
+    /// 目录树,慢几个数量级。
+    #[test]
+    fn bash_description_never_advertises_listing_or_reading_examples() {
+        for dialect in ["powershell", "bash"] {
+            let runtime = super::ShellRuntime {
+                os: std::env::consts::OS,
+                arch: std::env::consts::ARCH,
+                dialect,
+                shell_label: dialect.to_string(),
+                executable: dialect.to_string(),
+            };
+            for text in [
+                super::bash_tool_description(&runtime),
+                super::bash_command_param_description(&runtime),
+            ] {
+                for banned in [
+                    "Get-ChildItem",
+                    "Get-Content",
+                    "Select-String",
+                    "ls -la",
+                    "cat ",
+                    "find ",
+                    "grep ",
+                    "dir /s",
+                ] {
+                    assert!(
+                        !text.contains(banned),
+                        "bash 描述在 {dialect} 方言下出现了诱导性示例 {banned:?}:{text}"
+                    );
+                }
+            }
+        }
     }
 }

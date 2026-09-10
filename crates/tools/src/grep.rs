@@ -13,6 +13,9 @@
 //! - **取消响应**:每文件搜索前后检查取消令牌,中断即刻生效。
 //!
 //! 所有失败(坏正则、坏路径、IO 错误)都规范化为 `is_error` 结果。
+//!
+//! `path` 接受绝对路径(文件或目录)与相对路径,统一走 [`resolve_within`];
+//! 相对路径锚定会话工作区,沙箱开启时越界即拒绝。
 
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -41,7 +44,7 @@ fn default_true() -> bool {
 struct GrepArgs {
     /// 正则表达式(ripgrep 语法:rust regex)。
     pattern: String,
-    /// 搜索起点文件或目录;相对路径锚定会话工作区。
+    /// 搜索起点文件或目录;绝对路径原样使用,相对路径锚定会话工作区。
     #[serde(default)]
     path: Option<String>,
     /// 单个文件 glob 过滤(如 "*.rs"、"*.{ts,tsx}"),不支持负数与逗号列表。
@@ -79,7 +82,7 @@ impl GrepTool {
         Self {
             schema: ToolSchema {
                 name: "grep".to_string(),
-                description: "用正则表达式(ripgrep 语法)搜索文件内容,结果按 path:line:content 逐行返回(工作区相对路径,按路径与行号排序)。默认尊重 .gitignore 与隐藏文件,大树上搜索也很快;命中多时用 offset/max_matches 分页。找到目标文件后用 read_file 读取上下文。".to_string(),
+                description: "用正则表达式(ripgrep 语法)搜索文件内容,结果按 path:line:content 逐行返回(路径以会话工作区为基准,按路径与行号排序)。path 可传文件或目录(默认会话工作区),绝对路径与相对路径都可用。默认尊重 .gitignore 与隐藏文件,大树上搜索也很快;命中多时用 offset/max_matches 分页。找到目标文件后用 read_file 读取上下文。".to_string(),
                 parameters: serde_json::json!({
                     "type": "object",
                     "properties": {
@@ -89,7 +92,7 @@ impl GrepTool {
                         },
                         "path": {
                             "type": "string",
-                            "description": "搜索的文件或目录,默认会话工作区;相对路径锚定会话工作区。"
+                            "description": "搜索的文件或目录,默认会话工作区。绝对路径与相对路径都可用:相对路径锚定会话工作区(如 \"src\" 或 \"./src\")。"
                         },
                         "include": {
                             "type": "string",
@@ -154,13 +157,13 @@ impl Tool for GrepTool {
             Ok(path) => path,
             Err(message) => {
                 return ToolOutput::error(format!(
-                    "[工具错误] {message}\n建议:相对路径锚定会话工作区;确认路径存在"
+                    "[工具错误] {message}\n建议:path 可写绝对路径或相对工作区的相对路径;沙箱开启时路径必须在工作区内"
                 ));
             }
         };
         if !root.exists() {
             return ToolOutput::error(format!(
-                "[工具错误] 路径 '{}' 不存在\n建议:用 glob 确认目录/文件位置",
+                "[工具错误] 路径 '{}' 不存在\n建议:path 指向的文件/目录必须存在(绝对或相对工作区均可);用 glob 确认位置",
                 root.display()
             ));
         }
@@ -426,12 +429,13 @@ mod tests {
     use tokio_util::sync::CancellationToken;
 
     fn temp_root() -> PathBuf {
+        // pid + 进程内原子序号:同一次测试里连续调用也保证互不撞名
+        // (时钟精度不足时按时间戳命名会给出同一个目录)。
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let dir = std::env::temp_dir().join(format!(
-            "denia-grep-{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
+            "denia-grep-{}-{}",
+            std::process::id(),
+            SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         ));
         std::fs::create_dir_all(&dir).unwrap();
         dir
@@ -460,6 +464,63 @@ mod tests {
         }
         let mut file = std::fs::File::create(path).unwrap();
         file.write_all(content.as_bytes()).unwrap();
+    }
+
+    /// 绝对路径塞进 JSON:统一写成正斜杠(Windows 上同样合法),免去转义。
+    fn json_path(path: &Path) -> String {
+        path.to_string_lossy().replace('\\', "/")
+    }
+
+    #[tokio::test]
+    async fn absolute_directory_and_file_paths_are_accepted() {
+        let root = temp_root();
+        write_file(&root.join("src/a.rs"), "fn main() {\n    hello();\n}\n");
+        let ctx = context(root.clone());
+        let tool = GrepTool::new();
+
+        // 绝对目录:结果路径仍以工作区为基准显示。
+        let raw = format!(
+            r#"{{"pattern":"hello","path":"{}"}}"#,
+            json_path(&root.join("src"))
+        );
+        let out = tool.execute(&raw, &ctx).await;
+        assert!(!out.is_error, "{}", out.content);
+        assert!(out.content.contains("src/a.rs:2:"), "{}", out.content);
+
+        // 绝对文件路径:path 允许直接指向一个文件。
+        let raw = format!(
+            r#"{{"pattern":"hello","path":"{}"}}"#,
+            json_path(&root.join("src/a.rs"))
+        );
+        let out = tool.execute(&raw, &ctx).await;
+        assert!(!out.is_error, "{}", out.content);
+        assert!(out.content.contains("src/a.rs:2:"), "{}", out.content);
+        assert!(out.content.contains("1 条命中"), "{}", out.content);
+
+        // 相对路径与绝对路径指向同一目录时,结果形态一致。
+        let abs = tool.execute(&raw, &ctx).await;
+        let rel = tool
+            .execute(r#"{"pattern":"hello","path":"src/a.rs"}"#, &ctx)
+            .await;
+        assert_eq!(abs.content, rel.content, "绝对路径与相对路径结果不一致");
+
+        std::fs::remove_dir_all(&ctx.cwd).unwrap();
+    }
+
+    #[tokio::test]
+    async fn absolute_path_outside_workspace_is_rejected() {
+        let root = temp_root();
+        let outside = temp_root();
+        write_file(&root.join("a.txt"), "needle");
+        write_file(&outside.join("b.txt"), "needle");
+        let ctx = context(root.clone());
+        let tool = GrepTool::new();
+        let raw = format!(r#"{{"pattern":"needle","path":"{}"}}"#, json_path(&outside));
+        let out = tool.execute(&raw, &ctx).await;
+        assert!(out.is_error, "{}", out.content);
+        assert!(out.content.contains("越出了会话工作区"), "{}", out.content);
+        std::fs::remove_dir_all(&ctx.cwd).unwrap();
+        std::fs::remove_dir_all(&outside).unwrap();
     }
 
     #[tokio::test]

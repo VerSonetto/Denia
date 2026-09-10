@@ -13,9 +13,19 @@ use serde::{Deserialize, Serialize};
 
 use crate::GenerateRequest;
 
+/// `#[serde(default)]` 只兜"字段缺失",兜不住显式 `null`;而 usage/收尾帧
+/// 发 `"choices": null` 的网关实测存在。统一按空值兜住,不让一个 null 炸掉整步。
+fn null_as_default<'de, D, T>(deserializer: D) -> Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de> + Default,
+{
+    Ok(Option::<T>::deserialize(deserializer)?.unwrap_or_default())
+}
+
 #[derive(Debug, Deserialize)]
 pub struct WireChunk {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     pub choices: Vec<WireChoice>,
     #[serde(default)]
     pub usage: Option<WireUsage>,
@@ -45,7 +55,11 @@ pub struct WireDelta {
 
 #[derive(Debug, Deserialize)]
 pub struct WireToolCallDelta {
-    pub index: u32,
+    /// 规范要求每个 tool-call 增量帧都带 `index`,但实测有网关只在首帧带、
+    /// 续帧省略,甚至整条调用都不带。缺省交给 [`StreamTranslator::resolve_wire_index`]
+    /// 归类,不在此处硬失败。
+    #[serde(default)]
+    pub index: Option<u32>,
     #[serde(default)]
     pub id: Option<String>,
     #[serde(default)]
@@ -337,6 +351,27 @@ impl StreamTranslator {
         index
     }
 
+    /// 把一帧 tool-call 增量归到它的 wire index。帧带 `index` 时原样采用;
+    /// 缺 `index`(非规范网关)时按下述规则归类,而不是让整步失败:
+    /// - 帧里带非空 `id` 或 `function.name` → 这是"一次新调用"的首帧,取一个未被占用的 index;
+    /// - 只剩 `function.arguments` → 该调用的续帧,并入已打开的最大 index;
+    /// - 连一个已打开的调用都没有 → 落到 0(尽力归位,后续由参数校验兜底)。
+    fn resolve_wire_index(&self, call: &WireToolCallDelta) -> u32 {
+        if let Some(index) = call.index {
+            return index;
+        }
+        let opens_new_call = call.id.as_deref().is_some_and(|id| !id.is_empty())
+            || call
+                .function
+                .as_ref()
+                .and_then(|function| function.name.as_deref())
+                .is_some_and(|name| !name.is_empty());
+        if opens_new_call {
+            return self.tool_calls.keys().next_back().map_or(0, |k| k + 1);
+        }
+        self.tool_calls.keys().next_back().copied().unwrap_or(0)
+    }
+
     /// Feeds one wire chunk, returning the delta chunks emitted immediately.
     pub fn feed(&mut self, chunk: &WireChunk, style: UsageStyle) -> Vec<StreamChunk> {
         let mut out = Vec::new();
@@ -409,7 +444,8 @@ impl StreamTranslator {
         }
         if let Some(tool_calls) = &delta.tool_calls {
             for wire_call in tool_calls {
-                if !self.tool_calls.contains_key(&wire_call.index) {
+                let wire_index = self.resolve_wire_index(wire_call);
+                if !self.tool_calls.contains_key(&wire_index) {
                     let index = self.take_index();
                     self.saw_block = true;
                     out.push(StreamChunk::BlockStart {
@@ -417,7 +453,7 @@ impl StreamTranslator {
                         block_type: BlockType::ToolCall,
                     });
                     self.tool_calls.insert(
-                        wire_call.index,
+                        wire_index,
                         ToolCallState {
                             index,
                             id: String::new(),
@@ -426,7 +462,7 @@ impl StreamTranslator {
                         },
                     );
                 }
-                let entry = self.tool_calls.get_mut(&wire_call.index).unwrap();
+                let entry = self.tool_calls.get_mut(&wire_index).unwrap();
                 if let Some(id) = wire_call.id.as_deref().filter(|id| !id.is_empty()) {
                     if entry.id.is_empty() {
                         entry.id = id.to_string();
@@ -681,6 +717,93 @@ mod tests {
         let body = crate::protocols::build_openai_body(&request);
         assert!(body.get("thinking").is_none());
         assert_eq!(body["reasoning_effort"], "high");
+    }
+    #[test]
+    fn null_choices_and_null_usage_are_tolerated() {
+        // 显式 null 不是"字段缺失",`#[serde(default)]` 兜不住,必须单独宽容。
+        let parsed = chunk(r#"{"choices":null,"usage":null}"#);
+        assert!(parsed.choices.is_empty());
+        assert!(parsed.usage.is_none());
+    }
+
+    fn tool_call_ends(
+        chunks: &[denia_core::stream::StreamChunk],
+    ) -> Vec<denia_core::stream::ContentBlock> {
+        chunks
+            .iter()
+            .filter_map(|c| match c {
+                denia_core::stream::StreamChunk::BlockEnd { block, .. } => Some(block.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn tool_call_without_index_is_merged_into_one_call() {
+        // 非规范网关:首帧带 id/name、续帧只带 arguments,整条调用一个 index 都不给。
+        // 缺 index 不能炸整步,且两次增量必须归并成同一次调用。
+        let mut translator = StreamTranslator::default();
+        let mut all = translator.feed(
+            &chunk(
+                r#"{"choices":[{"delta":{"tool_calls":[{"id":"call_1","type":"function","function":{"name":"bash","arguments":"{\"command\":"}}]}}]}"#,
+            ),
+            UsageStyle::OpenAi,
+        );
+        all.extend(translator.feed(
+            &chunk(r#"{"choices":[{"delta":{"tool_calls":[{"function":{"arguments":"\"ls\"}"}}]}}]}"#),
+            UsageStyle::OpenAi,
+        ));
+        all.extend(translator.finalize());
+
+        let ends = tool_call_ends(&all);
+        assert_eq!(ends.len(), 1, "缺 index 的两段增量应归并成一次调用");
+        match &ends[0] {
+            denia_core::stream::ContentBlock::ToolCall {
+                id,
+                name,
+                arguments,
+            } => {
+                assert_eq!(id, "call_1");
+                assert_eq!(name, "bash");
+                assert_eq!(arguments, r#"{"command":"ls"}"#);
+            }
+            other => panic!("expected tool call, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn indexless_continuation_without_open_call_is_not_dropped() {
+        // 极端形态:只有 arguments 续帧、没有任何首帧。尽力归位到 0,不丢帧。
+        let mut translator = StreamTranslator::default();
+        let mut all = translator.feed(
+            &chunk(r#"{"choices":[{"delta":{"tool_calls":[{"function":{"arguments":"{}"}}]}}]}"#),
+            UsageStyle::OpenAi,
+        );
+        all.extend(translator.finalize());
+        assert_eq!(tool_call_ends(&all).len(), 1);
+    }
+
+    #[test]
+    fn present_index_still_drives_parallel_calls() {
+        // 带 index 时保持原语义:两个 index 归成两次独立调用。
+        let mut translator = StreamTranslator::default();
+        let mut all = translator.feed(
+            &chunk(
+                r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c0","function":{"name":"bash"}},{"index":1,"id":"c1","function":{"name":"grep"}}]}}]}"#,
+            ),
+            UsageStyle::OpenAi,
+        );
+        all.extend(translator.finalize());
+        let ends = tool_call_ends(&all);
+        assert_eq!(ends.len(), 2);
+        let names: Vec<String> = ends
+            .iter()
+            .map(|block| match block {
+                denia_core::stream::ContentBlock::ToolCall { name, .. } => name.clone(),
+                other => panic!("expected tool call, got {other:?}"),
+            })
+            .collect();
+        assert_eq!(names, vec!["bash", "grep"]);
     }
 }
 

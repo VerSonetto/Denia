@@ -4,6 +4,19 @@ import http from 'node:http'
 // - no tool-role message, no todo result  -> answer with a todo_write tool call
 // - todo result present, no bash result   -> answer with a bash tool call
 // - both results present                  -> answer with text + stop
+//
+// MOCK_QUIRKS=1 模拟实测遇到过的非规范网关:tool_calls 帧省掉 index、并用
+// 小写 `[done]` 收尾(都是曾让 denia 整步作废的真实形态)。用来回归流容错,
+// 默认关闭,不影响常规链路测试。
+const QUIRKS = process.env.MOCK_QUIRKS === '1'
+
+// 非规范模式下剔除 index:OpenAI 规范要求每个 tool-call 增量帧都带它。
+const toolCall = (obj) => {
+  const out = { ...obj }
+  if (QUIRKS) delete out.index
+  return out
+}
+
 http
   .createServer((req, res) => {
     if (req.url?.startsWith('/v1/models')) {
@@ -41,18 +54,18 @@ http
           write({ choices: [{ delta: { role: 'assistant' } }] })
           write({
             choices: [{
-              delta: { tool_calls: [{ index: 0, id: 'call_todo_1', function: { name: 'todo_write', arguments: '' } }] },
+              delta: { tool_calls: [toolCall({ index: 0, id: 'call_todo_1', function: { name: 'todo_write', arguments: '' } })] },
             }],
           })
           write({
             choices: [{
               delta: {
-                tool_calls: [{
+                tool_calls: [toolCall({
                   index: 0,
                   function: {
                     arguments: '{"todos":[{"content":"摸清项目结构","status":"completed"},{"content":"实现核心功能","status":"in_progress"},{"content":"写测试并验证","status":"pending"}]}',
                   },
-                }],
+                })],
               },
             }],
           })
@@ -61,12 +74,12 @@ http
           write({ choices: [{ delta: { role: 'assistant' } }] })
           write({
             choices: [{
-              delta: { tool_calls: [{ index: 0, id: 'call_mock_1', function: { name: 'bash', arguments: '' } }] },
+              delta: { tool_calls: [toolCall({ index: 0, id: 'call_mock_1', function: { name: 'bash', arguments: '' } })] },
             }],
           })
           write({
             choices: [{
-              delta: { tool_calls: [{ index: 0, function: { arguments: '{"command":"Write-Output hi-from-mock"}' } }] },
+              delta: { tool_calls: [toolCall({ index: 0, function: { arguments: '{"command":"Write-Output hi-from-mock"}' } })] },
             }],
           })
           write({ choices: [{ delta: {}, finish_reason: 'tool_calls' }], usage: { prompt_tokens: 20, completion_tokens: 9 } })
@@ -76,7 +89,7 @@ http
           write({ choices: [{ delta: { content: 'hi from mock' } }] })
           write({ choices: [{ delta: {}, finish_reason: 'stop' }], usage: { prompt_tokens: 30, completion_tokens: 7 } })
         }
-        res.write('data: [DONE]\n\n')
+        res.write(`data: ${QUIRKS ? '[done]' : '[DONE]'}\n\n`)
         res.end()
         }
         void streamOut()
