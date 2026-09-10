@@ -972,3 +972,107 @@ export function goalAction(
     }),
   })
 }
+
+/** 一个 MCP 工具(服务器声明 + 是否交给模型)。 */
+export interface McpToolInfo {
+  /** 服务器原始工具名。 */
+  name: string
+  /** 模型可见名 `mcp__<server>__<tool>`。 */
+  qualified: string
+  description: string
+  /** 是否交给模型(服务器启用 + 未被逐条关闭 + 无命名冲突)。 */
+  enabled: boolean
+  /** 未交给模型的原因;未启用时可见。 */
+  disabledReason?: string | null
+}
+
+/** 一个 MCP 服务器的状态(环境变量只回传 key,值不出现在 UI 里)。 */
+export interface McpServerInfo {
+  id: string
+  /** `stdio` | `http` | `sse`。 */
+  transport: string
+  command: string
+  args: string[]
+  envKeys: string[]
+  /** http / sse 传输的服务端地址;stdio 为 null。 */
+  url?: string | null
+  headerKeys: string[]
+  cwd?: string | null
+  enabled: boolean
+  /** connected | disabled | error */
+  status: 'connected' | 'disabled' | 'error'
+  error?: string | null
+  tools: McpToolInfo[]
+}
+
+export interface McpDescribe {
+  servers: McpServerInfo[]
+  /** 当前交给模型的 MCP 工具总数。 */
+  toolCount: number
+}
+
+/** 新增/更新一个服务器时的草稿态;id 决定身份(同名即替换)。 */
+export interface McpServerDraft {
+  id: string
+  /** `stdio` | `http`(Streamable HTTP) | `sse`(HTTP+SSE)。 */
+  transport: string
+  /** stdio 传输:可执行程序;http/sse 留空。 */
+  command: string
+  args: string[]
+  env: Record<string, string>
+  /** http/sse 传输的服务端地址;stdio 为 null。 */
+  url?: string | null
+  /** http/sse 传输的附加请求头(如 Authorization)。 */
+  headers?: Record<string, string>
+  cwd?: string | null
+  enabled: boolean
+  disabledTools: string[]
+}
+
+export function getMcp(): Promise<McpDescribe> {
+  return http('/api/mcp', undefined, 30_000)
+}
+
+/** 保存服务器配置:成功后返回新快照(服务端会立即连接)。 */
+export function saveMcpServer(
+  server: McpServerDraft,
+  expectedRevision?: number,
+): Promise<McpDescribe> {
+  return http(
+    '/api/mcp/servers',
+    {
+      method: 'PUT',
+      body: JSON.stringify({ server, expectedRevision }),
+    },
+    60_000,
+  )
+}
+
+export function deleteMcpServer(id: string): Promise<McpDescribe> {
+  return http(`/api/mcp/servers/${encodeURIComponent(id)}`, { method: 'DELETE' }, 60_000)
+}
+
+/** 服务器动作:enable / disable / reconnect。 */
+export function mcpServerAction(
+  id: string,
+  action: 'enable' | 'disable' | 'reconnect',
+): Promise<McpDescribe> {
+  return http(
+    `/api/mcp/servers/${encodeURIComponent(id)}`,
+    { method: 'POST', body: JSON.stringify({ action }) },
+    60_000,
+  )
+}
+
+/** 工具级开关:关掉的工具不再交给模型(服务器仍连着)。 */
+export function toggleMcpTool(
+  server: string,
+  tool: string,
+  enabled: boolean,
+): Promise<McpDescribe> {
+  return http(
+    '/api/mcp/tools',
+    { method: 'POST', body: JSON.stringify({ server, tool, enabled }) },
+    30_000,
+  )
+}

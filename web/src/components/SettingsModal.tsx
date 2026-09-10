@@ -1,3 +1,4 @@
+import { McpSettings } from './settings/McpSettings'
 import { RuntimeSettings } from './settings/RuntimeSettings'
 import { useCallback, useEffect, useState, type ReactNode } from 'react'
 import * as api from '../api'
@@ -10,16 +11,30 @@ import {
   IconPrompt,
   IconSliders,
   IconStack,
+  IconTool,
 } from './icons'
 import { LlmPanel } from './llm/LlmPanel'
 import { normalizePermissionMode, type PermissionMode } from '../types'
 import { PERMISSION_LEVELS, storePermission } from './PermissionSelector'
 
-type SettingsTab = 'runtime' | 'general' | 'prompts' | 'models' | 'appearance'
+type SettingsTab =
+  | 'runtime'
+  | 'general'
+  | 'prompts'
+  | 'models'
+  | 'mcp'
+  | 'appearance'
 
 const CONSOLE_NS = 'console'
 
-const TABS: SettingsTab[] = ['general', 'prompts', 'models', 'runtime', 'appearance']
+const TABS: SettingsTab[] = [
+  'general',
+  'prompts',
+  'models',
+  'mcp',
+  'runtime',
+  'appearance',
+]
 
 /** 新建会话默认权限档位:计划模式只在会话内显式进入,不列为默认。 */
 const DEFAULT_PERMISSION_OPTIONS: {
@@ -47,6 +62,8 @@ function tabIcon(tab: SettingsTab, size = 16) {
       return <IconPrompt size={size} />
     case 'models':
       return <IconSliders size={size} />
+    case 'mcp':
+      return <IconTool size={size} />
     case 'appearance':
       return <IconGear size={size} />
   }
@@ -62,6 +79,8 @@ function tabLabel(tab: SettingsTab): string {
       return t('settingsTabPrompts')
     case 'models':
       return t('settingsTabModels')
+    case 'mcp':
+      return t('mcpTab')
     case 'appearance':
       return t('settingsTabAppearance')
   }
@@ -77,6 +96,8 @@ function tabNavDesc(tab: SettingsTab): string {
       return t('settingsTabPromptsDesc')
     case 'models':
       return t('settingsTabModelsDesc')
+    case 'mcp':
+      return t('mcpTabDesc')
     case 'appearance':
       return t('settingsTabAppearanceDesc')
   }
@@ -92,6 +113,8 @@ function paneTitle(tab: SettingsTab): string {
       return t('settingsPanePromptsTitle')
     case 'models':
       return t('settingsPaneModelsTitle')
+    case 'mcp':
+      return t('mcpPaneTitle')
     case 'appearance':
       return t('catAppearance')
   }
@@ -107,6 +130,8 @@ function paneDesc(tab: SettingsTab): string {
       return t('settingsPanePromptsDesc')
     case 'models':
       return t('settingsPaneModelsDesc')
+    case 'mcp':
+      return t('mcpPaneDesc')
     case 'appearance':
       return t('settingsAppearanceHint')
   }
@@ -566,6 +591,8 @@ export function SettingsModal({ notify, onClose }: { notify: Notify; onClose: ()
                 )}
 
                 {tab === 'models' && <LlmPanel notify={notify} />}
+
+                {tab === 'mcp' && <McpSettings notify={notify} />}
 
                 {tab === 'appearance' && (
                   <section className="setm-section">
