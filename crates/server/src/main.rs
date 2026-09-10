@@ -5,6 +5,8 @@ mod api;
 mod error;
 mod file_history;
 mod jobs;
+mod mcp_runtime;
+mod mcp_settings;
 mod native_folder_picker;
 mod skills;
 mod state;
@@ -46,7 +48,7 @@ fn main() {
     runtime.block_on(async move {
         let home = resolve_home(args.home.as_deref());
         let bound_remote = !matches!(args.host.as_str(), "127.0.0.1" | "localhost" | "::1");
-        let state = match build_state(&home, bound_remote) {
+        let state = match build_state(&home, bound_remote).await {
             Ok(state) => Arc::new(state),
             Err(error) => {
                 tracing::error!(%error, "failed to initialize");

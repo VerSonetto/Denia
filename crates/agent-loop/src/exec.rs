@@ -163,7 +163,7 @@ fn reject_before_dispatch(
     {
         return Some(ToolOutput::error("该工具不在当前子代理允许的工具集合中"));
     }
-    if driver.tools.get(&call.name).is_none() {
+    if driver.tools().get(&call.name).is_none() {
         return Some(ToolOutput::error(format!(
             "unknown tool: {}\n该工具不存在;可用工具见系统提示的工具列表,核对名称后重试。",
             call.name
@@ -227,7 +227,7 @@ fn dispatch_tool_call(
     let selection = state.selection.clone();
     let cwd = cwd.to_path_buf();
     let call = call.clone();
-    let tools = driver.tools.clone();
+    let tools: Arc<denia_tools::ToolRegistry> = driver.tools();
     let cancel = state.cancel.clone();
     let file_history = state.file_history.clone();
     let vision_supported = state.vision_supported;

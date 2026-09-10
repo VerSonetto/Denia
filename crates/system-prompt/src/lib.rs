@@ -60,6 +60,9 @@ pub enum SectionOrder {
     ToolGoal,
     /// 计划呈交工具(exit_plan)的纪律段;仅计划模式注入。
     ToolPlan,
+    /// MCP 外部工具(`mcp__<server>__<tool>`)的纪律段;仅在至少有一个
+    /// MCP 服务器已连接时注入。
+    ToolMcp,
 }
 
 impl SectionOrder {
@@ -83,6 +86,7 @@ impl SectionOrder {
             Self::ToolAsk => 2000,
             Self::ToolGoal => 1950,
             Self::ToolPlan => 2050,
+            Self::ToolMcp => 2100,
         }
     }
 }

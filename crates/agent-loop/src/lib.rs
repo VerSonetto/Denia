@@ -105,7 +105,13 @@ pub trait ApprovalBridge: Send + Sync {
 pub struct SessionDriver {
     runtime: Option<Arc<dyn denia_tools::capabilities::AgentRuntime>>,
     registry: Arc<LlmRegistry>,
-    tools: Arc<ToolRegistry>,
+    /// 工具注册表。
+    ///
+    /// 用 `ArcSwap` 而不是裸 `Arc`:MCP 服务器配置变更会增删工具,整份
+    /// 注册表整体替换而不是原地增删——读到的永远是一份自洽的工具面,
+    /// 不会出现"提示词里有这个工具、注册表里却没了"的窗口期。
+    tools: Arc<ArcSwap<ToolRegistry>>,
+    /// 工具面变更时对外广播(供 server 侧刷新系统提示词的 MCP schema)。
     system_prompt: Arc<ArcSwap<SystemPrompt>>,
     file_history: Option<Arc<dyn FileHistoryProvider>>,
     approval: Option<Arc<dyn ApprovalBridge>>,
@@ -131,7 +137,7 @@ impl SessionDriver {
     ) -> Self {
         Self {
             registry,
-            tools,
+            tools: Arc::new(ArcSwap::from_pointee((*tools).clone())),
             system_prompt,
             runtime: None,
             file_history: None,
@@ -182,6 +188,19 @@ impl SessionDriver {
     pub fn with_ask(mut self, bridge: Arc<dyn denia_tools::AskBridge>) -> Self {
         self.ask = Some(bridge);
         self
+    }
+
+    /// 当前工具注册表(读路径无锁,拿到的是一份自洽快照)。
+    pub fn tools(&self) -> Arc<ToolRegistry> {
+        Arc::clone(&self.tools.load())
+    }
+
+    /// 整体替换工具注册表(MCP 服务器配置变更后由 server 调用)。
+    ///
+    /// 已在飞的工具调用持有旧注册表的 `Arc`,不受影响;新 step 的装配与
+    /// 派发都用新表,模型可见与可执行在同一次替换里对齐。
+    pub fn replace_tools(&self, registry: ToolRegistry) {
+        self.tools.store(Arc::new(registry));
     }
 
     /// 当前层叠上下文管理配置(server 热更新用)。

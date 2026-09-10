@@ -453,7 +453,7 @@ fn assemble_step(
     if driver.runtime.is_some() {
         if let (Some(schema), Some(tool)) = (
             assembly.tools.iter_mut().find(|s| s.name == "bash"),
-            driver.tools.get("bash"),
+            driver.tools().get("bash"),
         ) {
             *schema = tool.schema().clone();
         }

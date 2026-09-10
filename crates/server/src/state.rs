@@ -197,8 +197,17 @@ pub struct AppState {
     pub file_history: Arc<crate::file_history::FileHistoryStore>,
     /// 内嵌浏览器中枢(工具与 REST API 共用)。
     pub browser: Arc<denia_browser::BrowserManager>,
+    /// MCP 运行时:外部 MCP 服务器的连接与工具面同步。
+    pub mcp: Arc<crate::mcp_runtime::McpRuntime>,
     /// 绑定地址非回环 ⇒ 远程浏览器 ⇒ 目录选择器走 browse。
     pub bound_remote: bool,
+}
+
+impl AppState {
+    /// 广播 MCP 状态变化(前端刷新面板)。
+    pub fn announce_mcp_updated(&self) {
+        let _ = self.events.send(ServerEvent::McpUpdated);
+    }
 }
 
 /// Wire push events for the console.
@@ -222,6 +231,8 @@ pub enum ServerEvent {
     },
     /// 自定义系统提示词文件变更后广播(前端可选订阅)。
     SystemPromptChanged,
+    /// MCP 服务器配置或连接状态发生变化;前端据此刷新 MCP 面板。
+    McpUpdated,
     /// 手动压缩已结束但**没有**摘要产出:无可压缩区间(`nothing-to-compact`)
     /// 或摘要调用失败(附可读原因)。压缩是后台任务(202),结果只能走广播;
     /// 成功路径不发这个 —— 成功有 append-only 的 compaction-summary 事件。
@@ -704,7 +715,7 @@ fn validate_openai(value: Value) -> Result<Value, String> {
     serde_json::to_value(section).map_err(|e| e.to_string())
 }
 
-pub fn build_state(
+pub async fn build_state(
     home: &Path,
     bound_remote: bool,
 ) -> Result<AppState, Box<dyn std::error::Error>> {
@@ -804,6 +815,18 @@ pub fn build_state(
 
     runtime.attach(&driver);
 
+    // MCP:按 `mcp` 命名空间的配置连接外部服务器,并把它们的工具并入
+    // 注册表与系统提示词。连接失败不阻断启动(单个服务器自己标 error)。
+    let mcp = Arc::new(crate::mcp_runtime::McpRuntime::new(
+        Arc::new(denia_mcp::McpManager::new(
+            crate::mcp_runtime::builtin_tool_names(&driver.tools()),
+        )),
+        settings.clone(),
+        driver.clone(),
+        system_prompt.handle(),
+    ));
+    mcp.apply().await;
+
     spawn_forwarders(
         settings_events.1,
         credentials_events.1,
@@ -831,6 +854,7 @@ pub fn build_state(
         system_prompt,
         file_history,
         browser,
+        mcp,
         bound_remote,
     };
 
@@ -874,6 +898,20 @@ fn register_namespaces(settings: &SettingsStore) -> Result<(), Box<dyn std::erro
             defaults: json!({ "providers": {} }),
             validate: validate_openai,
             secrets: &[],
+            applies: Applies::Live,
+        },
+        json!({}),
+    )?;
+    settings.register(
+        crate::mcp_settings::MCP_NS,
+        NamespaceSpec {
+            defaults: crate::mcp_settings::defaults(),
+            validate: crate::mcp_settings::validate_mcp,
+            // env 与 headers 的值都是凭据:整条路径脱敏,describe 永不回传明文。
+            secrets: &[
+                &["servers", "*", "env", "*"],
+                &["servers", "*", "headers", "*"],
+            ],
             applies: Applies::Live,
         },
         json!({}),

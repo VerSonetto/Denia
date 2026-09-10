@@ -8,6 +8,7 @@ license.workspace = true
 [dependencies]
 denia-core = { workspace = true }
 denia-browser = { workspace = true }
+denia-mcp = { workspace = true }
 denia-system-prompt = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }

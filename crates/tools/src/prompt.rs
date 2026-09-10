@@ -222,6 +222,25 @@ pub fn register_ask_prompt_section(prompt: &mut SystemPrompt) -> Result<(), Stri
     Ok(())
 }
 
+/// MCP 外部工具的使用纪律段。
+///
+/// 与实际注册的工具严格同步:仅在有已连接 MCP 服务器、且确实注册了
+/// `mcp__*` 工具时注入(无 MCP 的部署模型不会看到不存在的工具)。
+/// 纪律与 description 分工不重叠:description 写调用机制与分页字段,
+/// 本段写"这些工具是什么、什么时候用、失败怎么办"的行为准则。
+pub fn register_mcp_prompt_section(prompt: &mut SystemPrompt) -> Result<(), String> {
+    prompt.section(PromptSection {
+        name: "tool:mcp".to_string(),
+        order: SectionOrder::ToolMcp.value(),
+        text: PromptText::Static(
+            "形如 mcp__<服务器>__<工具> 的是 MCP 外部工具,能力来自用户在设置里接入的第三方 MCP 服务器,不是 denia 内置功能。用法:与内置工具一样直接调用,参数按工具声明的 JSON Schema 给;不要向用户解释你在\"用 MCP\"。\n结果分页:长结果按字符分页返回,尾部会给出\"第 N-M 字符 / 共 X 字符\"与下一个 offset;要看后面的内容,用那个 offset 再调一次同一工具(不要改其它参数,否则会重新执行工具而不是翻页)。优先把查询范围收窄,不要靠翻页从头读到尾。\n失败处理:调用失败的文本通常来自外部服务器(未连接/超时/参数被拒)。先读错误里的可执行建议——多半是让用户到设置 → MCP 检查服务器状态或重新连接;一次失败不要反复重试同一个调用,换内置工具或请用户处理。同名能力优先用内置工具(ls/glob/grep/read_file 等),MCP 工具只在内置工具做不到时才用。".to_string(),
+        ),
+        complete: false,
+        audience: SectionAudience::Model,
+    })?;
+    Ok(())
+}
+
 /// 计划呈交工具(exit_plan)的纪律段。
 ///
 /// 与 `exit_plan` schema 严格同步注册(default_registry 总是带该工具);

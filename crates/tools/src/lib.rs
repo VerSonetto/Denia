@@ -15,6 +15,7 @@ mod goal;
 pub mod glob;
 pub mod grep;
 mod ls;
+pub mod mcp;
 mod plan;
 pub mod permission;
 pub mod prompt;
@@ -41,12 +42,14 @@ pub use glob::GlobTool;
 pub use goal::{GetGoalTool, UpdateGoalTool};
 pub use grep::GrepTool;
 pub use ls::LsTool;
+pub use mcp::McpTool;
 pub use plan::{ExitPlanArgs, ExitPlanTool};
 pub use prompt::{
     default_shipped, default_shipped_with_browser, default_shipped_with_browser_and_recon,
     default_shipped_with_browser_and_recon_and_ask, register_ask_prompt_section,
-    register_capability_prompt_sections, register_shipped_prompt, shipped_with_persona,
-    shipped_with_persona_and_browser, shipped_with_persona_and_browser_and_recon,
+    register_capability_prompt_sections, register_mcp_prompt_section, register_shipped_prompt,
+    shipped_with_persona, shipped_with_persona_and_browser,
+    shipped_with_persona_and_browser_and_recon,
     shipped_with_persona_and_browser_and_recon_and_ask,
 };
 pub use recon::{ReconExecute, ReconHub, ReconTool};
@@ -172,7 +175,7 @@ pub trait Tool: Send + Sync {
 }
 
 /// The deployment's tool set, in registration order.
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct ToolRegistry {
     tools: Vec<Arc<dyn Tool>>,
 }
@@ -198,6 +201,17 @@ impl ToolRegistry {
         self.tools
             .iter()
             .map(|tool| tool.schema().clone())
+            .collect()
+    }
+
+    /// 已注册的工具名(注册顺序)。
+    ///
+    /// 注册表热替换时用它枚举保留项(并剔除 `mcp__*` 前缀的旧 MCP 工具),
+    /// 避免重建把 server 侧的定制实现(如带 runtime 的 bash)冲掉。
+    pub fn names(&self) -> Vec<String> {
+        self.tools
+            .iter()
+            .map(|tool| tool.schema().name.clone())
             .collect()
     }
 
@@ -252,6 +266,24 @@ pub fn default_registry_with_browser_and_recon(
         registry.register(Arc::new(ReconTool::new(hub)));
     }
     registry
+}
+
+/// 把当前 MCP 快照里的工具追加进注册表。
+///
+/// 模型可见与可执行必须一致:放进注册表的名字就是快照里的 `mcp__*`
+/// 修饰名(快照负责过滤掉禁用/冲突的工具),派发处因此能 `get()` 到。
+/// 由 server 在 MCP 配置变更后用新的 `ToolRegistry` 整体替换 driver 的
+/// 注册表,保证一个 step 内工具面一致。
+pub fn register_mcp_tools(registry: &mut ToolRegistry, manager: &Arc<denia_mcp::McpManager>) {
+    let snapshot = manager.snapshot();
+    for (name, description, schema) in snapshot.tool_defs() {
+        registry.register(Arc::new(mcp::McpTool::new(
+            name,
+            description,
+            schema,
+            manager.clone(),
+        )));
+    }
 }
 
 /// Resolves one raw path for a tool call.
