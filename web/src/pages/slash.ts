@@ -5,10 +5,17 @@
  */
 
 /**
- * token 边界字符类:`/` 前允许行首、空白或 CJK 字符/标点(中文输入习惯
- * 不打空格);ASCII 字母数字紧邻(`/` 在 `https:`、`//`、`1/2` 里)不触发。
+ * token 边界字符类:`/` 前只允许行首或空白 —— 与 `@` 引用保持同一词法
+ * (对照 mention.ts 的 `(?:^|\s)`)。
+ *
+ * 这里**曾经**额外放行 CJK 汉字与全角标点,理由是"中文输入习惯不打空格"
+ * (想让 `帮我/plan` 能触发)。代价是汉字后随手敲 `/` 就弹面板:`修复/bug`、
+ * `看/compact` 这类正文里的普通斜杠全被误判成命令入口,与 `@` 的行为也
+ * 不一致。两者取其一,按用户实测反馈选了"与 @ 一致":`/` 同样只在行首或
+ * 空白之后触发,URL 的 `//`、`https:/`、分数 `1/2` 与汉字后的 `/` 天然
+ * 都不再触发。
  */
-const SLASH_BEFORE = `\\s\\u3000-\\u303f\\uff00-\\uffef\\u3400-\\u9fff`
+const SLASH_BEFORE = `\\s`
 
 /** 弹层触发:光标前的 `/name` token(name 可为空 = 刚敲下 `/`)。 */
 const ACTIVE_SLASH_RE = new RegExp(`(?:^|[${SLASH_BEFORE}])(\\/([a-zA-Z0-9_-]*))$`, 'u')
@@ -21,16 +28,17 @@ const SKILL_NAME_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/u
 
 /** 光标处活跃的 `/` token。 */
 export interface ActiveSlashToken {
-  /** 从行首/空白/CJK 边界后到光标前的完整 token(含 `/`),选中候选时整段替换。 */
+  /** 从行首/空白后到光标前的完整 token(含 `/`),选中候选时整段替换。 */
   prefix: string
   /** `/` 之后的名称查询串。 */
   query: string
 }
 
 /**
- * 提取光标处的 `/name` token:`/` 前必须是行首、空白或 CJK(URL 的 `//`、
- * `https:/` 与分数 `1/2` 因前一字符不在边界类里天然不触发)。draft 为
- * textarea 全文,正则里的 `\s` 天然覆盖换行。
+ * 提取光标处的 `/name` token:`/` 前必须是行首或空白。URL 的 `//`、
+ * `https:/`、分数 `1/2`、以及汉字后的 `/`(如 `修复/bug`)因前一字符不
+ * 在边界类里,天然都不触发。draft 为 textarea 全文,正则里的 `\s` 天然
+ * 覆盖换行。
  */
 export function activeSlashToken(draft: string, caret: number): ActiveSlashToken | undefined {
   const beforeCursor = draft.slice(0, Math.max(0, Math.min(caret, draft.length)))

@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import * as api from '../api'
 import type { ContextBreakdown, ContextPressure } from '../api'
+import { markCompacting, useCompactingFor } from '../appStore'
 import { t } from '../i18n'
 
 /** 从压力投影解析有界展示占用;分子或容量缺任一项即返回 null(不渲染)。
@@ -53,7 +54,6 @@ export function ContextRing({
   breakdown,
   sessionId,
   running,
-  onCompacted,
 }: {
   /** 服务端 `contextPressure` 投影(锚点 + 表面增量 + 路由容量)。 */
   pressure?: ContextPressure
@@ -63,11 +63,12 @@ export function ContextRing({
   sessionId?: string
   /** 会话是否在运行中:运行中禁用压缩按钮(服务端同样拒绝)。 */
   running?: boolean
-  /** 压缩成功后的回调(父组件刷新占用数据)。 */
-  onCompacted?: () => void
 }) {
   const [open, setOpen] = useState(false)
-  const [compressing, setCompressing] = useState(false)
+  // 压缩中状态来自全局 store:与对话流的"正在压缩"行是同一份,两个入口
+  // (面板按钮 / slash 命令)与刷新恢复共用,不会各说各话。
+  const compressingAt = useCompactingFor(sessionId ?? null)
+  const compressing = compressingAt !== null
   const [note, setNote] = useState<string | null>(null)
   const rootRef = useRef<HTMLSpanElement | null>(null)
   const context = contextOccupancy(pressure)
@@ -82,20 +83,14 @@ export function ContextRing({
 
   const handleCompact = async (): Promise<void> => {
     if (!sessionId || compressing || running) return
-    setCompressing(true)
     setNote(null)
     try {
-      const result = await api.compactSession(sessionId)
-      if (result.ok && result.outcome) {
-        setNote(t('contextCompactDone', { saved: formatTokens(result.outcome.savedTokens) }))
-        onCompacted?.()
-      } else {
-        setNote(t('contextCompactNothing'))
-      }
+      // 202 接单即返回:压缩在后台跑,不阻塞这里;收尾由全局"压缩中"标记
+      // 驱动(ContextRing 与对话流共用同一份状态,刷新也不丢)。
+      await api.compactSession(sessionId)
+      markCompacting(sessionId, Date.now())
     } catch (error) {
       setNote(error instanceof api.ApiError ? error.message : t('contextCompactFailed'))
-    } finally {
-      setCompressing(false)
     }
   }
 

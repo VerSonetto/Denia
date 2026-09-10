@@ -1,7 +1,13 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import { localeRevision, t } from '../i18n'
-import { groupTranscript, openTurnStartedAt, type OverviewRow, type TranscriptNode } from '../fold'
+import {
+  groupTranscript,
+  openTurnStartedAt,
+  withCompacting,
+  type OverviewRow,
+  type TranscriptNode,
+} from '../fold'
 import { MarkdownText } from '../markdown/MarkdownText'
 import type { MarkdownLabels } from '../markdown/MarkdownText'
 import { useTypewriter } from '../typewriter'
@@ -43,6 +49,7 @@ import {
 export function Transcript({
   nodes,
   pendingMessages = [],
+  compactingAt,
   onRewind,
   onFork,
   onLoopContinue,
@@ -52,6 +59,11 @@ export function Transcript({
   nodes: TranscriptNode[]
   /** 已发送未获确认的用户消息:渲染为尾部"发送中"行。 */
   pendingMessages?: { text: string; images?: UserMessageImage[] }[]
+  /**
+   * 压缩进行中:传发起时刻则在尾部挂占位行,传 null/undefined 不挂。
+   * 压缩结束(成功或失败)由父级置回 null,摘要作为 compaction 事件到达。
+   */
+  compactingAt?: number | null
   /** 用户消息点击回退按钮时回调。 */
   onRewind?: (seq: number) => void
   /** 轮次收尾消息点击分支按钮时回调(以该消息 seq 为锚点)。 */
@@ -63,10 +75,17 @@ export function Transcript({
   /** 取消一组模型提问。 */
   onAskCancel?: (requestId: string) => void
 }) {
-  if (nodes.length === 0 && pendingMessages.length === 0) {
+  // 压缩中占位行不进 nodes state:它是纯本地的瞬时状态,不该污染事件流
+  // fold 的结果(否则重拉快照/切视图时会出现幽灵行)。
+  // Hook 必须在提前 return 之前,否则 hook 数量随条件变化 → React #310。
+  const viewNodes = useMemo(
+    () => (compactingAt ? withCompacting(nodes, compactingAt) : nodes),
+    [nodes, compactingAt],
+  )
+  if (nodes.length === 0 && pendingMessages.length === 0 && !compactingAt) {
     return <div className="empty-hint">{t('emptyTranscript')}</div>
   }
-  const rows = groupTranscript(nodes)
+  const rows = groupTranscript(viewNodes)
   // 每个已完成轮次的最后一条助手消息挂复制/分支按钮;运行中/中间 step 不显示。
   // dsh 语义:任意已完成轮次都可分支,不再限制"仅 transcript 尾部"。
   const lastAssistantStep = new Map<number, number>()
@@ -230,6 +249,9 @@ const NodeView = memo(function NodeView({
       return <ToolRow node={node} onAskAnswer={onAskAnswer} onAskCancel={onAskCancel} />
     case 'compaction':
       return <CompactionRow node={node} />
+    // 压缩中占位:不来自事件流,由发起压缩的前端状态挂载。
+    case 'compacting':
+      return <CompactingRow startedAt={node.startedAt} />
   }
 })
 
@@ -237,6 +259,35 @@ const NodeView = memo(function NodeView({
  * LLM 总结压缩的边界标记(学 Claude Code compact boundary):显示摘要、
  * 被压缩的事件区间与 token 前后对比。摘要内部折叠,点击展开。
  */
+/**
+ * 压缩进行中的占位行:与 CompactionRow 同一视觉家族(同边框/圆角/底色),
+ * 但**不可点** —— 没有内容可展开,点了只会让人以为卡住了。
+ *
+ * 后端是一次 await、无中间进度事件,所以这里只表达"进行中":一个 spinner
+ * 加一句正在做什么,外加已经等了多久(长任务没有时间感最容易让人以为
+ * 死了)。不画假进度条 —— 不知道百分比就不该装作知道。
+ */
+function CompactingRow({ startedAt }: { startedAt: number }) {
+  const [elapsed, setElapsed] = useState(() => Math.max(0, Date.now() - startedAt))
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      setElapsed(Math.max(0, Date.now() - startedAt))
+    }, 1000)
+    return () => window.clearInterval(timer)
+  }, [startedAt])
+  return (
+    <div className="compaction-row compacting-row" role="status" aria-live="polite">
+      <div className="compaction-header compacting-header">
+        <span className="compacting-spinner" aria-hidden />
+        <span className="compacting-label">{t('contextCompacting')}</span>
+        <span className="compaction-meta compacting-elapsed">
+          {t('contextCompactingElapsed', { seconds: Math.max(1, Math.round(elapsed / 1000)) })}
+        </span>
+      </div>
+    </div>
+  )
+}
+
 function CompactionRow({ node }: { node: Extract<TranscriptNode, { kind: 'compaction' }> }) {
   const [open, setOpen] = useState(false)
   const pre = node.preTokens ?? 0

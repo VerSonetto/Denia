@@ -11,9 +11,11 @@ import {
   markStarted,
   notify,
   refreshList,
+  markCompacting,
   setActiveId,
   setRunningStatus,
   useCatalogTick,
+  useCompactingFor,
   useRunningFor,
   useSessions,
   useWorkspaces,
@@ -245,6 +247,11 @@ export default function SessionsPage({
   const [rewindBusy, setRewindBusy] = useState(false)
   // 回退成功后递增,强制重挂载 SessionView 重新拉快照。
   const [transcriptReloadTick, setTranscriptReloadTick] = useState(0)
+  /**
+   * 压缩中:来自全局 store(sessionStorage 持久化),刷新后仍可恢复。
+   * 早先放在组件 useState 里,一刷新就丢 —— 而后端任务其实还在跑。
+   */
+  const compactingAt = useCompactingFor(activeId)
   // 当前会话的 transcript 节点,供状态栏统计。
   const [transcriptNodes, setTranscriptNodes] = useState<TranscriptNode[]>([])
   // 全会话用户消息锚点(轮次轴刻度,来自分页响应,不受窗口限制)。
@@ -651,8 +658,36 @@ export default function SessionsPage({
    * 可整体撤销)。Chromium 的 insertHTML 会把光标落在不可编辑元素之前,所以
    * 插完显式钉到卡片之后再补空格,保证「卡片 + 空格」顺序与光标落点正确。
    */
+  /**
+   * 手动压缩的转发 ref:`pickSlash` 定义在 `runCompact` 之前(菜单逻辑靠
+   * 前),用 ref 拿到最新实现,免得把整块压缩逻辑提前搬上来。
+   */
+  const runCompactRef = useRef<(id: string) => Promise<void>>(async () => {})
+
   const pickSlash = useCallback(
     (candidate: SlashCandidate) => {
+      // 压缩是"立即执行"型命令:点选即发起,不落回输入框再等一次回车
+      // (它不产生消息、不经过模型,插进编辑器只会多一次无谓的确认)。
+      if (candidate.name === 'compact' && candidate.kind === 'command') {
+        // 触发菜单的那个 `/` 必须一起删掉:否则命令执行了,输入框里还留
+        // 着半个斜杠(用户还得手动退格)。
+        const editor = promptRef.current
+        if (editor) {
+          const text = serializeEditor(editor)
+          const caret = caretOffsetIn(editor)
+          const token = activeSlashToken(text, caret)
+          if (token) {
+            selectRange(editor, caret - token.prefix.length, caret)
+            document.execCommand('delete')
+          }
+          setPrompt(serializeEditor(editor))
+          originalPromptRef.current = ''
+          syncPromptHeight()
+        }
+        closeSlash()
+        if (activeId) void runCompactRef.current(activeId)
+        return
+      }
       const el = promptRef.current
       if (!el || document.activeElement !== el) return
       const text = serializeEditor(el)
@@ -675,7 +710,7 @@ export default function SessionsPage({
       closeSlash()
       syncPromptHeight()
     },
-    [closeSlash],
+    [closeSlash, runCompactRef],
   )
 
   /** input/selectionchange 共用的菜单触发检测:序列化草稿 + 光标偏移。 */
@@ -1435,6 +1470,37 @@ export default function SessionsPage({
   }
 
   /**
+   * 手动压缩上下文:对话流尾部挂"正在压缩"占位行,结束(成功/无可压缩/
+   * 失败)一律撤掉 —— 成功时真正的摘要会作为 compaction 事件到达并就地
+   * 出现在原位,占位行不抢它的位置。
+   *
+   * 后端是一次 await、没有中间进度事件,所以这里只表达"进行中";
+   * 不画假进度条 —— 不知道百分比就不该装作知道。
+   */
+  const compactingRef = useRef(false)
+  /**
+   * 发起压缩:后端 202 接单后立即返回,不 await 结果。
+   *
+   * 压缩现在与发轮次同构(spawn 到后台),刷新页面不再打断它;这里只负责
+   * 打上"正在压缩"标记,收尾由三处驱动:成功 → compaction-summary 事件
+   * 到达;无可压缩/失败 → `compaction-failed` 广播;页面刷新 → 标记从
+   * sessionStorage 恢复,再由 running 快照判定是否已结束。
+   */
+  const runCompact = async (id: string): Promise<void> => {
+    if (compactingRef.current) return
+    compactingRef.current = true
+    try {
+      await api.compactSession(id)
+      markCompacting(id, Date.now())
+    } catch (error) {
+      notify('err', error instanceof Error ? error.message : t('contextCompactFailed'))
+    } finally {
+      compactingRef.current = false
+    }
+  }
+  runCompactRef.current = runCompact
+
+  /**
    * 核心发送:把指定消息发往当前会话(复用乐观行/附件/引用的完整流程)。
    * 供输入框 send 与队列自动发送共用。
    */
@@ -1486,12 +1552,7 @@ export default function SessionsPage({
         body = rest
       } else if (command?.kind === 'compact') {
         if ((command.rest ?? '').trim()) throw new Error(t('slashCompactNoArgs'))
-        const result = await api.compactSession(id)
-        if (result.ok && result.outcome) {
-          notify('ok', t('contextCompactDone', { saved: formatTokens(result.outcome.savedTokens) }))
-        } else {
-          notify('ok', t('contextCompactNothing'))
-        }
+        await runCompact(id)
         if (options?.clearInput !== false) clearComposerState()
         return true // 裸 /compact:直接压缩,不发消息
       } else if (command?.kind === 'goal') {
@@ -2131,7 +2192,6 @@ export default function SessionsPage({
             breakdown={context?.breakdown}
             sessionId={activeId ?? undefined}
             running={running}
-            onCompacted={refreshContextBreakdown}
           />
           {primaryStops ? (
             <button
@@ -2253,6 +2313,7 @@ export default function SessionsPage({
               id={activeId}
               view={view}
               pendingMessages={pendingMessages}
+              compacting={compactingAt}
               onTodosChange={setTodos}
               onGoalTouch={() => {
                 if (activeId) refreshGoal(activeId)

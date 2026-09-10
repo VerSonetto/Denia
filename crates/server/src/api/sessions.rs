@@ -960,9 +960,17 @@ fn last_turn_of(session: &denia_session::Session) -> u32 {
         .unwrap_or(0)
 }
 
-/// 手动压缩(上下文面板按钮):占用运行位(压缩期间会话不可发消息),
-/// 从最近一次请求头部恢复模型/系统提示/工具集,同步等待摘要调用完成;
-/// 压缩行经 followers 广播展示。失败/无物可压给可读响应,不阻塞会话。
+/// 手动压缩(上下文面板按钮 / `/compact`):占用运行位(压缩期间会话不可
+/// 发消息),**在后台任务里执行**并立即返回 202。
+///
+/// 为什么必须 spawn:压缩要调一次模型、耗时数秒到数十秒。早先这里是直接
+/// `await`,handler future 挂在 HTTP 连接上 —— 用户一刷新页面连接断开,
+/// future 被 drop,`RunningGuard` 复位运行位并清空 cancel,**压缩真的被中
+/// 止**(不是"前端看不见了")。改成与 `prompt` 同构的 spawn + 202 后,任务
+/// 脱离连接生命周期:刷新、断网都不打断,进度与结果经 SSE 回到前端。
+///
+/// 成功会落 `compaction-summary` 事件并广播(前端就地渲染摘要行);
+/// 无可压缩/失败经 `ServerEvent::CompactionFailed` 广播,不阻塞会话。
 async fn compact_session(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
@@ -982,12 +990,13 @@ async fn compact_session(
             "会话正在运行中,无法手动压缩",
         ));
     }
-    // RAII:函数返回(含错误)自动复位运行位、清 cancel、广播结束。
-    let _guard = RunningGuard::new(live.clone(), state.events.clone());
+    // 守卫只能活到 spawn 之前:下面的校验失败要走同步错误返回(前端立刻
+    // 看到原因),否则 running 位会一直亮着。
     if !crate::state::console_settings(&state.settings)
         .compaction
         .compact_enabled
     {
+        live.running.store(false, Ordering::SeqCst);
         return Err(ApiError::bad_request(
             "compaction/disabled",
             "上下文压缩已在设置中关闭",
@@ -999,6 +1008,7 @@ async fn compact_session(
         .iter()
         .any(|item| matches!(item.event, SessionEvent::RequestHeader { .. }))
     {
+        live.running.store(false, Ordering::SeqCst);
         return Err(ApiError::bad_request(
             "session/no-request",
             "该会话还没有发起过模型请求,暂无可压缩内容",
@@ -1007,12 +1017,22 @@ async fn compact_session(
     // cancel 挂到会话槽:前端取消按钮可随时中止摘要调用。
     let token = CancellationToken::new();
     *live.cancel.lock().unwrap() = Some(token.clone());
-    match state.driver.compact_manually(&live.session, token).await {
-        Ok(Some(outcome)) => {
-            let envelope = live
-                .session
-                .append(SessionEvent::CompactionSummary {
-                    turn: last_turn_of(&live.session),
+
+    let driver = state.driver.clone();
+    let session = live.session.clone();
+    let live_for_task = live.clone();
+    let events_for_guard = state.events.clone();
+    let events_for_result = state.events.clone();
+    let followers = live.followers.clone();
+    tokio::spawn(async move {
+        // RAII:任务结束(含 panic)自动复位 running + 清 cancel + 广播结束。
+        let _guard = RunningGuard::new(live_for_task.clone(), events_for_guard);
+        match driver.compact_manually(&session, token).await {
+            Ok(Some(outcome)) => {
+                // 成功:落 append-only 摘要事件并广播 —— 前端据此把"正在
+                // 压缩"占位行就地换成摘要行,刷新后也能从日志重放出来。
+                match session.append(SessionEvent::CompactionSummary {
+                    turn: last_turn_of(&session),
                     step: 0,
                     summary: outcome.summary,
                     replaces_from: outcome.replaces_from,
@@ -1020,28 +1040,40 @@ async fn compact_session(
                     keep_from: outcome.keep_from,
                     pre_tokens: outcome.pre_tokens,
                     post_tokens: outcome.post_tokens,
-                })
-                .map_err(ApiError::from_session)?;
-            let _ = live.followers.send(envelope);
-            Ok(Json(json!({
-                "ok": true,
-                "outcome": {
-                    "replacesFrom": outcome.replaces_from,
-                    "replacesTo": outcome.replaces_to,
-                    "keepFrom": outcome.keep_from,
-                    "preTokens": outcome.pre_tokens,
-                    "postTokens": outcome.post_tokens,
-                    "savedTokens": outcome.pre_tokens.saturating_sub(outcome.post_tokens),
-                },
-            })))
+                }) {
+                    Ok(envelope) => {
+                        let _ = followers.send(envelope);
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error, "compaction summary append failed");
+                        let _ = events_for_result.send(ServerEvent::CompactionFailed {
+                            id: session.id().to_string(),
+                            reason: error.to_string(),
+                        });
+                    }
+                }
+            }
+            // 无可压缩区间:不是错误,只是历史太短。
+            Ok(None) => {
+                let _ = events_for_result.send(ServerEvent::CompactionFailed {
+                    id: session.id().to_string(),
+                    reason: "nothing-to-compact".to_string(),
+                });
+            }
+            Err(failure) => {
+                let _ = events_for_result.send(ServerEvent::CompactionFailed {
+                    id: session.id().to_string(),
+                    reason: failure.message,
+                });
+            }
         }
-        Ok(None) => Ok(Json(json!({ "ok": false, "reason": "nothing-to-compact" }))),
-        Err(failure) => Err(ApiError::new(
-            StatusCode::BAD_REQUEST,
-            failure.code,
-            failure.message,
-        )),
-    }
+        drop(_guard);
+    });
+
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(json!({ "accepted": true, "id": id })),
+    ))
 }
 
 /// SSE: replays persisted envelopes with `seq > after`, then live frames.

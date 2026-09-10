@@ -17,6 +17,8 @@ import {
   setPendingWsId,
   replaceRunningIds,
   setRunningStatus,
+  clearCompacting,
+  pruneCompactingByRunning,
   useActiveId,
   useConnLost,
   useLocalBlankIds,
@@ -297,9 +299,20 @@ export default function App() {
         if (parsed.type === 'sessions-updated') void refreshList()
         else if (parsed.type === 'settings-updated') applyConsoleSettings()
         else if (parsed.type === 'running-snapshot' && Array.isArray(parsed.ids)) {
-          replaceRunningIds(parsed.ids.filter((id) => typeof id === 'string'))
+          const ids = parsed.ids.filter((id) => typeof id === 'string')
+          replaceRunningIds(ids)
+          // 刷新恢复的关键一步:sessionStorage 里的"正在压缩"标记要拿服务端
+          // 权威的 running 校对 —— 会话已不在运行集中,说明任务早已收尾
+          // (摘要事件会在快照重放里出现),标记必须清掉,否则会一直转圈。
+          pruneCompactingByRunning(Object.fromEntries(ids.map((id) => [id, true])))
         } else if (parsed.type === 'running-changed' && parsed.id) {
           setRunningStatus(parsed.id, parsed.running === true)
+          // 运行位转 false:无论压缩成功与否都收尾(失败另有广播,这里兜底)。
+          if (parsed.running !== true) clearCompacting(parsed.id)
+        } else if (parsed.type === 'compaction-failed' && parsed.id) {
+          // 压缩后台任务的失败/无物可压出口:清掉"正在压缩"标记。
+          // 成功不走这里 —— 成功有 append-only 的 compaction-summary 事件。
+          clearCompacting(parsed.id)
         }
       } catch {
         /* ignore malformed frame */

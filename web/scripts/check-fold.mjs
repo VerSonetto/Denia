@@ -79,7 +79,25 @@ check('新会话首条与旧会话同文本也照常显示', count(sameAsBefore)
 let after = mod.applyEnvelope(sameAsBefore, sp(2, SYS_A))
 check('切会话后增量从新基准继续', count(after), 1)
 
-/* 7) context-injection 不去重(内容即使相近也是真信息,如"取代之前所有")。 */
+/* 7) 压缩占位行:不来自事件流,由前端挂载/移除,且不污染 fold 结果。 */
+const base = mod.foldEvents([sp(1, SYS_A)])
+const withRow = mod.withCompacting(base, 1000)
+check('挂上压缩中行', withRow.filter((n) => n.kind === 'compacting').length, 1)
+check('压缩中行在末尾', withRow[withRow.length - 1].kind, 'compacting')
+// 幂等:连点两次不能出现两行。
+const twice = mod.withCompacting(withRow, 2000)
+check('重复挂载不产生第二行', twice.filter((n) => n.kind === 'compacting').length, 1)
+check('重复挂载保留首次时刻', twice.find((n) => n.kind === 'compacting').startedAt, 1000)
+check('移除压缩中行', mod.withoutCompacting(withRow).filter((n) => n.kind === 'compacting').length, 0)
+// 移除时不能误伤其它节点(尤其刚到达的 compaction 摘要)。
+check('移除后原节点仍在', mod.withoutCompacting(withRow).length, base.length)
+check('无压缩行时移除是幂等的', mod.withoutCompacting(base).length, base.length)
+// 压缩中行不能被 turn 折叠吞掉:它在最后一个 turn-end 之后,应独立成行。
+const rowsWithCompacting = mod.groupTranscript(withRow)
+const compactingRows = rowsWithCompacting.filter((r) => r.kind === 'node' && r.node.kind === 'compacting')
+check('压缩中行不被折叠吞掉', compactingRows.length, 1)
+
+/* 8) context-injection 不去重(内容即使相近也是真信息,如"取代之前所有")。 */
 const injection = (seq, text) => ({ seq, time: seq * 100, type: 'agent-delivery', turn: 1, step: 1, text })
 const inj = mod.foldEvents([injection(1, '工作区指令:基线 A'), injection(2, '工作区指令:基线 A')])
 check('context-injection 不去重', inj.filter((n) => n.kind === 'context-injection').length, 2)

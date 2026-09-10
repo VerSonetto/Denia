@@ -766,26 +766,21 @@ export function contextBreakdown(id: string): Promise<ContextBreakdownResponse> 
   return http(`/api/sessions/${encodeURIComponent(id)}/context-breakdown`)
 }
 
-/** 手动压缩结果(上下文面板按钮;摘要调用可能持续数十秒)。 */
-export interface ManualCompactOutcome {
-  replacesFrom: number
-  replacesTo: number
-  keepFrom: number
-  preTokens: number
-  postTokens: number
-  savedTokens: number
-}
-
 export interface ManualCompactResponse {
-  ok: boolean
-  outcome?: ManualCompactOutcome
-  /** `nothing-to-compact`:无可压缩区间(历史太短)。 */
-  reason?: string
+  /** 202 接单:压缩在后台跑,结果经 SSE 回来(成功落 compaction-summary
+   *  事件,无可压缩/失败广播 compaction-failed)。 */
+  accepted: boolean
+  id?: string
 }
 
-/** 手动压缩:恢复最近一次请求形态执行总结压缩;超时放宽到 5 分钟。 */
+/**
+ * 手动压缩:**202 接单即返回**,不等待摘要调用完成。
+ *
+ * 压缩与发轮次同构 —— 后端 spawn 成后台任务,刷新页面不再打断它(早先
+ * 这里是长 await,连接一断任务就被 drop,压缩真的会中止)。
+ */
 export function compactSession(id: string): Promise<ManualCompactResponse> {
-  return http(`/api/sessions/${encodeURIComponent(id)}/compact`, { method: 'POST' }, 300_000)
+  return http(`/api/sessions/${encodeURIComponent(id)}/compact`, { method: 'POST' }, 30_000)
 }
 
 export interface SystemPromptView {

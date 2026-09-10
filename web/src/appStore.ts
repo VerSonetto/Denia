@@ -39,6 +39,60 @@ interface AppSnapshot {
   sessionsLoaded: boolean
   /** 运行中的会话集合:服务端 SSE 推送驱动 + 本地乐观兜底。 */
   runningIds: Record<string, boolean>
+  /** 正在压缩的会话:会话 id → 发起时刻(epoch ms),刷新可恢复。 */
+  compactingIds: Record<string, number>
+}
+
+/* ---- 压缩中集合(跨刷新) ----
+
+   压缩是后台任务(202 接单),前端不再 await 结果,所以"正在压缩"这个
+   状态必须有自己的持久来源,否则一刷新就没了。持久化到 sessionStorage:
+   标签页刷新保留、关闭即清空,不会跨会话长期残留。
+
+   存的是发起时刻(epoch ms),既用于显示已等待秒数,也用于兜底过期:
+   万一"结束"事件丢了(断网/实例重启),状态不会永久卡住。 */
+
+const COMPACTING_KEY = 'denia.compacting'
+/** 兜底超时:远超任何一次压缩耗时,过期即当作已结束。 */
+const COMPACTING_TTL_MS = 10 * 60 * 1000
+
+/**
+ * 读取持久化的压缩标记。
+ *
+ * **常量必须定义在 `state` 初始化之前**:早先它们排在 `state` 之后,
+ * 这里的 `COMPACTING_KEY` 落在 TDZ 里,抛出的 ReferenceError 被下面的
+ * catch 静默吞成 `{}` —— 表现为"标记写进去了,刷新后却读不回来"
+ * (状态没丢、组件丢了)。storage 相关的 catch 只能兜"不可用/损坏",
+ * 不能掩盖编程错误,故顺序即正确性。
+ */
+function readCompacting(): Record<string, number> {
+  try {
+    const raw = window.sessionStorage.getItem(COMPACTING_KEY)
+    if (!raw) return {}
+    const parsed: unknown = JSON.parse(raw)
+    if (!parsed || typeof parsed !== 'object') return {}
+    const now = Date.now()
+    const next: Record<string, number> = {}
+    for (const [id, at] of Object.entries(parsed as Record<string, unknown>)) {
+      if (typeof at !== 'number') continue
+      // 丢弃过期项:没有对应结束事件时,状态不能永久挂着。
+      if (now - at > COMPACTING_TTL_MS) continue
+      next[id] = at
+    }
+    return next
+  } catch {
+    /* storage 不可用(隐私模式):退化成纯内存,不影响主流程。 */
+    return {}
+  }
+}
+
+function writeCompacting(map: Record<string, number>) {
+  try {
+    if (Object.keys(map).length === 0) window.sessionStorage.removeItem(COMPACTING_KEY)
+    else window.sessionStorage.setItem(COMPACTING_KEY, JSON.stringify(map))
+  } catch {
+    /* 写失败只影响刷新恢复,不影响当前页面 —— 内存态仍然正确。 */
+  }
 }
 
 let state: AppSnapshot = {
@@ -53,6 +107,7 @@ let state: AppSnapshot = {
   localBlankIds: {},
   sessionsLoaded: false,
   runningIds: {},
+  compactingIds: readCompacting(),
 }
 
 const listeners = new Set<() => void>()
@@ -112,6 +167,55 @@ export function replaceRunningIds(ids: string[]) {
   const beforeKeys = Object.keys(before)
   if (beforeKeys.length === ids.length && ids.every((id) => before[id])) return
   setState({ runningIds: next })
+}
+
+/* ---- 压缩中集合(跨刷新):常量与读写函数见文件顶部(`state` 之前) ----
+
+   为什么放 sessionStorage 而不是内存:刷新是本次改要修的核心场景 —— 旧
+   实现把状态放在组件 useState 里,刷新即丢。sessionStorage 在**标签页刷
+   新时保留、关闭即清空**,正好匹配"刷新不丢、重开不该有残留";localStorage
+   则会跨会话长期残留,关掉浏览器再打开还会显示"正在压缩"。
+
+   存的是发起时刻(epoch ms),既用于显示已等待秒数,也用于兜底过期:
+   万一"结束"事件丢了(断网/实例重启),状态不会永久卡住。 */
+
+/** 标记某会话正在压缩(传发起时刻)。 */
+export function markCompacting(id: string, startedAt: number) {
+  const next = { ...state.compactingIds, [id]: startedAt }
+  writeCompacting(next)
+  setState({ compactingIds: next })
+}
+
+/** 清除某会话的压缩中标记(成功/无可压缩/失败都走这里)。 */
+export function clearCompacting(id: string) {
+  if (!(id in state.compactingIds)) return
+  const next = { ...state.compactingIds }
+  delete next[id]
+  writeCompacting(next)
+  setState({ compactingIds: next })
+}
+
+/** 压缩中集合订阅。 */
+export function useCompactingIds(): Record<string, number> {
+  return useApp((s) => s.compactingIds)
+}
+
+/** 某会话是否正在压缩(返回发起时刻,未压缩为 null)。 */
+export function useCompactingFor(id: string | null): number | null {
+  return useApp((s) => (id === null ? null : (s.compactingIds[id] ?? null)))
+}
+
+/** SSE 连接快照:running 已结束的会话,其压缩标记也一并清掉
+ *  (刷新后服务端权威的 running 是 false,说明任务早已收尾)。 */
+export function pruneCompactingByRunning(runningIds: Record<string, boolean>) {
+  const ids = Object.keys(state.compactingIds)
+  if (ids.length === 0) return
+  const stale = ids.filter((id) => !runningIds[id])
+  if (stale.length === 0) return
+  const next = { ...state.compactingIds }
+  for (const id of stale) delete next[id]
+  writeCompacting(next)
+  setState({ compactingIds: next })
 }
 
 export function useRunningIds(): Record<string, boolean> {

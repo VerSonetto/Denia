@@ -1922,6 +1922,57 @@ button {
   font-size: 11px;
 }
 
+/* 压缩进行中:与上面同族(同边框/圆角/底色),但不可点 —— 没有内容可展开。
+   进度未知就不画进度条,只给 spinner + 已等待秒数。 */
+.compacting-row {
+  background: var(--bg-layer-2);
+}
+
+.compacting-header {
+  cursor: default;
+}
+
+.compacting-header:hover {
+  background: transparent;
+}
+
+.compacting-spinner {
+  flex: none;
+  width: 11px;
+  height: 11px;
+  border: 1.5px solid var(--border-l1);
+  border-top-color: var(--label-tertiary);
+  border-radius: 50%;
+  animation: compacting-spin 0.7s linear infinite;
+}
+
+@keyframes compacting-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* 尊重"减少动态效果":转圈换成静止的环,信息不丢。 */
+@media (prefers-reduced-motion: reduce) {
+  .compacting-spinner {
+    animation: none;
+    border-top-color: var(--border-l1);
+    background: var(--label-caption);
+  }
+}
+
+.compacting-label {
+  flex: none;
+  font-size: 12px;
+  color: var(--label-primary);
+}
+
+/* 秒数:等宽数字,免得每跳一秒整行宽度都在抖。 */
+.compacting-elapsed {
+  font-variant-numeric: tabular-nums;
+  color: var(--label-caption);
+}
+
 .compaction-body {
   padding: 8px 10px 10px;
   border-top: 1px solid var(--border-l1);

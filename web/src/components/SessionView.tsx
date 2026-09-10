@@ -1,5 +1,6 @@
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react'
 import * as api from '../api'
+import { clearCompacting } from '../appStore'
 import { applyEnvelopes, foldEvents } from '../fold'
 import type { TranscriptNode } from '../fold'
 import { t } from '../i18n'
@@ -62,6 +63,7 @@ export function SessionView({
   id,
   view = 'chat',
   pendingMessages,
+  compacting = null,
   onTodosChange,
   onNotFound,
   onPendingSettled,
@@ -109,6 +111,11 @@ export function SessionView({
   onAskCancel?: (requestId: string) => void
   /** 目标状态可能变化(goal 事件 / 轮次闭合 / 快照重建):父级刷新 GoalBar。 */
   onGoalTouch?: () => void
+  /**
+   * 压缩进行中:传发起时刻(epoch ms)则在对话流尾部挂占位行,传 null 移除。
+   * 由父级驱动 —— 压缩请求在父级发出,这里只负责把状态画出来。
+   */
+  compacting?: number | null
 }) {
   const [nodes, setNodes] = useState<TranscriptNode[]>([])
   // 原始事件流:轨迹视图的 fold 源(与 transcript 共用一次订阅)。
@@ -199,6 +206,9 @@ export function SessionView({
         if (envelope.type === 'todo-write' || envelope.type === 'user-message') {
           publishTodos([...eventsRef.current, ...queueRef.current])
         }
+        // 压缩成功:摘要落盘事件到达 →"正在压缩"标记到此为止(摘要行会
+        // 由 fold 就地渲染出来)。刷新后走的是冷启动 snapshot 分支。
+        if (envelope.type === 'compaction-summary') clearCompacting(id)
         // 目标状态或轮次记账变化:父级重拉服务端权威的 goal 视图。
         if (envelope.type === 'goal' || envelope.type === 'turn-end') {
           goalTouchRef.current?.()
@@ -322,6 +332,7 @@ export function SessionView({
       <Transcript
         nodes={nodes}
         pendingMessages={pendingMessages}
+        compactingAt={compacting}
         onRewind={onRewind}
         onFork={onFork}
         onLoopContinue={onLoopContinue}

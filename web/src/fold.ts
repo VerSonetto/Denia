@@ -88,6 +88,18 @@ export type TranscriptNode =
       seq: number
     }
   | {
+      /**
+       * 压缩进行中的占位行:**不来自事件流**,由前端在发起手动压缩时插入、
+       * 收到结果后移除(真正的摘要会作为 compaction 事件落盘到达)。
+       *
+       * 后端 `compact_manually` 是一次 await、没有中间进度事件,所以这里
+       * 只能表达"进行中",做不出百分比 —— 不假装有进度。
+       */
+      kind: 'compacting'
+      /** 发起时刻(epoch ms)。 */
+      startedAt: number
+    }
+  | {
       /** 本地斜杠命令回显(如 /goal):右对齐命令气泡,按事件 seq 排序。 */
       kind: 'command-echo'
       name: string
@@ -761,6 +773,21 @@ export interface OverviewRow {
   hidden: TranscriptNode[]
 }
 
+/**
+ * 在对话流末尾挂上"正在压缩"占位行;已在压缩中则原样返回(幂等,避免
+ * 连点产生两行)。
+ */
+export function withCompacting(nodes: TranscriptNode[], startedAt: number): TranscriptNode[] {
+  if (nodes.some((node) => node.kind === 'compacting')) return nodes
+  return [...nodes, { kind: 'compacting', startedAt }]
+}
+
+/** 移除压缩占位行:压缩结束(成功、无可压缩、失败)都走这里。 */
+export function withoutCompacting(nodes: TranscriptNode[]): TranscriptNode[] {
+  if (!nodes.some((node) => node.kind === 'compacting')) return nodes
+  return nodes.filter((node) => node.kind !== 'compacting')
+}
+
 export type TranscriptRow =
   | { kind: 'node'; node: TranscriptNode }
   | OverviewRow
@@ -861,7 +888,8 @@ function rendersContent(node: TranscriptNode): boolean {
     node.kind === 'tool' ||
     node.kind === 'user' ||
     node.kind === 'context-injection' ||
-    node.kind === 'system-prompt'
+    node.kind === 'system-prompt' ||
+    node.kind === 'compacting'
   ) {
     return true
   }

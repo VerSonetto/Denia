@@ -222,6 +222,10 @@ pub enum ServerEvent {
     },
     /// 自定义系统提示词文件变更后广播(前端可选订阅)。
     SystemPromptChanged,
+    /// 手动压缩已结束但**没有**摘要产出:无可压缩区间(`nothing-to-compact`)
+    /// 或摘要调用失败(附可读原因)。压缩是后台任务(202),结果只能走广播;
+    /// 成功路径不发这个 —— 成功有 append-only 的 compaction-summary 事件。
+    CompactionFailed { id: String, reason: String },
 }
 
 /// One materialized session: durable log plus live fan-out. `session` is an
