@@ -1494,11 +1494,11 @@ mod tests {
             ])))
         }
     }
-    fn setup() -> (crate::state::AppState, ToolContext) {
+    async fn setup() -> (crate::state::AppState, ToolContext) {
         let home =
             std::env::temp_dir().join(format!("denia-runtime-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&home).unwrap();
-        let state = crate::state::build_state(&home, false).unwrap();
+        let state = crate::state::build_state(&home, false).await.unwrap();
         state
             .registry
             .register(
@@ -1543,7 +1543,7 @@ mod tests {
     }
     #[tokio::test]
     async fn spawn_resume_lineage_and_exactly_once_delivery() {
-        let (state, ctx) = setup();
+        let (state, ctx) = setup().await;
         let owner = ctx.session_id.as_ref().unwrap();
         let result = state
             .runtime
@@ -1637,7 +1637,7 @@ mod tests {
     /// allowed_tools 只能在这个集合内缩小,未知或越权一律拒绝。
     #[tokio::test]
     async fn subagents_are_read_only_by_default() {
-        let (state, ctx) = setup();
+        let (state, ctx) = setup().await;
         // 默认授予:只读集合。
         let result = state
             .runtime
@@ -1747,7 +1747,7 @@ mod tests {
 
     #[tokio::test]
     async fn admission_interrupt_and_owner_cleanup() {
-        let (state, mut ctx) = setup();
+        let (state, mut ctx) = setup().await;
         ctx.selection.as_mut().unwrap().model = "hold".into();
         state
             .settings
@@ -1802,7 +1802,7 @@ mod tests {
     /// 状态转换 fail loud;清除后回归无目标。
     #[tokio::test]
     async fn goal_rounds_auto_continue_and_stop_at_max_rounds() {
-        let (state, _) = setup();
+        let (state, _) = setup().await;
         state
             .settings
             .update("goals", json!({"maxRounds": 2}), None)
@@ -1984,7 +1984,7 @@ mod tests {
     }
     #[tokio::test]
     async fn cancelled_start_leaves_no_child_and_config_rejects_invalid() {
-        let (state, ctx) = setup();
+        let (state, ctx) = setup().await;
         ctx.cancel.cancel();
         assert!(
             state
@@ -2017,7 +2017,7 @@ mod tests {
 
     #[tokio::test]
     async fn http_prompt_tools_jobs_skills_and_child_controls() {
-        let (state, _) = setup();
+        let (state, _) = setup().await;
         std::fs::create_dir_all(state.home.join("skills/runtime-test")).unwrap();
         std::fs::write(
             state.home.join("skills/runtime-test/SKILL.md"),
