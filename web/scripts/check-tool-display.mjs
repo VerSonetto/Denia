@@ -154,7 +154,8 @@ check(
       { content: 'b', status: 'completed' },
     ]),
   ),
-  '2 ✓',
+  // 全部完成不再挂对勾:2/2 本身已经说明一切。
+  '2/2',
 )
 
 // 首次清单:没有上一次快照,不该把整表标成新增。
@@ -207,6 +208,66 @@ check('长清单只标 1 条', longList.changes.size, 1)
 check('长清单未变计数', longList.unchanged, 7)
 
 check('todo 非 todo 工具', mod.todoSnapshot('{"x":1}', t1)?.total ?? null, null)
+
+/* ---- bash:ANSI 清洗与终端噪声 ---- */
+
+// git --color=always 的真实形态:ESC[33m + ESC[m。
+check(
+  '剥 SGR 彩色',
+  mod.stripAnsi('[33m74fd909[m feat(web): todo'),
+  '74fd909 feat(web): todo',
+)
+// 多属性序列(粗体+前景+背景)与 256 色。
+check(
+  '剥多属性与 256 色',
+  mod.stripAnsi('[1;38;5;208m警告[0m [38;2;255;0;0m红[0m'),
+  '警告 红',
+)
+// 光标控制/清行/清屏:进度条与全屏 TUI 会大量产生。输入是 a+[2K+b+[H+b+[J+c
+// → 序列剥掉后剩 a、b、b、c(两个 b 都在,序列只是光标动作)。
+check('剥光标与清屏序列', mod.stripAnsi('a[2Kb[Hb[Jc'), 'abbc')
+// OSC 标题(设置窗口标题)与字符集切换。
+check('剥 OSC 与字符集', mod.stripAnsi(']0;titlex(B'), 'x')
+// 半截/孤立 ESC:捕获截断时常见,不能留可见垃圾。
+check('剥孤立 ESC', mod.stripAnsi('ab'), 'ab')
+check('无序列时原样', mod.stripAnsi('plain 中文'), 'plain 中文')
+
+// CRLF 归一。
+check('CRLF 归一', mod.normalizeTerminalText('a\r\nb\r\nc'), 'a\nb\nc')
+// 进度条:同一行被 \r 反复覆盖 → 只留最终一段(屏幕上留下的那一行)。
+check(
+  '回车覆盖取最后一段',
+  mod.normalizeTerminalText('  0%\r 50%\r100%\ndone'),
+  '100%\ndone',
+)
+// 组合拳:彩色 + CRLF + 覆盖。
+check(
+  '清洗组合',
+  mod.cleanToolOutput('[32m 10%\r[32m100%[0m\r\n[31mfail[0m\r\n'),
+  '100%\nfail\n',
+)
+
+// 命令正文:剥后端注入的输出编码前缀。
+check(
+  '剥输出编码前缀',
+  mod.cleanBashCommand(
+    '[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; git status',
+  ),
+  'git status',
+)
+check('无前缀时原样', mod.cleanBashCommand('cargo test'), 'cargo test')
+
+// 结果切段:首行的"退出码: N"由头部徽标呈现,正文里不再重复。
+const parts = mod.bashOutputParts('退出码: 0\nline 1\nline 2\n')
+check('剥首行退出码', parts.stdout, 'line 1\nline 2')
+check('无 stderr 段', parts.stderr, undefined)
+
+const withErr = mod.bashOutputParts(
+  '退出码: 1\nstdout line\n--- stderr ---\nerror: boom\n',
+)
+check('切出 stdout', withErr.stdout, 'stdout line')
+check('切出 stderr', withErr.stderr, 'error: boom')
+check('无 stderr 分隔时不误切', mod.bashOutputParts('a\n--- stderr\nb').stderr, undefined)
 
 console.log(failed === 0 ? '\nALL PASS' : `\n${failed} FAILED`)
 process.exit(failed === 0 ? 0 : 1)

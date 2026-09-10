@@ -5,9 +5,21 @@ import { groupTranscript, openTurnStartedAt, type OverviewRow, type TranscriptNo
 import { MarkdownText } from '../markdown/MarkdownText'
 import type { MarkdownLabels } from '../markdown/MarkdownText'
 import { useTypewriter } from '../typewriter'
-import { toolCallInput, toolCallSummary, editDiff, writeDiff, todoSnapshot, type EditDiff } from '../toolDisplay'
+import {
+  toolCallInput,
+  toolCallSummary,
+  editDiff,
+  writeDiff,
+  todoSnapshot,
+  cleanToolOutput,
+  cleanBashCommand,
+  bashOutputParts,
+  parseArgsObject,
+  type EditDiff,
+} from '../toolDisplay'
 import { DiffCard, DiffStat } from './DiffCard'
 import { TodoCard } from './TodoCard'
+import { BashCard } from './BashCard'
 import type { AskAnswer, UserMessageImage } from '../types'
 import { UserMessageBubble } from './UserMessageImages'
 import { BranchMessageButton, CopyMessageButton } from './CopyMessageButton'
@@ -579,7 +591,41 @@ function toolDiff(name: string, args: string, result?: string): EditDiff | null 
 }
 
 /**
- * 从 edit 的工具结果里抠出起始行号(形如"…首次替换发生在第 42 行")。
+ * bash 的退出码标记:**只在非 0 时出现**。
+ *
+ * 成功的命令不需要一枚对勾来证明自己 —— shell 的语义就是"没消息就是好
+ * 消息",而且一个绿勾钉在命令行末尾既突兀又占地方。非 0 才需要说话,写
+ * 法是 `exit 3`:等宽小字、错误前景色、无底色(底色会让人误以为是工具
+ * 失败,而非零退出是命令自己的结果)。
+ */
+function ExitBadge({ code }: { code: number }) {
+  if (code === 0) return null
+  return (
+    <span className="exit-badge" title={t('bashExitNonZero', { code })}>
+      exit {code}
+    </span>
+  )
+}
+
+/** bash 参数里的命令正文(剥掉后端注入的输出编码前缀)。 */
+function bashCommand(args: string): string | null {
+  const parsed = parseArgsObject(args)
+  const raw = parsed?.['command']
+  const command = typeof raw === 'string' ? raw : cleanBashCommand(args)
+  const cleaned = cleanBashCommand(command)
+  return cleaned.length > 0 ? cleaned : null
+}
+
+/** 结果首行的"退出码: N";解析不出返回 undefined。 */
+function bashExitCode(content?: string): number | undefined {
+  if (!content) return undefined
+  const match = content.match(/^退出码:\s*(-?\d+)/)
+  if (!match) return undefined
+  const code = Number(match[1])
+  return Number.isFinite(code) ? code : undefined
+}
+
+/** 从工具结果里抠出起始行号(形如"…首次替换发生在第 42 行")。
  * 拿不到就返回 1:diff 退化为相对行号,不影响展示。
  */
 function editStartLine(content?: string): number | undefined {
@@ -636,9 +682,31 @@ function ToolRow({
     : node.result!.isError
       ? firstLine(node.result!.content)
       : headSummary || firstLine(node.result!.content)
-  // 成功时卡片(diff / 清单)已经把"改了什么"说全了,不再重复 out 那句结果
-  // 文案;失败时保留 out(错误原因要看得见),卡片作为"打算改什么"的对照。
-  const showOut = node.result !== undefined && (node.result.isError || !(diff || todos))
+  // 工具输出统一过一遍清洗:剥 ANSI 彩色/光标序列、归一 CRLF 与进度条回车
+  // 覆盖。终端噪声在 <pre> 里可见即"乱码",修的是这个(见 stripAnsi 注释)。
+  const outBody = useMemo(
+    () => (node.result ? cleanToolOutput(node.result.content) : null),
+    [node.result],
+  )
+  // bash:命令正文(剥掉后端注入的输出编码前缀)与切段后的输出。
+  const commandBody = useMemo(
+    () => (node.name === 'bash' ? bashCommand(node.args) : null),
+    [node.name, node.args],
+  )
+  const bashOut = useMemo(
+    () => (node.name === 'bash' && outBody !== null ? bashOutputParts(outBody) : null),
+    [node.name, outBody],
+  )
+  // 成功时卡片(diff / 清单 / bash 引用)已经把"改了什么"说全了,不再重复
+  // out 那句结果文案;失败时保留 out(错误原因要看得见)。
+  const showOut =
+    node.result !== undefined && (node.result.isError || !(diff || todos || commandBody !== null))
+  // 退出码:bash 把"退出码: N"写在结果首行。非 0 是数据不是工具失败,
+  // 但要让人一眼看见 —— 挂在头部右侧。
+  const exitCode = useMemo(
+    () => (node.name === 'bash' ? bashExitCode(node.result?.content) : undefined),
+    [node.name, node.result?.content],
+  )
   const inputBody = toolCallInput(node.name, node.args)
   // Hook 常驻组件顶层:条件 JSX 内挂 hook 会在展开/收起时改变 hook 数量。
   const labels = useMemo<MarkdownLabels>(
@@ -696,12 +764,20 @@ function ToolRow({
           {summary}
         </span>
         {diff && !node.result?.isError && <DiffStat diff={diff} compact />}
+        {exitCode !== undefined && <ExitBadge code={exitCode} />}
       </button>
       {open && (
         <div className="disc-body">
           {todos && <TodoCard snapshot={todos} />}
           {diff ? (
             <DiffCard diff={diff} />
+          ) : commandBody !== null ? (
+            // bash:命令 + 输出走"引用"形态(无底色卡片,靠竖线分组)。
+            <BashCard
+              command={commandBody}
+              output={bashOut ?? { stdout: '' }}
+              exitCode={exitCode}
+            />
           ) : (
             !todos &&
             inputBody && (
@@ -711,6 +787,8 @@ function ToolRow({
               </div>
             )
           )}
+          {/* bash 已经由上面的 BashCard 完整呈现(命令 + stdout/stderr),
+              不再挂通用 out 块;失败原因在结果里,BashCard 的红色竖线已表达。 */}
           {showOut && (
             <div className="code-card">
               <div className="banner">
@@ -726,9 +804,7 @@ function ToolRow({
                   <MarkdownText text={skillBody} streaming={false} labels={labels} />
                 </div>
               ) : (
-                <pre className={node.result!.isError ? 'err' : ''}>
-                  {node.result!.content}
-                </pre>
+                <pre className={node.result!.isError ? 'err' : ''}>{outBody}</pre>
               )}
             </div>
           )}

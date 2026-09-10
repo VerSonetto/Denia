@@ -3198,6 +3198,108 @@ button {
   color: var(--label-tertiary);
 }
 
+/* ---- bash:命令与输出 ----
+
+   结构化数据(diff、清单)用过带底色的卡片;bash 是一段流文本,给它同款容器
+   就是在抢同一个视觉层级。这里同样用 --bg-layer-2 打底(与代码块同层,不
+   引外来色),但靠一条**命令/输出分割线**把两者切成两个语义区:上半是输入,
+   下半是输出 —— 形态上就是终端里回车之后才开始的输出。 */
+
+.bash-quote {
+  display: flex;
+  flex-direction: column;
+  /* 命令块自带下边距与分割线,输出块不额外撑开。 */
+  gap: 7px;
+  background: var(--bg-layer-2);
+  border: 1px solid var(--border-l1);
+  border-radius: var(--r-sm);
+  padding: 8px 10px;
+  overflow: hidden;
+}
+
+/* 非零退出:只在底色里掺极淡的红,并且转由 stderr 段落自己说话 ——
+   不留左侧色条(那条"彩带"在黑白体系里太跳,且容易和工具失败的红点
+   抢注意力)。 */
+.bash-quote.failed {
+  background: color-mix(in srgb, var(--error-fg) 6%, var(--bg-layer-2));
+}
+
+.bash-line {
+  min-width: 0;
+}
+
+/* 输出:分割线下方留一点呼吸空间,不与线贴死。 */
+.bash-line:not(.bash-cmd):not(.bash-empty) pre {
+  padding-top: 1px;
+}
+
+.bash-line pre {
+  margin: 0;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  line-height: 1.55;
+  color: var(--label-secondary);
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 240px;
+  overflow-y: auto;
+}
+
+/* 命令:提示符 + 命令,主键文本颜色(比输出亮一档,一眼分得清哪个是输入)。
+   下方一条通栏分割线:把"输入"与"输出"分成两个语义区,像终端里回车之后
+   才开始的输出。负 margin 抵消容器 padding,让线贯穿整张卡片。 */
+.bash-cmd {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  margin: 0 -10px;
+  padding: 0 10px 7px;
+  border-bottom: 1px solid var(--border-l1);
+}
+
+.bash-cmd pre {
+  color: var(--label-primary);
+  white-space: pre-wrap;
+  flex: 1;
+  min-width: 0;
+}
+
+.bash-cmd .bash-prompt {
+  flex: none;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--label-caption);
+  user-select: none;
+}
+
+/* stderr:单独着红并加一圈极淡红底,明确"这是错误流"。 */
+.bash-stderr {
+  background: color-mix(in srgb, var(--error-fg) 9%, transparent);
+  border-radius: var(--r-xs);
+  padding: 4px 8px;
+  margin: 0 -2px;
+}
+
+.bash-stderr pre {
+  color: var(--error-fg);
+}
+
+.bash-empty {
+  font-size: 11.5px;
+  color: var(--label-caption);
+}
+
+/* 退出码:只在非 0 时出现(成功不需要对勾)。等宽小字 + 错误前景色,
+   **无底色** —— 底色会让人误读成工具失败,但非零退出是命令自己的结果。 */
+.exit-badge {
+  flex: none;
+  margin-left: 2px;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  line-height: 16px;
+  color: var(--error-fg);
+}
+
 @keyframes todo-item-in {
   from {
     opacity: 0;

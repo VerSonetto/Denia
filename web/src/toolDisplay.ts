@@ -24,7 +24,7 @@ export function shortPath(raw: string): string {
  * 内容而非文件名的根因。这里做字符串感知扫描(转义与引号状态),把所有
  * "深度回 0"的候选闭括号记下来,从后往前逐个试 parse,取第一个成功的。
  */
-function parseArgsObject(args: string): Record<string, unknown> | null {
+export function parseArgsObject(args: string): Record<string, unknown> | null {
   const start = args.indexOf('{')
   if (start < 0) return null
   const candidates: number[] = []
@@ -115,12 +115,13 @@ export function toolCallSummary(name: string, args: string): string {
         break
       }
       case 'todo_write': {
-        // 头部不展示 JSON:只说"清单进度"(3/7),条目留给展开后的卡片。
+        // 头部不展示 JSON:只说清单进度(3/7),条目留给展开后的卡片。
+        // 全部完成不再挂对勾 —— 7/7 本身已经说明一切。
         const todos = parseTodos(args)
         if (todos) {
           if (todos.length === 0) return ''
           const done = todos.filter((item) => item.status === 'completed').length
-          return done === todos.length ? `${todos.length} ✓` : `${done}/${todos.length}`
+          return `${done}/${todos.length}`
         }
         break
       }
@@ -184,7 +185,96 @@ export function toolCallInput(name: string, args: string): string | null {
   }
 }
 
-/* ---- todo_write 的清单快照 ---- */
+/* ---- bash:命令输出的终端噪声清洗 ---- */
+
+/**
+ * 剥离 ANSI 转义序列(纯函数,导出以便单测)。
+ *
+ * 为什么要洗:Windows/PowerShell 上 `[Console]::OutputEncoding` 已经保证
+ * 中文是 UTF-8(实测无 U+FFFD),但工具会把 git/cargo/pwsh 的**彩色与光标
+ * 控制序列**原样带回:`\u001b[33m74fd909\u001b[m feat: …`。前端 `<pre>` 里
+ * 这些字节直接可见,就是用户看到的"乱码"。
+ *
+ * 处理范围:
+ * - CSI 序列 `ESC [ … 字母`(颜色、光标移动、清行、清屏);
+ * - OSC 标题 `ESC ] … BEL/ST`;
+ * - 两字符序列 `ESC ( B` 等字符集切换;
+ * - 孤立 ESC(截断/半截序列)—— 一并丢掉,不留可见垃圾。
+ */
+export function stripAnsi(text: string): string {
+  // eslint-disable-next-line no-control-regex
+  const CSI = /\x1b\[[0-?]*[ -\/]*[@-~]/g
+  // eslint-disable-next-line no-control-regex
+  const OSC = /\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)?/g
+  // eslint-disable-next-line no-control-regex
+  const CHARSET = /\x1b[()#][0-9A-Za-z]?/g
+  return text
+    .replace(OSC, '')
+    .replace(CSI, '')
+    .replace(CHARSET, '')
+    .replace(/\x1b/g, '')
+}
+
+/**
+ * 归一化终端输出:归一 CRLF、吃掉进度条式的"回车覆盖"。
+ *
+ * 进度条(以及 `Write-Progress` 一类)靠 `\r` 回到行首反复覆盖同一行,管道
+ * 捕获下来就成了"一段很长、中间夹着一堆 \r 的行"。这里按 `\r` 切段取最后
+ * 一段(语义 == 屏幕上最终留下的那一行);夹在中间的 `\r\n` 是正常换行,
+ * 要先保护再处理。
+ */
+export function normalizeTerminalText(text: string): string {
+  // 先把 CRLF/CR 统一成 LF,再单独处理"纯 CR 覆盖"。
+  const withLf = text.replace(/\r\n/g, '\n')
+  const lines = withLf.split('\n')
+  const out: string[] = []
+  for (const line of lines) {
+    // 行内还有孤立的 \r → 是回车覆盖,保留最后一段。
+    const segments = line.split('\r')
+    out.push(segments[segments.length - 1])
+  }
+  return out.join('\n')
+}
+
+/** 工具结果的展示清洗:ANSI + 终端噪声,一并归一。 */
+export function cleanToolOutput(text: string): string {
+  return normalizeTerminalText(stripAnsi(text))
+}
+
+/** 纯 bash 命令的显示:去掉注入的输出编码前缀,只留用户写的那句命令。 */
+export function cleanBashCommand(command: string): string {
+  return command
+    .replace(/^\[Console\]::OutputEncoding=\[System\.Text\.Encoding\]::UTF8;\s*/, '')
+    .trim()
+}
+
+/** bash 输出的两段:标准输出与(可选的)标准错误。 */
+export interface BashOutput {
+  stdout: string
+  stderr?: string
+}
+
+/**
+ * 把 bash 工具结果切成 stdout / stderr 两段(纯函数,导出以便单测)。
+ *
+ * 后端把 stderr 拼在 `--- stderr ---` 分隔段之后(见 `bash.rs`),这里按它
+ * 切开交给 UI 分别着色。首行的"退出码: N"已经由头部徽标呈现,正文里不再
+ * 重复一遍。这是与 `editStartLine`、`skillLoadBody` 同类的展示投影:
+ * 只影响对话流长什么样,不动模型可见的历史。
+ */
+export function bashOutputParts(content: string): BashOutput {
+  const body = content.replace(/^退出码:\s*-?\d+\n?/, '')
+  const marker = '\n--- stderr ---\n'
+  const index = body.indexOf(marker)
+  if (index < 0) return { stdout: trimTail(body) }
+  const stdout = trimTail(body.slice(0, index))
+  const stderr = trimTail(body.slice(index + marker.length))
+  return { stdout, stderr: stderr.length > 0 ? stderr : undefined }
+}
+
+function trimTail(text: string): string {
+  return text.replace(/\s+$/, '')
+}
 
 /** 一条待办(与 Rust `TodoItem` 对齐)。 */
 export interface TodoSnapshotItem {
