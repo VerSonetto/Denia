@@ -6,6 +6,7 @@ members = [
     "crates/credentials",
     "crates/llm",
     "crates/tools",
+    "crates/mcp",
     "crates/session",
     "crates/system-prompt",
     "crates/token-meter",
@@ -26,6 +27,7 @@ denia-settings = { path = "crates/settings" }
 denia-credentials = { path = "crates/credentials" }
 denia-llm = { path = "crates/llm" }
 denia-tools = { path = "crates/tools" }
+denia-mcp = { path = "crates/mcp" }
 denia-session = { path = "crates/session" }
 denia-agent-loop = { path = "crates/agent-loop" }
 denia-browser = { path = "crates/browser" }

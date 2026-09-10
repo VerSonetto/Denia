@@ -578,6 +578,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "denia-mcp"
+version = "0.1.0"
+dependencies = [
+ "arc-swap",
+ "async-trait",
+ "denia-core",
+ "futures",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.20",
+ "tokio",
+ "tokio-util",
+ "tracing",
+]
+
+[[package]]
 name = "denia-server"
 version = "0.1.0"
 dependencies = [
@@ -590,6 +607,7 @@ dependencies = [
  "denia-core",
  "denia-credentials",
  "denia-llm",
+ "denia-mcp",
  "denia-session",
  "denia-settings",
  "denia-system-prompt",
@@ -663,6 +681,7 @@ dependencies = [
  "base64",
  "denia-browser",
  "denia-core",
+ "denia-mcp",
  "denia-system-prompt",
  "ignore",
  "regex",

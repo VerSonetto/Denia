@@ -28,3 +28,6 @@
 
 # WorkBuddy 工具数据目录(记忆与概念稿,不入库)
 /.workbuddy/
+
+# 本地 denia 运行环境的启动脚本(仅本机)
+/.denia/
