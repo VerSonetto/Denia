@@ -114,6 +114,16 @@ export function toolCallSummary(name: string, args: string): string {
         if (pattern) return pattern.length > 90 ? `${pattern.slice(0, 90)}…` : pattern
         break
       }
+      case 'todo_write': {
+        // 头部不展示 JSON:只说"清单进度"(3/7),条目留给展开后的卡片。
+        const todos = parseTodos(args)
+        if (todos) {
+          if (todos.length === 0) return ''
+          const done = todos.filter((item) => item.status === 'completed').length
+          return done === todos.length ? `${todos.length} ✓` : `${done}/${todos.length}`
+        }
+        break
+      }
       case 'edit': {
         const path = readString(parsed, 'path')
         if (path) return shortPath(path)
@@ -174,7 +184,118 @@ export function toolCallInput(name: string, args: string): string | null {
   }
 }
 
-/* ---- edit 的 diff 视图 ---- */
+/* ---- todo_write 的清单快照 ---- */
+
+/** 一条待办(与 Rust `TodoItem` 对齐)。 */
+export interface TodoSnapshotItem {
+  content: string
+  status: 'pending' | 'in_progress' | 'completed'
+}
+
+/** 状态迁移的语义标签:卡片里用不同颜色标出"这一步推进了什么"。 */
+export type TodoChange =
+  /** 本次新加进清单。 */
+  | 'new'
+  /** 从 pending → in_progress:刚开始做。 */
+  | 'started'
+  /** 非 completed → completed:刚做完。 */
+  | 'done'
+  /** completed → 非 completed:回退重做。 */
+  | 'reopened'
+
+export interface TodoSnapshot {
+  todos: TodoSnapshotItem[]
+  /** 内容 → 本次的变化;未变的条目不出现在里面。 */
+  changes: Map<string, TodoChange>
+  /** 未发生变化的条目数(卡片里压成一行"另有 N 项未变")。 */
+  unchanged: number
+  done: number
+  total: number
+}
+
+/**
+ * 解析 todo_write 参数里的 `todos` 数组。
+ *
+ * 容错与 [`parseArgsObject`] 同理:流式未收完时数组可能不闭合,这里回退到
+ * 正则逐项抢救 `{"content": "...", "status": "..."}`,让卡片在参数没到齐时
+ * 也能先显示已经收到的条目。
+ */
+export function parseTodos(args: string): TodoSnapshotItem[] | null {
+  const parsed = parseArgsObject(args)
+  if (parsed && Array.isArray(parsed['todos'])) {
+    const todos: TodoSnapshotItem[] = []
+    for (const raw of parsed['todos'] as unknown[]) {
+      const item = coerceTodo(raw)
+      if (item) todos.push(item)
+    }
+    // 解析成功但没有合法条目 = 清单被清空(全部完成后的收尾),不是解析失败。
+    if (todos.length > 0 || (parsed['todos'] as unknown[]).length === 0) return todos
+  }
+  // 回退:半截 JSON 的逐项抢救。
+  const salvaged: TodoSnapshotItem[] = []
+  const pattern = /\{\s*"content"\s*:\s*"((?:[^"\\]|\\.)*)"\s*,\s*"status"\s*:\s*"(\w+)"/g
+  for (let match = pattern.exec(args); match !== null; match = pattern.exec(args)) {
+    const item = coerceTodo({ content: unescapeJson(match[1]), status: match[2] })
+    if (item) salvaged.push(item)
+  }
+  return salvaged.length > 0 ? salvaged : null
+}
+
+function coerceTodo(raw: unknown): TodoSnapshotItem | null {
+  if (raw === null || typeof raw !== 'object') return null
+  const record = raw as Record<string, unknown>
+  const content = typeof record['content'] === 'string' ? record['content'].trim() : ''
+  const status = record['status']
+  if (!content) return null
+  if (status !== 'pending' && status !== 'in_progress' && status !== 'completed') return null
+  return { content, status }
+}
+
+function unescapeJson(value: string): string {
+  try {
+    return JSON.parse(`"${value}"`) as string
+  } catch {
+    return value
+  }
+}
+
+/**
+ * 与上一次快照比对,算出本次状态发生变化的条目。
+ *
+ * todo_write 是**整表替换**:模型每次都重发全量清单,卡片若照单全收就是
+ * 反复刷同样的条目。这里只把"真变了"的条目挂上变化标签,未变的压成一行
+ * 计数 —— 与 edit 的 diff 同一个取舍。
+ */
+export function todoSnapshot(
+  args: string,
+  previous?: TodoSnapshotItem[],
+): TodoSnapshot | null {
+  const todos = parseTodos(args)
+  if (!todos) return null
+  const before = new Map<string, TodoSnapshotItem['status']>()
+  for (const item of previous ?? []) before.set(item.content, item.status)
+  const changes = new Map<string, TodoChange>()
+  let unchanged = 0
+  for (const item of todos) {
+    const prior = before.get(item.content)
+    if (prior === undefined) {
+      // 首次出现的清单(没有上一次快照)不算"新增":否则开天辟地那一次
+      // 会把整张表全标成 new。
+      if (previous) changes.set(item.content, 'new')
+      else unchanged += 1
+      continue
+    }
+    if (prior === item.status) {
+      unchanged += 1
+      continue
+    }
+    if (item.status === 'completed') changes.set(item.content, 'done')
+    else if (prior === 'completed') changes.set(item.content, 'reopened')
+    else if (item.status === 'in_progress') changes.set(item.content, 'started')
+  }
+  const done = todos.filter((item) => item.status === 'completed').length
+  return { todos, changes, unchanged, done, total: todos.length }
+}
 
 /** diff 的一行;`kind` 决定配色与前缀符号。 */
 export interface DiffLine {

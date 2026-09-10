@@ -136,5 +136,77 @@ check('write 对齐行序列', fmt(overwrite), [
 check('write 空内容', mod.writeDiff('write_file', JSON.stringify({ path: 'a.ts', content: '' })).added, 0)
 check('write 非 write 工具', mod.writeDiff('edit', args), null)
 
+/* ---- todo_write ---- */
+
+const todos = (items) => JSON.stringify({ todos: items })
+const t1 = [
+  { content: '解析参数', status: 'pending' },
+  { content: '写 diff', status: 'pending' },
+]
+check('todo 头部是进度不是 JSON', mod.toolCallSummary('todo_write', todos(t1)), '0/2')
+
+check(
+  'todo 全部完成时头部',
+  mod.toolCallSummary(
+    'todo_write',
+    todos([
+      { content: 'a', status: 'completed' },
+      { content: 'b', status: 'completed' },
+    ]),
+  ),
+  '2 ✓',
+)
+
+// 首次清单:没有上一次快照,不该把整表标成新增。
+const first = mod.todoSnapshot(todos(t1))
+check('首次清单无变化项', first.changes.size, 0)
+check('首次清单未变计数', first.unchanged, 2)
+check('首次清单总数', [first.done, first.total], [0, 2])
+
+// 第二次:一条完成、一条开做、一条新增 → 三条都被标出(未变项此时为 0)。
+const second = mod.todoSnapshot(
+  todos([
+    { content: '解析参数', status: 'completed' },
+    { content: '写 diff', status: 'in_progress' },
+    { content: '补测试', status: 'pending' },
+  ]),
+  t1,
+)
+check('第二次标出 3 条变化', second.changes.size, 3)
+check('第二次未变计数', second.unchanged, 0)
+check('完成的条目 → done', second.changes.get('解析参数'), 'done')
+check('开做的条目 → started', second.changes.get('写 diff'), 'started')
+check('新增条目 → new', second.changes.get('补测试'), 'new')
+check('进度', [second.done, second.total], [1, 3])
+
+// 回退重做:completed → in_progress。
+const reopened = mod.todoSnapshot(
+  todos([{ content: '解析参数', status: 'in_progress' }]),
+  [{ content: '解析参数', status: 'completed' }],
+)
+check('回退重做 → reopened', reopened.changes.get('解析参数'), 'reopened')
+
+// 状态没动 → 不计入变化。
+const same = mod.todoSnapshot(todos(t1), t1)
+check('状态未动无变化', same.changes.size, 0)
+
+// 半截 JSON:卡片仍应抢救出已收到的条目。
+const partial = mod.todoSnapshot(
+  '{"todos":[{"content":"解析参数","status":"completed"},{"content":"写 dif',
+)
+check('半截 JSON 抢救条目', partial?.total, 1)
+check('半截 JSON 抢救状态', partial?.todos[0].status, 'completed')
+
+// 长清单:只动一条时,其余压成 unchanged(卡片里"另有 N 项未变")。
+const many = Array.from({ length: 8 }, (_, i) => ({ content: `task${i}`, status: 'pending' }))
+const manyNext = many.map((item, i) =>
+  i === 3 ? { content: `task${i}`, status: 'in_progress' } : item,
+)
+const longList = mod.todoSnapshot(todos(manyNext), many)
+check('长清单只标 1 条', longList.changes.size, 1)
+check('长清单未变计数', longList.unchanged, 7)
+
+check('todo 非 todo 工具', mod.todoSnapshot('{"x":1}', t1)?.total ?? null, null)
+
 console.log(failed === 0 ? '\nALL PASS' : `\n${failed} FAILED`)
 process.exit(failed === 0 ? 0 : 1)

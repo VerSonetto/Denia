@@ -3055,6 +3055,166 @@ button {
   padding-left: 4px;
 }
 
+/* ---- todo_write 的清单卡片 ---- */
+
+.todo-card {
+  background: var(--code-block);
+  border: 1px solid var(--border-l1);
+  border-radius: var(--r-sm);
+  overflow: hidden;
+}
+
+.todo-card-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 10px;
+  border-bottom: 1px solid var(--border-l1);
+  font-size: 11px;
+  color: var(--label-tertiary);
+}
+
+.todo-card-head .todo-card-title {
+  color: var(--label-secondary);
+}
+
+.todo-card-head .todo-card-progress {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  color: var(--label-tertiary);
+}
+
+.todo-card-head .todo-card-all-done {
+  margin-left: auto;
+  font-size: 10.5px;
+  color: var(--success-fg);
+}
+
+.todo-card-list {
+  list-style: none;
+  margin: 0;
+  padding: 6px 0;
+  max-height: 260px;
+  overflow-y: auto;
+}
+
+.todo-card-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+  padding: 3px 10px;
+  font-size: 12px;
+  color: var(--label-secondary);
+  line-height: 1.5;
+  /* 变化项挂载时一次柔和淡入,眼睛能立刻抓住"这一步推进了哪条"。 */
+  animation: todo-item-in 220ms var(--ease) both;
+}
+
+.todo-card-item .todo-card-glyph {
+  flex: none;
+  display: flex;
+  margin-top: 2px;
+  color: var(--label-caption);
+}
+
+.todo-card-item .todo-card-content {
+  min-width: 0;
+  word-break: break-word;
+}
+
+/* 状态:已完成的划掉并压暗,进行中的提亮。 */
+.todo-card-item[data-status='completed'] .todo-card-content {
+  color: var(--label-caption);
+  text-decoration: line-through;
+}
+
+.todo-card-item[data-status='completed'] .todo-card-glyph {
+  color: var(--success-fg);
+}
+
+.todo-card-item[data-status='in_progress'] {
+  color: var(--label-primary);
+}
+
+.todo-card-item[data-status='in_progress'] .todo-card-glyph {
+  color: var(--accent);
+}
+
+/* 本次变化:一条 2px 的左侧色条 + 极淡底色,不动文字颜色以免与状态冲突。 */
+.todo-card-item.done {
+  background: color-mix(in srgb, var(--success-fg) 9%, transparent);
+  box-shadow: inset 2px 0 0 var(--success-fg);
+}
+
+.todo-card-item.started {
+  background: color-mix(in srgb, var(--accent) 7%, transparent);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+
+.todo-card-item.reopened {
+  background: color-mix(in srgb, var(--warn-fg) 9%, transparent);
+  box-shadow: inset 2px 0 0 var(--warn-fg);
+}
+
+.todo-card-item.new {
+  background: color-mix(in srgb, var(--violet-fg) 9%, transparent);
+  box-shadow: inset 2px 0 0 var(--violet-fg);
+}
+
+.todo-card-item .todo-card-change {
+  flex: none;
+  margin-left: auto;
+  padding: 0 5px;
+  border-radius: var(--r-xs);
+  font-size: 10px;
+  line-height: 16px;
+  color: var(--label-tertiary);
+  background: var(--hover-fill);
+}
+
+.todo-card-more {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  border: none;
+  border-top: 1px solid var(--border-l1);
+  background: none;
+  padding: 5px 10px;
+  font-size: 11px;
+  color: var(--label-caption);
+  cursor: pointer;
+  text-align: left;
+}
+
+.todo-card-more:hover {
+  background: var(--hover-fill);
+  color: var(--label-secondary);
+}
+
+.todo-card-more .todo-card-more-action {
+  margin-left: auto;
+  color: var(--label-tertiary);
+}
+
+@keyframes todo-item-in {
+  from {
+    opacity: 0;
+    transform: translateY(2px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .todo-card-item {
+    animation: none;
+  }
+}
+
 .btn-send {
   display: flex;
   align-items: center;

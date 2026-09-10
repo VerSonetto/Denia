@@ -5,8 +5,9 @@ import { groupTranscript, openTurnStartedAt, type OverviewRow, type TranscriptNo
 import { MarkdownText } from '../markdown/MarkdownText'
 import type { MarkdownLabels } from '../markdown/MarkdownText'
 import { useTypewriter } from '../typewriter'
-import { toolCallInput, toolCallSummary, editDiff, writeDiff, type EditDiff } from '../toolDisplay'
+import { toolCallInput, toolCallSummary, editDiff, writeDiff, todoSnapshot, type EditDiff } from '../toolDisplay'
 import { DiffCard, DiffStat } from './DiffCard'
+import { TodoCard } from './TodoCard'
 import type { AskAnswer, UserMessageImage } from '../types'
 import { UserMessageBubble } from './UserMessageImages'
 import { BranchMessageButton, CopyMessageButton } from './CopyMessageButton'
@@ -22,6 +23,7 @@ import {
   IconSlashCommand,
   IconTerminal,
   IconThink,
+  IconTodo,
   IconTool,
   IconWrite,
 } from './icons'
@@ -543,6 +545,8 @@ function toolMeta(name: string): { title: string; icon: ReactNode } {
       return { title: 'Ls', icon: <IconFolder size={14} /> }
     case 'edit':
       return { title: 'Edit', icon: <IconEdit size={14} /> }
+    case 'todo_write':
+      return { title: t('todoTitle'), icon: <IconTodo size={14} /> }
     default:
       return { title: name, icon: <IconTool size={14} /> }
   }
@@ -618,17 +622,23 @@ function ToolRow({
     node.args,
     node.result?.content,
   ])
+  // todo_write:清单卡片(整表替换,只突出本次变化项)。
+  const todos = useMemo(
+    () => (node.name === 'todo_write' ? todoSnapshot(node.args, node.prevTodos) : null),
+    [node.name, node.args, node.prevTodos],
+  )
   const argSummary = toolCallSummary(node.name, node.args)
-  // 头部摘要:文件类工具一律显示文件名(不是 old_string/content 原文)。
+  // 头部摘要:文件类工具一律显示文件名(不是 old_string/content 原文);
+  // todo_write 走 toolCallSummary 里的进度分支,同样不出现 JSON。
   const headSummary = diff ? diff.path : argSummary
   const summary = running
     ? headSummary
     : node.result!.isError
       ? firstLine(node.result!.content)
       : headSummary || firstLine(node.result!.content)
-  // 成功时 diff 已经把"改了什么"说全了,不再重复 out 那句结果文案;
-  // 失败时保留 out(错误原因要看得见),diff 作为"打算改什么"的对照。
-  const showOut = node.result !== undefined && (node.result.isError || !diff)
+  // 成功时卡片(diff / 清单)已经把"改了什么"说全了,不再重复 out 那句结果
+  // 文案;失败时保留 out(错误原因要看得见),卡片作为"打算改什么"的对照。
+  const showOut = node.result !== undefined && (node.result.isError || !(diff || todos))
   const inputBody = toolCallInput(node.name, node.args)
   // Hook 常驻组件顶层:条件 JSX 内挂 hook 会在展开/收起时改变 hook 数量。
   const labels = useMemo<MarkdownLabels>(
@@ -689,9 +699,11 @@ function ToolRow({
       </button>
       {open && (
         <div className="disc-body">
+          {todos && <TodoCard snapshot={todos} />}
           {diff ? (
             <DiffCard diff={diff} />
           ) : (
+            !todos &&
             inputBody && (
               <div className="code-card">
                 <div className="banner">in</div>

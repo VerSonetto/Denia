@@ -160,6 +160,16 @@ export function IconEdit(props: IconProps) {
 }
 
 /** 眼睛:只读权限(可看不可改)。 */
+/** 清单图标:三条横线 + 两个对勾(与 TodoPanel 的 ChecklistIcon 同源)。 */
+export function IconTodo(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <path d="M6.4 3.6h6.2M6.4 7.4h6.2M6.4 11.2h6.2" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
+      <path d="M1.5 3.1l.9.9L4 2.4M1.5 6.9l.9.9L4 6.2M1.5 10.7l.9.9 1.6-1.6" stroke="currentColor" strokeWidth="1.1" strokeLinecap="round" strokeLinejoin="round" />
+    </Svg>
+  )
+}
+
 export function IconEye(props: IconProps) {
   return (
     <Svg {...props}>

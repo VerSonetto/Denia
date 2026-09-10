@@ -8,6 +8,7 @@ import type {
   TurnEndReason,
   UserMessageImage,
 } from './types'
+import type { TodoSnapshotItem } from './toolDisplay'
 
 /** `ask` 工具的问答载荷(挂在对应工具行上)。 */
 export interface AskCardData {
@@ -60,6 +61,11 @@ export type TranscriptNode =
       result?: { content: string; isError: boolean }
       /** `ask` 工具的提问载荷:挂在对应工具行上渲染问答卡片。 */
       ask?: AskCardData
+      /**
+       * todo_write 的前一次清单快照(上一次 todo-write 事件的 todos)。
+       * 卡片据此标出"本次哪些条目推进了";首张清单为 undefined。
+       */
+      prevTodos?: TodoSnapshotItem[]
     }
   | { kind: 'turn-start'; turn: number; time: number }
   | {
@@ -176,6 +182,8 @@ export function foldEvents(events: SessionEnvelope[]): TranscriptNode[] {
   let turnUsage: TokenUsage | null = null
   // step-start 时间表:turn:step → epoch ms,供 assistant 节点算 TTFT。
   const stepStarts = new Map<string, number>()
+  // 当前清单快照:供下一次 todo_write 卡片比对"这次推进了哪条"。
+  let lastTodos: TodoSnapshotItem[] | undefined
 
   const addUsage = (usage?: TokenUsage) => {
     if (!usage) return
@@ -286,10 +294,18 @@ export function foldEvents(events: SessionEnvelope[]): TranscriptNode[] {
           args: event.arguments,
           seq: event.seq,
         }
+        // todo_write:带上本次调用之前的清单快照(工具执行时才 emit
+        // todo-write 事件,所以这里的 lastTodos 就是"上一次的")。
+        if (event.name === 'todo_write') node.prevTodos = lastTodos
         tools.set(event.call_id, node)
         nodes.push(node)
         break
       }
+      case 'todo-write':
+        // 清单快照(last-write-wins):只更新状态,不产生对话流节点 ——
+        // 清单由对应的 todo_write 工具行渲染,避免同一份数据出现两处。
+        lastTodos = event.todos
+        break
       case 'ask-requested': {
         const node = tools.get(event.call_id)
         const ask: AskCardData = {
@@ -396,6 +412,9 @@ export function openTurnStartedAt(nodes: TranscriptNode[]): number | undefined {
 
 /** 增量 fold 的 step-start 时间暂存:turn:step → epoch ms。 */
 const incrementalStepStarts = new Map<string, number>()
+
+/** 增量 fold 的清单快照暂存:供下一次 todo_write 卡片比对变化。 */
+let incrementalLastTodos: TodoSnapshotItem[] | undefined
 
 /**
  * Incremental fold: applies one envelope to an existing node list without
@@ -575,11 +594,22 @@ function applyEnvelopeStep(
       }
       return [...nodes, settled]
     }
-    case 'tool-call':
-      return [
-        ...nodes,
-        { kind: 'tool', callId: event.call_id, name: event.name, args: event.arguments, seq: event.seq },
-      ]
+    case 'tool-call': {
+      const base: Extract<TranscriptNode, { kind: 'tool' }> = {
+        kind: 'tool',
+        callId: event.call_id,
+        name: event.name,
+        args: event.arguments,
+        seq: event.seq,
+      }
+      // 与冷路径一致:todo_write 带上本次调用之前的清单快照。
+      if (event.name === 'todo_write') base.prevTodos = incrementalLastTodos
+      return [...nodes, base]
+    }
+    case 'todo-write':
+      // 清单快照(last-write-wins):不产生节点,清单由工具行渲染。
+      incrementalLastTodos = event.todos
+      return nodes
     // ask 的提问/结算挂到对应工具行(卡片与工具行同体,不产生游离节点)。
     case 'ask-requested': {
       const patch = (node: Extract<TranscriptNode, { kind: 'tool' }>) => ({
