@@ -101,11 +101,25 @@ export function IconWrite(props: IconProps) {
   )
 }
 
+/** 思考强度:灯泡(思考/点子的通用符号)。
+    刻意不用星芒 —— 提示词优化(IconSparkles)已是星芒,同屏会混淆。 */
 export function IconThink(props: IconProps) {
   return (
     <Svg {...props}>
-      <path d="M8 2.5 9.3 6l3.5 1.3-3.5 1.3L8 12.1 6.7 8.6 3.2 7.3 6.7 6 8 2.5Z" stroke="currentColor" strokeWidth="1.2" strokeLinejoin="round" />
-      <path d="M12.5 11.5l.6 1.4 1.4.6-1.4.6-.6 1.4-.6-1.4-1.4-.6 1.4-.6.6-1.4Z" fill="currentColor" />
+      {/* 灯泡轮廓:上圆下收,底部灯座 */}
+      <path
+        d="M8 2.2a3.9 3.9 0 0 0-2.35 7.02c.3.24.5.58.55.96l.06.52h3.48l.06-.52c.05-.38.25-.72.55-.96A3.9 3.9 0 0 0 8 2.2Z"
+        stroke="currentColor"
+        strokeWidth="1.2"
+        strokeLinejoin="round"
+      />
+      {/* 灯座横线 */}
+      <path
+        d="M6.6 12.4h2.8M7 14.1h2"
+        stroke="currentColor"
+        strokeWidth="1.2"
+        strokeLinecap="round"
+      />
     </Svg>
   )
 }
@@ -327,6 +341,15 @@ export function IconChevron(props: IconProps) {
   return (
     <Svg {...props}>
       <path d="m5 3.5 5 4.5-5 4.5" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
+    </Svg>
+  )
+}
+
+/** 下拉触发器用:默认朝下,展开时由 CSS 旋转朝上。 */
+export function IconChevronDown(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <path d="m4 6.2 4 3.9 4-3.9" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" />
     </Svg>
   )
 }
