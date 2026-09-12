@@ -1651,14 +1651,18 @@ impl AgentRuntime for Runtime {
         let home = self.inner.home.clone();
         let cwd = cwd.to_path_buf();
         let max_bytes = config.project_memory_max_bytes as usize;
+        // 记忆启用时注入永远发生:有索引给索引,空桶给目录路径——路径是
+        // tool:memory 纪律段可执行的前提,缺席会让模型满盘猜目录位置。
         let block = tokio::task::spawn_blocking(move || {
             let root = crate::project_memory::memory_root(&home, &cwd);
-            crate::project_memory::read_index(&root, max_bytes)
-                .map(|index| crate::project_memory::render_index_block(&root, &index))
+            match crate::project_memory::read_index(&root, max_bytes) {
+                Some(index) => crate::project_memory::render_index_block(&root, &index),
+                None => crate::project_memory::render_empty_index_block(&root),
+            }
         })
         .await
         .map_err(|e| e.to_string())?;
-        Ok(block)
+        Ok(Some(block))
     }
     async fn drain(&self, session: &str) -> Result<Vec<String>, String> {
         let live = self.live(session).await?;

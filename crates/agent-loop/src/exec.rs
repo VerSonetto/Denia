@@ -251,6 +251,25 @@ fn classify_call(cwd: &Path, call: &ToolCallRef, confined: bool, memory_root: Op
     }
 }
 
+/// 判定一次调用的路径参数是否锚定在项目记忆目录内(读写皆含):
+/// `write_file/edit/read_file/ls/glob/grep` 的 `path` 解析后落在
+/// `memory_root` 内即命中。命中者对沙箱 confined 豁免(见
+/// [`dispatch_tool_call`] 内注释);无 path 参数(如 grep 缺省全工作区)
+/// 与非 path 型工具(如 bash,本就不受 confined 约束)不在此列。
+fn memory_anchored(cwd: &Path, call: &ToolCallRef, memory_root: Option<&Path>) -> bool {
+    let Some(root) = memory_root else {
+        return false;
+    };
+    if !matches!(
+        call.name.as_str(),
+        "write_file" | "edit" | "read_file" | "ls" | "glob" | "grep"
+    ) {
+        return false;
+    }
+    crate::workspace_instructions::touched_path(cwd, &call.arguments)
+        .is_some_and(|path| path.starts_with(root))
+}
+
 /// 调度一次 Allow 类工具调用,返回 boxed future 供并行池使用。
 /// 取消与审批(Ask)路径在别处处理。
 fn dispatch_tool_call(
@@ -270,6 +289,22 @@ fn dispatch_tool_call(
     let vision_supported = state.vision_supported;
     let ask = driver.ask.clone();
     let call_id = call.id.clone();
+    // 记忆域沙箱豁免:锚定记忆目录的读写不受 confined 限制,否则默认
+    // 沙箱会话按 tool:memory 纪律读写记忆会在工具路径解析层被拦(权限
+    // 层早已放行,纪律段成为空头支票)。豁免口径与权限放行口径一致:
+    // 写边界仍由 MemoryWrite 分类(敏感段拒绝、子代理仅限记忆目录)收敛。
+    // 在 Box::pin 之前计算:闭包是 'static,不能借用 driver。
+    let confined = !state.permission_mode().is_full()
+        && state.session.header().sandbox
+        && !memory_anchored(
+            &cwd,
+            &call,
+            driver
+                .runtime
+                .as_ref()
+                .and_then(|runtime| runtime.memory_root_for(&cwd))
+                .as_deref(),
+        );
     Box::pin(async move {
         if cancel.is_cancelled() {
             return ToolOutput::error("工具调用在派发前已被中断");
@@ -287,7 +322,7 @@ fn dispatch_tool_call(
             selection: Some(selection),
             cwd: cwd.clone(),
             cancel: cancel.child_token(),
-            confined: !current_mode.is_full() && session.header().sandbox,
+            confined,
             vision_supported,
             emit_event: Some(Arc::new(move |event: SessionEvent| {
                 if let Ok(envelope) = sink_session.append(event) {
@@ -446,4 +481,57 @@ fn apply_plan_approval(state: &mut TurnState, decision: PlanReviewDecision) -> T
         text.push_str(feedback);
     }
     ToolOutput::text(text)
+}
+
+#[cfg(test)]
+mod memory_anchor_tests {
+    use super::*;
+
+    fn call(name: &str, arguments: &str) -> ToolCallRef {
+        ToolCallRef {
+            id: "c1".into(),
+            name: name.into(),
+            arguments: arguments.into(),
+        }
+    }
+
+    const ROOT: &str = "/home/u/.denia/memories/x/memory";
+
+    #[test]
+    fn anchored_only_for_memory_root_paths_of_path_tools() {
+        let cwd = Path::new("/ws");
+        let root = Some(Path::new(ROOT));
+        // 落点在记忆目录内:path 型读写工具全部豁免。
+        for name in ["write_file", "edit", "read_file", "ls", "glob", "grep"] {
+            assert!(
+                memory_anchored(cwd, &call(name, r#"{"path":"/home/u/.denia/memories/x/memory/a.md"}"#), root),
+                "{name} 锚定记忆目录应豁免沙箱"
+            );
+        }
+        // 落点在记忆目录外/无 path 参数/非 path 型工具:不豁免。
+        assert!(!memory_anchored(
+            cwd,
+            &call("write_file", r#"{"path":"/ws/a.md"}"#),
+            root
+        ));
+        assert!(!memory_anchored(
+            cwd,
+            &call("read_file", r#"{"path":"/etc/passwd"}"#),
+            root
+        ));
+        assert!(!memory_anchored(cwd, &call("grep", r#"{"pattern":"x"}"#), root));
+        assert!(!memory_anchored(cwd, &call("bash", r#"{"command":"echo hi"}"#), root));
+        // 记忆未启用(None):一律不豁免。
+        assert!(!memory_anchored(
+            cwd,
+            &call("write_file", r#"{"path":"/home/u/.denia/memories/x/memory/a.md"}"#),
+            None
+        ));
+        // 相对路径消解到记忆目录内同样命中(以记忆目录为锚的相对写法)。
+        assert!(memory_anchored(
+            Path::new(ROOT),
+            &call("read_file", r#"{"path":"MEMORY.md"}"#),
+            root
+        ));
+    }
 }

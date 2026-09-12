@@ -56,9 +56,9 @@ pub trait AgentRuntime: Send + Sync {
         None
     }
 
-    /// 项目记忆索引(MEMORY.md)注入文本;None = 未启用或无索引。
-    /// 配置门限、memory_root 计算、行数/字节预算截断都在实现方完成;
-    /// 幂等去重由驱动器按通道基准承担(内容不变不重发)。
+    /// 项目记忆索引(MEMORY.md)注入文本;None = 未启用。记忆启用时实现方
+    /// 必须给出注入(空桶给目录路径,有索引给全文)——路径是主代理读写
+    /// 记忆的前提。幂等去重由驱动器按通道基准承担(内容不变不重发)。
     async fn project_memory_index(
         &self,
         cwd: &std::path::Path,

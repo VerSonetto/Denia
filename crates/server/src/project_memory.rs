@@ -383,6 +383,16 @@ pub fn render_index_block(root: &Path, index: &str) -> String {
     )
 }
 
+/// 空桶的注入块:记忆启用时注入永远发生——没有索引也要把记忆目录路径
+/// 交给模型,否则 tool:memory 纪律段说的"路径随注入消息给出"落空,模型
+/// 只能满盘猜(2026-09-12 WorkBuddyAI 会话实录的教训)。
+pub fn render_empty_index_block(root: &Path) -> String {
+    format!(
+        "<system-reminder>\n项目记忆:本项目的记忆目录:{}。索引文件(MEMORY.md)尚不存在,当前还没有任何记忆;需要沉淀时先创建 MEMORY.md 索引,再一事一文件写入条目。\n</system-reminder>",
+        root.display()
+    )
+}
+
 /// 记忆提取子代理的任务提示词(中文;复用 ZCode 提取职责:分析最近消息、
 /// 去重更新、增删索引行)。`digest` 已按预算截断。
 pub fn render_extraction_prompt(root: &Path, digest: &TurnDigest, budget_bytes: usize) -> String {
@@ -676,5 +686,17 @@ mod tests {
         assert!(block.ends_with("</system-reminder>"));
         assert!(block.contains("/m/memory"));
         assert!(block.contains("先验证"));
+    }
+
+    #[test]
+    fn empty_index_block_still_carries_directory_path() {
+        // 空桶也必须注入:路径是模型读写记忆的唯一入口(缺失即满盘猜)。
+        let block = render_empty_index_block(Path::new("/m/memory"));
+        assert!(block.starts_with("<system-reminder>"));
+        assert!(block.ends_with("</system-reminder>"));
+        assert!(block.contains("/m/memory"));
+        assert!(block.contains("MEMORY.md"));
+        assert!(block.contains("尚不存在"), "{block}");
+        assert_ne!(block, render_index_block(Path::new("/m/memory"), ""));
     }
 }
