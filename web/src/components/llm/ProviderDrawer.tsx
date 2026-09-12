@@ -23,7 +23,10 @@ import styles from './ProviderDrawer.module.css'
 const OPENAI_NS = 'llm-openai'
 
 function deriveKeyRef(routeId: string): string {
-  return routeId.toUpperCase().replace(/[^A-Z0-9]+/g, '_') + '_API_KEY'
+  const base = routeId.toUpperCase().replace(/[^A-Z0-9]+/g, '_')
+  // 引用名必须是合法环境变量名(字母/下划线开头);routeId 以数字开头时补 `_` 兜底,否则后端校验 400。
+  const head = base.length > 0 && base[0] >= '0' && base[0] <= '9' ? '_' : ''
+  return head + base + '_API_KEY'
 }
 
 /** HTTP 请求头名称的 token 语法(与后端 reqwest 校验一致)。 */
