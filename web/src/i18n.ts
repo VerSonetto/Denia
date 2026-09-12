@@ -217,6 +217,9 @@ const zh = {
   modelSearchPlaceholder: '搜索模型…',
   modelSearchEmpty: '没有匹配的模型',
   reasoningLabel: '推理强度',
+  effortControlHint: '调节推理强度',
+  effortControlOffHint: '思考已关闭',
+  effortSliderAria: '推理强度滑块',
   catalogFailure: '目录加载失败',
   noModels: '该提供方暂无可用模型',
 
@@ -959,6 +962,9 @@ const en: typeof zh = {
   modelSearchPlaceholder: 'Search models…',
   modelSearchEmpty: 'No matching models',
   reasoningLabel: 'Reasoning effort',
+  effortControlHint: 'Adjust reasoning effort',
+  effortControlOffHint: 'Thinking is off',
+  effortSliderAria: 'Reasoning effort slider',
   catalogFailure: 'Catalog failed to load',
   noModels: 'No models available from this provider',
 

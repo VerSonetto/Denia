@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { IconChevron } from '../icons'
+import { IconChevronDown } from '../icons'
 
 export interface SelectOption<T extends string = string> {
   id: T
@@ -84,7 +84,7 @@ export function DropdownField<T extends string>({
           <span className="ui-dropdown-value">
             {current?.label ?? placeholder ?? '—'}
           </span>
-          <IconChevron size={11} />
+          <IconChevronDown size={11} />
         </button>
         {open && (
           <>

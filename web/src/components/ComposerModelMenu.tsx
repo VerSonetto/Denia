@@ -7,7 +7,6 @@ import {
   type MouseEvent as ReactMouseEvent,
 } from 'react'
 import { formatContextWindow, resolveSessionReasoningEffort } from '../modelCatalog'
-import { reasoningEffortLabel } from '../reasoningEffort'
 import { t } from '../i18n'
 import type {
   CatalogModel,
@@ -15,7 +14,7 @@ import type {
   ModelProviderGroup,
   ModelSelection,
 } from '../types'
-import { IconCheck, IconChevron, IconSearch, IconThink } from './icons'
+import { IconCheck, IconChevron, IconChevronDown, IconSearch, IconThink } from './icons'
 
 /** 二级菜单宽度 + 间距,与 styles.css 的 .model-menu-sub 保持一致(翻转探测用)。 */
 const SUB_MENU_WIDTH = 304
@@ -33,8 +32,9 @@ interface SearchHit {
 
 /**
  * Composer 模型选择:两级级联菜单 + 模型搜索。
- * 一级 = 供应商列表(沿用目录分组顺序),二级 = 该供应商的模型 + 思考强度;
+ * 一级 = 供应商列表(沿用目录分组顺序),二级 = 该供应商的模型;
  * 搜索词非空时一级列表切换为命中的模型平铺列表,点击直接选中。
+ * 思考强度已拆为独立控件(ComposerEffortControl),此处只管模型本身。
  */
 export function ComposerModelMenu({
   catalog,
@@ -69,9 +69,6 @@ export function ComposerModelMenu({
 
   const group = catalog.groups.find((g) => g.id === selection.provider)
   const model = group?.models.find((m) => m.id === selection.model)
-  const efforts = model?.reasoning?.efforts ?? []
-  const activeEffort = resolveSessionReasoningEffort(efforts, selection.reasoningEffort)
-  const effortName = activeEffort ? reasoningEffortLabel(activeEffort) : ''
   // 网关模型名常带厂商标注后缀(如 "qwen3.8-flash (ali)");
   // 输入框统一显示「模型名 (提供商 id)」,括号内固定是路由 id。
   const chipLabel = `${(model?.name ?? selection.model).replace(/\s*\([^)]*\)\s*$/, '')} (${selection.provider})`
@@ -193,12 +190,13 @@ export function ComposerModelMenu({
 
   /* ---- 选择 ---- */
 
-  const pickModel = (providerId: string, modelId: string, effort?: string) => {
+  const pickModel = (providerId: string, modelId: string) => {
     const nextGroup = catalog.groups.find((g) => g.id === providerId)
     const nextModel = nextGroup?.models.find((m) => m.id === modelId)
     const nextEfforts = nextModel?.reasoning?.efforts ?? []
+    // 换模型时:同模型保留当前档位,跨模型交给档位归一化(默认最高档)。
     const sameModel = selection.provider === providerId && selection.model === modelId
-    const preferred = effort ?? (sameModel ? selection.reasoningEffort : undefined)
+    const preferred = sameModel ? selection.reasoningEffort : undefined
     const resolved = resolveSessionReasoningEffort(
       nextEfforts,
       preferred && nextEfforts.some((entry) => entry.id === preferred) ? preferred : undefined,
@@ -333,13 +331,7 @@ export function ComposerModelMenu({
         onClick={toggle}
       >
         <span className="model-chip-label">{chipLabel}</span>
-        {efforts.length > 0 && (
-          <>
-            <span className="model-chip-dot" aria-hidden="true" />
-            <span className="model-chip-effort">{effortName}</span>
-          </>
-        )}
-        <IconChevron size={11} />
+        <IconChevronDown size={10} />
       </button>
       {open && (
         <>
@@ -462,11 +454,6 @@ export function ComposerModelMenu({
                   const active =
                     selection.provider === subGroup.id && selection.model === m.id
                   const kbHere = kbMode === 'models' && index === kbModel
-                  const modelEfforts = m.reasoning?.efforts ?? []
-                  // 条目内分段控件的高亮:当前模型显示会话实际档位,其余模型显示其默认档。
-                  const shownEffort = active
-                    ? resolveSessionReasoningEffort(modelEfforts, selection.reasoningEffort)
-                    : resolveSessionReasoningEffort(modelEfforts, m.reasoning?.defaultEffort)
                   return (
                     <div
                       key={m.id}
@@ -501,26 +488,6 @@ export function ComposerModelMenu({
                         </span>
                         {m.description && <span className="hint">{m.description}</span>}
                       </button>
-                      {modelEfforts.length > 0 && (
-                        <div className="mm-effort-row" role="group" aria-label={t('reasoningLabel')}>
-                          <span className="mm-effort-label">{t('reasoningLabel')}</span>
-                          <div className="mm-effort-seg">
-                            {modelEfforts.map((effort) => (
-                              <button
-                                key={effort.id}
-                                type="button"
-                                className={`mm-effort-btn${
-                                  shownEffort === effort.id ? ' active' : ''
-                                }`}
-                                title={effort.description}
-                                onClick={() => pickModel(subGroup.id, m.id, effort.id)}
-                              >
-                                {reasoningEffortLabel(effort.id)}
-                              </button>
-                            ))}
-                          </div>
-                        </div>
-                      )}
                     </div>
                   )
                 })}

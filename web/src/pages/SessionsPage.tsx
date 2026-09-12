@@ -28,6 +28,7 @@ import type { TrajectoryQuote } from '../trajectory'
 import { SessionView } from '../components/SessionView'
 import { StatsBar } from '../components/StatsBar'
 import { ComposerModelMenu } from '../components/ComposerModelMenu'
+import { ComposerEffortControl } from '../components/ComposerEffortControl'
 import {
   PermissionSelector,
   loadPermission,
@@ -559,6 +560,16 @@ export default function SessionsPage({
 
   const inert = !activeId && !activeWs
   const hasHistory = Boolean(activeSession?.excerpt)
+  // 当前模型的思考强度档位:模型没提供档位时没有可调空间,控件不渲染。
+  const effortLevels = useMemo(() => {
+    if (!catalog || !selection) return []
+    const group = catalog.groups.find((entry) => entry.id === selection.provider)
+    const model = group?.models.find((entry) => entry.id === selection.model)
+    return model?.reasoning?.efforts ?? []
+  }, [catalog, selection])
+  const activeEffort = selection
+    ? resolveSessionReasoningEffort(effortLevels, selection.reasoningEffort)
+    : undefined
   const showTranscript = Boolean(
     activeId && (hasStarted || sending || hasHistory || pendingMessages.length > 0),
   )
@@ -2140,6 +2151,14 @@ export default function SessionsPage({
               selection={selection}
               disabled={inert || optimizing}
               onChange={applySelection}
+            />
+          )}
+          {selection && activeEffort && effortLevels.length > 0 && (
+            <ComposerEffortControl
+              efforts={effortLevels}
+              value={activeEffort}
+              disabled={inert || optimizing}
+              onChange={(effort) => applySelection({ ...selection, reasoningEffort: effort })}
             />
           )}
         </div>

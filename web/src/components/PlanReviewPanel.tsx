@@ -5,6 +5,8 @@ import type { ModelCatalog, ModelSelection } from '../types'
 import { MarkdownText } from '../markdown/MarkdownText'
 import type { MarkdownLabels } from '../markdown/MarkdownText'
 import { ComposerModelMenu } from './ComposerModelMenu'
+import { ComposerEffortControl } from './ComposerEffortControl'
+import { resolveSessionReasoningEffort } from '../modelCatalog'
 import { IconCheck, IconClose, IconPlan } from './icons'
 
 /**
@@ -79,6 +81,16 @@ export function PlanReviewPanel({
 
   const trimmedFeedback = feedback.trim()
   const canSubmit = planText.trim().length > 0 && !submitting
+
+  // 执行模型的思考强度档位(与 composer 同源:目录 → 模型 → reasoning)。
+  const planEfforts = useMemo(() => {
+    if (!catalog || !model) return []
+    const group = catalog.groups.find((entry) => entry.id === model.provider)
+    return group?.models.find((entry) => entry.id === model.model)?.reasoning?.efforts ?? []
+  }, [catalog, model])
+  const planEffort = model
+    ? resolveSessionReasoningEffort(planEfforts, model.reasoningEffort)
+    : undefined
 
   const submit = async () => {
     if (!canSubmit) return
@@ -178,6 +190,17 @@ export function PlanReviewPanel({
                     setModelPicked(true)
                   }}
                 />
+                {planEffort && (
+                  <ComposerEffortControl
+                    efforts={planEfforts}
+                    value={planEffort}
+                    disabled={submitting}
+                    onChange={(effort) => {
+                      setModel((prev) => (prev ? { ...prev, reasoningEffort: effort } : prev))
+                      setModelPicked(true)
+                    }}
+                  />
+                )}
               </div>
             )}
           </div>

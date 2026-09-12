@@ -2547,10 +2547,11 @@ button {
 .model-chip {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  gap: 4px;
   max-width: min(320px, 70vw);
   height: 28px;
-  padding: 0 8px;
+  /* 右侧不留内边距:chevron 之后直接衔接强度控件,两个 chip 读作一组 */
+  padding: 0 2px 0 8px;
   border: none;
   border-radius: var(--r-sm);
   background: transparent;
@@ -2559,6 +2560,17 @@ button {
   font-weight: 500;
   line-height: 20px;
   cursor: pointer;
+}
+
+/* 展开箭头:退到次要位置(细、淡),不与 13px 文字争视觉重量 */
+.model-chip > svg {
+  opacity: 0.5;
+  transition: transform 0.15s var(--ease), opacity 0.15s var(--ease);
+}
+
+.model-chip:hover:not(:disabled) > svg,
+.model-chip.open > svg {
+  opacity: 0.85;
 }
 
 .model-chip:hover:not(:disabled),
@@ -2579,22 +2591,312 @@ button {
   min-width: 0;
 }
 
-.model-chip-dot {
-  width: 3px;
-  height: 3px;
-  border-radius: 50%;
-  background: var(--label-caption);
-  flex: none;
+/* ---- 思考强度控件:chip + 滑块浮层(模型选择器右侧独立控件) ---- */
+
+.effort-control {
+  position: relative;
+  /* 紧贴模型 chip:两个控件同属"模型"这一组,不留大缝。 */
+  margin-left: -6px;
 }
 
-.model-chip-effort {
+.effort-control.open {
+  z-index: 52;
+}
+
+.effort-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 28px;
+  /* 左侧不留内边距,与模型 chip 的 chevron 紧邻 */
+  padding: 0 6px 0 4px;
+  border: none;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--label-secondary);
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 20px;
+  cursor: pointer;
+}
+
+.effort-chip:hover:not(:disabled),
+.effort-chip.open {
+  background: var(--hover-fill);
+  color: var(--label-primary);
+}
+
+/* 思考关闭:不显示「关」文字,图标降为暗态以示未启用 */
+.effort-chip.off {
   color: var(--label-tertiary);
-  font-size: 12px;
-  font-weight: 400;
+}
+
+.effort-chip.off:hover:not(:disabled),
+.effort-chip.off.open {
+  color: var(--label-primary);
+}
+
+.effort-chip.off .effort-chip-icon {
+  color: var(--label-caption);
+}
+
+.effort-chip.off:hover:not(:disabled) .effort-chip-icon,
+.effort-chip.off.open .effort-chip-icon {
+  color: var(--label-primary);
+}
+
+.effort-chip:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* 单档:纯展示,不可展开、无悬停底色,视觉上与 chip 同高同色 */
+.effort-chip-static {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 28px;
+  padding: 0 6px;
+  color: var(--label-tertiary);
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 20px;
+  cursor: default;
+  user-select: none;
+}
+
+.effort-chip-static .effort-chip-icon {
+  display: inline-flex;
+  color: var(--label-caption);
+}
+
+.effort-chip-static .effort-chip-label {
+  color: var(--label-tertiary);
+}
+
+.effort-chip-icon {
+  display: inline-flex;
+  color: var(--label-tertiary);
+}
+
+.effort-chip:hover:not(:disabled) .effort-chip-icon,
+.effort-chip.open .effort-chip-icon {
+  color: var(--label-primary);
+}
+
+.effort-chip-label {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   min-width: 0;
+}
+
+.effort-popover {
+  position: absolute;
+  bottom: calc(100% + 8px);
+  left: 0;
+  z-index: 53;
+  width: 244px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 14px 10px;
+  background: var(--bg-layer-2);
+  border: 1px solid var(--border-l2);
+  border-radius: var(--r-md);
+  box-shadow: var(--shadow-float);
+  animation: model-menu-in 0.16s var(--ease);
+}
+
+.effort-popover-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.effort-popover-title {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--label-caption);
+}
+
+.effort-popover-value {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--label-primary);
+  font-variant-numeric: tabular-nums;
+}
+
+/* 滑块(对照 dsh 社区 reasoning-effort 插件):胶囊轨道 + 轨道内嵌圆钮,
+   原生 input 透明覆盖整条轨道承载拖动与键盘交互。
+   进度由 --progress 驱动:轨道已填充段用主前景色,未填充段用层级底色。 */
+.effort-slider {
+  position: relative;
+  width: 100%;
+  height: 28px;
+  border-radius: 999px;
+  isolation: isolate;
+  /* 把手直径:圆钮与轨道内缩量同源,改一处即同步。 */
+  --knob: 26px;
+}
+
+.effort-track {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  border-radius: inherit;
+  background: var(--bg-layer-3);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.05),
+    inset 0 -1px 0 rgba(0, 0, 0, 0.25);
+}
+
+/* 已填充段:左端圆角随轨道,右端直角(被把手覆盖处自然衔接)。
+   档位分级只靠静态颜色深浅表达,不做任何动画/发光。 */
+.effort-track::before {
+  content: "";
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: var(--progress, 0%);
+  border-radius: inherit;
+  background: linear-gradient(
+    90deg,
+    color-mix(in srgb, var(--label-primary) 78%, var(--bg-layer-3)) 0%,
+    var(--label-primary) 100%
+  );
+  transition: background 0.2s var(--ease);
+}
+
+/* 关闭档:没有思考强度可言,填充降到最低调(暗灰),不抢视线 */
+.effort-slider[data-tier='0'] .effort-track::before {
+  background: color-mix(in srgb, var(--label-primary) 42%, var(--bg-layer-3));
+}
+
+/* 最高档:填充最亮(纯前景色),静止无动画 */
+.effort-slider[data-tier='2'] .effort-track::before {
+  background: var(--label-primary);
+}
+
+/* 拖动中:轨道轻微提亮,呼应把手放大 */
+.effort-slider.dragging .effort-track::before {
+  filter: brightness(1.08);
+}
+
+/* 原生 input:透明覆盖整条轨道,承担指针与键盘交互 */
+.effort-input {
+  position: absolute;
+  z-index: 3;
+  inset: -4px 0;
+  width: 100%;
+  height: calc(100% + 8px);
+  margin: 0;
+  appearance: none;
+  -webkit-appearance: none;
+  opacity: 0;
+  cursor: grab;
+  touch-action: none;
+}
+
+.effort-input:active {
+  cursor: grabbing;
+}
+
+.effort-input::-webkit-slider-thumb {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 1px;
+  height: 100%;
+}
+
+.effort-input::-moz-range-thumb {
+  width: 1px;
+  height: 100%;
+  border: none;
+}
+
+/* 圆钮:轨道内嵌的实心圆点,位置由组件内联 clamp 夹在轨道内。
+   用底色(而非前景色)填充,才能在深色填充段上依然清晰可辨。 */
+.effort-knob {
+  position: absolute;
+  z-index: 4;
+  top: 50%;
+  width: var(--knob);
+  height: var(--knob);
+  border-radius: 50%;
+  background: var(--bg-layer-2);
+  box-shadow:
+    0 0 0 1px var(--border-l3),
+    0 1px 4px rgba(0, 0, 0, 0.4);
+  transform: translate(-50%, -50%);
+  transition:
+    left 0.18s cubic-bezier(0.22, 1, 0.36, 1),
+    transform 0.14s var(--ease);
+  pointer-events: none;
+}
+
+/* 拖动中:把手放大,给出明确触感(不发光) */
+.effort-slider.dragging .effort-knob {
+  transform: translate(-50%, -50%) scale(1.08);
+  transition: transform 0.14s var(--ease);
+}
+
+/* 键盘聚焦:圆钮加一圈描边,不改变轨道形状、不发光。
+   仅在键盘导航时出现(:focus-visible)——鼠标点开控件不留这圈描边。 */
+.effort-input:focus-visible + .effort-knob {
+  box-shadow:
+    0 0 0 1px var(--border-l3),
+    0 0 0 2px var(--label-caption);
+}
+
+/* 档位刻度:绝对定位,中心对齐轨道等分点(首末贴边防溢出),可直接点选 */
+.effort-ticks {
+  position: relative;
+  height: 15px;
+  margin-top: -2px;
+}
+
+.effort-tick {
+  position: absolute;
+  top: 0;
+  transform: translateX(-50%);
+  padding: 0 2px;
+  border: none;
+  border-radius: var(--r-xs);
+  background: transparent;
+  color: var(--label-caption);
+  font-size: 10.5px;
+  font-weight: 500;
+  line-height: 1.3;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: color 0.12s var(--ease);
+}
+
+/* 首末档位贴边:中心即轨道端点,不能再居中平移,否则文字溢出浮层 */
+.effort-tick:first-child {
+  transform: none;
+}
+
+.effort-tick:last-child {
+  transform: translateX(-100%);
+}
+
+.effort-tick:hover {
+  color: var(--label-primary);
+}
+
+.effort-tick.active {
+  color: var(--label-primary);
+  font-weight: 600;
+}
+
+.effort-popover-desc {
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--label-tertiary);
 }
 
 /* ---- 模型级联菜单:一级供应商列 / 二级模型列 ---- */
@@ -2779,7 +3081,7 @@ button {
   animation-name: model-sub-in-flip;
 }
 
-/* 模型条目:名称行 + 徽标 + 描述 + 思考强度分段 */
+/* 模型条目:名称行 + 徽标 + 描述 */
 .model-menu-model {
   display: flex;
   flex-direction: column;
@@ -2870,59 +3172,9 @@ button {
   overflow: hidden;
 }
 
-/* 条目内思考强度分段控件(紧凑版,只对支持档位的模型渲染) */
-.mm-effort-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 0 8px 4px;
-}
-
-.mm-effort-label {
-  flex: none;
-  font-size: 10.5px;
-  color: var(--label-caption);
-}
-
-.mm-effort-seg {
-  display: inline-flex;
-  gap: 2px;
-  padding: 2px;
-  border-radius: 8px;
-  background: var(--bg-layer-3);
-  border: 1px solid var(--border-l1);
-}
-
-.mm-effort-btn {
-  border: none;
-  background: transparent;
-  color: var(--label-tertiary);
-  font-size: 11px;
-  font-weight: 550;
-  line-height: 1;
-  padding: 4px 9px;
-  border-radius: 6px;
-  cursor: pointer;
-  transition: background 0.12s var(--ease), color 0.12s var(--ease);
-}
-
-.mm-effort-btn:hover {
-  background: var(--hover-fill);
-  color: var(--label-primary);
-}
-
-.mm-effort-btn.active {
-  background: var(--label-primary);
-  color: var(--bg-base);
-}
-
-/* chip 展开时 chevron 转向上方 */
-.model-chip > svg {
-  transition: transform 0.15s var(--ease);
-}
-
+/* chip 展开时 chevron 转向上方(默认朝下 → 旋转 180°) */
 .model-chip.open > svg {
-  transform: rotate(-90deg);
+  transform: rotate(180deg);
 }
 
 @keyframes model-menu-in {
@@ -4586,9 +4838,9 @@ button.btn.form-action {
 .permission-chip {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
+  gap: 4px;
   height: 28px;
-  padding: 0 8px;
+  padding: 0 5px 0 8px;
   border: none;
   border-radius: var(--r-sm);
   background: transparent;
@@ -4609,6 +4861,21 @@ button.btn.form-action {
 .permission-chip:disabled {
   opacity: 0.5;
   cursor: not-allowed;
+}
+
+/* 展开箭头:退到次要位置(细、淡),与文字重量匹配 */
+.permission-chip > svg {
+  opacity: 0.5;
+  transition: transform 0.15s var(--ease), opacity 0.15s var(--ease);
+}
+
+.permission-chip:hover:not(:disabled) > svg,
+.permission-chip.open > svg {
+  opacity: 0.85;
+}
+
+.permission-chip.open > svg {
+  transform: rotate(180deg);
 }
 
 .permission-chip-icon {

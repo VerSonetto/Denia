@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { t } from '../i18n'
-import { IconCheck, IconChevron, IconEye, IconPencil, IconPlan, IconZap } from './icons'
+import { IconCheck, IconChevronDown, IconEye, IconPencil, IconPlan, IconZap } from './icons'
 import { normalizePermissionMode } from '../types'
 import type { PermissionMode } from '../types'
 import type { ComponentType } from 'react'
@@ -97,7 +97,7 @@ export function PermissionSelector({
           <ActiveIcon size={13} />
         </span>
         <span className="permission-chip-name">{t(active.nameKey)}</span>
-        <IconChevron size={11} />
+        <IconChevronDown size={10} />
       </button>
       {open && (
         <>
