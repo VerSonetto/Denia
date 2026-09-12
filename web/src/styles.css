@@ -2615,7 +2615,8 @@ button {
   animation: model-menu-in 0.16s var(--ease);
 }
 
-/* 两列共用上限;二级另用 --menu-h(组件测得的一级总高)锁同高顶对齐。 */
+/* 两列各自按内容伸展,共用同一上限:二级不随一级高度收缩,
+   供应商少/模型多时模型列依然能撑到上限,内部滚动。 */
 .model-menu,
 .model-menu-sub {
   max-height: min(440px, 62vh);
@@ -2755,14 +2756,13 @@ button {
   color: var(--label-primary);
 }
 
-/* 二级:模型列(与一级同高、顶对齐,右侧放不下时翻到左侧) */
+/* 二级:模型列(高度随内容伸展、与一级底边对齐,右侧放不下时翻到左侧) */
 .model-menu-sub {
   position: absolute;
   bottom: calc(100% + 8px);
   left: calc(var(--menu-w, 100%) + 6px);
   z-index: 54;
   width: 304px;
-  height: var(--menu-h, auto);
   display: flex;
   flex-direction: column;
   background: var(--bg-layer-2);

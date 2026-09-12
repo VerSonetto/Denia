@@ -133,7 +133,7 @@ export function ComposerModelMenu({
     setKbModel(0)
   }, [query])
 
-  // 打开时:翻转探测 + 一级列尺寸写入 CSS 变量 + 聚焦搜索框(可直接打字)。
+  // 打开时:翻转探测 + 一级列宽度写入 CSS 变量 + 聚焦搜索框(可直接打字)。
   useLayoutEffect(() => {
     if (!open) return
     const menu = menuRef.current
@@ -144,9 +144,8 @@ export function ComposerModelMenu({
     const leftSpace = rect.left
     setFlip(rightSpace < SUB_MENU_GAP + SUB_MENU_WIDTH && leftSpace > rightSpace)
     const anchor = menu.parentElement
-    // 一级列实测宽/高写入 CSS 变量:二级的 left 依一级右缘(--menu-w)定位,翻转侧用 100%(chip 左缘)。
+    // 一级列实测宽写入 CSS 变量:二级的 left 依一级右缘(--menu-w)定位,翻转侧用 100%(chip 左缘)。
     anchor?.style.setProperty('--menu-w', `${Math.round(rect.width)}px`)
-    anchor?.style.setProperty('--menu-h', `${Math.round(rect.height)}px`)
     searchRef.current?.focus()
   }, [open])
 
