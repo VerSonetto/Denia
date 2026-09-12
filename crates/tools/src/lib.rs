@@ -19,7 +19,6 @@ pub mod mcp;
 mod plan;
 pub mod permission;
 pub mod prompt;
-pub mod recon;
 pub mod shell;
 pub mod shell_session;
 pub mod support;
@@ -45,14 +44,11 @@ pub use ls::LsTool;
 pub use mcp::McpTool;
 pub use plan::{ExitPlanArgs, ExitPlanTool};
 pub use prompt::{
-    default_shipped, default_shipped_with_browser, default_shipped_with_browser_and_recon,
-    default_shipped_with_browser_and_recon_and_ask, register_ask_prompt_section,
-    register_capability_prompt_sections, register_mcp_prompt_section, register_shipped_prompt,
-    shipped_with_persona, shipped_with_persona_and_browser,
-    shipped_with_persona_and_browser_and_recon,
-    shipped_with_persona_and_browser_and_recon_and_ask,
+    default_shipped, default_shipped_with_browser, default_shipped_with_browser_and_ask,
+    register_ask_prompt_section, register_capability_prompt_sections, register_mcp_prompt_section,
+    register_shipped_prompt, shipped_with_persona, shipped_with_persona_and_browser,
+    shipped_with_persona_and_browser_and_ask,
 };
-pub use recon::{ReconExecute, ReconHub, ReconTool};
 pub use shell_session::{Captured, PersistentShell, ShellHub};
 pub use todo::TodoWriteTool;
 
@@ -72,9 +68,8 @@ pub type SessionEventSink = Arc<dyn Fn(SessionEvent) + Send + Sync>;
 /// 子代理"别用 bash 去干"的那三件事。
 ///
 /// `browser` 在此集合内:网页抓取/查看是只读调查手段,子代理做调研时
-/// 常常需要。它带来的资源副作用(常驻 Chrome 实例)由父代理统一收尾——
-/// `tool:browser` 纪律段说明"任务完成后彻底清除",子代理同样受该纪律约束;
-/// 子代理不注册 `recon`(断点调试会冻结页面,属交互态操作)。
+/// 常常需要。它带来的资源副作用(常驻浏览器实例)由父代理统一收尾——
+/// `tool:browser` 纪律段说明"任务完成后彻底清除",子代理同样受该纪律约束。
 ///
 /// 与 dsh 的差异:dsh 让子代理继承父代理的完整工具面,只靠深度与审批兜底;
 /// 这里在授予层直接收口,子代理拿不到交互/写类工具,也就不存在"子代理
@@ -252,18 +247,6 @@ pub fn default_registry_with_browser(hub: Option<BrowserHub>) -> ToolRegistry {
     let mut registry = default_registry();
     if let Some(hub) = hub {
         registry.register(Arc::new(BrowserTool::new(hub)));
-    }
-    registry
-}
-
-/// Shipped tool set + browser + recon(JS 逆向;两个 hub 同源同一 BrowserManager)。
-pub fn default_registry_with_browser_and_recon(
-    browser_hub: Option<BrowserHub>,
-    recon_hub: Option<ReconHub>,
-) -> ToolRegistry {
-    let mut registry = default_registry_with_browser(browser_hub);
-    if let Some(hub) = recon_hub {
-        registry.register(Arc::new(ReconTool::new(hub)));
     }
     registry
 }

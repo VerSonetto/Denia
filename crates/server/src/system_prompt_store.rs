@@ -18,22 +18,16 @@ pub struct SystemPromptState {
     current: Arc<ArcSwap<SystemPrompt>>,
     home: PathBuf,
     browser_hub: Option<denia_tools::BrowserHub>,
-    recon_hub: Option<denia_tools::ReconHub>,
 }
 
 impl SystemPromptState {
     /// 启动时从磁盘加载;空或缺失则沿用出厂 persona。
-    pub fn load(
-        home: &Path,
-        browser_hub: Option<denia_tools::BrowserHub>,
-        recon_hub: Option<denia_tools::ReconHub>,
-    ) -> Self {
-        let prompt = build_prompt(read_file_text(home), browser_hub.clone(), recon_hub.clone());
+    pub fn load(home: &Path, browser_hub: Option<denia_tools::BrowserHub>) -> Self {
+        let prompt = build_prompt(read_file_text(home), browser_hub.clone());
         Self {
             current: Arc::new(ArcSwap::from_pointee(prompt)),
             home: home.to_path_buf(),
             browser_hub,
-            recon_hub,
         }
     }
 
@@ -76,11 +70,7 @@ impl SystemPromptState {
     }
 
     fn reload(&self) {
-        let prompt = build_prompt(
-            read_file_text(&self.home),
-            self.browser_hub.clone(),
-            self.recon_hub.clone(),
-        );
+        let prompt = build_prompt(read_file_text(&self.home), self.browser_hub.clone());
         self.current.store(Arc::new(prompt));
     }
 
@@ -145,34 +135,18 @@ fn read_file_text(home: &Path) -> Option<String> {
     }
 }
 
-fn build_prompt(
-    text: Option<String>,
-    browser_hub: Option<denia_tools::BrowserHub>,
-    recon_hub: Option<denia_tools::ReconHub>,
-) -> SystemPrompt {
+fn build_prompt(text: Option<String>, browser_hub: Option<denia_tools::BrowserHub>) -> SystemPrompt {
     // server 部署有应答通道:系统提示词与工具注册必须同步带上 `ask`
     // (schema + tool:ask 纪律段),模型可见即模型可执行。
     let mut prompt = match (text, browser_hub) {
-        (Some(persona), Some(hub)) => denia_tools::shipped_with_persona_and_browser_and_recon_and_ask(
-            persona,
-            Some(hub),
-            recon_hub,
-            true,
-        )
-        .0,
-        (Some(persona), None) => denia_tools::shipped_with_persona_and_browser_and_recon_and_ask(
-            persona, None, recon_hub, true,
-        )
-        .0,
-        (None, Some(hub)) => denia_tools::default_shipped_with_browser_and_recon_and_ask(
-            Some(hub),
-            recon_hub,
-            true,
-        )
-        .0,
-        (None, None) => {
-            denia_tools::default_shipped_with_browser_and_recon_and_ask(None, recon_hub, true).0
+        (Some(persona), Some(hub)) => {
+            denia_tools::shipped_with_persona_and_browser_and_ask(persona, Some(hub), true).0
         }
+        (Some(persona), None) => {
+            denia_tools::shipped_with_persona_and_browser_and_ask(persona, None, true).0
+        }
+        (None, Some(hub)) => denia_tools::default_shipped_with_browser_and_ask(Some(hub), true).0,
+        (None, None) => denia_tools::default_shipped_with_browser_and_ask(None, true).0,
     };
     // server 部署总是注册宿主能力工具(委派/后台任务/技能),其纪律段
     // 归位系统提示词(原先是 [denia 能力上下文] 注入消息里的静态内容)。

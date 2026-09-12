@@ -1,31 +1,34 @@
-//! 内嵌浏览器:拉起 Chrome/Edge + CDP 驱动,命令面与 ZCode "Browser Use" 对齐。
+//! 内嵌浏览器:通过 **Playwright** 驱动真实浏览器(Chromium/Firefox/WebKit)。
 //!
-//! 架构对照(见 D:\ZCode\analysis\browser-use\REPORT.md):
-//! - ZCode 用 Electron `<webview>` + `webContents.debugger`(CDP 1.3);
-//!   这里用真实 Chrome/Edge(headless=new,持久 profile)+ 自写 CDP 客户端。
-//! - 命令面、快照脚本、ref 机制、虚拟剪贴板、截图 CSS 像素校正全部移植。
+//! # 架构
+//!
+//! ```text
+//! denia ──▶ playwright-rs (JSON-RPC over stdio)
+//!              └─▶ Playwright Node driver(自带捆绑 Node,不依赖用户环境)
+//!                     └─▶ Chromium(持久化 profile,登录态跨重启存活)
+//! ```
+//!
+//! 与旧实现(自建 headless Chrome + 自写 CDP 客户端)的区别:
+//! - **进程管理、CDP 协议、断线重连、元素可操作性等待全部由 Playwright 负责**,
+//!   denia 不再自己维护 CDP 连接与 Chrome 生命周期;
+//! - **元素引用走 Playwright 官方 aria snapshot**:AI 模式产出 `[ref=eN]`,
+//!   定位用 `aria-ref=eN` 引擎,不再往页面注入全局变量;
+//! - **无窗口后台运行**:headless 启动,不弹浏览器窗口(对齐旧实现);
+//!   画面通过控制台侧边栏的 screencast 实时展示。
 
-pub mod cdp;
-pub mod commands;
-pub mod launch;
-pub mod lifecycle;
+pub mod driver;
 pub mod manager;
-pub mod recon;
-pub mod scripts;
+pub mod network;
 
-pub use manager::{BrowserEvent, BrowserManager};
+pub use manager::{BrowserEvent, BrowserManager, FrameViewport, TabInfo};
 
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
-/// 一条模型/控制台发来的浏览器命令(与 ZCode `Wo` discriminated union 同形)。
-///
-/// `rename_all_fields` 把变体字段统一转 camelCase,与前端的 tabId/fromRef/
-/// toRef/doubleClick 等命名对齐(否则 activate 的 tab_id 字段无法反序列化,
-/// 面板切 tab 会 400)。
-#[derive(Debug, Clone, Deserialize)]
+/// 模型可用的浏览器命令(与工具层 schema 一一对应)。
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(
     tag = "method",
     rename_all = "camelCase",
@@ -62,7 +65,7 @@ pub enum BrowserCommand {
     Click {
         tab_id: Option<String>,
         r#ref: Option<String>,
-        /// 稳定定位器：CSS 选择器、#id、[aria-label=...] 或文本匹配。
+        /// 稳定定位器:CSS 选择器、#id、[aria-label=...] 或文本匹配。
         locator: Option<String>,
         x: Option<f64>,
         y: Option<f64>,
@@ -158,7 +161,7 @@ pub enum BrowserCommand {
     ViewportReset {
         tab_id: Option<String>,
     },
-    /// 网络抓包:列出该 tab 捕获的请求(DevTools Network 等价;环形缓冲)。
+    /// 网络抓包:列出该 tab 捕获的请求(环形缓冲)。
     NetworkList {
         tab_id: Option<String>,
         url_filter: Option<String>,
@@ -173,7 +176,7 @@ pub enum BrowserCommand {
         #[serde(default)]
         body_kind: Option<String>,
     },
-    /// 面板实时画面:开启当前 tab 的 screencast(仅控制台用,模型命令面不含)。
+    /// 面板实时画面:开启当前 tab 的 screencast(仅控制台用)。
     StartScreencast {
         tab_id: Option<String>,
     },
@@ -197,7 +200,7 @@ pub struct Point {
     pub y: f64,
 }
 
-/// 统一命令结果(ZCode 结果形状:ok/error{code,message}/value)。
+/// 统一命令结果。
 #[derive(Debug, Clone, Serialize)]
 pub struct CommandOutcome {
     pub ok: bool,
@@ -265,8 +268,7 @@ impl CommandOutcome {
 }
 
 impl BrowserCommand {
-    /// 返回命令的显式目标 tab(无 tab 字段或未给时返回 None;execute 层用于
-    /// 断点暂停自动恢复的判定)。
+    /// 返回命令的显式目标 tab(无 tab 字段或未给时返回 None)。
     pub fn tab_id_probe(&self) -> Option<&str> {
         match self {
             BrowserCommand::Navigate { tab_id, .. }
@@ -297,6 +299,7 @@ impl BrowserCommand {
             | BrowserCommand::NetworkGetBody { tab_id, .. }
             | BrowserCommand::StartScreencast { tab_id }
             | BrowserCommand::StopScreencast { tab_id } => tab_id.as_deref(),
+
             BrowserCommand::NewTab { .. }
             | BrowserCommand::List
             | BrowserCommand::Activate { .. } => None,
@@ -307,7 +310,7 @@ impl BrowserCommand {
 /// 浏览器中枢:server 持有,工具与 REST API 共用。
 pub type SharedBrowser = Arc<manager::BrowserManager>;
 
-/// 默认 profile 目录:$DENIA_HOME/browser/profile(持久,等价 persist 分区)。
+/// 默认 profile 目录:$DENIA_HOME/browser/profile(持久,登录态跨重启存活)。
 pub fn default_profile_dir(home: &std::path::Path) -> PathBuf {
     home.join("browser").join("profile")
 }

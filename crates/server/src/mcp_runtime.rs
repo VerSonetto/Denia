@@ -86,7 +86,7 @@ impl McpRuntime {
     }
 
     /// 内置工具集:重建一份与 [`crate::state::build_state`] 初始注册等价
-    /// 的注册表(server 部署总是带 browser/recon/ask/宿主能力)。
+    /// 的注册表(server 部署总是带 browser/ask/宿主能力)。
     fn base_registry(&self) -> denia_tools::ToolRegistry {
         // 从当前注册表里剔除旧的 mcp__* 条目,其余原样保留——这样 server
         // 侧对 bash 的定制(with_runtime)等不会被重建冲掉。

@@ -51,7 +51,7 @@ pub enum SectionOrder {
     ToolJobs,
     /// 技能工具(skill)的工具纪律段。
     ToolSkill,
-    /// 浏览器工具(browser/recon)的资源回收纪律段;仅在注册了 browser 工具时注入。
+    /// 浏览器工具的资源回收纪律段;仅在注册了 browser 工具时注入。
     ToolBrowser,
     /// 提问工具(ask)的使用纪律段;仅在注册了 ask 工具时注入。
     ToolAsk,

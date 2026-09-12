@@ -8,9 +8,10 @@ license.workspace = true
 denia-core = { workspace = true }
 
 tokio = { workspace = true }
-tokio-tungstenite = { version = "0.24", features = ["native-tls"] }
 futures = { workspace = true }
-futures-util = "0.3"
+
+# Playwright 绑定(JSON-RPC over stdio 到官方 Node driver;driver 自带 Node)。
+playwright-rs = "0.18"
 
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -19,4 +20,3 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 base64 = { workspace = true }
 uuid = { workspace = true }
-rand = { workspace = true }

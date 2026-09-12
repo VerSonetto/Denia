@@ -9,7 +9,6 @@ use denia_system_prompt::{
 };
 
 use crate::browser::BrowserHub;
-use crate::recon::ReconHub;
 use crate::shell;
 use crate::{Tool, ToolRegistry};
 
@@ -184,17 +183,23 @@ pub fn register_capability_prompt_sections(prompt: &mut SystemPrompt) -> Result<
     Ok(())
 }
 
-/// 浏览器工具(browser/recon)的资源回收纪律段。
+/// 浏览器工具(browser)的使用纪律段。
 ///
 /// 段与 browser schema 严格同步:仅在带 hub 的 builder 里注册(hub 为 Some
-/// 才有工具),无 browser 的部署模型不会看到不存在的工具。机制上关闭最后
-/// 一个 tab 即彻底回收(manager 层),本段只负责让模型主动收尾清理。
+/// 才有工具),无 browser 的部署模型不会看到不存在的工具。
+///
+/// 机制上由 Playwright 驱动**真实浏览器**(headless 无窗口后台运行,画面
+/// 走控制台侧边栏),本段负责让模型明白:引用何时失效、收尾该关哪些 tab、
+/// 什么时候才该开可视化模式。
 fn register_browser_section(prompt: &mut SystemPrompt) -> Result<(), String> {
     prompt.section(PromptSection {
         name: "tool:browser".to_string(),
         order: SectionOrder::ToolBrowser.value(),
         text: PromptText::Static(
-            "browser 与 recon 共用一个常驻浏览器实例(与控制台面板同款),打开的 tab 不会随任务结束自动关闭。启动按需:getState 与 navigate/newTab 等交互命令会拉起浏览器;list/close/activate/networkList/getDialog 是查询与善后命令,浏览器没跑时原地返回(list 返回空 tabs、close 回报已关闭、networkList 返回空列表),绝不拉起实例——收尾时的确认查询不会凭空造出 tab。每次浏览器任务完成、或确认后续不再使用浏览器时,必须彻底清除浏览器资源:先 list 查看现存 tab,再把本次打开的 tab 逐个 close;关闭最后一个 tab 会彻底回收浏览器进程与全部状态,这是唯一的彻底清除方式。判定口径:list 返回空 tabs 即已清理干净(浏览器已回收、无残留 tab),此时立即停止操作,不要再调 getState/navigate 等会启动浏览器的命令;严禁留着打开的 tab 结束任务。\nbrowser 工具默认在后台无界面操作,控制台不展示浏览器画面。仅当用户明确要求看着他操作浏览器(如\"打开给我看\"\"可视化模式\"),或用户的话里明显需要亲眼看到画面(如\"看下这个页面长什么样\"\"演示一下操作\")时,才给命令加 visualMode: true 展开浏览器侧栏;用户没有这类表示时不要开启,常规抓取、点击、检查接口等后台任务保持默认。开启后用户手动收起侧栏即为不要看,不要再重复请求展开。"
+            "browser 由 Playwright 驱动真实浏览器,无窗口后台运行(headless),画面只在控制台浏览器侧栏实时展示。启动按需:交互命令会拉起浏览器;list/close 等查询与善后命令在浏览器没跑时原地返回,绝不凭空拉起实例。\n\
+             元素引用:snapshot 产出的 `[ref=eN]` 直接传 `e6`(也接受 `@e6`)。引用只在最近一次 snapshot 之后有效,且仅对同一 tab;页面导航、提交、SPA 路由切换后必须重新 snapshot——拿旧引用操作会报错(这是刻意的,避免静默点错元素)。\n\
+             收尾义务:任务完成、或确认后续不再使用浏览器时,把本次打开的 tab 逐个 close;判定口径 = list 里本次打开的 tab 全部消失,用户原有的 tab 原样保留。**绝不关闭不是自己开的 tab,绝不退出浏览器**。\n\
+             可视化模式:仅当用户明确要求看着他操作(如\"打开给我看\"\"可视化模式\"),或用户的话里明显需要亲眼看到画面(如\"看下这个页面长什么样\"\"演示一下操作\")时,才给命令加 visualMode: true 展开浏览器侧栏;常规抓取、点击、检查接口等后台任务保持默认。开启后用户手动收起侧栏即为不要看,不要再重复请求展开。"
                 .to_string(),
         ),
         complete: false,
@@ -310,37 +315,18 @@ pub fn default_shipped_with_browser(hub: Option<BrowserHub>) -> (SystemPrompt, T
     (prompt, tools)
 }
 
-/// Shipped pair + browser + recon(JS 逆向)。prompt schemas 同步追加两者。
-/// `SystemPrompt::tools` 是追加语义,依次 push provider,模型可见全部 schema。
-pub fn default_shipped_with_browser_and_recon(
-    browser_hub: Option<BrowserHub>,
-    recon_hub: Option<ReconHub>,
-) -> (SystemPrompt, ToolRegistry) {
-    default_shipped_with_browser_and_recon_and_ask(browser_hub, recon_hub, false)
-}
-
-/// `default_shipped_with_browser_and_recon` + 可选 `ask` 工具。
+/// Shipped pair + optional `ask` 工具。
 ///
 /// `ask` 是交互式工具:只有带应答通道的部署(server + 控制台)才注册,
 /// 纪律段与 schema 在同一分支注册,模型不会看到不存在的工具。
-pub fn default_shipped_with_browser_and_recon_and_ask(
+pub fn default_shipped_with_browser_and_ask(
     browser_hub: Option<BrowserHub>,
-    recon_hub: Option<ReconHub>,
     ask: bool,
 ) -> (SystemPrompt, ToolRegistry) {
     let (mut prompt, mut registry) = default_shipped_with_browser(browser_hub);
     if ask {
         register_ask_prompt_section(&mut prompt).expect("ask prompt section is valid");
         let tool = Arc::new(crate::AskTool::new());
-        let schema = tool.schema().clone();
-        prompt.tools(move |_| ToolProviderResult {
-            schemas: vec![schema.clone()],
-            known_names: None,
-        });
-        registry.register(tool);
-    }
-    if let Some(hub) = recon_hub {
-        let tool = Arc::new(crate::ReconTool::new(hub));
         let schema = tool.schema().clone();
         prompt.tools(move |_| ToolProviderResult {
             schemas: vec![schema.clone()],
@@ -370,23 +356,13 @@ pub fn shipped_with_persona_and_browser(
     persona_text: String,
     hub: BrowserHub,
 ) -> (SystemPrompt, ToolRegistry) {
-    shipped_with_persona_and_browser_and_recon(persona_text, Some(hub), None)
+    shipped_with_persona_and_browser_and_ask(persona_text, Some(hub), false)
 }
 
-/// `shipped_with_persona_and_browser` + recon 工具(schema 追加,registry 注册)。
-pub fn shipped_with_persona_and_browser_and_recon(
+/// `shipped_with_persona_and_browser` + 可选 `ask` 工具。
+pub fn shipped_with_persona_and_browser_and_ask(
     persona_text: String,
     hub: Option<BrowserHub>,
-    recon_hub: Option<ReconHub>,
-) -> (SystemPrompt, ToolRegistry) {
-    shipped_with_persona_and_browser_and_recon_and_ask(persona_text, hub, recon_hub, false)
-}
-
-/// `shipped_with_persona_and_browser_and_recon` + 可选 `ask` 工具。
-pub fn shipped_with_persona_and_browser_and_recon_and_ask(
-    persona_text: String,
-    hub: Option<BrowserHub>,
-    recon_hub: Option<ReconHub>,
     ask: bool,
 ) -> (SystemPrompt, ToolRegistry) {
     let (mut prompt, mut registry) = shipped_with_persona(persona_text);
@@ -403,15 +379,6 @@ pub fn shipped_with_persona_and_browser_and_recon_and_ask(
     if let Some(hub) = hub {
         register_browser_section(&mut prompt).expect("browser prompt section is valid");
         let tool = Arc::new(crate::BrowserTool::new(hub));
-        let schema = tool.schema().clone();
-        prompt.tools(move |_| ToolProviderResult {
-            schemas: vec![schema.clone()],
-            known_names: None,
-        });
-        registry.register(tool);
-    }
-    if let Some(hub) = recon_hub {
-        let tool = Arc::new(crate::ReconTool::new(hub));
         let schema = tool.schema().clone();
         prompt.tools(move |_| ToolProviderResult {
             schemas: vec![schema.clone()],
@@ -837,21 +804,34 @@ mod browser_prompt_tests {
             .find(|section| section.name == "tool:browser")
             .expect("tool:browser section registered");
         assert_eq!(section.audience, SectionAudience::Model);
-        assert!(section.text.contains("彻底清除浏览器资源"));
-        // 启动语义必须写清:哪些命令拉起实例、哪些只查询不拉起。
-        assert!(section.text.contains("getState 与 navigate/newTab 等交互命令会拉起浏览器"));
-        assert!(section.text.contains("绝不拉起实例"));
-        assert!(section.text.contains("list 返回空 tabs 即已清理干净"));
+        // 新架构(Playwright):纪律段讲清引用有效期、收尾口径与可视化模式。
+        assert!(
+            section.text.contains("Playwright"),
+            "纪律段应说明底层是 Playwright"
+        );
+        assert!(
+            section.text.contains("引用只在最近一次 snapshot 之后有效"),
+            "纪律段应说明 ref 的有效期"
+        );
+        assert!(
+            section.text.contains("绝不关闭不是自己开的 tab"),
+            "纪律段应写明不碰用户原有标签页"
+        );
+        assert!(
+            section.text.contains("list 里本次打开的 tab 全部消失"),
+            "纪律段应给出收尾判定口径"
+        );
+        assert!(
+            section.text.contains("绝不凭空拉起实例"),
+            "纪律段应说明查询命令不拉起浏览器"
+        );
         assert!(section.text.contains("visualMode"));
         let user_body = denia_system_prompt::render_prompt_for_user(&assembly);
-        assert!(!user_body.contains("彻底清除浏览器资源"));
+        assert!(!user_body.contains("绝不关闭不是自己开的 tab"));
 
         // persona 变体带 hub 同样有段。
-        let (prompt, _registry) = shipped_with_persona_and_browser_and_recon(
-            "自定义 persona".to_string(),
-            Some(fake_hub()),
-            None,
-        );
+        let (prompt, _registry) =
+            shipped_with_persona_and_browser_and_ask("自定义 persona".to_string(), Some(fake_hub()), false);
         let assembly = prompt.assemble(&context).expect("assemble");
         assert!(
             assembly
@@ -890,15 +870,8 @@ mod browser_prompt_tests {
             crate::SUBAGENT_READ_ONLY_TOOLS.contains(&"browser"),
             "browser 应授予子代理"
         );
-        assert!(
-            !crate::SUBAGENT_READ_ONLY_TOOLS.contains(&"recon"),
-            "recon 是交互态调试工具,不授予子代理"
-        );
-        let (prompt, registry) = default_shipped_with_browser_and_recon_and_ask(
-            Some(fake_hub()),
-            None,
-            true,
-        );
+        let (prompt, registry) =
+            default_shipped_with_browser_and_ask(Some(fake_hub()), true);
         let assembly = prompt
             .assemble(&denia_system_prompt::AssembleContext {
                 cwd: Some("/tmp/ws".to_string()),
@@ -919,8 +892,7 @@ mod browser_prompt_tests {
             ..Default::default()
         };
         // 带 ask:段注册、audience=Model、不进用户可见副本,schema 同步可见。
-        let (prompt, registry) =
-            default_shipped_with_browser_and_recon_and_ask(None, None, true);
+        let (prompt, registry) = default_shipped_with_browser_and_ask(None, true);
         let assembly = prompt.assemble(&context).expect("assemble");
         let section = assembly
             .sections
@@ -943,8 +915,7 @@ mod browser_prompt_tests {
         assert!(!user_body.contains("真正卡住的时刻"));
 
         // 不带 ask:段与 schema 都不出现。
-        let (prompt, registry) =
-            default_shipped_with_browser_and_recon_and_ask(None, None, false);
+        let (prompt, registry) = default_shipped_with_browser_and_ask(None, false);
         let assembly = prompt.assemble(&context).expect("assemble");
         assert!(
             !assembly
@@ -960,13 +931,11 @@ mod browser_prompt_tests {
         assert!(registry.get("ask").is_none());
 
         // persona 变体同样成对。
-        let (prompt, registry) =
-            shipped_with_persona_and_browser_and_recon_and_ask(
-                "自定义 persona".to_string(),
-                None,
-                None,
-                true,
-            );
+        let (prompt, registry) = shipped_with_persona_and_browser_and_ask(
+            "自定义 persona".to_string(),
+            None,
+            true,
+        );
         let assembly = prompt.assemble(&context).expect("assemble");
         assert!(assembly.sections.iter().any(|s| s.name == "tool:ask"));
         assert!(registry.get("ask").is_some());

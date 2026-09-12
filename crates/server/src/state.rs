@@ -774,11 +774,9 @@ pub async fn build_state(
     spawn_live_evictor(live.clone(), 30, 600);
     let browser = Arc::new(denia_browser::BrowserManager::new(home.to_path_buf()));
     let browser_hub: denia_tools::BrowserHub = browser.clone();
-    let recon_hub: denia_tools::ReconHub = browser.clone();
     let system_prompt = Arc::new(crate::system_prompt_store::SystemPromptState::load(
         home,
         Some(browser_hub.clone()),
-        Some(recon_hub.clone()),
     ));
     let file_history = Arc::new(crate::file_history::FileHistoryStore::new(home));
     let runtime = crate::agent_runtime::Runtime::new(
@@ -791,7 +789,7 @@ pub async fn build_state(
         workspaces.clone(),
     )?;
     let mut tools =
-        denia_tools::default_registry_with_browser_and_recon(Some(browser_hub), Some(recon_hub));
+        denia_tools::default_registry_with_browser(Some(browser_hub));
     denia_tools::capabilities::register(&mut tools, runtime.clone());
     tools.replace(Arc::new(
         denia_tools::BashTool::new().with_runtime(runtime.clone()),

@@ -1675,7 +1675,6 @@ mod tests {
             "bash",
             "job_start",
             "spawn_agent",
-            "recon",
         ] {
             assert!(
                 !allowed.contains(&forbidden.to_string()),

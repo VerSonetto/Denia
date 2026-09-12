@@ -1,7 +1,10 @@
-//! `browser` 工具:给模型的内嵌浏览器控制面(与 ZCode Browser Use 命令面一致)。
+//! `browser` 工具:给模型的浏览器控制面(基于 **Playwright**)。
 //!
 //! 工具本体只做参数解析 + 转发到 [`BrowserHub`];截图以视觉输入回注会话
 //! (与 `read_file` 图片注入同一条路)。
+//!
+//! 底层是微软 Playwright 驱动的**真实浏览器**(headless 无窗口后台运行,
+//! 画面走控制台侧边栏),元素引用走官方 aria snapshot 的 `[ref=eN]` + `aria-ref` 引擎。
 
 use std::sync::Arc;
 
@@ -13,25 +16,22 @@ use serde::Deserialize;
 
 use crate::{Tool, ToolContext, ToolOutput, parse_args_lenient};
 
-const TOOL_DESCRIPTION: &str = r#"控制内嵌浏览器(headless Chrome),可导航、读取页面、交互操作。ZCode 同款命令面:
+const TOOL_DESCRIPTION: &str = r#"控制内嵌浏览器(Playwright 驱动 Chromium;无窗口后台运行,用户可在控制台浏览器侧栏实时看到画面)。命令面:
 - 导航:navigate{url}(仅 http/https)、back{}、forward{}、reload{}
-- 读取:getState{}(浏览器没跑时会按需启动)、snapshot{maxElements?, includeHidden?}(返回可交互元素列表,每个带 ref 编号与稳定定位器 locator/selector;后续交互用 ref 或 locator)、screenshot{fullPage?, clip?}(返回截图,图片自动注入会话)、elementInfo{x,y}
-- 交互:click{ref?|locator?|x,y, button?, doubleClick?}、fill{ref|locator, value}(整体替换输入框内容)、type{ref?|locator?, text}(追加粘贴)、press{key, ref?}、scroll{ref?|x,y, deltaX?, deltaY?}(滚动,缺省向下 360px) 、hover{ref?|x,y}、select{ref, values[]}、check{ref, checked?}、drag{fromRef,toRef}。ref 和 locator 也可直接放 ref 字段:CSS 选择器、#id、[aria-label=...]、text:文本
+- 读取:getState{}(浏览器没跑时会按需启动)、snapshot{maxElements?, includeHidden?}(返回可访问性树,每个可交互元素带 `[ref=eN]` 引用;后续交互用该引用)、screenshot{fullPage?, clip?}(返回截图,图片自动注入会话)、elementInfo{x,y}
+- 交互:click{ref?|locator?|x,y, button?, doubleClick?}、fill{ref, value}(整体替换输入框内容)、type{ref?, text}(追加输入)、press{key, ref?}、scroll{ref?|x,y, deltaX?, deltaY?}(滚动,缺省向下 360px)、hover{ref?|x,y}、select{ref, values[]}、check{ref, checked?}、drag{fromRef,toRef}
 - 等待:waitFor{selector?|text?|textGone?, timeoutMs?}
 - 弹窗:getDialog{}、handleDialog{accept, promptText?}(页面 alert/confirm/prompt 会挂起等待处理)
 - 执行:evaluate{expression}(页面 JS,返回 JSON)
-- tab:newTab{url?}、list{}(未运行时返回空 tabs,不拉起实例)、activate{tabId}、close{tabId?}(缺省 tabId = 当前 tab;未运行时幂等回报已关闭)
+- tab:newTab{url?}、list{}(未运行时返回空 tabs,不拉起实例)、activate{tabId}、close{tabId?}(缺省 tabId = 当前 tab)
 - 视口:viewportSet{width,height}、viewportReset{}
-- 网络抓包:networkList{urlFilter?, max?}(该 tab 捕获的请求:URL/方法/状态码/请求响应头/postData;环形缓冲约 200 条)、networkGetBody{requestId, bodyKind?}(bodyKind 缺省 "response" 取响应体;传 "request" 取 POST 请求体;文本直出,二进制返回 base64 标记)
-- 可视化模式:任意命令可带 visualMode: true,让用户在浏览器侧栏实时看到本次及后续操作;默认 false 不打扰用户
-启动语义:
-- 按需启动:getState 与 navigate/newTab 等交互命令会拉起浏览器
-- 查询与善后命令(list/close/activate/networkList/getDialog)浏览器没跑时原地返回,不拉起实例(收尾确认不会凭空造出 tab)
-稳定性保证:
-- 元素失效自动重定位:ref 过期会按 locator/selector/xpath/文本 回退链自动重绑,并在 1.2s 窗口内自动刷新快照重试,无需重复 snapshot
-- 统一超时:命令总耗时 30s(waitFor 可显式更长,上限 60s),CDP 单请求 30s
-- 断线自动重连:浏览器掉线自动重启实例并恢复活跃 tab(最多重试 3 次);关闭最后一个 tab 会彻底回收 Chrome 进程与资源
-典型流程:snapshot 拿 ref → 用 ref/locator 交互 → 需要视觉时 screenshot。要分析页面背后的 API 调用时先 networkList。"#;
+- 网络抓包:networkList{urlFilter?, max?}(该 tab 捕获的请求:URL/方法/资源类型/请求体,环形缓冲约 200 条)、networkGetBody{requestId, bodyKind?}(bodyKind 缺省 "response" 取响应体;传 "request" 取 POST 请求体)
+- 可视化模式:任意命令可带 visualMode: true,展开控制台浏览器侧栏让用户实时看到画面;默认不开
+
+元素引用约定:snapshot 产出的 `[ref=eN]` 直接传 `e6`(也接受 `@e6`);ref 只在最近一次 snapshot 之后有效,页面导航/重渲染后需重新 snapshot。也可以直接传 CSS 选择器或 Playwright 定位器(`#id`、`[aria-label=...]`、`text=登录`、`getByRole('button')`)。
+启动语义:交互命令会按需拉起浏览器;list/close 等查询与善后命令在浏览器没跑时原地返回。
+稳定性:元素可操作性等待(可见/可命中/稳定)由 Playwright 负责,过期引用会明确报错而不是静默点错。
+典型流程:snapshot 拿 ref → 用 ref 交互 → 需要视觉时 screenshot。分析页面接口先 networkList。"#;
 
 #[derive(Deserialize)]
 #[allow(dead_code)]
