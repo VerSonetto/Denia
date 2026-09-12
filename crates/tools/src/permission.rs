@@ -21,6 +21,9 @@ pub enum ActionClass {
     WriteInside,
     /// 文件写,落点在工作区外(自动编辑档唯一的 Ask 点)。
     WriteOutside,
+    /// 文件写,落点在项目记忆目录内的 `.md` 文件(记忆是 harness 行为,
+    /// 不是用户任务写:后台提取与手工沉淀在四档下都不打断)。
+    MemoryWrite,
     /// 有写副作用的命令(bash / job_start)。
     BashWrite,
     /// 提交计划(exit_plan)。
@@ -40,7 +43,7 @@ pub enum Decision {
 
 /// 策略矩阵:模式 × 类别 → 决策。
 pub fn decide(mode: PermissionMode, class: ActionClass) -> Decision {
-    use ActionClass::{BashWrite, PlanSubmit, Read, WriteInside, WriteOutside};
+    use ActionClass::{BashWrite, MemoryWrite, PlanSubmit, Read, WriteInside, WriteOutside};
     use Decision::{Allow, Ask, Deny};
     use PermissionMode::{AutoEdit, Full, Plan, ReadOnly};
     match (mode, class) {
@@ -51,6 +54,9 @@ pub fn decide(mode: PermissionMode, class: ActionClass) -> Decision {
         ),
         // 读类永远放行。
         (_, Read) => Allow,
+        // 记忆目录写是 harness 行为(后台提取/索引维护),不是用户任务写:
+        // 四档一律放行;敏感路径在派发处(exec)先行拒绝。
+        (_, MemoryWrite) => Allow,
         // 完全访问档全部放行。
         (Full, _) => Allow,
         // 自动编辑:工作区内写与命令自动放行;越界写文件是唯一 Ask 点。
@@ -64,6 +70,17 @@ pub fn decide(mode: PermissionMode, class: ActionClass) -> Decision {
             "当前为计划模式,禁止一切写操作与有写副作用的命令;请完成调研后调用 exit_plan 提交计划,等待用户批准后再执行。".into(),
         ),
     }
+}
+
+/// 记忆写敏感段(抄 ZCode pSe 名单口径):git 钩子、依赖树、其他 agent
+/// harness 的配置/技能目录。按路径组件匹配、不区分大小写——命中即拒,
+/// 防止记忆写被诱导落到可执行/供应链位置。
+pub fn memory_path_is_sensitive(path: &std::path::Path) -> bool {
+    const SENSITIVE: &[&str] = &[".git", "hooks", "node_modules", ".claude", ".zcode", ".agents"];
+    path.components().any(|component| {
+        let text = component.as_os_str().to_string_lossy().to_ascii_lowercase();
+        SENSITIVE.contains(&text.as_str())
+    })
 }
 
 /// 启发式判断一条 bash 命令是否明显包含文件写副作用。
@@ -115,6 +132,8 @@ mod tests {
         // 读类全放行。
         for mode in [ReadOnly, AutoEdit, Plan, Full] {
             assert_eq!(decide(mode, Read), Decision::Allow);
+            // 记忆写是 harness 行为,四档一律放行(敏感段在派发处拒)。
+            assert_eq!(decide(mode, MemoryWrite), Decision::Allow);
         }
         // 完全访问档全放行。
         for class in [Read, WriteInside, WriteOutside, BashWrite] {
@@ -134,6 +153,24 @@ mod tests {
         for mode in [ReadOnly, AutoEdit, Full] {
             assert!(matches!(decide(mode, PlanSubmit), Decision::Deny(_)));
         }
+    }
+
+    #[test]
+    fn memory_sensitive_paths_match_component_wise() {
+        assert!(memory_path_is_sensitive(std::path::Path::new(
+            "C:\\repo\\.git\\hooks\\post-commit"
+        )));
+        assert!(memory_path_is_sensitive(std::path::Path::new("/a/node_modules/x/y.md")));
+        assert!(memory_path_is_sensitive(std::path::Path::new(
+            "/home/u/.claude/skills/s.md"
+        )));
+        assert!(memory_path_is_sensitive(std::path::Path::new("/repo/Hooks/x.md")), "大小写折叠");
+        // 记忆目录本体不命中( home 目录名 .denia 不在名单)。
+        assert!(!memory_path_is_sensitive(std::path::Path::new(
+            "/home/u/.denia/memories/projects/x/memory/a.md"
+        )));
+        // 子串不算命中。
+        assert!(!memory_path_is_sensitive(std::path::Path::new("/ws/gitbook/notes.md")));
     }
 
     #[test]

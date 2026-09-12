@@ -46,8 +46,8 @@ pub use plan::{ExitPlanArgs, ExitPlanTool};
 pub use prompt::{
     default_shipped, default_shipped_with_browser, default_shipped_with_browser_and_ask,
     register_ask_prompt_section, register_capability_prompt_sections, register_mcp_prompt_section,
-    register_shipped_prompt, shipped_with_persona, shipped_with_persona_and_browser,
-    shipped_with_persona_and_browser_and_ask,
+    register_memory_prompt_section, register_shipped_prompt, shipped_with_persona,
+    shipped_with_persona_and_browser, shipped_with_persona_and_browser_and_ask,
 };
 pub use shell_session::{Captured, PersistentShell, ShellHub};
 pub use todo::TodoWriteTool;

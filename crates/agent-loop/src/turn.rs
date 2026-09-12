@@ -431,6 +431,9 @@ pub(crate) fn section_tools(section: &str) -> Option<&'static [&'static str]> {
         "tool:ask" => &["ask"],
         "tool:goal" => &["get_goal", "update_goal"],
         "tool:plan" => &["exit_plan"],
+        // 记忆沉淀复用 write_file/edit;映射让提取子代理(白名单含这两个
+        // 写工具)能看到纪律段,只读子代理看不到。
+        "tool:memory" => &["write_file", "edit"],
         _ => return None,
     })
 }
@@ -503,6 +506,19 @@ fn assemble_step(
                 Some(tools) => tools.iter().any(|name| !mode_denies(name)),
                 None => true,
             });
+    }
+    // 项目记忆:纪律段仅在记忆启用时注入(runtime.memory_root_for 与
+    // 权限层、注入通道同源);未注册(如无 runtime 部署)自然不存在。
+    let session_cwd = std::path::PathBuf::from(state.session.header().cwd.clone());
+    if assembly.sections.iter().any(|section| section.name == "tool:memory")
+        && !driver
+            .runtime
+            .as_ref()
+            .is_some_and(|runtime| runtime.memory_root_for(&session_cwd).is_some())
+    {
+        assembly
+            .sections
+            .retain(|section| section.name != "tool:memory");
     }
     let tools_tokens = serde_json::to_string(&assembly.tools)
         .map(|json| denia_token_meter::estimate_tools_tokens(&json))

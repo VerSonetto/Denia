@@ -30,6 +30,11 @@ pub(crate) async fn execute_calls(
     touched: &mut Vec<PathBuf>,
 ) -> Result<(), denia_core::error::LlmFailure> {
     let cwd = state.cwd();
+    // 项目记忆目录一次解析(未启用为 None):写类分类与子代理写收敛共用。
+    let memory_root = driver
+        .runtime
+        .as_ref()
+        .and_then(|runtime| runtime.memory_root_for(&cwd));
     let max_parallel = driver.parallel.max_parallel_tool_calls.max(1);
     let mut in_flight: futures::stream::FuturesOrdered<
         futures::future::BoxFuture<'static, (usize, ToolOutput)>,
@@ -46,7 +51,7 @@ pub(crate) async fn execute_calls(
                 next += 1;
                 continue;
             }
-            match decide_for(state, &cwd, call) {
+            match decide_for(state, &cwd, call, memory_root.as_deref()) {
                 Decision::Allow => {
                     append_call(state, step, call)?;
                     let index = next;
@@ -173,10 +178,35 @@ fn reject_before_dispatch(
 }
 
 /// 策略判定:当前会话模式 × 调用类别 → Allow/Ask/Deny。
-fn decide_for(state: &TurnState, cwd: &Path, call: &ToolCallRef) -> Decision {
+///
+/// `memory_root` 是本会话工作区对应的项目记忆目录(None = 记忆未启用):
+/// 命中的 `.md` 写分类为 MemoryWrite(四档放行,敏感段拒绝);子代理的
+/// 其余写一律拒绝(提取子代理不能被诱导写记忆目录之外,子代理也不弹审批)。
+fn decide_for(state: &TurnState, cwd: &Path, call: &ToolCallRef, memory_root: Option<&Path>) -> Decision {
     let mode = state.permission_mode();
     let confined = !mode.is_full() && state.session.header().sandbox;
-    let class = classify_call(cwd, call, confined);
+    let class = classify_call(cwd, call, confined, memory_root);
+    let is_memory_write = class == ActionClass::MemoryWrite;
+    if is_memory_write {
+        // 敏感段(git 钩子/依赖树/其他 harness 的技能目录)直接拒绝,
+        // 即使落点算在记忆目录内(防符号链接与名字伪装的兜底)。
+        if let Some(path) = crate::workspace_instructions::touched_path(cwd, &call.arguments)
+            && denia_tools::permission::memory_path_is_sensitive(&path)
+        {
+            return Decision::Deny(format!(
+                "路径 {} 命中敏感目录(git 钩子/依赖/技能等),禁止写入。",
+                path.display()
+            ));
+        }
+        return denia_tools::permission::decide(mode, class);
+    }
+    if state.session.header().subagent.is_some()
+        && matches!(call.name.as_str(), "write_file" | "edit")
+    {
+        return Decision::Deny(
+            "子代理的文件写仅限记忆目录内的 .md 文件(记忆提取);其余写操作留在父代理。".into(),
+        );
+    }
     denia_tools::permission::decide(mode, class)
 }
 
@@ -184,11 +214,18 @@ fn decide_for(state: &TurnState, cwd: &Path, call: &ToolCallRef) -> Decision {
 ///
 /// 分类宽容:参数取不到时按读类/区内放行,让工具自身的参数错误兜底,
 /// 避免分类失败伪装成权限问题。
-fn classify_call(cwd: &Path, call: &ToolCallRef, confined: bool) -> ActionClass {
+fn classify_call(cwd: &Path, call: &ToolCallRef, confined: bool, memory_root: Option<&Path>) -> ActionClass {
     match call.name.as_str() {
         "exit_plan" => ActionClass::PlanSubmit,
         "write_file" | "edit" => match crate::workspace_instructions::touched_path(cwd, &call.arguments)
         {
+            // 记忆目录内的 .md 写:独立类别(harness 行为,四档放行)。
+            Some(path)
+                if memory_root.is_some_and(|root| path.starts_with(root))
+                    && path.extension().is_some_and(|ext| ext == "md") =>
+            {
+                ActionClass::MemoryWrite
+            }
             Some(path) if path.starts_with(cwd) => ActionClass::WriteInside,
             // 真越界(confined 时工具本就会拒绝 `..` 逃逸,按区内处理)。
             Some(_) if !confined => ActionClass::WriteOutside,

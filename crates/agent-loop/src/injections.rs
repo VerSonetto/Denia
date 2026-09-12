@@ -1,8 +1,9 @@
 //! 每 step 的背景注入管线(抄 dsh agent-instructions / tool-skill 语义)。
 //!
-//! 三条独立幂等的注入通道(文本即身份,通道字段 `channel` 优先、旧日志
-//! 文本前缀 fallback):工作区指令(AGENTS.md)、能力上下文、技能目录。
-//! 刷新失败不阻断轮次(记日志跳过);`runtime.drain` 失败视为硬错误。
+//! 四条独立幂等的注入通道(文本即身份,通道字段 `channel` 优先、旧日志
+//! 文本前缀 fallback):工作区指令(AGENTS.md)、能力上下文、技能目录、
+//! 项目记忆索引。刷新失败不阻断轮次(记日志跳过);`runtime.drain` 失败
+//! 视为硬错误。
 
 use std::path::PathBuf;
 
@@ -17,10 +18,13 @@ use crate::{SessionDriver, TurnState, append};
 /// 目标状态注入通道名;goal 模式唯一的模型侧目标消息通道。
 pub const GOAL_CHANNEL: &str = "goal";
 
+/// 项目记忆索引注入通道名(MEMORY.md 全文,记忆启用时主会话可见)。
+pub const MEMORY_CHANNEL: &str = "project-memory";
+
 /// 目标被清除后的终局通知(一次性;此后通道内容与基准一致,不再重发)。
 const GOAL_CLEARED_TEXT: &str = "[denia 目标] 当前会话目标已清除,无需再关注目标。";
 
-/// 三条注入通道的本轮基准:日志中最后一条本通道注入文本,内容未变不重发。
+/// 注入通道的本轮基准:日志中最后一条本通道注入文本,内容未变不重发。
 pub(crate) struct InjectionBaselines {
     /// 能力上下文(`[denia 能力上下文]` 前缀)。
     pub capability_context: Option<String>,
@@ -28,12 +32,14 @@ pub(crate) struct InjectionBaselines {
     pub workspace_baseline: Option<String>,
     /// 技能目录(`<system-reminder>\n技能目录:` 前缀)。
     pub skill_catalog: Option<String>,
+    /// 项目记忆索引(`<system-reminder>\n项目记忆:` 前缀)。
+    pub project_memory: Option<String>,
     /// 会话目标状态块(`[denia 目标]` 前缀)。
     pub goal: Option<String>,
 }
 
 impl InjectionBaselines {
-    /// 从日志恢复三条通道的基准(通道字段优先,旧日志走前缀判断)。
+    /// 从日志恢复注入通道的基准(通道字段优先,旧日志走前缀判断)。
     pub(crate) fn restore(state: &TurnState) -> Self {
         Self {
             capability_context: last_injected_channel(&state.session, "capability").or_else(
@@ -50,6 +56,7 @@ impl InjectionBaselines {
             ),
             workspace_baseline: restore_injected_text(&state.session.events(), WORKSPACE_PREFIX),
             skill_catalog: restore_injected_text(&state.session.events(), SKILL_CATALOG_PREFIX),
+            project_memory: last_injected_channel(&state.session, MEMORY_CHANNEL),
             goal: last_injected_channel(&state.session, GOAL_CHANNEL),
         }
     }
@@ -166,7 +173,37 @@ pub(crate) async fn refresh_background_injections(
         }
     }
 
-    // ④ 会话目标:状态块仅对 goal 工具可见的会话注入(子代理白名单同
+    // ④ 项目记忆索引:仅主代理会话注入(子代理不烧这份 token,提取
+    // 子代理的素材由任务提示词自带);内容不变不重发,后台提取更新索引后
+    // 下一个 step 自动带出最新版。
+    let memory_visible = session.header().subagent.is_none();
+    if memory_visible {
+        match runtime.project_memory_index(&cwd).await {
+            Ok(Some(text)) => {
+                if baselines.project_memory.as_deref() != Some(&text) {
+                    append(
+                        session,
+                        &state.emit,
+                        SessionEvent::UserMessage {
+                            text: text.clone(),
+                            injected: true,
+                            channel: Some(MEMORY_CHANNEL.into()),
+                            images: Vec::new(),
+                        },
+                    )?;
+                    baselines.project_memory = Some(text);
+                }
+            }
+            Ok(None) => {}
+            Err(error) => tracing::warn!(
+                session_id = session.id(),
+                error = %error,
+                "project memory index refresh failed"
+            ),
+        }
+    }
+
+    // ⑤ 会话目标:状态块仅对 goal 工具可见的会话注入(子代理白名单同
     // 装配过滤)。内容不变不重发——turn 运行中用户编辑目标(steering)或
     // 状态转换后,下一 step 自动带出新状态;目标被清除后发一次终局通知。
     let goal_tool_visible = session

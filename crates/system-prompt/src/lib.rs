@@ -63,6 +63,9 @@ pub enum SectionOrder {
     /// MCP 外部工具(`mcp__<server>__<tool>`)的纪律段;仅在至少有一个
     /// MCP 服务器已连接时注入。
     ToolMcp,
+    /// 项目记忆(记忆目录写沉淀 + MEMORY.md 索引维护)的纪律段;仅在
+    /// 项目记忆启用(runtime.memoryEnabled)时注入。
+    ToolMemory,
 }
 
 impl SectionOrder {
@@ -87,6 +90,7 @@ impl SectionOrder {
             Self::ToolGoal => 1950,
             Self::ToolPlan => 2050,
             Self::ToolMcp => 2100,
+            Self::ToolMemory => 2150,
         }
     }
 }

@@ -47,6 +47,25 @@ pub trait AgentRuntime: Send + Sync {
         let _ = (cwd, touched, previous);
         Ok(None)
     }
+
+    /// 当前工作区的项目记忆目录;None = 项目记忆未启用。
+    /// 权限层(记忆写放行)、系统提示纪律段的进退、索引注入通道共用这
+    /// 一个判定源,保证读写两端与提示文案同步开停。
+    fn memory_root_for(&self, cwd: &std::path::Path) -> Option<std::path::PathBuf> {
+        let _ = cwd;
+        None
+    }
+
+    /// 项目记忆索引(MEMORY.md)注入文本;None = 未启用或无索引。
+    /// 配置门限、memory_root 计算、行数/字节预算截断都在实现方完成;
+    /// 幂等去重由驱动器按通道基准承担(内容不变不重发)。
+    async fn project_memory_index(
+        &self,
+        cwd: &std::path::Path,
+    ) -> Result<Option<String>, String> {
+        let _ = cwd;
+        Ok(None)
+    }
 }
 
 pub fn schemas() -> Vec<ToolSchema> {

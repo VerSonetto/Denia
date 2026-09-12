@@ -285,6 +285,28 @@ pub fn register_goal_prompt_section(prompt: &mut SystemPrompt) -> Result<(), Str
     Ok(())
 }
 
+/// 项目记忆(记忆目录写沉淀)的纪律段。
+///
+/// 与记忆能力的装配严格同步:仅在 server 部署注册(system_prompt_store
+/// build_prompt),运行中的进退(记忆关闭不注入)由 agent-loop 的
+/// assemble 阶段按 runtime.memory_root_for 过滤。记忆目录的具体路径不写
+/// 死在段落里——它随会话工作区变化,由「项目记忆」注入消息携带。
+/// 纪律与工具 schema 分工不重叠:write_file/edit 的用法各自段落已讲,
+/// 本段写"什么值得沉淀、怎么写、怎么维护索引"的行为准则。
+pub fn register_memory_prompt_section(prompt: &mut SystemPrompt) -> Result<(), String> {
+    prompt.section(PromptSection {
+        name: "tool:memory".to_string(),
+        order: SectionOrder::ToolMemory.value(),
+        text: PromptText::Static(
+            "项目记忆:本项目有一个跨会话的记忆目录(路径随「项目记忆」注入消息给出,索引为目录下的 MEMORY.md)。值得跨会话长期记住的知识——用户偏好、项目决策、反馈纠正、外部资源指针——用 write_file/edit 沉淀进记忆目录:一事一文件,frontmatter 必须含 name(kebab-case 短名)、description(一句话)、metadata.type(user 用户画像 | feedback 反馈纠正 | project 项目决策与状态 | reference 外部资源指针);正文精炼直陈,feedback 类补 **Why:** 与 **How to apply:**。写完同步更新 MEMORY.md 索引(一行一条,格式:- [标题](文件名.md) — 一句话钩子);改已有记忆前先 read_file 读取原文,就地更新而不是新建重复文件。禁止保存可从仓库本身推导的内容(代码结构、git 历史、一次性任务状态);向用户推荐某条记忆前先重读原文验证,过时就修正,不要凭索引行推断内容。"
+                .to_string(),
+        ),
+        complete: false,
+        audience: SectionAudience::Model,
+    })?;
+    Ok(())
+}
+
 /// Shipped registry pair: prompt assembly plus executable tools.
 pub fn default_shipped() -> (SystemPrompt, ToolRegistry) {
     let tools = crate::default_registry();
@@ -694,6 +716,62 @@ mod tests {
         assert!(registry.get("update_goal").is_some());
         assert!(assembly.tools.iter().any(|tool| tool.name == "get_goal"));
         assert!(assembly.tools.iter().any(|tool| tool.name == "update_goal"));
+    }
+
+    #[test]
+    fn memory_section_follows_registration_and_audience_rules() {
+        // tool:memory 纪律段:注册后存在、audience 为 Model、不进用户可见
+        // 副本;文案必须给出一事一文件格式、四类型语义、索引维护与验证义务。
+        let mut prompt = denia_system_prompt::SystemPrompt::new(
+            denia_system_prompt::SystemPromptConfig::default(),
+        );
+        prompt
+            .variable("cwd", |context| context.cwd.clone())
+            .unwrap();
+        register_memory_prompt_section(&mut prompt).unwrap();
+        let assembly = prompt
+            .assemble(&AssembleContext {
+                cwd: Some("/tmp/ws".into()),
+                ..Default::default()
+            })
+            .unwrap();
+        let section = assembly
+            .sections
+            .iter()
+            .find(|section| section.name == "tool:memory")
+            .expect("tool:memory section registered");
+        assert_eq!(section.audience, SectionAudience::Model);
+        for needle in [
+            "一事一文件",
+            "MEMORY.md",
+            "metadata.type",
+            "feedback",
+            "先 read_file 读取原文",
+            "禁止保存可从仓库本身推导的内容",
+        ] {
+            assert!(section.text.contains(needle), "tool:memory 段缺少 {needle}");
+        }
+        let user_body = render_prompt_for_user(&assembly);
+        assert!(!user_body.contains("一事一文件"), "tool:memory 段泄进了用户可见副本");
+    }
+
+    #[test]
+    fn default_shipped_has_no_memory_section() {
+        // 无 runtime 的部署不注册记忆纪律段:模型不看到不存在的记忆能力。
+        let (prompt, _registry) = default_shipped();
+        let assembly = prompt
+            .assemble(&AssembleContext {
+                cwd: Some("/tmp/ws".into()),
+                ..Default::default()
+            })
+            .unwrap();
+        assert!(
+            !assembly
+                .sections
+                .iter()
+                .any(|section| section.name == "tool:memory"),
+            "tool:memory must not be registered in the bare shipped prompt"
+        );
     }
 
     #[test]

@@ -152,5 +152,9 @@ fn build_prompt(text: Option<String>, browser_hub: Option<denia_tools::BrowserHu
     // 归位系统提示词(原先是 [denia 能力上下文] 注入消息里的静态内容)。
     denia_tools::register_capability_prompt_sections(&mut prompt)
         .expect("capability prompt sections are valid");
+    // 项目记忆纪律段同批注册;运行中的进退(记忆关闭不注入)由
+    // agent-loop 的 assemble 阶段按 runtime.memory_root_for 过滤。
+    denia_tools::register_memory_prompt_section(&mut prompt)
+        .expect("memory prompt section is valid");
     prompt
 }
