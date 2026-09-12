@@ -6142,438 +6142,64 @@ button.btn.form-action {
   box-shadow: var(--shadow-lv2);
 }
 
-/* ---- JS 逆向工作台(recon) ---- */
 
-.recon-panel {
-  display: flex;
-  flex-direction: column;
-  border-top: 1px solid var(--border-l1);
-  background: var(--bg-layer-1);
-  max-height: 46vh;
-}
 
-.recon-header {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 6px 12px;
-  border-bottom: 1px solid var(--border-l1);
-}
 
-.recon-toggle {
-  border: none;
-  background: transparent;
-  color: var(--label-secondary);
-  font-size: 12px;
-  cursor: pointer;
-  padding: 4px 8px;
-  border-radius: var(--r-sm);
-}
 
-.recon-toggle:hover {
-  background: var(--hover-fill);
-}
 
-.recon-banner {
-  flex: 1;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-size: 12px;
-  color: var(--warn-fg);
-  }
 
-.recon-clear {
-  border: 1px solid var(--border-l1);
-  background: transparent;
-  color: var(--label-tertiary);
-  font-size: 11px;
-  border-radius: var(--r-sm);
-  padding: 3px 10px;
-  cursor: pointer;
-}
 
-.recon-clear:hover {
-  background: var(--hover-fill);
-}
 
-.recon-error {
-  padding: 6px 12px;
-  font-size: 12px;
-  color: var(--error-fg);
-  background: var(--bg-layer-2);
-  border-bottom: 1px solid var(--border-l1);
-}
 
-.recon-body {
-  overflow-y: auto;
-  padding: 10px 12px;
-  display: flex;
-  flex-direction: column;
-  gap: 14px;
-}
 
-.recon-section {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
 
-.recon-section-title {
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--label-primary);
-}
 
-.recon-bp-title {
-  margin-top: 6px;
-}
 
-.recon-muted {
-  font-size: 11px;
-  color: var(--label-tertiary);
-}
 
-.recon-search-row {
-  display: flex;
-  gap: 6px;
-  align-items: center;
-  flex-wrap: wrap;
-}
 
-.recon-search-row input {
-  flex: 1;
-  min-width: 140px;
-  padding: 5px 10px;
-  border: 1px solid var(--border-l1);
-  border-radius: var(--r-sm);
-  background: var(--input-major);
-  color: var(--label-primary);
-  font-size: 12px;
-  outline: none;
-}
 
-.recon-search-row input:focus {
-  border-color: var(--border-l3);
-}
 
-.recon-filter-input {
-  flex: 0 0 130px !important;
-  min-width: 100px !important;
-}
 
-.recon-check {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  font-size: 12px;
-  color: var(--label-secondary);
-  cursor: pointer;
-}
 
-.recon-check input {
-  accent-color: var(--accent);
-}
 
-.recon-search-row button,
-.recon-req-actions button,
-.recon-eval-row button {
-  padding: 5px 12px;
-  border: 1px solid var(--border-l2);
-  border-radius: var(--r-sm);
-  background: var(--bg-layer-2);
-  color: var(--label-primary);
-  font-size: 12px;
-  cursor: pointer;
-  white-space: nowrap;
-}
 
-.recon-search-row button:hover,
-.recon-req-actions button:hover,
-.recon-eval-row button:hover {
-  background: var(--hover-fill);
-}
 
-.recon-primary {
-  border-color: var(--border-l3) !important;
-  font-weight: 600;
-}
 
-.recon-matches {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  max-height: 220px;
-  overflow-y: auto;
-}
 
-.recon-match {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 4px 8px;
-  border: 1px solid var(--border-l1);
-  border-radius: var(--r-sm);
-  font-size: 12px;
-}
 
-.recon-match-meta {
-  flex: 0 0 auto;
-  color: var(--label-tertiary);
-  font-size: 11px;
-}
 
-.recon-match-code {
-  flex: 1;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  color: var(--label-primary);
-  font-family: var(--font-mono, monospace);
-}
 
-.recon-mini {
-  flex: 0 0 auto;
-  border: 1px solid var(--border-l1);
-  background: transparent;
-  color: var(--label-secondary);
-  font-size: 11px;
-  border-radius: var(--r-sm);
-  padding: 2px 8px;
-  cursor: pointer;
-}
 
-.recon-mini:hover {
-  background: var(--hover-fill);
-}
 
-.recon-bp-list {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  max-height: 120px;
-  overflow-y: auto;
-}
 
-.recon-bp {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  padding: 3px 8px;
-  border: 1px dashed var(--border-l2);
-  border-radius: var(--r-sm);
-  font-size: 12px;
-  color: var(--label-secondary);
-}
 
-.recon-paused {
-  border: 1px solid var(--border-l2);
-  border-radius: var(--r-md);
-  padding: 8px 10px;
-  background: var(--bg-layer-2);
-}
 
-.recon-frames {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px;
-}
 
-.recon-frame {
-  padding: 3px 10px;
-  border: 1px solid var(--border-l1);
-  border-radius: var(--r-pill);
-  background: transparent;
-  color: var(--label-secondary);
-  font-size: 11px;
-  cursor: pointer;
-  max-width: 260px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
 
-.recon-frame.active {
-  background: var(--active-fill);
-  border-color: var(--border-l3);
-  color: var(--label-primary);
-}
 
-.recon-eval-row {
-  display: flex;
-  gap: 6px;
-  align-items: center;
-  flex-wrap: wrap;
-}
 
-.recon-eval-row input {
-  flex: 1;
-  min-width: 160px;
-  padding: 5px 10px;
-  border: 1px solid var(--border-l1);
-  border-radius: var(--r-sm);
-  background: var(--input-major);
-  color: var(--label-primary);
-  font-size: 12px;
-  outline: none;
-}
 
-.recon-eval-result {
-  margin: 0;
-  padding: 6px 10px;
-  border: 1px solid var(--border-l1);
-  border-radius: var(--r-sm);
-  background: var(--bg-base);
-  font-size: 11px;
-  white-space: pre-wrap;
-  word-break: break-all;
-  max-height: 180px;
-  overflow-y: auto;
-  color: var(--label-primary);
-}
 
-.recon-req-list {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  max-height: 240px;
-  overflow-y: auto;
-}
 
-.recon-req-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  width: 100%;
-  padding: 3px 8px;
-  border: none;
-  background: transparent;
-  color: var(--label-primary);
-  font-size: 12px;
-  cursor: pointer;
-  text-align: left;
-  border-radius: var(--r-sm);
-}
 
-.recon-req-row:hover {
-  background: var(--hover-fill);
-}
 
-.recon-method {
-  flex: 0 0 40px;
-  font-size: 10px;
-  font-weight: 700;
-  text-align: center;
-  padding: 1px 4px;
-  border-radius: var(--r-xs);
-  background: var(--bg-layer-2);
-  color: var(--label-tertiary);
-}
 
-.recon-method.get {
-  color: var(--method-get);
-}
 
-.recon-method.post,
-.recon-method.put,
-.recon-method.patch {
-  color: var(--method-post);
-}
 
-.recon-method.ws {
-  color: var(--method-ws);
-}
 
-.recon-status {
-  flex: 0 0 34px;
-  font-size: 11px;
-}
 
-.recon-url {
-  flex: 1;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
 
-.recon-bad {
-  color: var(--error-fg);
-}
 
-.recon-redirect {
-  color: var(--warn-fg);
-}
 
-.recon-req-detail {
-  padding: 6px 8px 8px 12px;
-  border-left: 2px solid var(--border-l2);
-  margin-left: 12px;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
 
-.recon-req-detail pre {
-  margin: 0;
-  font-size: 11px;
-  white-space: pre-wrap;
-  word-break: break-all;
-  color: var(--label-secondary);
-  max-height: 140px;
-  overflow-y: auto;
-}
 
-.recon-req-actions {
-  display: flex;
-  gap: 6px;
-}
 
-.recon-body {
-  border: 1px solid var(--border-l1);
-  border-radius: var(--r-sm);
-  padding: 6px 8px;
-  background: var(--bg-base);
-}
 
-.recon-console {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  max-height: 160px;
-  overflow-y: auto;
-  font-size: 12px;
-}
 
-.recon-console-line {
-  display: flex;
-  gap: 8px;
-  padding: 2px 6px;
-  border-radius: var(--r-xs);
-}
 
-.recon-console-level {
-  flex: 0 0 44px;
-  font-size: 10px;
-  font-weight: 700;
-  opacity: 0.7;
-}
 
-.recon-console-text {
-  flex: 1;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  color: var(--label-primary);
-}
 
-.recon-level-error {
-  color: var(--error-fg);
-}
 
-.recon-level-warning {
-  color: var(--warn-fg);
-}
 
 /* ---------- 长会话性能:有限窗口 + 浏览器跳过屏外渲染 ---------- */
 

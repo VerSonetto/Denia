@@ -6,7 +6,6 @@ import {
 } from '../browserApi'
 import type { BrowserState, BrowserOutcome, BrowserEventFrame } from '../types'
 import { t } from '../i18n'
-import ReconPanel from './ReconPanel'
 
 /**
  * 内嵌浏览器面板:实时画面(screencast 帧)+ tab 栏 + 地址栏。
@@ -343,6 +342,23 @@ export default function BrowserPanel() {
             onClick={(event) => void clickPage(event)}
             onWheel={(event) => void wheelPage(event)}
           />
+        ) : state?.running ? (
+          // 浏览器在跑但画面还没到(开流后首帧在路上/偶发丢帧):
+          // 给出连接中状态与手动重连,而不是误导性的"启动浏览器"按钮。
+          <div className="browser-empty">
+            <span className="empty-hint">{t('browserFrameConnecting')}</span>
+            <button
+              type="button"
+              onClick={() =>
+                void browserCommand({
+                  method: 'startScreencast',
+                  tabId: activeTabRef.current ?? undefined,
+                }).catch(() => {})
+              }
+            >
+              {t('browserFrameRetry')}
+            </button>
+          </div>
         ) : (
           <div className="browser-empty">
             <button type="button" onClick={() => void startBrowser()}>
@@ -352,7 +368,6 @@ export default function BrowserPanel() {
         )}
         {notice && <div className="browser-notice">{notice}</div>}
       </div>
-      {state?.running && state.activeTabId && <ReconPanel tabId={state.activeTabId} />}
     </div>
   )
 }
