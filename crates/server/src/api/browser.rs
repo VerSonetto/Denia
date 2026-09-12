@@ -1,7 +1,7 @@
 //! 内嵌浏览器 API:命令执行 + 状态 + screencast SSE。
 //!
 //! 面板与 `browser` 工具共用 [`AppState::browser`] 同一实例;命令面与
-//! ZCode Browser Use 一致(navigate/snapshot/click/…/viewportReset)。
+//! 浏览器工具一致(navigate/snapshot/click/…/viewportReset)。
 
 use std::convert::Infallible;
 use std::sync::Arc;

@@ -174,26 +174,43 @@ pub(crate) async fn run_turn_inner(
             crate::request::RequestOutcome::TurnEnded(reason) => return Ok(reason),
             crate::request::RequestOutcome::RestartStep => continue 'step_loop,
             crate::request::RequestOutcome::Step { blocks, finish } => {
-                // —— 死循环检测:三次以上(第 4 次)出现完全相同的内容 → 强制中断 ——
-                if let Some(repeats) = state.loop_guard.observe(&blocks) {
-                    append(
-                        &state.session,
-                        &state.emit,
-                        SessionEvent::StepEnd {
-                            turn: state.turn,
-                            step,
-                        },
-                    )?;
-                    let reason = TurnEndReason::LoopDetected { repeats };
-                    append(
-                        &state.session,
-                        &state.emit,
-                        SessionEvent::TurnEnd {
-                            turn: state.turn,
-                            reason: reason.clone(),
-                        },
-                    )?;
-                    return Ok(reason);
+                // —— 死循环检测:两级处置(先提醒、后中断)——
+                // 连续第 3 次相同 → 注入提醒让模型自纠(工作继续);
+                // 连续第 4 次相同 → 强制中断本轮(提醒无效时的兜底)。
+                match state.loop_guard.observe(&blocks) {
+                    crate::loop_guard::LoopVerdict::Continue => {}
+                    crate::loop_guard::LoopVerdict::Warn { .. } => {
+                        append(
+                            &state.session,
+                            &state.emit,
+                            SessionEvent::UserMessage {
+                                text: crate::loop_guard::LOOP_WARN_TEXT.to_string(),
+                                injected: true,
+                                channel: Some("loop-warning".into()),
+                                images: Vec::new(),
+                            },
+                        )?;
+                    }
+                    crate::loop_guard::LoopVerdict::Block { repeats } => {
+                        append(
+                            &state.session,
+                            &state.emit,
+                            SessionEvent::StepEnd {
+                                turn: state.turn,
+                                step,
+                            },
+                        )?;
+                        let reason = TurnEndReason::LoopDetected { repeats };
+                        append(
+                            &state.session,
+                            &state.emit,
+                            SessionEvent::TurnEnd {
+                                turn: state.turn,
+                                reason: reason.clone(),
+                            },
+                        )?;
+                        return Ok(reason);
+                    }
                 }
 
                 let mut calls: Vec<ToolCallRef> = blocks
@@ -284,6 +301,10 @@ pub(crate) async fn run_turn_inner(
                 // —— 工具并行执行(滚动池;升权串行;结果兜底截断)——
                 crate::exec::execute_calls(driver, state, step, &calls, &mut assembly.touched)
                     .await?;
+                // 计一次工具轮次:rapid-refill 断路器靠它判断"压缩后多久又满"。
+                driver
+                    .tool_turns_since_compact
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 // 本 step 闭合(工具与结果全部落盘后)。
                 append(
                     &state.session,

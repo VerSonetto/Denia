@@ -36,6 +36,10 @@ pub struct ConsoleSettings {
     /// 全部字段带默认值;见 `ConsoleCompactionSettings`。
     #[serde(default)]
     pub compaction: ConsoleCompactionSettings,
+    /// 工具结果微压缩:摘要之前的廉价清理。
+    /// 全部字段带默认值;见 `ConsoleMicrocompactSettings`。
+    #[serde(default)]
+    pub microcompact: ConsoleMicrocompactSettings,
     /// 工具并行执行上限(学 codex `ToolCallRuntime` + dsh `maxParallelToolCalls`)。
     /// 一次 step 内模型返回的多个工具调用并发执行,受此上限约束。
     #[serde(default = "default_max_parallel_tool_calls")]
@@ -93,6 +97,37 @@ impl Default for ConsoleCompactionSettings {
     }
 }
 
+/// `console.microcompact` 段(工具结果微压缩配置)。
+///
+/// 这是 LLM 摘要之前的廉价清理层:把已经用过的旧工具结果内容替换为
+/// 占位符,不调模型、不重写历史。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct ConsoleMicrocompactSettings {
+    /// 微压缩总开关。
+    pub microcompact_enabled: bool,
+    /// 保留最近多少组工具结果(一组 = 一次 assistant 消息发起的全部调用)。
+    pub microcompact_keep_recent_groups: usize,
+    /// 空闲触发阈值(分钟):模型闲置超过这么久,下次进入时清理一次。
+    pub microcompact_idle_threshold_minutes: u64,
+    /// 最小节省 token 数:省不到这么多就不动手(保护 provider 前缀缓存)。
+    pub microcompact_min_savings: u64,
+    /// 可清理的工具白名单。
+    pub microcompact_tools: Vec<String>,
+}
+
+impl Default for ConsoleMicrocompactSettings {
+    fn default() -> Self {
+        Self {
+            microcompact_enabled: true,
+            microcompact_keep_recent_groups: 5,
+            microcompact_idle_threshold_minutes: 60,
+            microcompact_min_savings: 256,
+            microcompact_tools: denia_agent_loop::microcompact::default_compactable_tools(),
+        }
+    }
+}
+
 /// 把 console compaction 配置翻译成 driver 的 [`CompactionSettings`]。
 pub fn compaction_settings_from(console: &ConsoleSettings) -> denia_agent_loop::CompactionSettings {
     let c = &console.compaction;
@@ -104,6 +139,21 @@ pub fn compaction_settings_from(console: &ConsoleSettings) -> denia_agent_loop::
         min_text_messages: c.compact_min_text_messages,
         summary_max_tokens: c.compact_summary_max_tokens,
         max_attempts: c.compact_max_attempts,
+    }
+}
+
+/// 把 console microcompact 配置翻译成 driver 的 [`MicrocompactSettings`]。
+pub fn microcompact_settings_from(
+    console: &ConsoleSettings,
+) -> denia_agent_loop::microcompact::MicrocompactSettings {
+    let c = &console.microcompact;
+    denia_agent_loop::microcompact::MicrocompactSettings {
+        enabled: c.microcompact_enabled,
+        keep_recent_groups: c.microcompact_keep_recent_groups,
+        idle_threshold_minutes: c.microcompact_idle_threshold_minutes,
+        min_savings: c.microcompact_min_savings,
+        compactable_tools: c.microcompact_tools.clone(),
+        clear_error_results: false,
     }
 }
 
@@ -175,6 +225,7 @@ pub fn console_settings(settings: &SettingsStore) -> ConsoleSettings {
             theme: "system".to_string(),
             locale: "zh".to_string(),
             compaction: ConsoleCompactionSettings::default(),
+            microcompact: ConsoleMicrocompactSettings::default(),
             max_parallel_tool_calls: 10,
             default_permission_mode: default_permission_mode(),
         })
@@ -806,6 +857,7 @@ pub async fn build_state(
             .with_ask(ask)
             .with_runtime(runtime.clone())
             .with_compaction(compaction_settings_from(&console))
+            .with_microcompact(microcompact_settings_from(&console))
             .with_parallel(denia_agent_loop::ParallelSettings {
                 max_parallel_tool_calls: console.max_parallel_tool_calls,
             }),

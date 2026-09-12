@@ -3,7 +3,7 @@
 //! 与旧实现(自建 headless Chrome + 自写 CDP 客户端)的区别:
 //! - **进程与协议由 Playwright 负责**:driver 自带 Node,浏览器由其拉起与守护;
 //! - **元素引用用 Playwright 官方 aria snapshot**:AI 模式产出 `[ref=eN]`,
-//!   定位走 `aria-ref=eN` 引擎,不再往页面全局注入 `__zcodeRefs`;
+//!   定位走 `aria-ref=eN` 引擎,不再往页面全局注入自定义 ref 映射;
 //! - **tab 身份用自维护 id**:Playwright 的 Page 不暴露 guid,这里分配稳定
 //!   tabId(`t1`、`t2`…),映射到 `Page` 句柄。
 

@@ -19,6 +19,7 @@ pub mod mcp;
 mod plan;
 pub mod permission;
 pub mod prompt;
+pub mod read_state;
 pub mod shell;
 pub mod shell_session;
 pub mod support;
@@ -45,9 +46,12 @@ pub use mcp::McpTool;
 pub use plan::{ExitPlanArgs, ExitPlanTool};
 pub use prompt::{
     default_shipped, default_shipped_with_browser, default_shipped_with_browser_and_ask,
-    register_ask_prompt_section, register_capability_prompt_sections, register_mcp_prompt_section,
-    register_memory_prompt_section, register_shipped_prompt, shipped_with_persona,
-    shipped_with_persona_and_browser, shipped_with_persona_and_browser_and_ask,
+    register_ask_prompt_section, register_capability_prompt_sections,
+    register_code_style_section, register_communication_section,
+    register_context_management_section, register_mcp_prompt_section,
+    register_memory_prompt_section, register_risk_honesty_section, register_shipped_prompt,
+    register_working_style_section, shipped_with_persona, shipped_with_persona_and_browser,
+    shipped_with_persona_and_browser_and_ask,
 };
 pub use shell_session::{Captured, PersistentShell, ShellHub};
 pub use todo::TodoWriteTool;
@@ -133,6 +137,12 @@ pub struct ToolContext {
     /// 会话目标读取器(`get_goal` 用);`None` 表示当前调用无法读取
     /// 会话目标状态。返回 `(当前目标快照, 激活后的 token 用量)`。
     pub goal_reader: Option<Arc<dyn Fn() -> Option<(denia_core::session::GoalState, u64)> + Send + Sync>>,
+    /// 会话共享的文件读取状态表。
+    ///
+    /// `read_file` 用它做重复读取去重;`write_file`/`edit` 用它做写前
+    /// "读过且新鲜"校验。`None` 表示当前调用不参与去重(独立工具调用、
+    /// 测试场景),此时行为与引入该机制之前完全一致。
+    pub read_state: Option<read_state::SharedReadState>,
 }
 
 /// One model-facing tool outcome.

@@ -410,6 +410,7 @@ mod tests {
             ask: bridge,
             call_id: Some("call-1".to_string()),
             goal_reader: None,
+            read_state: None,
         }
     }
 

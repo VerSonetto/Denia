@@ -66,6 +66,24 @@ pub enum SectionOrder {
     /// 项目记忆(记忆目录写沉淀 + MEMORY.md 索引维护)的纪律段;仅在
     /// 项目记忆启用(runtime.memoryEnabled)时注入。
     ToolMemory,
+    /// 工作方式纪律段:
+    /// 有足够信息就行动、不重复推导、不罗列不打算做的选项。
+    ///
+    /// 放在工具段之后、输出纪律之前——它约束的是"怎么推进工作",
+    /// 而不是"怎么说话"。
+    WorkingStyle,
+    /// 输出与沟通纪律段:
+    /// 先给结论、为读者写、可读性优先于简洁。
+    Communication,
+    /// 上下文管理纪律段:
+    /// 上下文变长会被摘要,工作可以继续,不必提前收尾或中途交接。
+    ContextManagement,
+    /// 代码风格纪律段:
+    /// 代码要像周围的代码;注释只写代码本身表达不了的约束。
+    CodeStyle,
+    /// 风险与诚实纪律段:
+    /// 难以撤销/对外的操作先确认;删除前先看目标;如实报告结果。
+    RiskHonesty,
 }
 
 impl SectionOrder {
@@ -91,6 +109,11 @@ impl SectionOrder {
             Self::ToolPlan => 2050,
             Self::ToolMcp => 2100,
             Self::ToolMemory => 2150,
+            Self::WorkingStyle => 2200,
+            Self::Communication => 2250,
+            Self::ContextManagement => 2260,
+            Self::CodeStyle => 2270,
+            Self::RiskHonesty => 2280,
         }
     }
 }
@@ -431,17 +454,14 @@ impl SystemPrompt {
     }
 }
 
-/// 出厂 persona 模板;`SYSTEM.md` 为空时沿用。含身份句,与自定义替换目标一致。
+/// 出厂 persona 模板;`SYSTEM.md` 为空时沿用。
 ///
-/// 这份模板是 prompt 里**第一个**被读到的段落(order 0),所以它说的每一句
-/// 都比后面的工具纪律段更有分量——它一旦点名 bash,后面 `tool:bash` 段的收口
-/// 就会被压过去。规矩句里只用专用工具名(ls/glob/grep/read_file)。
+/// 只放**身份**:"我是谁"。它不承担环境事实(工作目录/平台/日期 → `harness:runtime`)、
+/// 工具选择规矩(→ 各 `tool:*` 段)、推进方式(→ `harness:working-style`)与
+/// 表达偏好(→ `harness:communication`)——那些各有归属,混进来只会形成
+/// 重复的第二个来源,还会因为 order 0 的位置反过来压制后面的专职段落。
 pub fn default_persona_template() -> &'static str {
-    "你是由 denia 驱动的 AI 编码 agent。\n\n\
-     你是运行在 denia 里的编码 agent。工作目录是 {{cwd}}（相对路径以它为根）。\
-     规矩：不要猜文件路径；读取失败时先用 ls 列目录再重试；按模式找文件用 glob，搜文件内容用 grep，读文本用 read_file。\
-     每步聚焦一件事；能回答时就停止调用工具。\
-     始终使用简体中文回复，除非用户明确要求其他语言。"
+    "你是由 denia 驱动的 AI 编码 agent。"
 }
 
 fn is_valid_variable_name(name: &str) -> bool {
@@ -568,7 +588,6 @@ mod tests {
                 .any(|section| section.name == "harness:identity")
         );
         assert!(render_prompt(&assembly).contains("denia 驱动的"));
-        assert!(render_prompt(&assembly).contains("/tmp/ws"));
         assert_eq!(assembly.tools.len(), 1);
     }
 
@@ -622,22 +641,70 @@ mod tests {
     }
 
     /// 出厂 persona 是 prompt 里第一个被读到的段落(order 0),比后面的工具纪律段
-    /// 更有分量。它一旦点名 bash 干探索类动作,"列目录/找文件/搜内容走专用工具"
-    /// 的收口就会被它压过去——这里锁死规矩句只用专用工具名。
+    /// 更有分量。它只放身份句:一旦它开始讲工具选择/环境事实/表达偏好,就等于
+    /// 在专职段落之外造了第二个来源,而且因为位置靠前会压过后者。
     #[test]
-    fn default_persona_never_steers_exploration_to_bash() {
+    fn default_persona_stays_identity_only() {
         let persona = default_persona_template();
-        for banned in ["bash 列目录", "用 bash", "先用 bash", "bash 找", "bash 搜"] {
+        assert!(
+            persona.contains("denia 驱动的 AI 编码 agent"),
+            "出厂 persona 必须声明身份:{persona}"
+        );
+        for banned in [
+            // 环境事实 → harness:runtime
+            "{{cwd}}",
+            "工作目录",
+            // 工具选择 → 各 tool:* 段
+            "bash",
+            "ls 列目录",
+            "glob",
+            "grep",
+            "read_file",
+            // 推进方式 → harness:working-style
+            "每步聚焦",
+            "能回答时就停止",
+            // 表达偏好 → harness:communication
+            "简体中文",
+        ] {
             assert!(
                 !persona.contains(banned),
-                "出厂 persona 把探索动作推给了 bash({banned}):{persona}"
+                "出厂 persona 混入了非身份职责({banned}),应归入专职段落:{persona}"
             );
         }
-        for needle in ["先用 ls 列目录", "glob", "grep", "read_file"] {
-            assert!(
-                persona.contains(needle),
-                "出厂 persona 缺少专用工具出口 {needle}:{persona}"
-            );
-        }
+    }
+
+    /// 环境事实(工作目录)由 `harness:runtime` 承担,它是动态段:
+    /// 会话切换工作目录时会重新注入,而 persona 是静态的。
+    #[test]
+    fn runtime_context_carries_working_directory() {
+        let mut prompt = SystemPrompt::new(SystemPromptConfig::default());
+        prompt
+            .context(PromptContext {
+                name: "harness:runtime".to_string(),
+                order: 10,
+                text: PromptText::Dynamic(std::sync::Arc::new(|context| {
+                    format!(
+                        "工作目录:{}（相对路径以它为根）。",
+                        context.cwd.as_deref().unwrap_or("(unknown)")
+                    )
+                })),
+            })
+            .unwrap();
+        prompt.variable("cwd", |context| context.cwd.clone()).unwrap();
+        let assembly = prompt
+            .assemble(&AssembleContext {
+                cwd: Some("/tmp/ws".to_string()),
+                ..Default::default()
+            })
+            .unwrap();
+        let snapshot = render_context_snapshot(&assembly);
+        assert!(
+            snapshot.contains("工作目录:/tmp/ws"),
+            "运行时快照必须携带工作目录:{snapshot}"
+        );
+        assert!(
+            snapshot.contains("相对路径以它为根"),
+            "运行时快照必须说明相对路径基准:{snapshot}"
+        );
     }
 }

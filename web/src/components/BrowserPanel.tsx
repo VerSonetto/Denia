@@ -9,7 +9,7 @@ import { t } from '../i18n'
 
 /**
  * 内嵌浏览器面板:实时画面(screencast 帧)+ tab 栏 + 地址栏。
- * 交互模型与 ZCode 一致:AI 通过 browser 工具操作同一实例;
+ * AI 通过 browser 工具与用户操作同一实例;
  * 用户在面板里也能手动导航/点选/点击/滚轮/输入。
  */
 export default function BrowserPanel() {

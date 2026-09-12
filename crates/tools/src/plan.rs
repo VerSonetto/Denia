@@ -107,6 +107,7 @@ mod tests {
             ask: None,
             call_id: None,
             goal_reader: None,
+            read_state: None,
         }
     }
 

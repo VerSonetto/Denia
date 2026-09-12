@@ -1363,7 +1363,7 @@ impl Runtime {
         }
         tracing::debug!(parent = parent_id, child = %child_id, "记忆提取子代理已启动");
         // 等收尾:至多一个 turn(启动异常兜底 10 分钟);轮数超过 5 强制
-        // 中断(对齐 ZCode 提取器的轮次上限,防跑飞烧 token)。
+        // 中断(提取器的轮次上限,防跑飞烧 token)。
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(600);
         let mut saw_turn = false;
         loop {
@@ -1399,7 +1399,7 @@ impl Runtime {
         Ok(())
     }
 
-    /// 进程关停:等待在跑的记忆提取任务收尾(对齐 ZCode 60s 上限)。
+    /// 进程关停:等待在跑的记忆提取任务收尾(60s 上限)。
     pub async fn drain_extractions(&self, timeout: std::time::Duration) {
         let deadline = std::time::Instant::now() + timeout;
         while !self.inner.extraction_inflight.lock().unwrap().is_empty() {
@@ -1820,6 +1820,7 @@ mod tests {
             ask: None,
             call_id: None,
             goal_reader: None,
+            read_state: None,
         };
         (state, ctx)
     }

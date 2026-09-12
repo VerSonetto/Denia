@@ -380,6 +380,7 @@ mod tests {
             ask: None,
             call_id: None,
             goal_reader: None,
+            read_state: None,
         };
         let job = jobs
             .start(&ctx, "echo hello", "测试", 10_000, 2, 8, 4096)
@@ -415,6 +416,7 @@ mod tests {
             ask: None,
             call_id: None,
             goal_reader: None,
+            read_state: None,
         };
         let job = jobs
             .start(

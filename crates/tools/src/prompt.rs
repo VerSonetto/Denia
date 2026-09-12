@@ -54,7 +54,7 @@ pub fn register_shipped_prompt(
         name: "tool:ls".to_string(),
         order: SectionOrder::ToolLs.value(),
         text: PromptText::Static(
-            "用 ls 查看一个目录里有哪些条目——不要用 shell 的 ls/dir/Get-ChildItem。默认只列一层;确实要看更深时显式给 depth(上限 5),不要用 shell 递归摊平整棵树。"
+            "用 ls 查看一个目录里有哪些条目——不要用 shell 的 ls/dir/Get-ChildItem。默认只列一层;确实要看更深时显式给 depth(上限 5),不要用 shell 递归摊平整棵树。不要猜文件路径;读取失败时先用 ls 列目录再重试。"
                 .to_string(),
         ),
         complete: false,
@@ -134,6 +134,14 @@ pub fn register_shipped_prompt(
     })?;
     register_plan_prompt_section(prompt)?;
     register_goal_prompt_section(prompt)?;
+    // 行为与表达纪律:放在工具段之后,约束"怎么推进工作"、"怎么说话"、
+    // "上下文变长时怎么办"、"代码写成什么样"、"结果怎么报告",
+    // 与工具用法不重叠。
+    register_working_style_section(prompt)?;
+    register_communication_section(prompt)?;
+    register_context_management_section(prompt)?;
+    register_code_style_section(prompt)?;
+    register_risk_honesty_section(prompt)?;
 
     let schemas: Vec<ToolSchema> = tools.schemas();
     prompt.tools(move |_| ToolProviderResult {
@@ -307,6 +315,147 @@ pub fn register_memory_prompt_section(prompt: &mut SystemPrompt) -> Result<(), S
     Ok(())
 }
 
+/// 工作方式纪律段。
+///
+/// 这段解决的是**模型的行为浪费**:反复推导已确立的事实、重开已决策的
+/// 议题、罗列不打算做的选项、把"下一步计划"当成收尾。这些应当写成
+/// 硬纪律放在系统提示里,而不是靠用户每轮提醒。
+///
+/// 与工具纪律的分工:工具段讲"用什么工具、怎么用";本段讲"什么时候该
+/// 停止思考开始行动"。不重叠。
+pub fn register_working_style_section(prompt: &mut SystemPrompt) -> Result<(), String> {
+    prompt.section(PromptSection {
+        name: "harness:working-style".to_string(),
+        order: SectionOrder::WorkingStyle.value(),
+        text: PromptText::Static(
+            "每步聚焦一件事;能回答时就停止调用工具。\n\
+             \n\
+             有足够信息就动手,不要空转:\n\
+             - 不要重新推导对话里已经确立的事实,不要重开用户已经拍板的决定,不要罗列你不打算做的选项。\n\
+             - 要在两个方案之间取舍时,直接给推荐和理由,不要做面面俱到的综述。\n\
+             - 用户不在实时旁观,中途问\"要不要我……?\"\"需要我……吗?\"会直接卡住工作。\
+             属于原始请求范围内、可逆的动作,直接做;只有破坏性操作或真正的范围变更才停下来问。\n\
+             - 例外:当用户是在描述问题、提问或自言自语式地思考,而不是要求改动时,交付物就是你的判断。\
+             汇报发现后停下,不要顺手把修复做了。\n\
+             \n\
+             结束本轮之前,检查你最后一段话:\n\
+             - 如果它是计划、分析、提问、下一步清单,或对尚未完成工作的承诺(\"我会……\"\"你可以让我……\"),\
+             那就现在用工具把它做掉。\n\
+             - 包括重试失败的操作、自己去补齐缺失的信息。不要因为上下文或会话变长就停下。\n\
+             - 只有任务完成、或卡在只有用户能提供的信息上时,才结束本轮。\n\
+             \n\
+             改动系统状态的命令(重启、删除、改配置)执行前,先确认证据确实支持这一步;\
+             一个看起来像已知故障的信号,可能有别的原因。"
+                .to_string(),
+        ),
+        complete: false,
+        audience: SectionAudience::Model,
+    })?;
+    Ok(())
+}
+
+/// 输出与沟通纪律段。
+///
+/// 这段解决的是**表达质量**:模型容易把过程笔记当交付、把结论埋在最后、
+/// 为了简洁牺牲可读性。
+pub fn register_communication_section(prompt: &mut SystemPrompt) -> Result<(), String> {
+    prompt.section(PromptSection {
+        name: "harness:communication".to_string(),
+        order: SectionOrder::Communication.value(),
+        text: PromptText::Static(
+            "**始终使用简体中文回复**,除非用户明确要求其他语言。\n\
+             \n\
+             你的文字输出就是用户看到的东西;他们看不到你的思考过程,通常也看不到原始工具结果。\
+             把输出写给一个刚离开工位、正在补进度的同事——他不知道你中途起的代号和简写,\
+             也没有旁观你的探索过程。\n\
+             \n\
+             - 第一次调用工具之前,用一句话说明你准备做什么;过程中发现关键信息或改变方向时,给简短更新。\n\
+             - **工具调用之间的文字可能不会展示给用户**。本轮里用户需要的一切——答案、总结、发现、结论、\
+             交付物——都必须落在本轮最后一条文字消息里,且其后不再有工具调用。\
+             工具之间的文字只保留简短状态说明。只在中途或思考里出现过的重要内容,要在最后那条消息里重述。\n\
+             - **先给结论**。完成后的第一句话应当回答\"发生了什么\"或\"你发现了什么\"——\
+             也就是用户说\"直接给我 TL;DR\"时会想要的那句。支撑细节和推理放在后面。\n\
+             - 可读和简洁是两件事,可读更重要。如果用户要重读你的总结、或要你解释一遍,\
+             省下的那点时间就全赔回去了。让输出短的正确做法是**取舍内容**(删掉不影响读者下一步动作的细节),\
+             而不是把文字压成碎片、缩写、`A → B → 失败`这样的箭头链或行话。\
+             写出来的部分用完整句子,技术术语写全。不要让读者来回对照你先前发明的标签或编号。\n\
+             - 回答要与问题匹配:简单问题用一段话直接答,不要上标题和分节。\
+             表格只用于简短的可枚举事实,解释放在表格外的正文里。\
+             对专家可以紧一些,对新手要多解释几句。"
+                .to_string(),
+        ),
+        complete: false,
+        audience: SectionAudience::Model,
+    })?;
+    Ok(())
+}
+
+/// 上下文管理纪律段。
+///
+/// 与 `agent-loop` 的压缩机制配套:压缩是自动的、无损于工作连续性的,
+/// 但模型不知道这件事时,会在上下文变长时本能地收尾、交接或急着做总结——
+/// 那是把一次可继续的工作提前掐断。这段把机制本身告诉模型。
+pub fn register_context_management_section(prompt: &mut SystemPrompt) -> Result<(), String> {
+    prompt.section(PromptSection {
+        name: "harness:context-management".to_string(),
+        order: SectionOrder::ContextManagement.value(),
+        text: PromptText::Static(
+            "对话变长时,当前上下文会被摘要;摘要与尚未摘要的剩余上下文会一起提供到下一个上下文窗口,\
+             工作因此可以继续——你不需要提前收尾,也不需要在任务中途交接。\
+             不要因为上下文或会话变长就停下或急着做阶段性总结,把任务做完为止。"
+                .to_string(),
+        ),
+        complete: false,
+        audience: SectionAudience::Model,
+    })?;
+    Ok(())
+}
+
+/// 代码风格纪律段。
+///
+/// 两条约束针对的是两类常见的"写给审查者而不是下一个读者"的噪音:
+/// 风格与周围代码脱节、注释解释代码已经说清的事。
+pub fn register_code_style_section(prompt: &mut SystemPrompt) -> Result<(), String> {
+    prompt.section(PromptSection {
+        name: "harness:code-style".to_string(),
+        order: SectionOrder::CodeStyle.value(),
+        text: PromptText::Static(
+            "写代码要像周围的代码:匹配它的注释密度、命名方式与惯用法。\n\
+             只在代码本身表达不了的约束上写注释——不要写它来自哪里、下一行做什么、\
+             或你的改动为什么正确。那是写给审查者的,不是写给下一个读者的;\
+             改动一旦合并,它就是噪音。"
+                .to_string(),
+        ),
+        complete: false,
+        audience: SectionAudience::Model,
+    })?;
+    Ok(())
+}
+
+/// 风险与诚实纪律段。
+///
+/// 只保留与**工程判断**直接相关的部分:不可逆/对外操作的确认门槛、
+/// 删除前先核对目标、以及如实报告结果。不含任何要求模型审查用户意图
+/// 是否合规的内容——那类内容会把注意力从工程问题上挪走。
+pub fn register_risk_honesty_section(prompt: &mut SystemPrompt) -> Result<(), String> {
+    prompt.section(PromptSection {
+        name: "harness:risk-honesty".to_string(),
+        order: SectionOrder::RiskHonesty.value(),
+        text: PromptText::Static(
+            "难以撤销或对外的操作,除非已有持续授权或被明确要求直接执行,先确认再做;\
+             一次上下文里的批准不延伸到下一次。把内容发到外部服务等于发布,即使之后删除,\
+             也可能已被缓存或索引。\n\
+             删除或覆盖之前先看目标:如果它与描述不符,或不是你创建的,先说明情况而不是直接动手。\n\
+             如实报告结果:测试失败就说明失败并给出输出;跳过了某一步就说跳过了;\
+             已经完成并验证过的,直接陈述,不要加含糊的限定词。"
+                .to_string(),
+        ),
+        complete: false,
+        audience: SectionAudience::Model,
+    })?;
+    Ok(())
+}
+
 /// Shipped registry pair: prompt assembly plus executable tools.
 pub fn default_shipped() -> (SystemPrompt, ToolRegistry) {
     let tools = crate::default_registry();
@@ -416,13 +565,13 @@ fn runtime_context_text(context: &AssembleContext) -> String {
     let cwd = context.cwd.as_deref().unwrap_or("(unknown)");
     let shell_note = shell::shell_system_prompt_note(&runtime);
     format!(
-        "平台:{os} ({arch})。日期:{date}。{shell_note}",
+        "工作目录:{cwd}（相对路径以它为根）。平台:{os} ({arch})。日期:{date}。{shell_note}",
+        cwd = cwd,
         os = std::env::consts::OS,
         arch = std::env::consts::ARCH,
         date = today_string(),
         shell_note = shell_note,
     )
-    .replace("{{cwd}}", cwd)
 }
 
 /// 公历日期 yyyy-mm-dd,不引 chrono:unix 秒 → civil 算法。
@@ -450,6 +599,141 @@ mod tests {
     use denia_system_prompt::{render_context_snapshot, render_prompt, render_prompt_for_user};
 
     use super::*;
+
+    /// 行为与表达纪律段的两条路径断言:
+    /// 带工具时存在、audience 为 Model、不进用户可见副本。
+    #[test]
+    fn working_style_and_communication_sections_are_model_only() {
+        let (prompt, _tools) = default_shipped();
+        let assembly = prompt
+            .assemble(&AssembleContext {
+                cwd: Some("/work".to_string()),
+                ..Default::default()
+            })
+            .unwrap();
+
+        for name in ["harness:working-style", "harness:communication"] {
+            let section = assembly
+                .sections
+                .iter()
+                .find(|section| section.name == name)
+                .unwrap_or_else(|| panic!("{name} 段必须存在"));
+            assert_eq!(
+                section.audience,
+                SectionAudience::Model,
+                "{name} 是模型侧纪律,不应展示给用户"
+            );
+        }
+
+        let model = render_prompt(&assembly);
+        assert!(model.contains("有足够信息就动手"), "工作方式纪律必须进模型提示");
+        assert!(model.contains("先给结论"), "输出纪律必须进模型提示");
+
+        // 用户可见副本不含这两段(它们是给模型的私货)。
+        let user = render_prompt_for_user(&assembly);
+        assert!(!user.contains("有足够信息就动手"));
+        assert!(!user.contains("先给结论"));
+    }
+
+    /// 新增的三段行为纪律:上下文管理、代码风格、风险与诚实。
+    #[test]
+    fn behavior_discipline_sections_are_registered() {
+        let (prompt, _tools) = default_shipped();
+        let assembly = prompt
+            .assemble(&AssembleContext {
+                cwd: Some("/work".to_string()),
+                ..Default::default()
+            })
+            .unwrap();
+        let model = render_prompt(&assembly);
+        // 上下文管理:告诉模型压缩后可以继续,不必提前收尾。
+        assert!(
+            model.contains("你不需要提前收尾"),
+            "上下文管理纪律必须进模型提示"
+        );
+        // 代码风格:匹配周围代码 + 注释只写约束。
+        assert!(
+            model.contains("写代码要像周围的代码"),
+            "代码风格纪律必须进模型提示"
+        );
+        assert!(
+            model.contains("只在代码本身表达不了的约束上写注释"),
+            "注释纪律必须进模型提示"
+        );
+        // 风险与诚实:不可逆操作确认 + 如实报告。
+        assert!(
+            model.contains("难以撤销或对外的操作"),
+            "风险确认纪律必须进模型提示"
+        );
+        assert!(model.contains("如实报告结果"), "诚实报告纪律必须进模型提示");
+
+        let user = render_prompt_for_user(&assembly);
+        for needle in ["你不需要提前收尾", "写代码要像周围的代码", "如实报告结果"] {
+            assert!(!user.contains(needle), "用户副本不应含模型侧纪律:{needle}");
+        }
+    }
+
+    /// 提示词不得包含要求模型审查用户意图是否合规的安全政策。
+    ///
+    /// 那类内容会把注意力从工程问题挪到自我审查上,直接拉低交付质量;
+    /// 需要拒绝的东西已经由权限模式与工具层承担,不靠模型读提示词来判。
+    #[test]
+    fn prompt_has_no_intent_review_policy() {
+        let (prompt, _tools) = default_shipped();
+        let assembly = prompt
+            .assemble(&AssembleContext {
+                cwd: Some("/work".to_string()),
+                ..Default::default()
+            })
+            .unwrap();
+        let mut corpus = render_prompt(&assembly);
+        corpus.push_str(&render_context_snapshot(&assembly));
+        for schema in &assembly.tools {
+            corpus.push_str(&schema.description);
+        }
+        for banned in [
+            // 只列安全审查政策特有的措辞:"授权"这类词在正常的风险确认
+            // 语境里也会出现(如"除非已有持续授权"),不能拿来当判据。
+            "安全测试",
+            "渗透测试",
+            "dual-use",
+            "CTF",
+            "拒绝请求",
+            "是否合法",
+            "是否合规",
+            "恶意用途",
+        ] {
+            assert!(
+                !corpus.contains(banned),
+                "提示词混入了要求模型审查用户意图的内容({banned})"
+            );
+        }
+    }
+
+    /// 段位顺序:行为/表达纪律排在全部工具段之后。
+    #[test]
+    fn behavior_sections_come_after_tool_sections() {
+        let (prompt, _tools) = default_shipped();
+        let assembly = prompt
+            .assemble(&AssembleContext {
+                cwd: Some("/work".to_string()),
+                ..Default::default()
+            })
+            .unwrap();
+        // 装配结果已按 order 排序,直接用位置比较。
+        let index_of = |name: &str| {
+            assembly
+                .sections
+                .iter()
+                .position(|section| section.name == name)
+                .unwrap_or_else(|| panic!("{name} 段必须存在"))
+        };
+        assert!(index_of("harness:working-style") > index_of("tool:edit"));
+        assert!(index_of("harness:communication") > index_of("harness:working-style"));
+        assert!(index_of("harness:context-management") > index_of("harness:communication"));
+        assert!(index_of("harness:code-style") > index_of("harness:context-management"));
+        assert!(index_of("harness:risk-honesty") > index_of("harness:code-style"));
+    }
 
     #[test]
     fn shipped_with_persona_omits_harness_identity() {
@@ -503,7 +787,13 @@ mod tests {
             .unwrap();
         let rendered = render_prompt(&assembly);
         assert!(rendered.contains("denia"));
-        assert!(rendered.contains("/tmp/ws"));
+        // 工作目录属于运行时快照,不进静态段落(它每步可能变,静态段会被缓存)。
+        assert!(!rendered.contains("/tmp/ws"));
+        let snapshot = render_context_snapshot(&assembly);
+        assert!(
+            snapshot.contains("/tmp/ws"),
+            "工作目录必须由运行时快照携带:{snapshot}"
+        );
         assert!(
             assembly
                 .sections
@@ -841,6 +1131,7 @@ mod browser_prompt_tests {
             ask: None,
             call_id: None,
             goal_reader: None,
+            read_state: None,
         };
         let tool = crate::BrowserTool::new(hub);
         tool.execute(arguments, &ctx).await

@@ -82,7 +82,7 @@ export default function App() {
   // 切换会话时按记忆恢复/收起;AI 触发的自动展开归属到当前活跃会话。
   const [browserOpen, setBrowserOpen] = useState(false)
   const browserOpenBySessionRef = useRef<Record<string, boolean>>({})
-  // ZCode 式自动展开的收口:模型显式请求可视化模式(visualMode)时右侧视图出现。
+  // 自动展开的收口:模型显式请求可视化模式(visualMode)时右侧视图出现。
   // 用户手动收起只挡当轮:新一轮 AI 轮次开始后重新允许展开。
   const browserAutoDismissedRef = useRef(false)
   const browserOpenRef = useRef(false)

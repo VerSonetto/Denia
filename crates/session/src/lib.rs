@@ -669,6 +669,37 @@ impl Session {
         derive_messages(&inner.events)
     }
 
+    /// 派生带 seq 的表面消息(微压缩/压缩需要 seq 定位 `replaces` 目标)。
+    pub fn derive_surface(&self) -> Vec<denia_core::session::SurfaceMessage> {
+        let inner = self
+            .inner
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        denia_core::session::derive_surface(&inner.events)
+    }
+
+    /// 距最后一条 assistant 消息落盘过了多少分钟(微压缩的空闲触发用)。
+    ///
+    /// 日志里没有 assistant 消息时返回 `None`(没有"闲置"可言)。
+    /// 时间戳是 epoch 毫秒;系统时钟回拨时按 0 处理,不产生负值。
+    pub fn last_assistant_age_minutes(&self) -> Option<f64> {
+        let inner = self
+            .inner
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let last_ms = inner
+            .events
+            .iter()
+            .rev()
+            .find(|envelope| matches!(envelope.event, SessionEvent::AssistantMessage { .. }))
+            .map(|envelope| envelope.time)?;
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()
+            .map(|d| d.as_millis() as u64)?;
+        Some(now_ms.saturating_sub(last_ms) as f64 / 60_000.0)
+    }
+
     /// The first user prompt, trimmed, for list views.
     pub fn first_prompt_excerpt(&self, max_chars: usize) -> Option<String> {
         let inner = self
@@ -1477,12 +1508,13 @@ mod tests {
     use super::*;
 
     fn temp_root() -> PathBuf {
+        // pid + 进程内原子序号:同一次测试里连续调用也保证互不撞名
+        // (时钟精度不足时按时间戳命名会给出同一个目录)。
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let dir = std::env::temp_dir().join(format!(
-            "denia-session-{}",
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
+            "denia-session-{}-{}",
+            std::process::id(),
+            SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         ));
         std::fs::create_dir_all(&dir).unwrap();
         dir

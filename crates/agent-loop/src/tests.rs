@@ -30,12 +30,19 @@ fn system_prompt_frames_runtime_authority() {
         .unwrap();
     let body = denia_system_prompt::render_prompt(&assembly);
     assert!(!body.contains("最高优先级"));
-    assert!(body.contains("/tmp/ws"));
+    // 工作目录是运行时事实,归 harness:runtime(动态快照),不在静态段落里。
+    assert!(!body.contains("/tmp/ws"));
+    let snapshot = denia_system_prompt::render_context_snapshot(&assembly);
+    assert!(
+        snapshot.contains("/tmp/ws"),
+        "工作目录必须由运行时快照携带:{snapshot}"
+    );
 
+    // 框架只包静态正文:快照随每步变化,包进去会让缓存前缀失效。
     let model = denia_system_prompt::frame_system_prompt_for_model(&body);
     assert!(model.contains("最高优先级"));
     assert!(model.contains("再次确认"));
-    assert!(model.contains("/tmp/ws"));
+    assert!(model.contains("你是由 denia 驱动的"));
 }
 
 /// 子代理的纪律段必须跟着工具授予走:拿不到的工具,其纪律段不得注入。
@@ -848,15 +855,29 @@ async fn fake_tool_call_quota_exhausts_then_completes() {
             SessionEvent::UserMessage {
                 text,
                 injected: true,
+                channel,
                 ..
-            } => Some(text.clone()),
+            } => Some((text.clone(), channel.clone())),
             _ => None,
         })
         .collect::<Vec<_>>();
+    // 两类注入各自计数:自纠反馈受 MAX_FEEDBACK 配额约束;死循环提醒
+    // 由 loop_guard 在第 3 次重复时给出(独立通道,不占反馈配额)。
+    let feedback = injected
+        .iter()
+        .filter(|(_, channel)| channel.as_deref() != Some("loop-warning"))
+        .count();
+    let loop_warnings = injected
+        .iter()
+        .filter(|(_, channel)| channel.as_deref() == Some("loop-warning"))
+        .count();
     assert_eq!(
-        injected.len(),
-        MAX_FEEDBACK as usize,
+        feedback, MAX_FEEDBACK as usize,
         "feedback quota must cap at MAX_FEEDBACK"
+    );
+    assert_eq!(
+        loop_warnings, 1,
+        "第 3 次重复应当给出一次死循环提醒(提醒线 3,中断线 4)"
     );
     let calls = session
         .events()

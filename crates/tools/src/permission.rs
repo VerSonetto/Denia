@@ -72,11 +72,23 @@ pub fn decide(mode: PermissionMode, class: ActionClass) -> Decision {
     }
 }
 
-/// 记忆写敏感段(抄 ZCode pSe 名单口径):git 钩子、依赖树、其他 agent
-/// harness 的配置/技能目录。按路径组件匹配、不区分大小写——命中即拒,
-/// 防止记忆写被诱导落到可执行/供应链位置。
+/// 记忆写敏感段:git 钩子、依赖树、其他 agent harness 的配置/技能目录。
+/// 按路径组件匹配、不区分大小写——命中即拒,防止记忆写被诱导落到
+/// 可执行/供应链位置。
+///
+/// 名单里的 `.zcode` 是**实际存在的目录名**(其他 agent 工具在本机留下的
+/// 配置目录),属于"要防的第三方 harness 目录"这一类,不是对某个产品的
+/// 引用——它与 `.claude`、`.agents` 同性质。删掉它会让该目录变成记忆写的
+/// 可落点,是安全回退,故保留。
 pub fn memory_path_is_sensitive(path: &std::path::Path) -> bool {
-    const SENSITIVE: &[&str] = &[".git", "hooks", "node_modules", ".claude", ".zcode", ".agents"];
+    const SENSITIVE: &[&str] = &[
+        ".git",
+        "hooks",
+        "node_modules",
+        ".claude",
+        ".zcode",
+        ".agents",
+    ];
     path.components().any(|component| {
         let text = component.as_os_str().to_string_lossy().to_ascii_lowercase();
         SENSITIVE.contains(&text.as_str())

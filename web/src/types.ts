@@ -436,7 +436,7 @@ export interface WorkspaceRecord {
   sessionIds: string[]
 }
 
-/* ---- 内嵌浏览器(ZCode Browser Use 同款命令面) ---- */
+/* ---- 内嵌浏览器(与 browser 工具同款命令面) ---- */
 
 export interface BrowserTabInfo {
   tabId: string

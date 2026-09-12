@@ -857,6 +857,12 @@ pub fn derive_messages(events: &[SessionEnvelope]) -> Vec<ChatMessage> {
 pub struct SurfaceMessage {
     pub seq: u64,
     pub message: ChatMessage,
+    /// 该 tool-result 是否为错误结果。
+    ///
+    /// 错误状态只存在于事件层(`ToolResult.is_error`),不进 `ChatMessage`
+    /// (wire 层不需要它)。微压缩需要这个信息来保护错误结果不被清理——
+    /// 错误信息往往是模型纠正自己的唯一线索。
+    pub is_error: bool,
 }
 
 /// 派生模型可见历史,带事件 seq(压缩折叠同 [`derive_messages`])。
@@ -870,6 +876,17 @@ fn derive_surface_inner(events: &[SessionEnvelope]) -> Vec<SurfaceMessage> {
     struct SurfaceItem {
         seq: u64,
         message: ChatMessage,
+        /// 仅 tool-result 有意义:该结果是否为错误结果。
+        is_error: bool,
+    }
+
+    /// 构造非 tool 类节点(错误标记恒为 false)。
+    fn plain(seq: u64, message: ChatMessage) -> SurfaceItem {
+        SurfaceItem {
+            seq,
+            message,
+            is_error: false,
+        }
     }
 
     let mut surface: Vec<SurfaceItem> = Vec::new();
@@ -891,10 +908,7 @@ fn derive_surface_inner(events: &[SessionEnvelope]) -> Vec<SurfaceMessage> {
         let seq = envelope.seq;
         match &envelope.event {
             SessionEvent::AgentDelivery { text, .. } => {
-                surface.push(SurfaceItem {
-                    seq,
-                    message: ChatMessage::user(text),
-                });
+                surface.push(plain(seq, ChatMessage::user(text)));
             }
             SessionEvent::UserMessage { text, images, .. } => {
                 if !unanswered.is_empty() && !images.is_empty() {
@@ -907,7 +921,7 @@ fn derive_surface_inner(events: &[SessionEnvelope]) -> Vec<SurfaceMessage> {
                 } else {
                     ChatMessage::user_with_images(text, images.clone())
                 };
-                surface.push(SurfaceItem { seq, message });
+                surface.push(plain(seq, message));
             }
             SessionEvent::CompactionSummary {
                 summary,
@@ -952,16 +966,17 @@ fn derive_surface_inner(events: &[SessionEnvelope]) -> Vec<SurfaceMessage> {
                 for call in &calls {
                     unanswered.push(call.id.clone());
                 }
-                surface.push(SurfaceItem {
+                surface.push(plain(
                     seq,
                     // 模型历史剥离 reasoning_content:思考过程不回传 provider,
                     // 省 token 且不影响后续决策;UI/日志仍保留完整 blocks。
-                    message: ChatMessage::assistant(text, None, calls),
-                });
+                    ChatMessage::assistant(text, None, calls),
+                    ));
             }
             SessionEvent::ToolResult {
                 call_id,
                 content,
+                is_error,
                 replaces,
                 ..
             } => {
@@ -970,6 +985,7 @@ fn derive_surface_inner(events: &[SessionEnvelope]) -> Vec<SurfaceMessage> {
                 if let Some(replaced_seq) = replaces {
                     if let Some(item) = surface.iter_mut().find(|item| item.seq == *replaced_seq) {
                         item.message = ChatMessage::tool_result(call_id.clone(), content);
+                        item.is_error = *is_error;
                         continue;
                     }
                 }
@@ -977,6 +993,7 @@ fn derive_surface_inner(events: &[SessionEnvelope]) -> Vec<SurfaceMessage> {
                     surface.push(SurfaceItem {
                         seq,
                         message: ChatMessage::tool_result(call_id, content),
+                        is_error: *is_error,
                     });
                 } else {
                     // 带图合并:截图等工具图片挂到本条 tool-result 上,
@@ -986,7 +1003,11 @@ fn derive_surface_inner(events: &[SessionEnvelope]) -> Vec<SurfaceMessage> {
                     merged.push_str("\n[附:工具产生的截图已附在本条结果]");
                     let mut message = ChatMessage::tool_result(call_id, merged);
                     message.images = images;
-                    surface.push(SurfaceItem { seq, message });
+                    surface.push(SurfaceItem {
+                        seq,
+                        message,
+                        is_error: *is_error,
+                    });
                 }
             }
             _ => {}
@@ -1007,6 +1028,7 @@ fn derive_surface_inner(events: &[SessionEnvelope]) -> Vec<SurfaceMessage> {
             SurfaceItem {
                 seq: summary.keep_from.saturating_sub(1),
                 message: ChatMessage::user(summary.text),
+                is_error: false,
             },
         );
     }
@@ -1016,12 +1038,14 @@ fn derive_surface_inner(events: &[SessionEnvelope]) -> Vec<SurfaceMessage> {
         .map(|item| SurfaceMessage {
             seq: item.seq,
             message: item.message,
+            is_error: item.is_error,
         })
         .collect();
     for call_id in unanswered {
         messages.push(SurfaceMessage {
             seq: u64::MAX - messages.len() as u64,
             message: ChatMessage::tool_result(call_id, INTERRUPTED_TOOL_RESULT),
+            is_error: true,
         });
     }
     messages

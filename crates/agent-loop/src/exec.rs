@@ -287,6 +287,7 @@ fn dispatch_tool_call(
     let cancel = state.cancel.clone();
     let file_history = state.file_history.clone();
     let vision_supported = state.vision_supported;
+    let read_state = state.read_state.clone();
     let ask = driver.ask.clone();
     let call_id = call.id.clone();
     // 记忆域沙箱豁免:锚定记忆目录的读写不受 confined 限制,否则默认
@@ -338,6 +339,7 @@ fn dispatch_tool_call(
                 let used = goal_session.goal_tokens_used().unwrap_or(0);
                 Some((goal, used))
             })),
+            read_state: Some(read_state),
         };
         let execute = tool.execute(&call.arguments, &context);
         tokio::pin!(execute);

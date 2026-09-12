@@ -1,4 +1,4 @@
-//! 项目记忆:每工作区一个 Markdown 记忆域(抄 ZCode 项目记忆三件套)。
+//! 项目记忆:每工作区一个 Markdown 记忆域(索引 + 条目文件 + 后台提取三件套)。
 //!
 //! - 落点:`$DENIA_HOME/memories/projects/<slug>-<sha16>/memory/`,slug 是
 //!   工作区目录名的清洗结果,sha16 是规范化路径的 sha256 前 16 位十六进制;
@@ -16,7 +16,7 @@ use sha2::Digest;
 
 /// 索引文件名(纯索引,一行一条)。
 pub const MEMORY_INDEX_FILE: &str = "MEMORY.md";
-/// 单条记忆的 manifest 上限(按 mtime 倒序保留最新 200 个,抄 ZCode)。
+/// 单条记忆的 manifest 上限(按 mtime 倒序保留最新 200 个)。
 const MANIFEST_CAP: usize = 200;
 /// 单文件读取上限(设置页 viewer 与 API 同用)。
 pub const MAX_FILE_BYTES: u64 = 5 * 1024 * 1024;
@@ -68,7 +68,7 @@ fn project_slug(workspace_path: &Path) -> String {
 }
 
 /// 读 `MEMORY.md` 全文;缺失/空白返回 None。先按 200 行截行,再按字节
-/// 预算做 UTF-8 边界截断,两处截断都附告警(抄 ZCode 200 行/25KB 口径)。
+/// 预算做 UTF-8 边界截断,两处截断都附告警(200 行 / 25KB 口径)。
 pub fn read_index(root: &Path, max_bytes: usize) -> Option<String> {
     let raw = std::fs::read_to_string(root.join(MEMORY_INDEX_FILE)).ok()?;
     let content = raw.trim_start_matches('\u{feff}').replace("\r\n", "\n");
@@ -357,7 +357,7 @@ fn touched_path(cwd: &Path, raw_arguments: &str) -> Option<PathBuf> {
 }
 
 /// 用户散文词数:空白分词(含非 CJK 的字母数字才算词)+ 每个中日韩字符
-/// 各记 1。门限 3 词(抄 ZCode):问候语/单字指令不触发后台提取。
+/// 各记 1。门限 3 词:问候语/单字指令不触发后台提取。
 pub fn prose_word_count(text: &str) -> usize {
     let is_cjk = |ch: char| {
         matches!(ch,
@@ -393,7 +393,7 @@ pub fn render_empty_index_block(root: &Path) -> String {
     )
 }
 
-/// 记忆提取子代理的任务提示词(中文;复用 ZCode 提取职责:分析最近消息、
+/// 记忆提取子代理的任务提示词(中文;提取职责:分析最近消息、
 /// 去重更新、增删索引行)。`digest` 已按预算截断。
 pub fn render_extraction_prompt(root: &Path, digest: &TurnDigest, budget_bytes: usize) -> String {
     let tool_lines = if digest.tool_lines.is_empty() {

@@ -170,6 +170,54 @@ pub struct CompactOutcome {
     pub keep_from: u64,
     pub pre_tokens: u64,
     pub post_tokens: u64,
+    /// 压缩后重新注入的"读状态"条目。
+    ///
+    /// 压缩把旧的文件内容从历史里抹掉,模型会忘记自己看过什么,于是
+    /// **重新读一遍**——这正是压缩后窗口二次膨胀的根源。这里把压缩区间内
+    /// 读过的文件按预算挑几条重新注入,让模型继续保有这些内容。
+    pub read_state_entries: Vec<String>,
+}
+
+/// 压缩后读状态恢复的预算。
+pub const POST_COMPACT_MAX_FILES: usize = 5;
+/// 单文件 token 上限:超过则退化为路径提示。
+pub const POST_COMPACT_MAX_FILE_TOKENS: u64 = 5_000;
+/// 总量 token 上限。
+pub const POST_COMPACT_MAX_TOTAL_TOKENS: u64 = 50_000;
+
+/// 为压缩后的读状态恢复挑选条目。
+///
+/// 输入是"被压缩区间内被读取过的文件"(按最近优先排序),输出是可直接
+/// 注入的消息文本列表:
+/// - 放得下的:重建为"伪工具调用"格式(带行号的内容),让模型保有原文;
+/// - 放不下的:退化为一句路径提示,告诉模型"需要用 Read 重新获取"。
+///
+/// 预算是**双重的**:单文件 token 上限 + 总量 token 上限,两者任一超限
+/// 都会让该条目退化。这防止一个大文件挤掉其他所有条目。
+pub fn build_post_compact_read_state(
+    entries: &[(String, String)],
+    max_files: usize,
+    max_file_tokens: u64,
+    max_total_tokens: u64,
+) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut total: u64 = 0;
+    for (path, content) in entries.iter().take(max_files) {
+        let tokens = rough_tokens(&ChatMessage::user(content));
+        if tokens > max_file_tokens || total.saturating_add(tokens) > max_total_tokens {
+            // 超预算:退化为路径提示(模型知道"看过但内容没了",会按需重读)。
+            out.push(format!(
+                "注意:{path} 在本次压缩前被读取过,但内容太大未保留。如需其内容请重新用 read_file 获取。"
+            ));
+            continue;
+        }
+        total = total.saturating_add(tokens);
+        out.push(format!(
+            "以下是压缩前读取过的文件内容(供你继续工作,无需重新读取):\n\n\
+             === {path} ===\n{content}"
+        ));
+    }
+    out
 }
 
 /// 摘要输入的消息裁剪:图片/文档在摘要请求里不值得占 token(学 Claude Code
@@ -624,6 +672,8 @@ impl crate::SessionDriver {
             pre_tokens,
             // 摘要消息本身的开销按角色框 + 文本估算,并入压缩后占用。
             post_tokens: post_tokens.saturating_add(rough_tokens(&ChatMessage::user(&summary))),
+            // 读状态恢复在调用方做(它持有 driver 的 read_state 句柄)。
+            read_state_entries: Vec::new(),
         }))
     }
 }

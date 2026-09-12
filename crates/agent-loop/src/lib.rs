@@ -15,13 +15,15 @@
 //! - [`errors`] — 失败分类处置与用户可读的中文报错摘要;
 //! - [`loop_guard`] — 死循环检测(文本/工具两条指纹线);
 //! - [`rescue`] — 文本伪工具调用救援;
-//! - [`compact`] — LLM 总结压缩(压力驱动)。
+//! - [`compact`] — LLM 总结压缩(压力驱动);
+//! - [`microcompact`] — 工具结果微压缩(占位符替换,摘要前的廉价清理)。
 
 mod compact;
 mod errors;
 mod exec;
 mod injections;
 mod loop_guard;
+pub mod microcompact;
 mod request;
 mod rescue;
 mod runtime_context;
@@ -119,14 +121,25 @@ pub struct SessionDriver {
     ask: Option<Arc<dyn denia_tools::AskBridge>>,
     /// 层叠上下文管理:LLM 总结压缩(学 dsh 压力驱动 + Claude Code compact)。
     compaction: CompactionSettings,
+    /// 工具结果微压缩:摘要之前的廉价清理。
+    microcompact: microcompact::MicrocompactSettings,
     /// 连续压缩失败计数(熔断,学 Claude Code `MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES`)。
     compact_failures: AtomicU32,
+    /// 连续"压缩后快速回填"计数(rapid-refill 断路器)。
+    rapid_refills: AtomicU32,
+    /// 上次压缩后经过的工具轮次(用于判定回填是否过快)。
+    tool_turns_since_compact: AtomicU32,
     /// 工具并行执行配置(学 codex `ToolCallRuntime`)。
     parallel: ParallelSettings,
     /// 死循环检测状态(按会话):跨 turn 记忆——"用户手动继续后模型又
     /// 重复同样内容"的场景只能靠跨轮记忆抓住。同一会话的轮次由 server
     /// 的 running 位串行化,锁只保护跨会话的并发访问。
     loop_guards: std::sync::Mutex<std::collections::HashMap<String, loop_guard::LoopGuard>>,
+    /// 文件读取状态(按会话):重复读取去重 + 写前新鲜度校验。
+    /// 同一会话的工具调用共享一张表。
+    read_states: std::sync::Mutex<
+        std::collections::HashMap<String, denia_tools::read_state::SharedReadState>,
+    >,
 }
 
 impl SessionDriver {
@@ -144,9 +157,13 @@ impl SessionDriver {
             approval: None,
             ask: None,
             compaction: CompactionSettings::default(),
+            microcompact: microcompact::MicrocompactSettings::default(),
             compact_failures: AtomicU32::new(0),
+            rapid_refills: AtomicU32::new(0),
+            tool_turns_since_compact: AtomicU32::new(0),
             parallel: ParallelSettings::default(),
             loop_guards: std::sync::Mutex::new(std::collections::HashMap::new()),
+            read_states: std::sync::Mutex::new(std::collections::HashMap::new()),
         }
     }
 
@@ -163,6 +180,35 @@ impl SessionDriver {
     pub fn with_compaction(mut self, settings: CompactionSettings) -> Self {
         self.compaction = settings;
         self
+    }
+
+    /// 覆盖工具结果微压缩配置(默认值见
+    /// [`MicrocompactSettings::default`])。
+    pub fn with_microcompact(mut self, settings: microcompact::MicrocompactSettings) -> Self {
+        self.microcompact = settings;
+        self
+    }
+
+    /// 当前微压缩配置(server 侧构造 driver 时同步设置)。
+    pub fn microcompact_settings(&self) -> microcompact::MicrocompactSettings {
+        self.microcompact.clone()
+    }
+
+    /// 摘要阈值 token 数(供微压缩取 90% 作为自己的触发线)。
+    ///
+    /// 与 [`compact::should_compact`] 同口径:有效窗口 = 窗口 - 输出预留,
+    /// 阈值 = 有效窗口 - buffer。
+    pub(crate) fn compaction_threshold_tokens(
+        &self,
+        pressure: &denia_token_meter::ContextPressure,
+    ) -> Option<u64> {
+        let window = pressure.context_window?;
+        if window == 0 {
+            return None;
+        }
+        let reserve = self.compaction.summary_max_tokens.min(window);
+        let effective = window.saturating_sub(reserve);
+        Some(effective.saturating_sub(13_000))
     }
 
     /// 覆盖工具并行执行配置(默认值见 [`ParallelSettings::default`])。
@@ -314,12 +360,15 @@ impl SessionDriver {
         emit: Arc<dyn Fn(&SessionEnvelope) + Send + Sync>,
     ) -> TurnEndReason {
         // 死循环检测记忆跨 turn 保留:轮次开始借出,结束(含错误路径)归还。
-        let mut loop_guard = self
+        let loop_guard = self
             .loop_guards
             .lock()
             .unwrap_or_else(|poison| poison.into_inner())
             .remove(session.id())
             .unwrap_or_default();
+        // 文件读取状态同样按会话持有:跨 turn 保留(同一会话的下一轮里,
+        // "上一轮读过的文件"依然算读过,不该要求重读)。
+        let read_state = self.read_state_for(session.id());
         let mut state = TurnState::new(
             session.clone(),
             emit,
@@ -327,6 +376,7 @@ impl SessionDriver {
             vision_supported,
             cancel,
             loop_guard,
+            read_state,
         );
         let result = turn::run_turn_inner(self, &mut state, prompt, images, files, quoted).await;
         let guard = std::mem::take(&mut state.loop_guard);
@@ -339,6 +389,39 @@ impl SessionDriver {
             // Append or dispatch failure: the turn stays open in the log and
             // session load closes it with a synthetic aborted turn-end.
             Err(failure) => TurnEndReason::Error { failure },
+        }
+    }
+
+    /// 取(或首次创建)某会话的文件读取状态表。
+    ///
+    /// 按会话持有:同一会话的所有工具调用共享一张表,不同会话互不干扰。
+    /// 表本身是 `Arc<Mutex<..>>`,借出的是克隆的句柄。
+    pub fn read_state_for(
+        &self,
+        session_id: &str,
+    ) -> denia_tools::read_state::SharedReadState {
+        let mut map = self
+            .read_states
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        map.entry(session_id.to_string())
+            .or_insert_with(denia_tools::read_state::shared)
+            .clone()
+    }
+
+    /// 清空某会话的文件读取状态(压缩后调用)。
+    ///
+    /// 压缩摘要已接管旧内容的记忆职责;清空后模型若需要文件内容会重新读取,
+    /// 而不是依赖"读过"的标记去写一个自己已经看不到内容的文件。
+    pub fn clear_read_state(&self, session_id: &str) {
+        let map = self
+            .read_states
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        if let Some(state) = map.get(session_id)
+            && let Ok(mut state) = state.lock()
+        {
+            state.clear();
         }
     }
 }
@@ -415,6 +498,8 @@ pub(crate) struct TurnState {
     pub feedback: u32,
     /// 死循环检测器(driver 按会话持有,跨 turn 记忆)。
     pub loop_guard: loop_guard::LoopGuard,
+    /// 文件读取状态表(按会话共享):重复读取去重 + 写前新鲜度校验。
+    pub read_state: denia_tools::read_state::SharedReadState,
     /// dsh 对齐:请求头按需落盘的基准(最近快照即重建)。
     pub last_header: Option<RequestHeaderSnapshot>,
     /// 路由元数据(仅在变化时写 request-context)。
@@ -436,6 +521,7 @@ impl TurnState {
         vision_supported: bool,
         cancel: CancellationToken,
         loop_guard: loop_guard::LoopGuard,
+        read_state: denia_tools::read_state::SharedReadState,
     ) -> Self {
         Self {
             session,
@@ -447,6 +533,7 @@ impl TurnState {
             turn: 0,
             feedback: 0,
             loop_guard,
+            read_state,
             last_header: None,
             last_context: None,
             has_request_header: false,

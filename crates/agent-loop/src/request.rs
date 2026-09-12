@@ -52,6 +52,10 @@ pub(crate) async fn dispatch_request(
     tools: &[ToolSchema],
 ) -> Result<RequestOutcome, LlmFailure> {
     log_request_headers(state, step, framed_system, tools)?;
+    // 先做廉价的工具结果微压缩(不调模型),再做压力驱动的 LLM 摘要。
+    // 顺序:先轻量清理,再重量摘要。
+    // 轻量清理能把压力降下来,很多时候就不必动用昂贵的摘要了。
+    run_microcompact_gate(driver, state, step).await;
     run_compaction_gate(driver, state, step, framed_system, tools).await;
 
     let request = GenerateRequest {
@@ -361,12 +365,175 @@ fn log_request_headers(
     Ok(())
 }
 
+/// —— 工具结果微压缩闸门 ——
+///
+/// 在 LLM 摘要之前的一层廉价清理:把已经用过的旧工具结果内容替换为
+/// 占位符。不调模型、不重写历史——落盘为带 `replaces` 的 `ToolResult`
+/// 事件,派生时原位替换,**日志保持 append-only**。
+///
+/// 触发条件(两者之一):空闲超时 / token 压力达到摘要阈值的一定比例。
+/// `min_savings` 保护前缀缓存:省不到阈值就不动手。
+async fn run_microcompact_gate(driver: &SessionDriver, state: &TurnState, step: u32) {
+    let settings = &driver.microcompact;
+    if !settings.enabled {
+        return;
+    }
+
+    let surface = state.session.derive_surface();
+    if surface.is_empty() {
+        return;
+    }
+
+    // 空闲时长:从最后一条 assistant 消息的落盘时间算起。
+    let idle_minutes = state
+        .session
+        .last_assistant_age_minutes()
+        .map(|m| m as u64);
+    // token 压力与阈值:微压缩的阈值取摘要阈值的 90%(
+    // 让轻量清理总是先于重量摘要发生)。
+    let pressure = state.session.context_pressure();
+    let pressure_tokens = pressure.projected_tokens;
+    let threshold_tokens = driver
+        .compaction_threshold_tokens(&pressure)
+        .map(|t| (t as f64 * 0.9) as u64);
+
+    let decision = crate::microcompact::plan(
+        &surface,
+        settings,
+        idle_minutes,
+        pressure_tokens,
+        threshold_tokens,
+    );
+
+    let crate::microcompact::MicrocompactDecision::Applied {
+        trigger,
+        cleared,
+        kept,
+        cleared_seqs,
+        estimated_savings,
+    } = decision
+    else {
+        return;
+    };
+
+    // 落盘:每个被清理项追加一条带 `replaces` 的 ToolResult 事件,
+    // 派生时原位替换(内容不再进模型,但日志与前端仍保留完整历史)。
+    let seq_to_call: std::collections::HashMap<u64, &str> = surface
+        .iter()
+        .filter_map(|item| {
+            item.message
+                .tool_call_id
+                .as_deref()
+                .map(|id| (item.seq, id))
+        })
+        .collect();
+
+    let mut cleared_count = 0usize;
+    for seq in &cleared_seqs {
+        let Some(call_id) = seq_to_call.get(seq) else {
+            continue;
+        };
+        let event = SessionEvent::ToolResult {
+            turn: state.turn,
+            step,
+            call_id: (*call_id).to_string(),
+            content: crate::microcompact::CLEARED_PLACEHOLDER.to_string(),
+            is_error: false,
+            error: None,
+            error_identity: None,
+            meta: None,
+            truncation: None,
+            replaces: Some(*seq),
+        };
+        if append(&state.session, &state.emit, event).is_err() {
+            // 落盘失败不阻断请求:清理是优化,不是正确性依赖。
+            break;
+        }
+        cleared_count += 1;
+    }
+
+    if cleared_count > 0 {
+        tracing::info!(
+            session_id = state.session.id(),
+            turn = state.turn,
+            step,
+            trigger = ?trigger,
+            cleared = cleared_count,
+            kept = kept.len(),
+            estimated_savings,
+            cleared_tool_calls = ?cleared,
+            "microcompact applied"
+        );
+    }
+}
+
+/// 压缩后的读状态恢复:重新注入压缩前读过的文件内容。
+///
+/// 两件事一起做:
+///
+/// 1. **重新注入内容**:从 read_state 里挑最近读过的文件(最多 5 个、
+///    单文件 5k token、总量 50k token),以注入消息的形式放回上下文;
+/// 2. **清空 read_state**:摘要已接管旧内容的记忆职责。不清空的话,模型
+///    会看到"读过"的标记、却看不到内容,写文件时基于不存在的记忆做决策。
+fn restore_read_state_after_compact(driver: &SessionDriver, state: &TurnState, step: u32) {
+    let shared = state.read_state.clone();
+    let entries = match shared.lock() {
+        Ok(state) => state.recent_writable(crate::compact::POST_COMPACT_MAX_FILES),
+        Err(_) => return,
+    };
+
+    // 组装"路径 + 内容"列表(只取保留了完整内容的条目)。
+    let pairs: Vec<(String, String)> = entries
+        .into_iter()
+        .filter_map(|(key, entry)| {
+            let content = entry.content?;
+            Some((key.path.to_string_lossy().replace('\\', "/"), content))
+        })
+        .collect();
+
+    if !pairs.is_empty() {
+        let texts = crate::compact::build_post_compact_read_state(
+            &pairs,
+            crate::compact::POST_COMPACT_MAX_FILES,
+            crate::compact::POST_COMPACT_MAX_FILE_TOKENS,
+            crate::compact::POST_COMPACT_MAX_TOTAL_TOKENS,
+        );
+        for text in texts {
+            let _ = append(
+                &state.session,
+                &state.emit,
+                SessionEvent::UserMessage {
+                    text,
+                    injected: true,
+                    channel: Some("post-compact-read-state".into()),
+                    images: Vec::new(),
+                },
+            );
+        }
+    }
+
+    // 清空:旧内容要么已重新注入、要么已明确告知"需重读"。
+    driver.clear_read_state(state.session.id());
+    let _ = step;
+}
+
+/// rapid-refill 断路器:连续多少次"压缩后立刻回填"就停止自动压缩。
+pub const RAPID_REFILL_MAX_CONSECUTIVE: u32 = 3;
+
+/// 判定"回填过快"的工具轮次阈值:压缩后经过少于这么多轮又撞阈值,
+/// 计一次 rapid-refill。
+pub const RAPID_REFILL_TOOL_TURN_THRESHOLD: u32 = 3;
+
 /// —— 层叠上下文管理(学 dsh 压力驱动 + Claude Code compact)——
 /// 1. 低压力:什么都不做 —— 请求内容与日志逐字一致,provider 前缀缓存
 ///    持续命中;
 /// 2. 高压力:LLM 总结压缩,把旧事件区间折叠成摘要(落盘
 ///    compaction-summary,日志保持 append-only)。失败熔断:连续失败达
 ///    max_attempts 后不再尝试,带着全量历史继续。
+///
+/// 另有 **rapid-refill 断路器**:
+/// 压缩刚做完、没经过几个工具轮次又撞上阈值,说明有超大输出在持续灌入。
+/// 连续发生 3 次就停止自动压缩并明确报错——比无限压缩烧钱更有用。
 async fn run_compaction_gate(
     driver: &SessionDriver,
     state: &TurnState,
@@ -379,6 +546,28 @@ async fn run_compaction_gate(
         || driver.compact_failures.load(std::sync::atomic::Ordering::SeqCst)
             >= driver.compaction.max_attempts
     {
+        return;
+    }
+    // 断路器:连续快速回填已达上限时不再尝试,并把原因明确告知用户。
+    if driver
+        .rapid_refills
+        .load(std::sync::atomic::Ordering::SeqCst)
+        >= RAPID_REFILL_MAX_CONSECUTIVE
+    {
+        let _ = append(
+            &state.session,
+            &state.emit,
+            SessionEvent::UserMessage {
+                text: format!(
+                    "[denia] 自动压缩已停止:连续 {RAPID_REFILL_MAX_CONSECUTIVE} 次压缩后、\
+                     不到 {RAPID_REFILL_TOOL_TURN_THRESHOLD} 个工具轮次上下文就被重新填满。\
+                     可能有某个文件或命令的输出过大。请分块读取,或开一个新会话继续。"
+                ),
+                injected: true,
+                channel: Some("compact-breaker".into()),
+                images: Vec::new(),
+            },
+        );
         return;
     }
     match driver
@@ -398,6 +587,28 @@ async fn run_compaction_gate(
             driver
                 .compact_failures
                 .store(0, std::sync::atomic::Ordering::SeqCst);
+            // rapid-refill 判定:上次压缩后经过的工具轮次太少又撞阈值,
+            // 说明有超大输出在持续灌入。连续 3 次就停(见闸门开头的断路器)。
+            let since = driver
+                .tool_turns_since_compact
+                .swap(0, std::sync::atomic::Ordering::SeqCst);
+            if since < RAPID_REFILL_TOOL_TURN_THRESHOLD {
+                let count = driver
+                    .rapid_refills
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+                    + 1;
+                tracing::warn!(
+                    session_id = state.session.id(),
+                    consecutive_rapid_refills = count,
+                    tool_turns_since_compact = since,
+                    "compaction refilled quickly; rapid-refill breaker counting"
+                );
+            } else {
+                // 回填速度正常:断路计数清零。
+                driver
+                    .rapid_refills
+                    .store(0, std::sync::atomic::Ordering::SeqCst);
+            }
             let _ = append(
                 &state.session,
                 &state.emit,
@@ -412,6 +623,10 @@ async fn run_compaction_gate(
                     post_tokens: outcome.post_tokens,
                 },
             );
+            // 压缩后读状态恢复:
+            // 把压缩前读过的文件内容按预算重新注入,避免模型"忘了看过什么"
+            // 而立刻重新读一遍——那正是压缩后窗口二次膨胀的根源。
+            restore_read_state_after_compact(driver, state, step);
         }
         Ok(None) => {
             // 无可压缩区间(历史太短/窗口选择失败):不计数。

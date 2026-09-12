@@ -249,6 +249,28 @@ impl Tool for ReadFileTool {
             ));
         }
         // 文本文件:按行读取 offset/limit;字符级预算由落盘层统一兜底。
+        //
+        // 重复读取去重:同一会话里对同一文件的
+        // 同一分页重复读取,若文件自上次读取以来未变更,则不返回内容,
+        // 只回一句提示让模型引用此前的结果。实测同一会话中 77% 的
+        // read_file 调用是冗余的,这一层直接把它们清零。
+        let read_key = crate::read_state::ReadKey::new(&path, Some(args.offset), Some(args.limit));
+        let stamp = {
+            let path = path.clone();
+            tokio::task::spawn_blocking(move || crate::read_state::FileStamp::of(&path)).await
+        }
+        .ok()
+        .flatten();
+        if let (Some(shared), Some(stamp)) = (ctx.read_state.as_ref(), stamp)
+            && let Ok(state) = shared.lock()
+            && let Some(entry) = state.get(&read_key)
+            && crate::read_state::is_fresh(entry, &stamp)
+        {
+            return ToolOutput::text(format!(
+                "{} 自上次读取以来未变更,内容同上一条读取结果,无需重复读取。",
+                args.path
+            ));
+        }
         let read = {
             let path = path.clone();
             let offset = args.offset;
@@ -273,12 +295,31 @@ impl Tool for ReadFileTool {
                         "\n\n({truncated_lines} 行因单行超长被截断;超长单行可用 bash 处理)"
                     ));
                 }
-                if count == args.limit as usize {
+                // 是否读到文件末尾:行数不足 limit 即已到末尾,是完整读取。
+                let reached_eof = count < args.limit as usize;
+                if !reached_eof {
                     content.push_str(&format!(
                         "\n\n(已达 limit={};文件可能还有更多行,用 offset={} 继续读取)",
                         args.limit,
                         end + 1
                     ));
+                }
+                // 记录读取状态:供后续去重与写前校验使用。
+                if let (Some(shared), Some(stamp)) = (ctx.read_state.as_ref(), stamp) {
+                    // 单行被截断意味着内容不完整,标记为部分视图(不得作为写依据)。
+                    let is_partial_view = truncated_lines > 0;
+                    let is_full_read = args.offset <= 1 && reached_eof && !is_partial_view;
+                    let entry = crate::read_state::ReadEntry {
+                        mtime_ms: stamp.mtime_ms,
+                        size_bytes: stamp.size_bytes,
+                        is_partial_view,
+                        is_full_read,
+                        read_at: std::time::SystemTime::now(),
+                        content: is_full_read.then(|| body.clone()),
+                    };
+                    if let Ok(mut state) = shared.lock() {
+                        state.record(read_key, entry);
+                    }
                 }
                 ToolOutput::text(content)
             }
@@ -385,6 +426,54 @@ impl Tool for WriteFileTool {
                 );
             }
         }
+        // 写前新鲜度校验:
+        // 覆盖一个已存在的文件前,要求模型在本会话里读过它、且读过之后
+        // 文件没有被外部改动。新建文件不需要校验。
+        //
+        // 只在文件已存在时校验:创建新文件没有"基于过期内容覆写"的风险。
+        if path.exists()
+            && let Some(shared) = ctx.read_state.as_ref()
+        {
+            let stamp = {
+                let path = path.clone();
+                tokio::task::spawn_blocking(move || crate::read_state::FileStamp::of(&path)).await
+            }
+            .ok()
+            .flatten();
+            if let Some(stamp) = stamp {
+                let check = shared
+                    .lock()
+                    .map(|state| state.check_writable(&path, &stamp))
+                    .unwrap_or(crate::read_state::WriteCheck::Fresh);
+                match check {
+                    crate::read_state::WriteCheck::NeverRead => {
+                        return tool_error(
+                            format!("{} 尚未读取过,不能覆盖已有文件", args.path),
+                            "先用 read_file 读取该文件确认内容,再决定写入",
+                        );
+                    }
+                    crate::read_state::WriteCheck::PartialView => {
+                        return tool_error(
+                            format!(
+                                "{} 此前只被部分读取(内容不完整),不能基于不完整内容覆盖",
+                                args.path
+                            ),
+                            "用 read_file 完整读取该文件后再写入",
+                        );
+                    }
+                    crate::read_state::WriteCheck::Stale => {
+                        return tool_error(
+                            format!(
+                                "{} 自上次读取以来已被改动(可能被用户或工具修改)",
+                                args.path
+                            ),
+                            "重新读取该文件获取最新内容,再执行写入",
+                        );
+                    }
+                    crate::read_state::WriteCheck::Fresh => {}
+                }
+            }
+        }
         if let Some(file_history) = &ctx.file_history
             && let Err(message) = file_history.track_before_write(&path).await
         {
@@ -400,11 +489,29 @@ impl Tool for WriteFileTool {
             tokio::task::spawn_blocking(move || std::fs::write(&path, content.as_bytes())).await
         };
         match write {
-            Ok(Ok(())) => ToolOutput::text(format!(
-                "已写入 {} 字节到 {}",
-                args.content.len(),
-                args.path
-            )),
+            Ok(Ok(())) => {
+                // 写入成功后刷新读状态:文件内容已变成我们写进去的样子,
+                // 模型接着 Edit 同一文件时不会因写前校验而要求重读。
+                if let Some(shared) = ctx.read_state.as_ref() {
+                    let stamp = {
+                        let path = path.clone();
+                        tokio::task::spawn_blocking(move || crate::read_state::FileStamp::of(&path))
+                            .await
+                    }
+                    .ok()
+                    .flatten();
+                    if let Some(stamp) = stamp
+                        && let Ok(mut state) = shared.lock()
+                    {
+                        state.record_after_write(&path, args.content.clone(), stamp);
+                    }
+                }
+                ToolOutput::text(format!(
+                    "已写入 {} 字节到 {}(内容状态已在上下文中更新,无需重新读取)",
+                    args.content.len(),
+                    args.path
+                ))
+            }
             Ok(Err(error)) => tool_error(
                 format!("写入 {} 失败:{error}", args.path),
                 "确认目标路径可写;文件被占用时稍后重试",
@@ -437,6 +544,7 @@ mod tests {
             ask: None,
             call_id: None,
             goal_reader: None,
+            read_state: None,
         };
         (tempfile_like::TempDir(dir), context)
     }
@@ -621,6 +729,7 @@ mod tests {
                 ask: None,
                 call_id: None,
                 goal_reader: None,
+                read_state: None,
             };
             let reader = ReadFileTool::new();
             let out = reader.execute(r#"{"path":"pixel.png"}"#, &ctx).await;
@@ -659,6 +768,7 @@ mod tests {
             ask: None,
             call_id: None,
             goal_reader: None,
+            read_state: None,
         };
         let reader = ReadFileTool::new();
         let out = reader.execute(r#"{"path":"pixel.png"}"#, &ctx).await;

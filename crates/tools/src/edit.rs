@@ -158,6 +158,33 @@ impl Tool for EditTool {
         };
         let updated = restore_line_endings(&updated_view, crlf);
 
+        // 写前新鲜度校验。
+        //
+        // Edit 已经隐式要求"文件内容与模型预期一致"(old_string 匹配),
+        // 但匹配成功不代表模型看到的是**最新版本**——文件可能在模型读取
+        // 之后被用户或工具改动,而改动恰好没触及 old_string。此时写入会把
+        // 过期的修改合并进新版本,产生难以察觉的内容回退。
+        //
+        // 校验不通过时**不阻断编辑**(匹配已成功,内容差异大概率无害),
+        // 而是在结果里提示模型重新确认——比硬拒绝更实用。
+        let staleness_note = if let Some(shared) = ctx.read_state.as_ref() {
+            let stamp = {
+                let path = path.clone();
+                tokio::task::spawn_blocking(move || crate::read_state::FileStamp::of(&path)).await
+            }
+            .ok()
+            .flatten();
+            match stamp {
+                Some(stamp) => shared
+                    .lock()
+                    .map(|state| state.check_writable(&path, &stamp))
+                    .unwrap_or(crate::read_state::WriteCheck::Fresh),
+                None => crate::read_state::WriteCheck::Fresh,
+            }
+        } else {
+            crate::read_state::WriteCheck::Fresh
+        };
+
         if let Some(file_history) = &ctx.file_history
             && let Err(message) = file_history.track_before_write(&path).await
         {
@@ -188,11 +215,34 @@ impl Tool for EditTool {
         } else {
             "1 处".to_string()
         };
-        ToolOutput::text(format!(
+        // 写入成功后刷新读状态:文件内容已是编辑后的版本,后续 Edit
+        // 同一文件不会因写前校验而误报过期。
+        if let Some(shared) = ctx.read_state.as_ref() {
+            let stamp = {
+                let path = path.clone();
+                tokio::task::spawn_blocking(move || crate::read_state::FileStamp::of(&path)).await
+            }
+            .ok()
+            .flatten();
+            if let Some(stamp) = stamp
+                && let Ok(mut state) = shared.lock()
+            {
+                state.record_after_write(&path, updated.clone(), stamp);
+            }
+        }
+        let mut content = format!(
             "已在 {} 替换 {verb}({:?} → 新文本),首次替换发生在第 {first_line} 行",
             display(&path, &ctx.cwd),
             preview(&args.old_string),
-        ))
+        );
+        // 写前若检测到文件曾被外部改动,提示模型确认结果符合预期。
+        if staleness_note == crate::read_state::WriteCheck::Stale {
+            content.push_str(
+                "\n\n(注意:该文件在你上次读取之后曾被改动,本次编辑已基于最新内容写入;\
+                 如需确认结果请重新读取)",
+            );
+        }
+        ToolOutput::text(content)
     }
 }
 
@@ -250,12 +300,13 @@ mod tests {
     use tokio_util::sync::CancellationToken;
 
     fn temp_root() -> std::path::PathBuf {
+        // pid + 进程内原子序号:同一次测试里连续调用也保证互不撞名
+        // (时钟精度不足时按时间戳命名会给出同一个目录)。
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let dir = std::env::temp_dir().join(format!(
-            "denia-edit-{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
+            "denia-edit-{}-{}",
+            std::process::id(),
+            SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         ));
         std::fs::create_dir_all(&dir).unwrap();
         dir
@@ -275,6 +326,7 @@ mod tests {
             ask: None,
             call_id: None,
             goal_reader: None,
+            read_state: None,
         }
     }
 

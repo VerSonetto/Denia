@@ -54,7 +54,7 @@ async fn message(
     let live = ensure(&state, &id).await?;
     use denia_tools::capabilities::AgentRuntime;
     let ctx = denia_tools::ToolContext {
-        session_id: Some(id),
+        session_id: Some(id.clone()),
         selection: None,
         cwd: live.session.header().cwd.clone().into(),
         cancel: tokio_util::sync::CancellationToken::new(),
@@ -66,6 +66,9 @@ async fn message(
         ask: None,
         call_id: None,
         goal_reader: None,
+        // 与 agent-loop 共享同一张读状态表:这个入口发起的工具调用
+        // 也参与重复读取去重,不会在会话历史里留下"假新鲜"的标记。
+        read_state: Some(state.driver.read_state_for(&id)),
     };
     Ok(Json(
         state

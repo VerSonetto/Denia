@@ -79,6 +79,7 @@ async fn context7_tool_is_dispatchable_through_registry() {
         ask: None,
         call_id: None,
         goal_reader: None,
+        read_state: None,
     };
     let output = tool
         .execute(
