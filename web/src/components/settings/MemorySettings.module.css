@@ -1,0 +1,282 @@
+/* 设置 → 记忆:开关行 + 只读 viewer(工作区下拉 + 搜索 + 列表 + 预览)。 */
+
+.toggleRow {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 550;
+  color: var(--label-primary);
+}
+
+.toggle input[type='checkbox'] {
+  width: 15px;
+  height: 15px;
+  accent-color: var(--accent, #4f7cff);
+}
+
+.toggleLabel {
+  user-select: none;
+}
+
+.saved {
+  font-size: 12.5px;
+  font-weight: 550;
+  color: var(--label-secondary);
+}
+
+.hint {
+  margin: 6px 0 0;
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--label-tertiary);
+}
+
+.error {
+  margin: 10px 0 0;
+  padding: 10px 12px;
+  border: 1px dashed var(--danger-border);
+  border-radius: 10px;
+  font-size: 12.5px;
+  color: var(--danger);
+  overflow-wrap: anywhere;
+}
+
+.viewer {
+  margin-top: 18px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border-l1);
+}
+
+.viewerHead {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-bottom: 10px;
+}
+
+.viewerTitle {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--label-secondary);
+}
+
+.dropdown {
+  position: relative;
+}
+
+/* 覆写全局 .ui-dropdown-menu:浮层用最亮表面(亮色主题纯白),宽度内容
+   自适应不被触发钮框死。 */
+.menu {
+  right: auto;
+  width: max-content;
+  min-width: 220px;
+  max-width: 380px;
+  z-index: 60;
+  background: var(--bg-layer-1);
+}
+
+/* 行式选项:左侧名称+路径两行,右侧当前项勾选;不再用整块填充标当前。 */
+.menuItem {
+  flex-direction: row;
+  align-items: center;
+  gap: 12px;
+}
+
+.menuItemText {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.menuHint {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.nameSelected {
+  color: var(--accent);
+}
+
+.checkWrap {
+  flex: none;
+  display: flex;
+  color: var(--accent);
+}
+
+.dropdownTrigger {
+  /* 自绘 chevron(同 .chip-select 的视觉语言);原生外观整体关掉。 */
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  max-width: 260px;
+  height: 28px;
+  padding: 0 24px 0 10px;
+  border: 1px solid var(--border-l1);
+  border-radius: var(--r-sm, 8px);
+  background-color: var(--input-major);
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12' fill='none'%3E%3Cpath d='M3 4.5L6 7.5L9 4.5' stroke='%2381858C' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 7px center;
+  background-size: 12px 12px;
+  color: var(--label-primary);
+  font-size: 12.5px;
+  font-weight: 500;
+  cursor: pointer;
+  transition:
+    border-color var(--ease, 0.15s),
+    background-color var(--ease, 0.15s);
+}
+
+.dropdownTrigger:hover:not(:disabled) {
+  background-color: var(--hover-fill);
+}
+
+.dropdownTrigger:focus-visible {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.dropdownTrigger:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.dropdownValue {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.search {
+  flex: 1 1 140px;
+  min-width: 120px;
+  max-width: 240px;
+  box-sizing: border-box;
+  height: 28px;
+  padding: 0 10px;
+  border: 1px solid var(--border-l1);
+  border-radius: var(--r-sm, 8px);
+  background: var(--input-major);
+  color: var(--label-primary);
+  font-size: 12.5px;
+}
+
+.search:focus-visible {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.columns {
+  display: grid;
+  grid-template-columns: minmax(200px, 280px) minmax(0, 1fr);
+  gap: 12px;
+  align-items: start;
+}
+
+.fileList {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 420px;
+  overflow-y: auto;
+}
+
+.fileItem {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  width: 100%;
+  padding: 7px 10px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: none;
+  text-align: left;
+  cursor: pointer;
+  color: inherit;
+}
+
+.fileItem:hover {
+  background: var(--bg-hover, rgba(127, 127, 127, 0.08));
+}
+
+.fileItem.active {
+  border-color: var(--border-l1);
+  background: var(--active-fill);
+}
+
+.fileName {
+  font-size: 12.5px;
+  font-weight: 550;
+  color: var(--label-primary);
+  overflow-wrap: anywhere;
+}
+
+.fileMeta {
+  font-size: 11.5px;
+  color: var(--label-tertiary);
+}
+
+.preview {
+  min-height: 200px;
+  max-height: 420px;
+  overflow: auto;
+  padding: 10px 12px;
+  border: 1px solid var(--border-l1);
+  border-radius: 10px;
+}
+
+.previewBody {
+  margin: 0;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 12px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  color: var(--label-primary);
+}
+
+.changedHint {
+  margin: 0 0 8px;
+  padding: 6px 10px;
+  border-radius: 8px;
+  background: rgba(240, 180, 60, 0.14);
+  font-size: 12px;
+  color: var(--warn, #b8860b);
+}
+
+.previewError {
+  margin: 0;
+  font-size: 12.5px;
+  color: var(--danger);
+}
+
+.empty {
+  margin: 0;
+  padding: 10px 4px;
+  font-size: 12.5px;
+  color: var(--label-tertiary);
+}
+
+@media (max-width: 767px) {
+  .columns {
+    grid-template-columns: 1fr;
+  }
+}

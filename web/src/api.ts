@@ -524,6 +524,44 @@ export function deleteWorkspace(id: string): Promise<unknown> {
   return http(`/api/workspaces/${encodeURIComponent(id)}`, { method: 'DELETE' })
 }
 
+export interface MemoryFileInfo {
+  name: string
+  size: number
+  modifiedMs: number
+}
+
+export interface MemoryProject {
+  id: string
+  title: string
+  path: string
+  updatedAt: number
+  root: string
+  index: MemoryFileInfo | null
+  files: MemoryFileInfo[]
+}
+
+export interface MemoryFileView {
+  name: string
+  content: string
+  size: number
+  modifiedMs: number
+}
+
+/** 项目记忆清单(每工作区一条;无记忆的桶 files 为空)。 */
+export function getMemoryProjects(): Promise<{ projects: MemoryProject[] }> {
+  return http('/api/memories/projects')
+}
+
+/** 读取单个记忆文件(只读;超限 413 / 缺失 404 / 非法路径 400)。 */
+export function getMemoryFile(id: string, file: string): Promise<MemoryFileView> {
+  return http(
+    `/api/memories/projects/${encodeURIComponent(id)}/${file
+      .split('/')
+      .map(encodeURIComponent)
+      .join('/')}`,
+  )
+}
+
 export function pickerCapability(): Promise<{ kind: 'native' | 'browse' }> {
   return http('/api/fs/capability')
 }

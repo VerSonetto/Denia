@@ -1,5 +1,6 @@
 import { McpSettings } from './settings/McpSettings'
 import { RuntimeSettings } from './settings/RuntimeSettings'
+import { MemorySettings } from './settings/MemorySettings'
 import { useCallback, useEffect, useState, type ReactNode } from 'react'
 import * as api from '../api'
 import { t } from '../i18n'
@@ -23,6 +24,7 @@ type SettingsTab =
   | 'prompts'
   | 'models'
   | 'mcp'
+  | 'memory'
   | 'appearance'
 
 const CONSOLE_NS = 'console'
@@ -32,6 +34,7 @@ const TABS: SettingsTab[] = [
   'prompts',
   'models',
   'mcp',
+  'memory',
   'runtime',
   'appearance',
 ]
@@ -64,6 +67,8 @@ function tabIcon(tab: SettingsTab, size = 16) {
       return <IconSliders size={size} />
     case 'mcp':
       return <IconTool size={size} />
+    case 'memory':
+      return <IconStack size={size} />
     case 'appearance':
       return <IconGear size={size} />
   }
@@ -81,6 +86,8 @@ function tabLabel(tab: SettingsTab): string {
       return t('settingsTabModels')
     case 'mcp':
       return t('mcpTab')
+    case 'memory':
+      return t('memoryTab')
     case 'appearance':
       return t('settingsTabAppearance')
   }
@@ -98,6 +105,8 @@ function tabNavDesc(tab: SettingsTab): string {
       return t('settingsTabModelsDesc')
     case 'mcp':
       return t('mcpTabDesc')
+    case 'memory':
+      return t('memoryTabDesc')
     case 'appearance':
       return t('settingsTabAppearanceDesc')
   }
@@ -115,6 +124,8 @@ function paneTitle(tab: SettingsTab): string {
       return t('settingsPaneModelsTitle')
     case 'mcp':
       return t('mcpPaneTitle')
+    case 'memory':
+      return t('memoryPaneTitle')
     case 'appearance':
       return t('catAppearance')
   }
@@ -132,6 +143,8 @@ function paneDesc(tab: SettingsTab): string {
       return t('settingsPaneModelsDesc')
     case 'mcp':
       return t('mcpPaneDesc')
+    case 'memory':
+      return t('memoryPaneDesc')
     case 'appearance':
       return t('settingsAppearanceHint')
   }
@@ -593,6 +606,8 @@ export function SettingsModal({ notify, onClose }: { notify: Notify; onClose: ()
                 {tab === 'models' && <LlmPanel notify={notify} />}
 
                 {tab === 'mcp' && <McpSettings notify={notify} />}
+
+                {tab === 'memory' && <MemorySettings />}
 
                 {tab === 'appearance' && (
                   <section className="setm-section">
