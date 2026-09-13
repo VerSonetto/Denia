@@ -1109,6 +1109,41 @@ export default function SessionsPage({
     syncPromptHeight()
   }, [prompt, phase])
 
+  /* ---- 输入框自动聚焦 ----
+   * 进入欢迎态/切换会话后,只要输入框可编辑就自动获得焦点,用户不必先点一下
+   * 才能打字。三类情况不抢:输入框不可编辑(inert/优化中)、有弹窗在等用户
+   * 决策(审批/计划评审/回退与全权确认)、用户当前焦点在别的输入控件上
+   * (搜索框、浏览器面板的地址栏等)。视图切回对话也算一次"进入",一并聚焦。 */
+  useEffect(() => {
+    if (inert || optimizing) return
+    if (approvalReq || rewindReq || fullAccessConfirm || planReview) return
+    const el = promptRef.current
+    if (el === null) return
+    const active = document.activeElement
+    if (active === el) return
+    // 已有别的可输入控件握着焦点(搜索框/地址栏/弹窗输入):不抢。
+    if (
+      active instanceof HTMLElement &&
+      (active.isContentEditable ||
+        active.tagName === 'INPUT' ||
+        active.tagName === 'TEXTAREA' ||
+        active.tagName === 'SELECT')
+    ) {
+      return
+    }
+    el.focus({ preventScroll: true })
+  }, [
+    activeId,
+    phase,
+    view,
+    inert,
+    optimizing,
+    approvalReq,
+    rewindReq,
+    fullAccessConfirm,
+    planReview,
+  ])
+
   // dsh: composer seat / 内容列 / 滚动口尺寸变化时,贴底读者保持视野。
   // 内容列观察兜住不伴随 nodes 变化的增高(展开工具卡、图片加载等)。
   useEffect(() => {
