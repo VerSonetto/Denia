@@ -415,6 +415,8 @@ export interface SessionSummary {
   id: string
   created_at: number
   excerpt: string | null
+  /** AI 生成的会话标题(第一轮用户消息后后台产出);展示优先于 excerpt。 */
+  title: string | null
   cwd?: string
   sandbox?: boolean
   cwd_alive?: boolean

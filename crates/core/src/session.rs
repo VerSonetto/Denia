@@ -722,6 +722,12 @@ CommandRun {
     PermissionMode {
         mode: PermissionMode,
     },
+    /// 会话标题快照(抄 dsh `session/title`):latest-wins、仅日志持久,
+    /// 不进入模型历史与 token-meter 表面;第一轮用户消息发出后由服务端
+    /// 后台生成,列表摘要与侧栏展示读取。
+    SessionTitle {
+        title: String,
+    },
     /// 会话审批策略切换(遗留事件):新代码不再发射;变体保留以解析
     /// 旧日志,折叠为 no-op。
     ApprovalPolicy {

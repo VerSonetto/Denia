@@ -469,6 +469,21 @@ async fn prompt_session(
     state.runtime.human_turn(&id, &selection);
     *live.cancel.lock().unwrap() = Some(token.clone());
 
+    // 会话标题:第一轮用户消息(本会话还没有任何用户消息、非分支会话)
+    // 发出后,后台用同路由模型生成;dsh `first-prompt` 节奏的对齐——
+    // 分支会话沿用源会话标题,子代理有 label,都不生成。
+    if live.session.header().parent_session.is_none()
+        && live.session.first_prompt_excerpt(1).is_none()
+    {
+        crate::session_title::schedule(
+            state.registry.clone(),
+            live.clone(),
+            state.events.clone(),
+            selection.clone(),
+            prompt.clone(),
+        );
+    }
+
     let followers_for_turn = live.followers.clone();
     let events_for_guard = state.events.clone();
     let driver = state.driver.clone();

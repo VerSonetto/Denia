@@ -425,6 +425,7 @@ export async function ensureSession(ws: WorkspaceRecord | null): Promise<string 
     id: session.id,
     created_at: session.created_at,
     excerpt: null,
+    title: null,
     cwd: session.cwd,
     sandbox: session.sandbox,
     cwd_alive: true,

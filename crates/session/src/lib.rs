@@ -118,6 +118,8 @@ struct SessionInner {
     permission_mode: PermissionMode,
     /// 当前会话目标(goal 事件折叠;None = 无目标)。
     goal: Option<GoalState>,
+    /// 会话标题(session-title 事件折叠,latest-wins;None = 尚未生成)。
+    title: Option<String>,
 }
 
 /// One live session: header, in-memory log, and its append handle. The log is
@@ -185,6 +187,7 @@ impl Session {
                     pending_turn: Vec::new(),
                     permission_mode: PermissionMode::AutoEdit,
                     goal: None,
+                    title: None,
                 }),
             });
         }
@@ -216,6 +219,7 @@ impl Session {
         let mut last_system_prompt: Option<String> = None;
         let mut permission_mode = PermissionMode::AutoEdit;
         let mut goal: Option<GoalState> = None;
+        let mut title: Option<String> = None;
         let mut meter = ContextMeter::new();
         for line in lines {
             let with_newline = line.len() + 1;
@@ -232,6 +236,7 @@ impl Session {
                             last_system_prompt = Some(text.clone())
                         }
                         SessionEvent::PermissionMode { mode } => permission_mode = *mode,
+                        SessionEvent::SessionTitle { title: t } => title = Some(t.clone()),
                         _ => {}
                     }
                     meter.apply_one(&envelope);
@@ -274,6 +279,7 @@ impl Session {
                 pending_turn: Vec::new(),
                 permission_mode,
                 goal,
+                title,
             }),
         };
         session.close_orphaned_turn()?;
@@ -367,6 +373,9 @@ impl Session {
             SessionEvent::PermissionMode { mode } => {
                 inner.permission_mode = *mode;
             }
+            SessionEvent::SessionTitle { title } => {
+                inner.title = Some(title.clone());
+            }
             _ => {}
         }
         // 维护 token-meter:
@@ -403,6 +412,7 @@ impl Session {
             | SessionEvent::ToolResult { .. }
             | SessionEvent::TodoWrite { .. }
             | SessionEvent::PermissionMode { .. }
+            | SessionEvent::SessionTitle { .. }
             | SessionEvent::Goal { .. }
             | SessionEvent::CommandRun { .. } => {
                 inner.writer.flush()?;
@@ -660,6 +670,21 @@ impl Session {
         self.append(SessionEvent::PermissionMode { mode })
     }
 
+    /// 当前会话标题(session-title 事件折叠;None = 尚未生成)。
+    pub fn title(&self) -> Option<String> {
+        self.inner
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .title
+            .clone()
+    }
+
+    /// 写入会话标题:追加 session-title 事件(latest-wins,事件源折叠,
+    /// O(1) 生效);append 自带落盘 flush,标题必须立即可被磁盘读者看到。
+    pub fn set_title(&self, title: String) -> Result<SessionEnvelope, SessionError> {
+        self.append(SessionEvent::SessionTitle { title })
+    }
+
     /// The model-facing history projected from the log.
     pub fn derive_messages(&self) -> Vec<ChatMessage> {
         let inner = self
@@ -826,6 +851,8 @@ pub struct SessionSummary {
     pub id: String,
     pub created_at: u64,
     pub excerpt: Option<String>,
+    /// AI 生成的会话标题(第一轮用户消息后后台产出);展示优先于 excerpt。
+    pub title: Option<String>,
     pub cwd: Option<String>,
     pub sandbox: Option<bool>,
     /// Whether the recorded working directory still exists; sessions with a
@@ -919,6 +946,7 @@ pub struct SessionMeta {
     pub id: String,
     pub created_at: u64,
     pub excerpt: Option<String>,
+    pub title: Option<String>,
     pub cwd: String,
     pub sandbox: bool,
     pub parent_session: Option<String>,
@@ -1409,6 +1437,7 @@ fn meta_of(session: &Session) -> SessionMeta {
             .as_ref()
             .map(|s| s.label.clone())
             .or_else(|| session.first_prompt_excerpt(80)),
+        title: session.title(),
         cwd: session.header().cwd.clone(),
         sandbox: session.header().sandbox,
         parent_session: session.header().parent_session.clone(),
@@ -1425,6 +1454,7 @@ fn summary_of_meta(meta: &SessionMeta) -> SessionSummary {
         id: meta.id.clone(),
         created_at: meta.created_at,
         excerpt: meta.excerpt.clone(),
+        title: meta.title.clone(),
         cwd: Some(meta.cwd.clone()),
         sandbox: Some(meta.sandbox),
         cwd_alive: Path::new(&meta.cwd).is_dir(),
@@ -1433,13 +1463,16 @@ fn summary_of_meta(meta: &SessionMeta) -> SessionSummary {
     }
 }
 
-/// 摘要读取:header + 首条用户消息(流式逐行,提前停止),跳过损坏行。
+/// 摘要读取:header + 首条用户消息 + 标题事件(流式逐行,两个目标都命中
+/// 即停,上限 [`SUMMARY_SCAN_LIMIT`]),跳过损坏行。标题事件落在第一轮
+/// 闭合之后,所以不能在首条用户消息处提前停止。
 fn read_summary(file: &Path) -> Option<(SessionMeta, FileStamp)> {
     let stamp = file_stamp(file)?;
     let mut reader = BufReader::new(File::open(file).ok()?);
     let mut bytes_read = 0usize;
     let mut first_line: Option<String> = None;
     let mut excerpt: Option<String> = None;
+    let mut title: Option<String> = None;
     loop {
         if bytes_read >= SUMMARY_SCAN_LIMIT {
             break;
@@ -1462,14 +1495,24 @@ fn read_summary(file: &Path) -> Option<(SessionMeta, FileStamp)> {
             Ok(envelope) => envelope,
             Err(_) => continue,
         };
-        if let SessionEvent::UserMessage {
-            text,
-            injected: false,
-            ..
-        } = envelope.event
-        {
-            excerpt = Some(excerpt_text(&text, 80));
-            break;
+        match envelope.event {
+            SessionEvent::UserMessage {
+                text,
+                injected: false,
+                ..
+            } => {
+                excerpt = Some(excerpt_text(&text, 80));
+                if title.is_some() {
+                    break;
+                }
+            }
+            SessionEvent::SessionTitle { title: t } => {
+                title = Some(t);
+                if excerpt.is_some() {
+                    break;
+                }
+            }
+            _ => {}
         }
     }
     let header: SessionHeader = serde_json::from_str(first_line.as_deref()?).ok()?;
@@ -1483,6 +1526,7 @@ fn read_summary(file: &Path) -> Option<(SessionMeta, FileStamp)> {
                 .as_ref()
                 .map(|s| s.label.clone())
                 .or(excerpt),
+            title,
             cwd: header.cwd,
             sandbox: header.sandbox,
             parent_session: header.parent_session,
@@ -1856,6 +1900,41 @@ mod tests {
 
         loaded.set_permission_mode(PermissionMode::Full).unwrap();
         assert_eq!(loaded.permission_mode(), PermissionMode::Full);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn session_title_folds_persists_and_feeds_summary() {
+        let root = temp_root();
+        let store = SessionStore::open(&root).unwrap();
+        let cwd = root.join("work");
+        std::fs::create_dir_all(&cwd).unwrap();
+
+        let session = store.create(&cwd, true).unwrap();
+        assert_eq!(session.title(), None);
+        session.append(SessionEvent::UserMessage {
+            text: "帮我重构登录流程".into(),
+            injected: false,
+            channel: None,
+            images: Vec::new(),
+        })
+        .unwrap();
+        session.set_title("AI 生成标题·唯一串".into()).unwrap();
+        assert_eq!(session.title().as_deref(), Some("AI 生成标题·唯一串"));
+        let id = session.id().to_string();
+        drop(session);
+
+        // 重载折叠 + 摘要(内存索引与文件重读两条路径)都携带标题。
+        let loaded = store.load(&id).unwrap();
+        assert_eq!(loaded.title().as_deref(), Some("AI 生成标题·唯一串"));
+        let list = store.list().unwrap();
+        let summary = list.iter().find(|s| s.id == id).unwrap();
+        assert_eq!(summary.title.as_deref(), Some("AI 生成标题·唯一串"));
+        // 标题不进模型历史:model-visible == logged 的投影不受影响。
+        assert!(loaded
+            .derive_messages()
+            .iter()
+            .all(|m| !m.content.contains("AI 生成标题·唯一串")));
         std::fs::remove_dir_all(&root).unwrap();
     }
 

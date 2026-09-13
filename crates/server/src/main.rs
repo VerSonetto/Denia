@@ -9,6 +9,7 @@ mod mcp_runtime;
 mod mcp_settings;
 mod native_folder_picker;
 mod project_memory;
+mod session_title;
 mod skills;
 mod state;
 mod system_prompt_store;
