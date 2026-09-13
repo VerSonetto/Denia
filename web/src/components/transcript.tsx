@@ -77,11 +77,15 @@ export function Transcript({
 }) {
   // 压缩中占位行不进 nodes state:它是纯本地的瞬时状态,不该污染事件流
   // fold 的结果(否则重拉快照/切视图时会出现幽灵行)。
-  // Hook 必须在提前 return 之前,否则 hook 数量随条件变化 → React #310。
   const viewNodes = useMemo(
     () => (compactingAt ? withCompacting(nodes, compactingAt) : nodes),
     [nodes, compactingAt],
   )
+  // 全部 hook 必须在提前 return 之前:回退把日志截断为空后走空态分支,
+  // 若 hook 挂在 return 之下,同一个实例在"空态 → 有乐观行"切换时
+  // hook 数量变化,React 抛 #310(Rendered more hooks than during the
+  // previous render),异常冒泡到根 →整页白屏。
+  const workStartedAt = useMemo(() => openTurnStartedAt(nodes), [nodes])
   if (nodes.length === 0 && pendingMessages.length === 0 && !compactingAt) {
     return <div className="empty-hint">{t('emptyTranscript')}</div>
   }
@@ -94,7 +98,6 @@ export function Transcript({
     if (node.kind === 'assistant') lastAssistantStep.set(node.turn, node.step)
     else if (node.kind === 'turn-end') endedTurns.add(node.turn)
   }
-  const workStartedAt = useMemo(() => openTurnStartedAt(nodes), [nodes])
   return (
     <>
       {rows.map((row, index) =>
