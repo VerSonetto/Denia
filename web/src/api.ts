@@ -26,12 +26,14 @@ export class ApiError extends Error {
   }
 }
 
-/** 非 follow 型请求的默认超时:15s(挂死的请求不能卡住 UI)。 */
+/** 非 follow 型请求的默认超时:15s(挂死的请求不能卡住 UI);传 0 表示不设超时。 */
 const DEFAULT_TIMEOUT_MS = 15_000
 
 async function http<T>(path: string, init?: RequestInit, timeoutMs = DEFAULT_TIMEOUT_MS): Promise<T> {
   const timeout = new AbortController()
-  const timer = window.setTimeout(() => timeout.abort(), timeoutMs)
+  // 时长由用户手动操作决定的请求(如原生目录选择器)必须传 0,否则超时 abort 会在
+  // 用户还没选完时掐断请求,后端随之杀掉弹窗进程。
+  const timer = timeoutMs > 0 ? window.setTimeout(() => timeout.abort(), timeoutMs) : undefined
   try {
     const response = await fetch(path, {
       headers: { 'content-type': 'application/json' },
@@ -582,9 +584,10 @@ export function browseDirs(path?: string): Promise<{
   return http(`/api/fs/dirs${query}`)
 }
 
-/** Opens the OS-native directory chooser on the host; null when cancelled. */
+/** Opens the OS-native directory chooser on the host; null when cancelled.
+ *  用户可能停留任意久,不设超时;页面离开/刷新会自然 abort 并关掉弹窗。 */
 export function pickDirectory(): Promise<{ path: string | null }> {
-  return http('/api/fs/pick', { method: 'POST' })
+  return http('/api/fs/pick', { method: 'POST' }, 0)
 }
 
 /** `@` 提及候选:相对会话 cwd 的路径条目(目录与文件)。 */
