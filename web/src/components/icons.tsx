@@ -675,3 +675,109 @@ export function IconArrowLeft(props: IconProps) {
     </Svg>
   )
 }
+
+/** 前进箭头:浏览器工具栏。 */
+export function IconArrowRight(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <path
+        d="M3 8h10M9.5 4.5 13 8l-3.5 3.5"
+        stroke="currentColor"
+        strokeWidth="1.4"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </Svg>
+  )
+}
+
+/** 地球:浏览器空态/无安全信息的站点。 */
+export function IconGlobe(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <circle cx="8" cy="8" r="5.7" stroke="currentColor" strokeWidth="1.2" />
+      <path
+        d="M2.3 8h11.4M8 2.3c1.7 1.6 2.6 3.5 2.6 5.7S9.7 12.1 8 13.7C6.3 12.1 5.4 10.2 5.4 8S6.3 3.9 8 2.3Z"
+        stroke="currentColor"
+        strokeWidth="1.1"
+      />
+    </Svg>
+  )
+}
+
+/** 锁:HTTPS 安全标识。 */
+export function IconLock(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <rect
+        x="3.6"
+        y="7.2"
+        width="8.8"
+        height="5.8"
+        rx="1.4"
+        stroke="currentColor"
+        strokeWidth="1.3"
+      />
+      <path
+        d="M5.7 7.2V5.5a2.3 2.3 0 0 1 4.6 0v1.7"
+        stroke="currentColor"
+        strokeWidth="1.3"
+        strokeLinecap="round"
+      />
+    </Svg>
+  )
+}
+
+/** 相机:页面截图。 */
+export function IconCamera(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <path
+        d="M6 4.2 6.8 3h2.4l.8 1.2h2c.66 0 1.2.54 1.2 1.2v5.4c0 .66-.54 1.2-1.2 1.2H3.9c-.66 0-1.2-.54-1.2-1.2V5.4c0-.66.54-1.2 1.2-1.2H6Z"
+        stroke="currentColor"
+        strokeWidth="1.2"
+        strokeLinejoin="round"
+      />
+      <circle cx="8" cy="8" r="2" stroke="currentColor" strokeWidth="1.2" />
+    </Svg>
+  )
+}
+
+/** 准星:元素拾取。 */
+export function IconTarget(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <circle cx="8" cy="8" r="4.6" stroke="currentColor" strokeWidth="1.2" />
+      <circle cx="8" cy="8" r="1.1" fill="currentColor" />
+      <path
+        d="M8 1.6v2.2M8 12.2v2.2M1.6 8h2.2M12.2 8h2.2"
+        stroke="currentColor"
+        strokeWidth="1.2"
+        strokeLinecap="round"
+      />
+    </Svg>
+  )
+}
+
+/** 键盘:文本输入条开关。 */
+export function IconKeyboard(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <rect
+        x="1.8"
+        y="4.2"
+        width="12.4"
+        height="7.6"
+        rx="1.4"
+        stroke="currentColor"
+        strokeWidth="1.2"
+      />
+      <path
+        d="M3.6 6.6h.01M5.8 6.6h.01M8 6.6h.01M10.2 6.6h.01M12.4 6.6h.01M5.4 9.4h5.2"
+        stroke="currentColor"
+        strokeWidth="1.2"
+        strokeLinecap="round"
+      />
+    </Svg>
+  )
+}

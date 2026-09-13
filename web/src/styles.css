@@ -1687,6 +1687,8 @@ button {
   word-break: break-word;
   max-height: 240px;
   overflow-y: auto;
+  /* 打字机逐帧改写文本,禁止滚动锚定产生幽灵 scroll 事件干扰吸底账本判定。 */
+  overflow-anchor: none;
 }
 
 /* 思考流式输出:跟随滚动发生在 240px 内部框自己身上(外层对话容器不撑高)。
@@ -6165,7 +6167,10 @@ button.btn.form-action {
   }
 }
 
-/* ---------- browser panel (brw) ---------- */
+/* ---------- 浏览器侧栏布局 ----------
+ * 面板本体样式在 components/BrowserPanel.css(随懒加载分包);
+ * 这里只保留与整体布局耦合的主行结构。
+ */
 
 /* 常驻侧栏形态(ZCode 式):聊天区缩窄,右侧并排实时画面 */
 .main-row {
@@ -6178,235 +6183,6 @@ button.btn.form-action {
 .main-row .page-pane {
   flex: 1 1 auto;
   min-width: 0;
-}
-
-.browser-sidebar {
-  flex: 0 0 min(560px, 46vw);
-  min-width: 380px;
-  display: flex;
-  flex-direction: column;
-  border-left: 1px solid var(--border-l2);
-  background: var(--bg-layer-1);
-  overflow: hidden;
-  /* 挂载即完整尺寸:弹开瞬间不要有 0 高/塌陷的中间帧(先展开后布局会
-     让 screencast 首帧画进一个 0 高容器里,用户看到"侧栏开了但全白")。 */
-  min-height: 0;
-}
-
-.browser-sidebar .brw-head {
-  flex: 0 0 auto;
-}
-
-.browser-sidebar .brw-body {
-  flex: 1;
-  min-height: 0;
-}
-
-.brw-head {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 10px 14px;
-  border-bottom: 1px solid var(--border-l1);
-  color: var(--label-primary);
-  font-size: 13px;
-}
-
-.brw-body {
-  flex: 1;
-  min-height: 0;
-  display: flex;
-  flex-direction: column;
-}
-
-.browser-panel {
-  flex: 1;
-  min-height: 0;
-  display: flex;
-  flex-direction: column;
-}
-
-.browser-toolbar {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  padding: 10px 12px;
-  border-bottom: 1px solid var(--border-l1);
-}
-
-.browser-tabs {
-  display: flex;
-  gap: 6px;
-  overflow-x: auto;
-  scrollbar-width: none;
-}
-
-.browser-tab {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  max-width: 180px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  padding: 5px 8px 5px 12px;
-  border: 1px solid var(--border-l1);
-  border-radius: var(--r-pill);
-  background: transparent;
-  color: var(--label-secondary);
-  font-size: 12px;
-  cursor: pointer;
-  flex-shrink: 0;
-}
-
-.browser-tab-label {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.browser-tab.active {
-  background: var(--active-fill);
-  color: var(--label-primary);
-  border-color: var(--border-l3);
-}
-
-/* tab 悬停关闭按钮:默认透明,悬浮/键盘聚焦时显示 */
-.browser-tab-close {
-  flex-shrink: 0;
-  width: 16px;
-  height: 16px;
-  padding: 0;
-  border: none;
-  border-radius: 50%;
-  background: transparent;
-  color: var(--label-tertiary);
-  font-size: 12px;
-  line-height: 1;
-  cursor: pointer;
-  opacity: 0;
-  transition: opacity 0.12s ease, background 0.12s ease, color 0.12s ease;
-}
-
-.browser-tab:hover .browser-tab-close,
-.browser-tab:focus-within .browser-tab-close,
-.browser-tab.active .browser-tab-close {
-  opacity: 1;
-}
-
-.browser-tab-close:hover {
-  background: var(--danger-soft);
-  color: var(--danger);
-}
-
-.browser-tab.new {
-  padding: 5px 14px;
-  font-size: 14px;
-}
-
-.browser-address {
-  display: flex;
-  gap: 8px;
-  align-items: center;
-}
-
-.browser-address input {
-  flex: 1;
-  padding: 7px 12px;
-  border: 1px solid var(--border-l1);
-  border-radius: var(--r-sm);
-  background: var(--input-major);
-  color: var(--label-primary);
-  font-size: 13px;
-  outline: none;
-}
-
-.browser-address input:focus {
-  border-color: var(--border-l3);
-}
-
-.browser-frame {
-  position: relative;
-  flex: 1;
-  min-height: 120px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: var(--bg-base);
-  overflow: hidden;
-}
-
-.browser-frame img {
-  max-width: 100%;
-  max-height: 100%;
-  object-fit: contain;
-}
-
-.browser-frame img.interactive {
-  cursor: pointer;
-}
-
-.browser-frame img.picking {
-  cursor: crosshair;
-}
-
-/* 画面输入条:点击画面输入框后,从这里输入文本(回车粘贴进页面) */
-.browser-typebar {
-  display: flex;
-  gap: 6px;
-  align-items: center;
-}
-
-.browser-typebar input {
-  flex: 1;
-  padding: 5px 10px;
-  border: 1px solid var(--border-l1);
-  border-radius: var(--r-sm);
-  background: var(--input-major);
-  color: var(--label-primary);
-  font-size: 12px;
-  outline: none;
-}
-
-.browser-typebar input:focus {
-  border-color: var(--border-l3);
-}
-
-.browser-empty {
-  color: var(--label-tertiary);
-  font-size: 13px;
-}
-
-.browser-empty button {
-  padding: 8px 18px;
-  border: 1px solid var(--border-l2);
-  border-radius: var(--r-sm);
-  background: var(--bg-layer-2);
-  color: var(--label-primary);
-  font-size: 13px;
-  cursor: pointer;
-}
-
-.browser-empty button:hover {
-  background: var(--hover-fill);
-}
-
-.browser-notice {
-  position: absolute;
-  left: 50%;
-  bottom: 14px;
-  transform: translateX(-50%);
-  max-width: 80%;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  padding: 6px 14px;
-  border: 1px solid var(--border-l2);
-  border-radius: var(--r-pill);
-  background: var(--bg-layer-3);
-  color: var(--label-secondary);
-  font-size: 12px;
-  box-shadow: var(--shadow-lv2);
 }
 
 

@@ -28,6 +28,8 @@ import {
   useStartedIds,
   useToast,
   useWorkspaces,
+  readBrowserSidebarFlag,
+  writeBrowserSidebarFlag,
 } from './appStore'
 import {
   IconClose,
@@ -50,7 +52,7 @@ const LazySettingsModal = lazy(() =>
   import('./components/SettingsModal').then((module) => ({ default: module.SettingsModal })),
 )
 const LazyBrowserPanel = lazy(() => import('./components/BrowserPanel'))
-import { subscribeBrowserEvents } from './browserApi'
+import { fetchBrowserState, subscribeBrowserEvents } from './browserApi'
 import { sessionDisplayTitle } from './sessionDisplay'
 import type { SessionSummary, WorkspaceRecord } from './types'
 
@@ -78,61 +80,62 @@ export default function App() {
   const runningIds = useRunningIds()
 
   const [settingsOpen, setSettingsOpen] = useState(false)
-  // 侧栏归属会话:browserOpenBySession 记忆"每个会话的侧栏开合状态"。
-  // 切换会话时按记忆恢复/收起;AI 触发的自动展开归属到当前活跃会话。
-  const [browserOpen, setBrowserOpen] = useState(false)
-  const browserOpenBySessionRef = useRef<Record<string, boolean>>({})
+  // 浏览器侧栏是页面级开关,sessionStorage 持久化:刷新后按最后一次的
+  // 开合原样恢复。不按会话归属 —— 刷新后活跃会话可能落到新空白会话,
+  // 按会话记忆恢复必然丢失,也与"侧栏是页面家具"的直觉不符。
+  const [browserOpen, setBrowserOpen] = useState(() => readBrowserSidebarFlag())
   // 自动展开的收口:模型显式请求可视化模式(visualMode)时右侧视图出现。
   // 用户手动收起只挡当轮:新一轮 AI 轮次开始后重新允许展开。
   const browserAutoDismissedRef = useRef(false)
-  const browserOpenRef = useRef(false)
-  const activeIdRef = useRef(activeId)
-  useEffect(() => {
-    activeIdRef.current = activeId
-  }, [activeId])
+  const browserOpenRef = useRef(browserOpen)
   useEffect(() => {
     browserOpenRef.current = browserOpen
   }, [browserOpen])
-
-  /** 侧栏开合状态归属到指定会话(当前活跃会话)。 */
-  const setBrowserOpenForSession = useCallback(
-    (sessionId: string | null, open: boolean) => {
-      if (sessionId) browserOpenBySessionRef.current[sessionId] = open
-      setBrowserOpen(open && sessionId === activeIdRef.current)
-    },
-    [],
-  )
-
   useEffect(() => {
+    writeBrowserSidebarFlag(browserOpen)
+  }, [browserOpen])
+  // 自动收起的防竞速复核定时器:关光标签 → 延迟复查仍为空才收。
+  const tabsEmptyCheckRef = useRef<number | undefined>(undefined)
+
+  // 浏览器事件订阅:可视化模式自动展开 + 收尾自动收口。
+  useEffect(() => {
+    // AI 收尾口径 = 关光自己开的 tab、进程保持存活(纪律段"绝不退出
+    // 浏览器"),所以"标签清空"是比 exited 更常走的收尾信号;进程退出
+    // (崩溃/被杀)是兜底。两者都意味着侧栏没有可看的内容。
+    const maybeCollapseOnEmptyTabs = async () => {
+      if (!browserOpenRef.current) return
+      const snapshot = await fetchBrowserState().catch(() => null)
+      if (!snapshot?.running || snapshot.tabs.length > 0) return
+      // 防竞速:关光后立刻又开新 tab 是正常节奏,延迟复核一次再收。
+      window.clearTimeout(tabsEmptyCheckRef.current)
+      tabsEmptyCheckRef.current = window.setTimeout(() => {
+        void fetchBrowserState()
+          .then((again) => {
+            if (again.running && again.tabs.length === 0) setBrowserOpen(false)
+          })
+          .catch(() => {})
+      }, 1200)
+    }
     const close = subscribeBrowserEvents((event) => {
       // 可视化模式:模型显式带 visualMode 的浏览器命令才展开侧栏;
-      // frame/tabs-changed/navigated 只驱动面板内画面刷新,不自动展开,
-      // 后台浏览器任务不打扰用户。
-      if (
-        event.type === 'visual-mode-requested' &&
-        !browserAutoDismissedRef.current
-      ) {
-        setBrowserOpenForSession(activeIdRef.current, true)
+      // frame/navigated 只驱动面板内画面刷新,不自动展开,后台任务不打扰。
+      if (event.type === 'visual-mode-requested') {
+        if (!browserAutoDismissedRef.current) setBrowserOpen(true)
+      } else if (event.type === 'exited') {
+        // 不是用户拒绝,不标记 autoDismissed:后续可视化请求仍应展开。
+        setBrowserOpen(false)
+      } else if (event.type === 'tabs-changed') {
+        void maybeCollapseOnEmptyTabs()
       }
     })
-    return close
-  }, [setBrowserOpenForSession])
-
-  // 切换会话:侧栏归属跟随——旧会话记住开合,新会话按记忆恢复/收起。
-  const prevActiveForSidebar = useRef(activeId)
-  useEffect(() => {
-    const prev = prevActiveForSidebar.current
-    prevActiveForSidebar.current = activeId
-    if (prev === activeId) return
-    // 记录旧会话当前开合(仅在旧会话是活跃时更新,避免覆盖记忆)。
-    if (prev && browserOpenRef.current) {
-      browserOpenBySessionRef.current[prev] = true
-    } else if (prev && !browserOpenRef.current) {
-      browserOpenBySessionRef.current[prev] = false
+    // 刷新恢复的兜底:浏览器在跑但标签已清空(上一页面的收尾残留),
+    // 侧栏即便恢复开合也无可看,复核后收起。
+    void maybeCollapseOnEmptyTabs()
+    return () => {
+      window.clearTimeout(tabsEmptyCheckRef.current)
+      close()
     }
-    // 新会话按记忆恢复;无记忆则收起(侧栏不跨会话残留)。
-    setBrowserOpen(activeId !== null && !!browserOpenBySessionRef.current[activeId])
-  }, [activeId])
+  }, [])
   const prevRunningRef = useRef<Record<string, boolean>>({})
   useEffect(() => {
     const freshRun = Object.keys(runningIds).some((id) => !prevRunningRef.current[id])
@@ -761,24 +764,15 @@ export default function App() {
           </div>
           {browserOpen && (
             <aside className="browser-sidebar" data-open="true">
-              <div className="brw-head">
-                <span>{t('navBrowser')}</span>
-                <button
-                  type="button"
-                  className="icon-btn"
-                  onClick={() => {
+              <Suspense fallback={<div className="empty-hint">{t('loading')}</div>}>
+                {/* 面板自带完整 chrome(tab 条右侧收编收起按钮),不再套外层标题行 */}
+                <LazyBrowserPanel
+                  onClose={() => {
                     browserAutoDismissedRef.current = true
-                    setBrowserOpenForSession(activeId, false)
+                    setBrowserOpen(false)
                   }}
-                >
-                  <IconClose size={16} />
-                </button>
-              </div>
-              <div className="brw-body">
-                <Suspense fallback={<div className="empty-hint">{t('loading')}</div>}>
-                  <LazyBrowserPanel />
-                </Suspense>
-              </div>
+                />
+              </Suspense>
             </aside>
           )}
         </div>
