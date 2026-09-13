@@ -1,9 +1,8 @@
-//! SSE stream driver: parses eventsource payloads off one HTTP response,
-//! feeds the route's protocol translator, and enforces an idle timeout
-//! between events.
+//! SSE stream driver: parses eventsource payloads off one HTTP response and
+//! feeds the route's protocol translator. No denia-side timers live here: the
+//! stream ends only on upstream EOF, transport failure, or translate error.
 
 use std::collections::VecDeque;
-use std::time::Duration;
 
 use denia_core::error::{LlmFailure, codes};
 use denia_core::stream::StreamChunk;
@@ -25,23 +24,20 @@ struct SseState {
     >,
     translator: Box<dyn EventTranslator>,
     buffer: VecDeque<StreamChunk>,
-    idle_timeout: Duration,
     finished: bool,
 }
 
 /// Drives one SSE response into the chunk protocol through `translator`.
 /// The stream terminates after the translator's EOF buffer drains, or with a
-/// terminal error item on transport, translate, or idle-timeout failures.
+/// terminal error item on transport or translate failures.
 pub fn sse_chunk_stream(
     response: reqwest::Response,
     translator: Box<dyn EventTranslator>,
-    idle_timeout: Duration,
 ) -> crate::ChunkStream {
     let state = SseState {
         events: Box::pin(response.bytes_stream().eventsource()),
         translator,
         buffer: VecDeque::new(),
-        idle_timeout,
         finished: false,
     };
     Box::pin(futures::stream::unfold(state, step))
@@ -55,20 +51,7 @@ async fn step(mut state: SseState) -> Option<(Result<StreamChunk, LlmFailure>, S
         if state.finished {
             return None;
         }
-        let next = tokio::time::timeout(state.idle_timeout, state.events.next()).await;
-        let event = match next {
-            Err(_) => {
-                state.finished = true;
-                return Some((
-                    Err(LlmFailure::new(
-                        codes::TIMEOUT,
-                        "no stream activity within the idle timeout",
-                    )),
-                    state,
-                ));
-            }
-            Ok(event) => event,
-        };
+        let event = state.events.next().await;
         match event {
             Some(Ok(event)) => match state.translator.feed(&event.data) {
                 Ok(chunks) => state.buffer.extend(chunks),

@@ -19,7 +19,7 @@ use crate::catalog::{
     DiscoveredModel, LlmModelInfo, LlmResolvedModelInfo, ProviderInfo, ReasoningEffortInfo,
     ReasoningInfo, highest_reasoning_effort,
 };
-use crate::http::http_error_failure;
+use crate::http::{http_error_failure, send_sse};
 use crate::protocols::{
     self, AnthropicStream, CompletionsStream, EventTranslator, ResponsesStream, WireProtocol,
 };
@@ -32,7 +32,6 @@ pub const OPENAI_SETTINGS_NS: &str = "llm-openai";
 
 const DEFAULT_CONTEXT_WINDOW: u64 = 262_144;
 const DEFAULT_MAX_TOKENS: u64 = 32_768;
-const STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
 const DISCOVERY_RESPONSE_CAP: usize = 4 * 1024 * 1024;
 const USER_AGENT: &str = concat!("denia/", env!("CARGO_PKG_VERSION"));
 
@@ -416,18 +415,15 @@ impl LlmAdapter for OpenAiCompatAdapter {
         // 自定义头最后应用:可覆盖同名内置头(含 authorization,支持自定义认证网关)。
         let custom_headers = resolve_profile_headers(&profile.headers, &self.credentials)?;
         builder = builder.headers(custom_headers);
-        // 超时合理化(优化项):连接阶段 30s;请求总超时按请求体规模放宽——
-        // 大体量请求(xhigh 推理 + 长上下文)提供方处理慢,实测 200K 字符
-        // payload 正常 TTFB 21.8s,固定短超时会系统性错杀;30s 仅覆盖
-        // 连接建立(connect_timeout 已在 client 上),这里管整个请求。
+        // 超时纪律:连接阶段由 client 的 connect_timeout 负责;这里只给
+        // 「发出请求 → 响应头返回」设 TTFB 超时——大体量 + 深度思考请求
+        // 提供方受理慢,实测 200K 字符 payload 正常 TTFB 21.8s,按请求体
+        // 规模放宽。流式体不设任何 denia 侧超时:上游不报错就一直流
+        // (reqwest 的 .timeout() 是覆盖响应体读完的总超时,会把长思考
+        // 模型在流中途掐死,绝不能挂)。
         let body_size = serde_json::to_string(&body).map(|s| s.len()).unwrap_or(0);
-        let request_timeout_secs = if body_size > 100_000 { 120 } else { 60 };
-        builder = builder.timeout(Duration::from_secs(request_timeout_secs));
-        let response = builder
-            .json(&body)
-            .send()
-            .await
-            .map_err(crate::http::transport_error)?;
+        let ttfb_timeout = if body_size > 100_000 { 120 } else { 60 };
+        let response = send_sse(builder.json(&body), Duration::from_secs(ttfb_timeout)).await?;
 
         if !response.status().is_success() {
             let status = response.status();
@@ -442,7 +438,7 @@ impl LlmAdapter for OpenAiCompatAdapter {
             WireProtocol::Responses => Box::new(ResponsesStream::default()),
             WireProtocol::AnthropicMessages => Box::new(AnthropicStream::default()),
         };
-        Ok(sse_chunk_stream(response, translator, STREAM_IDLE_TIMEOUT))
+        Ok(sse_chunk_stream(response, translator))
     }
 }
 

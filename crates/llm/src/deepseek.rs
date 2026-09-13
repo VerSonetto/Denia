@@ -16,7 +16,7 @@ use crate::catalog::{
     LlmModelInfo, LlmResolvedModelInfo, ProviderInfo, ReasoningEffortInfo, ReasoningInfo,
     highest_reasoning_effort,
 };
-use crate::http::http_error_failure;
+use crate::http::{http_error_failure, send_sse};
 use crate::request::GenerateRequest;
 use crate::sse::sse_chunk_stream;
 use crate::wire::{UsageStyle, build_wire_messages, build_wire_tools};
@@ -28,7 +28,6 @@ pub const DEEPSEEK_SETTINGS_NS: &str = "llm-deepseek";
 const DEFAULT_BASE_URL: &str = "https://api.deepseek.com";
 const DEFAULT_CONTEXT_WINDOW: u64 = 1_000_000;
 const DEFAULT_MAX_TOKENS: u64 = 256_000;
-const STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
 const USER_AGENT: &str = concat!("denia/", env!("CARGO_PKG_VERSION"));
 
 /// The `llm-deepseek` settings section shape.
@@ -473,22 +472,22 @@ impl LlmAdapter for DeepSeekAdapter {
             "{}/chat/completions",
             Self::base_url(&section).trim_end_matches('/')
         );
-        // 请求总超时按请求体规模放宽(优化项,与 openai.rs 同口径):
-        // 大体量 + 深度思考请求提供方处理慢,固定短超时会系统性错杀。
+        // 超时纪律(与 openai.rs 同口径):只给「发出请求 → 响应头返回」
+        // 设 TTFB 超时,大体量 + 深度思考请求按请求体规模放宽;流式体不设
+        // 任何 denia 侧超时,上游不报错就一直流。
         let body_size = serde_json::to_string(&body).map(|s| s.len()).unwrap_or(0);
-        let request_timeout_secs = if body_size > 100_000 { 120 } else { 60 };
-        let response = self
-            .http
-            .post(&url)
-            .header("authorization", format!("Bearer {api_key}"))
-            .header("content-type", "application/json")
-            .header("accept", "text/event-stream")
-            .header("user-agent", USER_AGENT)
-            .json(&body)
-            .timeout(std::time::Duration::from_secs(request_timeout_secs))
-            .send()
-            .await
-            .map_err(crate::http::transport_error)?;
+        let ttfb_timeout = if body_size > 100_000 { 120 } else { 60 };
+        let response = send_sse(
+            self.http
+                .post(&url)
+                .header("authorization", format!("Bearer {api_key}"))
+                .header("content-type", "application/json")
+                .header("accept", "text/event-stream")
+                .header("user-agent", USER_AGENT)
+                .json(&body),
+            Duration::from_secs(ttfb_timeout),
+        )
+        .await?;
 
         if !response.status().is_success() {
             let status = response.status();
@@ -503,7 +502,6 @@ impl LlmAdapter for DeepSeekAdapter {
             Box::new(crate::protocols::CompletionsStream::new(
                 UsageStyle::DeepSeek,
             )),
-            STREAM_IDLE_TIMEOUT,
         ))
     }
 }

@@ -1,6 +1,8 @@
 //! Shared HTTP error mapping for chat-completions endpoints.
 
-use denia_core::error::{LlmFailure, codes};
+use std::time::Duration;
+
+use denia_core::error::{LlmError, LlmFailure, codes};
 use reqwest::StatusCode;
 use reqwest::header::{HeaderMap, RETRY_AFTER};
 use serde::Deserialize;
@@ -157,4 +159,95 @@ pub fn transport_failure(error: reqwest::Error) -> LlmFailure {
 /// The [`transport_failure`] snapshot wrapped as the live error form.
 pub fn transport_error(error: reqwest::Error) -> denia_core::error::LlmError {
     denia_core::error::LlmError::from_failure(transport_failure(error))
+}
+
+/// 发出 SSE 请求,只对「发出请求 → 响应头返回」设 TTFB 超时。
+///
+/// 这个预算绝不能交给 `RequestBuilder::timeout` 承载:那是覆盖到响应体
+/// 读完的总超时,流式生成超过时限会在流中途被掐断(reqwest 上报为
+/// error decoding response body,超时标记在 body 解码层丢失,还会被
+/// 误判成网络故障)。流中不设任何 denia 侧超时:上游不报错就一直流,
+/// 由上游 EOF / 断连 / 翻译错误终结。
+pub(crate) async fn send_sse(
+    builder: reqwest::RequestBuilder,
+    ttfb_timeout: Duration,
+) -> Result<reqwest::Response, LlmError> {
+    tokio::time::timeout(ttfb_timeout, builder.send())
+        .await
+        .map_err(|_| {
+            LlmError::from_failure(LlmFailure::new(
+                codes::TIMEOUT,
+                format!("provider returned no response headers within {ttfb_timeout:?}"),
+            ))
+        })?
+        .map_err(transport_error)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::{TcpListener, TcpStream};
+
+    /// 受理一条连接并读掉整个请求头(直到空行),供两个测试用。
+    async fn drain_request_head(sock: &mut TcpStream) {
+        let mut buf = [0u8; 4096];
+        let mut got = Vec::new();
+        loop {
+            let n = sock.read(&mut buf).await.unwrap();
+            got.extend_from_slice(&buf[..n]);
+            if got.windows(4).any(|w| w == b"\r\n\r\n") {
+                return;
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn ttfb_timeout_fires_when_headers_never_arrive() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            // 受理连接后什么都不回,模拟受理了请求却挂死的网关。
+            let (_sock, _) = listener.accept().await.unwrap();
+            futures::future::pending::<()>().await;
+        });
+
+        let builder = reqwest::Client::new().post(format!("http://{addr}/v1/chat/completions"));
+        let err = send_sse(builder, Duration::from_millis(150)).await.unwrap_err();
+        assert_eq!(err.code, codes::TIMEOUT);
+    }
+
+    #[tokio::test]
+    async fn slow_stream_body_outlives_ttfb_budget() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            drain_request_head(&mut sock).await;
+            sock.write_all(
+                b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nconnection: close\r\n\r\n",
+            )
+            .await
+            .unwrap();
+            // 体总耗时 300ms,远超 100ms 的 TTFB 预算:超时只管响应头,
+            // 缓慢流式体必须完整送达(旧实现的总超时会在 100ms 处掐断)。
+            for i in 0..5 {
+                tokio::time::sleep(Duration::from_millis(60)).await;
+                sock.write_all(format!("data: frame-{i}\n\n").as_bytes())
+                    .await
+                    .unwrap();
+            }
+        });
+
+        let builder = reqwest::Client::new().post(format!("http://{addr}/v1/chat/completions"));
+        let response = send_sse(builder, Duration::from_millis(100)).await.unwrap();
+        let body = response.text().await.unwrap();
+        for i in 0..5 {
+            assert!(
+                body.contains(&format!("frame-{i}")),
+                "body 应含第 {i} 帧,实际:{body}"
+            );
+        }
+    }
 }
