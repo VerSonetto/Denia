@@ -61,6 +61,10 @@ fn parse(path: &Path, source: &str) -> Result<(Skill, String), String> {
         return Err(format!("技能文件过大：{}", path.display()));
     }
     let raw = std::fs::read_to_string(path).map_err(|e| format!("读取技能失败：{e}"))?;
+    parse_from_str(&raw, path, source)
+}
+
+fn parse_from_str(raw: &str, path: &Path, source: &str) -> Result<(Skill, String), String> {
     let normalized = raw.trim_start_matches('\u{feff}').replace("\r\n", "\n");
     let (metadata, body) = if let Some(rest) = normalized.strip_prefix("---\n") {
         let (header, body) = rest
@@ -119,17 +123,16 @@ fn parse(path: &Path, source: &str) -> Result<(Skill, String), String> {
 }
 
 fn builtin_skills() -> Vec<Skill> {
-    vec![Skill {
-        name: "skill-creator".into(),
-        description: "创建或更新符合要求的高质量 Codex skill，并按需组织参考资料、脚本和资源。"
-            .into(),
-        source: "bundled".into(),
-        path: PathBuf::from("<denia-bundled>/skill-creator/SKILL.md"),
-        resource_base: PathBuf::from("<denia-bundled>/skill-creator"),
-        model_invocable: true,
-        user_invocable: true,
-        builtin_body: Some(include_str!("builtin_skills/skill-creator/SKILL.md").to_string()),
-    }]
+    let path = PathBuf::from("<denia-bundled>/skill-creator/SKILL.md");
+    // 元数据与正文同源自 SKILL.md frontmatter，硬编码描述会与正文文案漂移。
+    let (mut skill, body) = parse_from_str(
+        include_str!("builtin_skills/skill-creator/SKILL.md"),
+        &path,
+        "bundled",
+    )
+    .expect("内置技能 skill-creator 必须可解析");
+    skill.builtin_body = Some(body);
+    vec![skill]
 }
 
 /// 按字符数截断描述（技能目录用；对齐 dsh catalogDescriptionMaxLength 语义）。
