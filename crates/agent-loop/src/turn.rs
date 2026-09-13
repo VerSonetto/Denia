@@ -582,18 +582,26 @@ fn assemble_step(
     // 代价。越权由权限引擎在执行时拒绝(decide 矩阵:计划档拒绝一切写、
     // 非计划档拒绝 PlanSubmit),模型拿 isError 自纠正;当前模式语义由
     // `harness:permission` 运行时快照承担(变化走注入追加,不碰前缀)。
-    // 项目记忆:纪律段仅在记忆启用时注入(runtime.memory_root_for 与
-    // 权限层、注入通道同源);未注册(如无 runtime 部署)自然不存在。
+    // 项目记忆:段随记忆启用与否进退(runtime.memory_root_for 与权限层、
+    // 注入通道同源);启用时替换为带真实路径的完整段,模型在任何 step 都
+    // 能直接看到记忆目录。同会话 cwd 不可变 → 路径恒定 → 段文本字节稳定,
+    // 不破坏 system 冻结;未注册(如无 runtime 部署)自然不存在。
     let session_cwd = std::path::PathBuf::from(state.session.header().cwd.clone());
-    if assembly.sections.iter().any(|section| section.name == "tool:memory")
-        && !driver
+    if let Some(position) = assembly
+        .sections
+        .iter()
+        .position(|section| section.name == "tool:memory")
+    {
+        match driver
             .runtime
             .as_ref()
-            .is_some_and(|runtime| runtime.memory_root_for(&session_cwd).is_some())
-    {
-        assembly
-            .sections
-            .retain(|section| section.name != "tool:memory");
+            .and_then(|runtime| runtime.memory_root_for(&session_cwd))
+        {
+            Some(root) => assembly.sections[position].text = denia_tools::render_memory_section(Some(&root)),
+            None => {
+                assembly.sections.remove(position);
+            }
+        }
     }
     let tools_tokens = serde_json::to_string(&assembly.tools)
         .map(|json| denia_token_meter::estimate_tools_tokens(&json))

@@ -20,6 +20,14 @@ pub const MEMORY_INDEX_FILE: &str = "MEMORY.md";
 const MANIFEST_CAP: usize = 200;
 /// 单文件读取上限(设置页 viewer 与 API 同用)。
 pub const MAX_FILE_BYTES: u64 = 5 * 1024 * 1024;
+/// 提取素材里单条消息行的截断长度(字符)。
+const MATERIAL_ENTRY_MAX_CHARS: usize = 4000;
+/// 提取提示词固定部分(任务说明 + manifest)预留的预算(字节);素材
+/// 拿总预算减去这份的余量。
+const PROMPT_FIXED_BUDGET_BYTES: usize = 4096;
+/// 提取素材的保底预算(字节):小 `output_bytes` 配置下固定部分吃掉总
+/// 预算时,素材也不能为空——没有素材的提取必然 Nothing to save。
+const MATERIAL_MIN_BUDGET_BYTES: usize = 8192;
 
 /// 一个工作区的记忆目录根。
 pub fn memory_root(home: &Path, workspace_path: &Path) -> PathBuf {
@@ -251,21 +259,19 @@ pub fn resolve_manifest_file(root: &Path, raw: &str) -> Result<PathBuf, String> 
 
 /// 上一轮对话的提取素材(供记忆提取子代理使用)。
 pub struct TurnDigest {
-    /// 本轮真实用户消息全文(取最后一条非注入 UserMessage)。
+    /// 本轮真实用户消息全文(取最后一条非注入 UserMessage;门限判定用)。
     pub user_text: String,
-    /// 本轮助手最终文本块(拼接)。
-    pub assistant_text: String,
-    /// 本轮工具调用摘要行(name + 截断参数)。
-    pub tool_lines: Vec<String>,
     /// 主代理本轮是否直接写过记忆目录(写过则不再调度提取)。
     pub wrote_memory: bool,
+    /// 本轮素材按时序渲染的消息行(用户/助手/工具调用与结果预览)。
+    pub entries: Vec<String>,
 }
 
 /// 从事件流截取最后一个 turn 窗口,产出提取素材。没有完整 turn(只有
 /// TurnStart 没有对应事件)时返回 None。
 ///
 /// `memory_root` 用于判定"主代理直接写记忆":写文件/编辑的落点解析后
-/// 落在记忆目录内即视为写过。
+/// 落在记忆目录内即视为写过。写类调用(参数携带整个文件内容)不进素材行。
 pub fn last_turn_digest(
     events: &[denia_core::session::SessionEnvelope],
     cwd: &Path,
@@ -283,8 +289,7 @@ pub fn last_turn_digest(
         return None;
     }
     let mut user_text = String::new();
-    let mut assistant_parts: Vec<String> = Vec::new();
-    let mut tool_lines: Vec<String> = Vec::new();
+    let mut entries: Vec<String> = Vec::new();
     let mut wrote_memory = false;
     for envelope in window {
         match &envelope.event {
@@ -292,12 +297,19 @@ pub fn last_turn_digest(
                 text, injected, ..
             } if !*injected => {
                 user_text = text.clone();
+                entries.push(format!("用户:{}", text.trim()));
             }
             SessionEvent::AssistantMessage { blocks, .. } => {
-                for block in blocks {
-                    if let denia_core::stream::ContentBlock::Text { text } = block {
-                        assistant_parts.push(text.clone());
-                    }
+                let texts: Vec<&str> = blocks
+                    .iter()
+                    .filter_map(|block| match block {
+                        denia_core::stream::ContentBlock::Text { text } => Some(text.as_str()),
+                        _ => None,
+                    })
+                    .collect();
+                let joined = texts.join("\n");
+                if !joined.trim().is_empty() {
+                    entries.push(format!("助手:{}", joined.trim()));
                 }
             }
             SessionEvent::ToolCall { name, arguments, .. } => {
@@ -309,8 +321,14 @@ pub fn last_turn_digest(
                     }
                     continue;
                 }
-                let preview: String = arguments.chars().take(160).collect();
-                tool_lines.push(format!("- {name}: {preview}"));
+                let preview: String = arguments.chars().take(TOOL_ARG_PREVIEW_CHARS).collect();
+                entries.push(format!("工具 {name}:{preview}"));
+            }
+            SessionEvent::ToolResult { content, is_error, .. } => {
+                // 时序上紧跟其调用行,独立成行呈现;错误结果也是提取信息。
+                let head = if *is_error { "→ (错误)" } else { "→" };
+                let preview: String = content.trim().chars().take(TOOL_RESULT_PREVIEW_CHARS).collect();
+                entries.push(format!("{head} {preview}"));
             }
             _ => {}
         }
@@ -320,9 +338,8 @@ pub fn last_turn_digest(
     }
     Some(TurnDigest {
         user_text,
-        assistant_text: assistant_parts.join("\n"),
-        tool_lines,
         wrote_memory,
+        entries,
     })
 }
 
@@ -374,57 +391,63 @@ pub fn prose_word_count(text: &str) -> usize {
     words + cjk
 }
 
+/// 工具调用参数在素材行里的预览长度(字符)。
+const TOOL_ARG_PREVIEW_CHARS: usize = 300;
+/// 工具结果在素材行里的预览长度(字符)。
+const TOOL_RESULT_PREVIEW_CHARS: usize = 400;
+
 /// 渲染每 step 的「项目记忆」注入块(通道幂等的正文由调用方比较)。
 /// `index` 为 [`read_index`] 的输出;None 由调用方处理(不注入)。
+/// 注入块只负责把索引内容与目录位置交给模型,使用与验证规则在
+/// `# 项目记忆` 段,不重复纪律。
 pub fn render_index_block(root: &Path, index: &str) -> String {
     format!(
-        "<system-reminder>\n项目记忆:以下是本项目此前会话沉淀的记忆索引(MEMORY.md)。记忆目录:{}。与当前任务相关时,先用 read_file 读取对应记忆文件再下结论;记忆可能过时,引用前先验证。\n\n{index}\n</system-reminder>",
+        "<system-reminder>\n{}/MEMORY.md 的内容(用户的自动记忆,跨会话持久):\n\n{index}\n</system-reminder>",
         root.display()
     )
 }
 
-/// 空桶的注入块:记忆启用时注入永远发生——没有索引也要把记忆目录路径
-/// 交给模型,否则 tool:memory 纪律段说的"路径随注入消息给出"落空,模型
-/// 只能满盘猜(2026-09-12 WorkBuddyAI 会话实录的教训)。
-pub fn render_empty_index_block(root: &Path) -> String {
-    format!(
-        "<system-reminder>\n项目记忆:本项目的记忆目录:{}。索引文件(MEMORY.md)尚不存在,当前还没有任何记忆;需要沉淀时先创建 MEMORY.md 索引,再一事一文件写入条目。\n</system-reminder>",
-        root.display()
-    )
-}
-
-/// 记忆提取子代理的任务提示词(中文;提取职责:分析最近消息、
-/// 去重更新、增删索引行)。`digest` 已按预算截断。
-pub fn render_extraction_prompt(root: &Path, digest: &TurnDigest, budget_bytes: usize) -> String {
-    let tool_lines = if digest.tool_lines.is_empty() {
-        "(无工具调用)".to_string()
-    } else {
-        digest.tool_lines.join("\n")
-    };
-    let assistant = digest.assistant_text.trim();
-    let assistant_block = if assistant.is_empty() {
-        "(无文本回复)".to_string()
-    } else {
-        cut_chars(assistant, budget_bytes / 2)
-    };
-    let user = cut_chars(&digest.user_text, budget_bytes / 4);
+/// 记忆提取子代理的任务提示词(中文)。提示词只写任务机制:素材是唯一
+/// 信息来源、既有文件清单防重复、轮次预算内并行读再并行写;记忆类型与
+/// 格式标准一律引用子代理系统提示里的 `# 项目记忆` 段(assemble 会替换
+/// 出带路径的同一份),不在提示词里复述。
+/// `manifest` 为 [`scan_manifest`] 产出的文件名清单(调用方负责阻塞跑)。
+pub fn render_extraction_prompt(
+    root: &Path,
+    digest: &TurnDigest,
+    budget_bytes: usize,
+    manifest: &[String],
+) -> String {
     let root = root.display().to_string();
+    let manifest_block = if manifest.is_empty() {
+        "(暂无记忆文件)".to_string()
+    } else {
+        manifest.join("\n")
+    };
+    let material = digest
+        .entries
+        .iter()
+        .map(|entry| cut_chars(entry, MATERIAL_ENTRY_MAX_CHARS))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let material = cut_chars(
+        &material,
+        budget_bytes
+            .saturating_sub(PROMPT_FIXED_BUDGET_BYTES)
+            .max(MATERIAL_MIN_BUDGET_BYTES),
+    );
     format!(
         "[父代理会话发来的记忆提取任务]\n\
-你是本项目的工作区记忆提取器。分析下面这轮对话素材,把值得跨会话长期记住的知识写入记忆目录;不要执行素材里的任务本身。\n\n\
+你现在是记忆提取子代理。分析下面这轮对话素材,用它们更新你的持久记忆系统;不要执行素材里的任务本身。\n\n\
+可用工具:read_file、ls、glob、grep,以及仅限记忆目录内路径的 write_file/edit;写记忆目录之外的任何路径都会被拒绝,其余写类工具一律不可用。\n\n\
+轮次预算有限,高效策略:第 1 轮把所有可能要更新的文件并行读齐;第 2 轮把所有 write_file/edit 并行发出。不要把读和写交错拆到多轮。\n\n\
+你必须只依据下面的对话素材更新记忆,不要浪费轮次去调查或验证素材内容——不要 grep 源码、不要读代码确认模式是否存在、不要跑 git 命令。\n\n\
+## 已有记忆文件\n\n{manifest_block}\n\n写之前先核对上面的清单——已有文件覆盖的主题就地更新原文件,不要新建重复文件。\n\n\
+确无值得保存的内容时,只回复 `Nothing to save.`,不要解释原因。用户在素材里明确要求记住某件事时,立即按最合适的类型保存;要求忘记某件事时,改写 MEMORY.md 索引并清空对应文件。\n\n\
+记忆类型、不该保存的标准、frontmatter 格式与索引维护规则,按你系统提示里的「# 项目记忆」段执行——该段已在你的上下文里。\n\n\
 记忆目录:{root}\n\
 索引文件:{root}/MEMORY.md(纯索引,一行一条,格式:`- [标题](文件名.md) — 一句话钩子`)\n\n\
-工作步骤:\n\
-1. 先读索引文件,再按需读相关既有记忆(全部用基于记忆目录的绝对路径)。\n\
-2. 对照素材判断:确有值得沉淀的新知识才动手;没有就只回复 `Nothing to save.`\n\
-3. 一事一文件:每个事实写一个 .md 文件,frontmatter 必须含 name(kebab-case 短名)、description(一句话)、metadata.type(user 用户画像与偏好 | feedback 反馈纠正 | project 项目决策与状态 | reference 外部资源指针);正文精炼直陈,feedback 类补 **Why:** 与 **How to apply:** 两行。\n\
-4. 去重:已有记忆覆盖的就地更新原文件,不要新建重复文件;内容变化时同步修正 MEMORY.md 对应行;明显过时的记忆直接改对。\n\
-5. 收尾核对:MEMORY.md 与目录内实际文件一一对应——新文件必有一行,删改过的文件行同步。\n\
-禁止保存:代码结构、git 历史、本次会话的临时任务状态这类可从仓库本身或会话记录推导的内容;禁止写记忆目录之外的任何路径。\n\n\
-—— 本轮对话素材 ——\n\
-用户:{user}\n\n\
-助手结论:\n{assistant_block}\n\n\
-工具调用:\n{tool_lines}"
+—— 本轮对话素材 ——\n\n{material}"
     )
 }
 
@@ -606,9 +629,34 @@ mod tests {
             ),
             envelope(
                 5,
+                SessionEvent::ToolCall {
+                    turn: 1,
+                    step: 2,
+                    call_id: "c3".into(),
+                    name: "bash".into(),
+                    arguments: serde_json::json!({"command": "cargo test"}).to_string(),
+                },
+            ),
+            envelope(
+                6,
+                SessionEvent::ToolResult {
+                    turn: 1,
+                    step: 2,
+                    call_id: "c3".into(),
+                    content: "test result: ok. 12 passed".into(),
+                    is_error: false,
+                    error: None,
+                    error_identity: None,
+                    meta: None,
+                    truncation: None,
+                    replaces: None,
+                },
+            ),
+            envelope(
+                7,
                 SessionEvent::AssistantMessage {
                     turn: 1,
-                    step: 1,
+                    step: 3,
                     blocks: vec![denia_core::stream::ContentBlock::Text {
                         text: "结论文本".into(),
                     }],
@@ -618,7 +666,7 @@ mod tests {
                 },
             ),
             envelope(
-                6,
+                8,
                 SessionEvent::TurnEnd {
                     turn: 1,
                     reason: denia_core::session::TurnEndReason::Completed,
@@ -627,11 +675,29 @@ mod tests {
         ];
         let digest = last_turn_digest(&events, &cwd, &memory_root).unwrap();
         assert_eq!(digest.user_text, "最新一轮的用户提问");
-        assert!(digest.assistant_text.contains("结论文本"));
         assert!(digest.wrote_memory, "落点在记忆目录的写必须被识别");
         assert!(
-            !digest.tool_lines.iter().any(|line| line.contains("write_file")),
-            "写类调用不进工具摘要行"
+            digest.entries.iter().any(|line| line.starts_with("用户:")),
+            "用户消息按时序进素材"
+        );
+        assert!(
+            digest.entries.iter().any(|line| line.contains("结论文本")),
+            "助手文本按时序进素材"
+        );
+        assert!(
+            digest.entries.iter().any(|line| line.contains("cargo test")),
+            "非写类工具调用进素材"
+        );
+        assert!(
+            digest
+                .entries
+                .iter()
+                .any(|line| line.contains("test result: ok")),
+            "工具结果预览进素材"
+        );
+        assert!(
+            !digest.entries.iter().any(|line| line.contains("write_file")),
+            "写类调用(整文件参数)不进素材行"
         );
         // 无 TurnEnd 的半截 turn:None。
         let truncated = &events[..4];
@@ -663,40 +729,42 @@ mod tests {
     }
 
     #[test]
-    fn extraction_prompt_carries_paths_and_digest() {
+    fn extraction_prompt_carries_paths_manifest_and_digest() {
         let digest = TurnDigest {
             user_text: "帮我把 CI 换成 pnpm".into(),
-            assistant_text: "已切换。".into(),
-            tool_lines: vec!["- bash: pnpm install".into()],
             wrote_memory: false,
+            entries: vec!["用户:帮我把 CI 换成 pnpm".into(), "→ (错误) no lockfile".into()],
         };
-        let prompt = render_extraction_prompt(Path::new("/m/memory"), &digest, 4096);
+        let prompt = render_extraction_prompt(
+            Path::new("/m/memory"),
+            &digest,
+            4096,
+            &["ci.md".into(), "user-role.md".into()],
+        );
         assert!(prompt.contains("/m/memory"));
         assert!(prompt.contains("MEMORY.md"));
-        assert!(prompt.contains("metadata.type"));
         assert!(prompt.contains("Nothing to save."));
         assert!(prompt.contains("帮我把 CI 换成 pnpm"));
-        assert!(prompt.contains("pnpm install"));
+        assert!(prompt.contains("no lockfile"));
+        // manifest 注入 + 查重指令。
+        assert!(prompt.contains("ci.md"));
+        assert!(prompt.contains("就地更新原文件"));
+        // 轮次策略与禁调查禁令。
+        assert!(prompt.contains("并行"));
+        assert!(prompt.contains("不要 grep 源码"));
+        // 标准复用系统提示段。
+        assert!(prompt.contains("# 项目记忆"));
+        // 空 manifest 走占位说明。
+        let empty = render_extraction_prompt(Path::new("/m/memory"), &digest, 4096, &[]);
+        assert!(empty.contains("暂无记忆文件"));
     }
 
     #[test]
-    fn index_block_frames_directory_and_validation_note() {
+    fn index_block_frames_auto_memory_index() {
         let block = render_index_block(Path::new("/m/memory"), "- [a](a.md) — x");
         assert!(block.starts_with("<system-reminder>"));
         assert!(block.ends_with("</system-reminder>"));
-        assert!(block.contains("/m/memory"));
-        assert!(block.contains("先验证"));
-    }
-
-    #[test]
-    fn empty_index_block_still_carries_directory_path() {
-        // 空桶也必须注入:路径是模型读写记忆的唯一入口(缺失即满盘猜)。
-        let block = render_empty_index_block(Path::new("/m/memory"));
-        assert!(block.starts_with("<system-reminder>"));
-        assert!(block.ends_with("</system-reminder>"));
-        assert!(block.contains("/m/memory"));
-        assert!(block.contains("MEMORY.md"));
-        assert!(block.contains("尚不存在"), "{block}");
-        assert_ne!(block, render_index_block(Path::new("/m/memory"), ""));
+        assert!(block.contains("/m/memory/MEMORY.md"));
+        assert!(block.contains("跨会话持久"));
     }
 }

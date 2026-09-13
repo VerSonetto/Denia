@@ -1344,11 +1344,27 @@ impl Runtime {
             .lock()
             .unwrap()
             .insert(child_id.clone(), selection);
-        let prompt = crate::project_memory::render_extraction_prompt(
-            &memory_root,
-            &digest,
-            (config.output_bytes / 2) as usize,
-        );
+        let prompt_budget = (config.output_bytes / 2) as usize;
+        let prompt = {
+            // manifest 是阻塞 fs 扫描;提取子代理的提示词需要它注入
+            // "已有记忆文件"清单(先查再写,防重复)。
+            let manifest_root = memory_root.clone();
+            let manifest = tokio::task::spawn_blocking(move || {
+                crate::project_memory::scan_manifest(&manifest_root)
+                    .files
+                    .into_iter()
+                    .map(|file| file.name)
+                    .collect::<Vec<_>>()
+            })
+            .await
+            .map_err(|e| e.to_string())?;
+            crate::project_memory::render_extraction_prompt(
+                &memory_root,
+                &digest,
+                prompt_budget,
+                &manifest,
+            )
+        };
         if let Err(error) = self
             .enqueue(
                 &child_id,
@@ -1651,18 +1667,20 @@ impl AgentRuntime for Runtime {
         let home = self.inner.home.clone();
         let cwd = cwd.to_path_buf();
         let max_bytes = config.project_memory_max_bytes as usize;
-        // 记忆启用时注入永远发生:有索引给索引,空桶给目录路径——路径是
-        // tool:memory 纪律段可执行的前提,缺席会让模型满盘猜目录位置。
+        // 索引非空才注入;空桶不注入——记忆目录路径已由 assemble 阶段
+        // 内联进「# 项目记忆」段,模型任何 step 都可见。
         let block = tokio::task::spawn_blocking(move || {
             let root = crate::project_memory::memory_root(&home, &cwd);
             match crate::project_memory::read_index(&root, max_bytes) {
-                Some(index) => crate::project_memory::render_index_block(&root, &index),
-                None => crate::project_memory::render_empty_index_block(&root),
+                Some(index) if !index.trim().is_empty() => {
+                    Ok(Some(crate::project_memory::render_index_block(&root, &index)))
+                }
+                _ => Ok(None),
             }
         })
         .await
         .map_err(|e| e.to_string())?;
-        Ok(Some(block))
+        block
     }
     async fn drain(&self, session: &str) -> Result<Vec<String>, String> {
         let live = self.live(session).await?;

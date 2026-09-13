@@ -50,7 +50,7 @@ pub use prompt::{
     register_code_style_section, register_communication_section,
     register_context_management_section, register_mcp_prompt_section,
     register_memory_prompt_section, register_risk_honesty_section, register_shipped_prompt,
-    register_working_style_section, shipped_with_persona, shipped_with_persona_and_browser,
+    register_working_style_section, render_memory_section, shipped_with_persona,
     shipped_with_persona_and_browser_and_ask,
 };
 pub use shell_session::{Captured, PersistentShell, ShellHub};

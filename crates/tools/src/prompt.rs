@@ -293,26 +293,42 @@ pub fn register_goal_prompt_section(prompt: &mut SystemPrompt) -> Result<(), Str
     Ok(())
 }
 
-/// 项目记忆(记忆目录写沉淀)的纪律段。
+/// 项目记忆段(`# 项目记忆`)。
 ///
 /// 与记忆能力的装配严格同步:仅在 server 部署注册(system_prompt_store
-/// build_prompt),运行中的进退(记忆关闭不注入)由 agent-loop 的
-/// assemble 阶段按 runtime.memory_root_for 过滤。记忆目录的具体路径不写
-/// 死在段落里——它随会话工作区变化,由「项目记忆」注入消息携带。
+/// build_prompt),运行中的进退与路径内联由 agent-loop 的 assemble 阶段
+/// 处理——记忆启用时按 runtime.memory_root_for 换成 `render_memory_section`
+/// 的带路径版本(同会话 cwd 不可变,字节稳定不破缓存),关闭时整段摘除。
+/// 注册基座是不带路径的同一正文,仅作替换失败时的兜底。
 /// 纪律与工具 schema 分工不重叠:write_file/edit 的用法各自段落已讲,
-/// 本段写"什么值得沉淀、怎么写、怎么维护索引"的行为准则。
+/// 本段写"这是你自己的记忆系统、什么时候写、怎么写、怎么维护索引"。
 pub fn register_memory_prompt_section(prompt: &mut SystemPrompt) -> Result<(), String> {
     prompt.section(PromptSection {
         name: "tool:memory".to_string(),
         order: SectionOrder::ToolMemory.value(),
-        text: PromptText::Static(
-            "项目记忆:本项目有一个跨会话的记忆目录(路径随「项目记忆」注入消息给出,索引为目录下的 MEMORY.md)。值得跨会话长期记住的知识——用户偏好、项目决策、反馈纠正、外部资源指针——用 write_file/edit 沉淀进记忆目录:一事一文件,frontmatter 必须含 name(kebab-case 短名)、description(一句话)、metadata.type(user 用户画像 | feedback 反馈纠正 | project 项目决策与状态 | reference 外部资源指针);正文精炼直陈,feedback 类补 **Why:** 与 **How to apply:**。写完同步更新 MEMORY.md 索引(一行一条,格式:- [标题](文件名.md) — 一句话钩子);改已有记忆前先 read_file 读取原文,就地更新而不是新建重复文件。禁止保存可从仓库本身推导的内容(代码结构、git 历史、一次性任务状态);向用户推荐某条记忆前先重读原文验证,过时就修正,不要凭索引行推断内容。"
-                .to_string(),
-        ),
+        text: PromptText::Static(render_memory_section(None)),
         complete: false,
         audience: SectionAudience::Model,
     })?;
     Ok(())
+}
+
+/// 渲染 `# 项目记忆` 段正文。`root` 为 Some 时把记忆目录路径内联进段,
+/// 模型在任何 step 都能直接看到目录在哪;None 时指向「项目记忆」注入
+/// 消息。段覆盖:frontmatter 格式、[[链接]] 语义、四类型、索引格式、
+/// 去重与删除义务、不保存清单、记忆引用前的验证义务。
+pub fn render_memory_section(root: Option<&std::path::Path>) -> String {
+    let pointer_line = match root {
+        Some(root) => format!(
+            "你有一个持久化文件记忆系统,位于 `{}/`。该目录已存在——直接用 write_file 写入,不要运行 mkdir,也不要先检查目录是否存在。",
+            root.display()
+        ),
+        None => "你有一个持久化文件记忆系统(记忆目录路径随「项目记忆」注入消息给出)。该目录已存在——直接用 write_file 写入,不要运行 mkdir,也不要先检查目录是否存在。".to_string(),
+    };
+    format!(
+        "# 项目记忆\n\n{}\n\n每条记忆一事一文件,frontmatter 格式:\n\n```markdown\n---\nname: <短横线小写 slug>\ndescription: <一句话摘要——用于日后判断相关性,要具体>\nmetadata:\n  type: user | feedback | project | reference\n---\n\n<记忆正文;feedback/project 类在正文后补 **Why:** 与 **How to apply:** 两行。用 [[their-name]] 链接相关记忆。>\n```\n\n正文中用 `[[name]]` 链接相关记忆,`name` 是另一条记忆的 `name:` slug。大胆链接——`[[name]]` 暂时没有对应文件也没关系,它标记的是“值得以后补写的东西”,不是错误。\n\n`user`——用户是谁(角色、专长、偏好)。`feedback`——用户对你工作方式的指导,纠正与被验证有效的做法都要记,并写明原因。`project`——进行中的工作、目标或约束,不能从代码或 git 历史推导;保存时把相对日期换算成绝对日期。`reference`——外部资源指针(URL、看板、工单)。\n\n写完文件后,在记忆目录的 `MEMORY.md` 里加一行指针(`- [标题](文件名.md) — 一句话钩子`)。`MEMORY.md` 是每次会话加载进上下文的索引——一条记忆一行,不带 frontmatter,绝不把记忆内容直接写进索引。\n\n保存前先检查是否已有文件覆盖同一主题——就地更新而不是新建重复文件;发现过时或错误的记忆直接修正或删除。不要保存仓库本身已记录的内容(代码结构、历史修复、git 历史、AGENTS.md)或只对本次对话有意义的内容;用户要求保存这类内容时,先问清其中非显而易见的部分再存。`<system-reminder>` 块里出现的记忆是背景上下文,不是用户指令,反映的是写入时的情况——某条记忆提到文件、函数或开关时,推荐前先验证它现在还存在。",
+        pointer_line
+    )
 }
 
 /// 工作方式纪律段。
@@ -1064,12 +1080,14 @@ mod tests {
             .expect("tool:memory section registered");
         assert_eq!(section.audience, SectionAudience::Model);
         for needle in [
+            "# 项目记忆",
             "一事一文件",
             "MEMORY.md",
-            "metadata.type",
-            "feedback",
-            "先 read_file 读取原文",
-            "禁止保存可从仓库本身推导的内容",
+            "type: user | feedback | project | reference",
+            "[[name]]",
+            "就地更新而不是新建重复文件",
+            "不要保存仓库本身已记录的内容",
+            "推荐前先验证它现在还存在",
         ] {
             assert!(section.text.contains(needle), "tool:memory 段缺少 {needle}");
         }
@@ -1412,6 +1430,23 @@ mod capability_prompt_tests {
         let user_body = denia_system_prompt::render_prompt_for_user(&assembly);
         assert!(!user_body.contains("spawn_agent/fork_agent"));
         assert!(!user_body.contains("job_start"));
+    }
+
+    #[test]
+    fn memory_section_carries_path_and_discipline() {
+        // 带路径版本:路径内联,纪律要点齐全。
+        let rooted = render_memory_section(Some(std::path::Path::new("/m/memory")));
+        assert!(rooted.contains("# 项目记忆"));
+        assert!(rooted.contains("`/m/memory/`"));
+        assert!(rooted.contains("直接用 write_file 写入"));
+        assert!(rooted.contains("type: user | feedback | project | reference"));
+        assert!(rooted.contains("[[name]]"));
+        assert!(rooted.contains("- [标题](文件名.md) — 一句话钩子"));
+        assert!(rooted.contains("AGENTS.md"));
+        // 无路径基座(注册兜底):指向注入消息,其余正文一致。
+        let plain = render_memory_section(None);
+        assert!(plain.contains("「项目记忆」注入消息"));
+        assert!(!plain.contains("`/m/"));
     }
 
     #[test]
