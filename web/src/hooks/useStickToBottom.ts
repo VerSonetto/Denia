@@ -37,8 +37,9 @@ import { useCallback, useEffect, useRef, useState, type MutableRefObject } from 
 const DEFAULT_SNAP = 32
 /** "贴底"判定容差(px):到底时 scrollTop 精确等于上限,留一点舍入余量。 */
 const BOTTOM_EPS = 2
-/** 累积上翻意图超过该值才判定读者确实在往上翻(px)。 */
-const MIN_INTENT = 16
+/** 累积上翻意图超过该值就露回底按钮(px):一档滚轮、一次上拖都在此之上,
+ *  而滚动锚定/图片回流这类一两 px 的抖动够不着。 */
+const MIN_INTENT = 8
 /** 心跳观察窗(ms):active 期每帧续期,active 结束后自然收尾这一段。 */
 const DEFAULT_WAKE_MS = 600
 /** 程序性跳转的静默窗口(ms):期间不自动吸附,读者一动即交还控制权。 */
@@ -245,7 +246,10 @@ export function useStickToBottom<T extends HTMLElement>(
     attach()
     write()
     wake()
-  }, [attach, write, wake])
+    // 落底写入会回派一次 scroll:此时 attach 已把归属恢复,但若回执晚于
+    // 其他判定到达,基线可能被读成"读者上翻"。显式同步一次几何兜住。
+    sync()
+  }, [attach, write, wake, sync])
 
   const reset = useCallback(() => {
     wakeUntilRef.current = 0

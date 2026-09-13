@@ -691,6 +691,21 @@ export function IconArrowRight(props: IconProps) {
   )
 }
 
+/** 回到底部:竖直向下的箭头(回底按钮用)。 */
+export function IconArrowDown(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <path
+        d="M8 3.6v8.8M4.6 9.1 8 12.5l3.4-3.4"
+        stroke="currentColor"
+        strokeWidth="1.4"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </Svg>
+  )
+}
+
 /** 地球:浏览器空态/无安全信息的站点。 */
 export function IconGlobe(props: IconProps) {
   return (

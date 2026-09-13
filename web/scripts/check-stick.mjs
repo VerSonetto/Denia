@@ -299,12 +299,7 @@ async function mount(options) {
 
 // 8) 折叠 → 重新展开:新容器按需对齐到底部。
 {
-  const { scroller, handle, root } = await mount({ alignOnAttach: true })
-  scroller.setGeometry({ scrollHeight: 3000, clientHeight: 400 })
-  handle().snapToBottom()
-  scroller.echoScroll()
-  await settle()
-  // 模拟重新挂载一个新容器(展开态重建):几何重置。
+  const { handle } = await mount({ alignOnAttach: true })
   const again = await mount({ alignOnAttach: true })
   again.scroller.setGeometry({ scrollHeight: 3000, clientHeight: 400 })
   again.handle().snapToBottom()
@@ -316,7 +311,65 @@ async function mount(options) {
       `scrollTop=${again.scroller.scrollTop} floor=${again.scroller.floor}`,
     )
   }
-  void root
+  void handle
+}
+
+// 9) 回底按钮的行为契约:上翻即脱跟(stick=false 才会渲染按钮)、
+//    点击后恢复吸底并跟随后续增长。
+{
+  const { scroller, handle } = await mount()
+  handle().snapToBottom()
+  scroller.grow(3000)
+  handle().follow()
+  await settle()
+  if (!handle().stick) {
+    fail('初始应处于吸底态', `stick=${handle().stick}`)
+  } else {
+    // 上翻一档滚轮:够到阈值,按钮必须露出来(等一次渲染再看 stick)。
+    scroller.wheel(-120)
+    await settle()
+    if (handle().stick) {
+      fail('上翻一档滚轮后按钮未出现(stick 仍为 true)', `wheel=-120`)
+    } else {
+      // 按钮点击:snapToBottom 必须真的把位置落到当前底部,并重新吸底。
+      // 归属是 React 状态,更新是异步的 —— 落点可以同步断言,stick 要等一次提交。
+      handle().snapToBottom()
+      const landed = scroller.scrollTop === scroller.floor
+      await settle()
+      if (!handle().stick || !landed) {
+        fail(
+          '点击回底后未落到底/未恢复吸底',
+          `stick=${handle().stick} scrollTop=${scroller.scrollTop} floor=${scroller.floor}`,
+        )
+      } else {
+        // 落底后继续增长,必须继续跟随。
+        scroller.grow(scroller.floor + 400 + 700)
+        handle().follow()
+        if (scroller.scrollTop === scroller.floor) {
+          ok('上翻露按钮 → 点击回底 → 继续跟随')
+        } else {
+          fail('回底后未继续跟随', `scrollTop=${scroller.scrollTop} floor=${scroller.floor}`)
+        }
+      }
+    }
+  }
+}
+
+// 10) 慢速拖滚动条:位移够阈值必须脱跟(不依赖 wheel 信号)。
+{
+  const { scroller, handle } = await mount()
+  handle().snapToBottom()
+  scroller.grow(3000)
+  handle().follow()
+  await settle()
+  // 只派发 scroll(模拟拖动滚动条,没有 wheel)。
+  scroller.readerScrollTo(scroller.floor - 300)
+  await settle()
+  if (handle().stick) {
+    fail('拖滚动条上翻后仍吸底,按钮不会出现', `scrollTop=${scroller.scrollTop}`)
+  } else {
+    ok('拖滚动条上翻:几何路径判定脱跟(按钮可见)')
+  }
 }
 
 console.log('')

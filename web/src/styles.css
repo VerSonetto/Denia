@@ -2014,27 +2014,58 @@ button {
   font-weight: 500;
 }
 
+/* 回到底部:水平居中的圆形浮钮,垫在输入区上方(输入区是 sticky 的,
+   按钮必须让开它的高度,否则会被盖住 —— 高度来自 --composer-height,
+   由 SessionsPage 的 ResizeObserver 写在 .session-layout 上)。 */
 .jump-bottom {
   position: absolute;
-  right: 24px;
-  bottom: calc(var(--composer-height, 120px) + 16px);
-  width: 32px;
-  height: 32px;
-  border-radius: var(--r-md);
-  border: 1px solid var(--border-l2);
-  background: var(--bg-layer-2);
+  left: 50%;
+  transform: translateX(-50%);
+  bottom: calc(var(--composer-height, 152px) + 12px);
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  border-radius: 999px;
+  border: none;
+  background: var(--bg-layer-3);
   color: var(--label-secondary);
   display: flex;
   align-items: center;
   justify-content: center;
   cursor: pointer;
   box-shadow: var(--shadow-float);
-  z-index: 5;
+  z-index: 8;
+  transition:
+    background 0.15s var(--ease),
+    color 0.15s var(--ease),
+    opacity 0.15s var(--ease);
+  animation: jump-bottom-in 160ms var(--ease);
+}
+
+@keyframes jump-bottom-in {
+  from {
+    opacity: 0;
+    transform: translateX(-50%) translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(-50%);
+  }
 }
 
 .jump-bottom:hover {
   color: var(--label-primary);
-  border-color: var(--border-l3);
+  background: var(--bg-layer-3);
+  filter: brightness(1.12);
+}
+
+.jump-bottom:active {
+  transform: translateX(-50%) scale(0.94);
+}
+
+.jump-bottom:focus-visible {
+  outline: 2px solid var(--accent, var(--border-l3));
+  outline-offset: 2px;
 }
 
 /* ---------- workspace selector ---------- */

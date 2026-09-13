@@ -41,6 +41,7 @@ import { ConfirmDialog } from '../components/ConfirmDialog'
 import { ContextRing } from '../components/ContextRing'
 import {
   IconBranch,
+  IconArrowDown,
   IconChevron,
   IconClose,
   IconDownload,
@@ -277,6 +278,8 @@ export default function SessionsPage({
   // ResizeObserver 观察它才能兜住所有内容增高路径(同 dsh columnRef)。
   const viewRef = useRef<HTMLDivElement | null>(null)
   const seatRef = useRef<HTMLDivElement | null>(null)
+  // 布局根:回底按钮等多处需要读/写挂在共同祖先上的尺寸变量。
+  const layoutRef = useRef<HTMLDivElement | null>(null)
 
   /* ---- 对话流贴底跟随 ---- *
    * 判定与驱动都在 useStickToBottom 里(见该 hook 顶部注释),这里只负责把
@@ -1112,8 +1115,14 @@ export default function SessionsPage({
     const seat = seatRef.current
     const scroller = scrollRef.current
     const view = viewRef.current
-    if (seat === null || scroller === null || view === null) return
+    const layout = layoutRef.current
+    if (seat === null || scroller === null || view === null || layout === null) return
     const observer = new ResizeObserver(() => {
+      // 输入区高度要写到布局根上:回底按钮是滚动容器的兄弟节点,只有挂在
+      // 共同祖先(session-layout)才继承得到 —— 挂在滚动容器上时按钮拿不到
+      // 真实高度,只能用兜底值定位,于是被 sticky 输入区盖住,既看不见也
+      // 点不到。滚动容器那份保留:对话轴与滚动口内部还按它算。
+      layout.style.setProperty('--composer-height', `${seat.offsetHeight}px`)
       scroller.style.setProperty('--composer-height', `${seat.offsetHeight}px`)
       scroller.style.setProperty('--conversation-viewport-height', `${scroller.clientHeight}px`)
       follow()
@@ -2156,7 +2165,7 @@ export default function SessionsPage({
   )
 
   return (
-    <div className="session-layout" data-phase={phase}>
+    <div className="session-layout" data-phase={phase} ref={layoutRef}>
       {phase === 'active' && (
         <header className="session-header">
           <h1 className="session-title">
@@ -2352,8 +2361,9 @@ export default function SessionsPage({
           className="jump-bottom"
           onClick={snapToBottom}
           title={t('jumpToBottom')}
+          aria-label={t('jumpToBottom')}
         >
-          <IconChevron size={14} />
+          <IconArrowDown size={16} />
         </button>
       )}
       {fullAccessConfirm && (
