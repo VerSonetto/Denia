@@ -57,6 +57,7 @@ import {
   IconSlashCommand,
 } from '../components/icons'
 import { resolveSessionReasoningEffort } from '../modelCatalog'
+import { useStickToBottom } from '../hooks/useStickToBottom'
 import { activeAtToken, formatFileMention } from './mention'
 import { activeSlashToken, collectSkillTokens, parseLeadingCommand } from './slash'
 import {
@@ -121,11 +122,6 @@ function firstAvailableSelection(catalog: ModelCatalog): ModelSelection | null {
   }
   return null
 }
-
-/** dsh ChatView FOLLOW_THRESHOLD */
-const FOLLOW_THRESHOLD = 24
-/** dsh ChatView SCROLL_SAMPLE_INTERVAL_MS:raw scroll 只排采样,几何每 interval 至多判一次。 */
-const SCROLL_SAMPLE_INTERVAL_MS = 500
 
 /** 乐观行内容指纹:文本 + 内联图片都参与匹配,避免多条纯图片消息("图片")互相误删。 */
 function pendingMessageKey(message: { text: string; images?: UserMessageImage[] }): string {
@@ -234,8 +230,6 @@ export default function SessionsPage({
   const originalPromptRef = useRef('')
   const optimizeAbortRef = useRef<AbortController | null>(null)
   const optimizingRef = useRef(false)
-  // 贴底跟随状态:吸底时流式内容追加自动滚动;手动滚动打断;滚回底部恢复。
-  const [stick, setStick] = useState(true)
   // 已发送未获服务端确认的用户消息(乐观行)。
   const [pendingMessages, setPendingMessages] = useState<
     { text: string; images?: UserMessageImage[] }[]
@@ -279,11 +273,20 @@ export default function SessionsPage({
   // 只作镜像(input 事件同步),外部写路径统一走 applyDraft 重建 DOM。
   const promptRef = useRef<HTMLDivElement | null>(null)
   const scrollRef = useRef<HTMLDivElement | null>(null)
-  const stickRef = useRef(true)
   // 对话内容列:增长(工具卡展开/图片加载/markdown 回流)不一定伴随 nodes 变化,
   // ResizeObserver 观察它才能兜住所有内容增高路径(同 dsh columnRef)。
   const viewRef = useRef<HTMLDivElement | null>(null)
   const seatRef = useRef<HTMLDivElement | null>(null)
+
+  /* ---- 对话流贴底跟随 ---- *
+   * 判定与驱动都在 useStickToBottom 里(见该 hook 顶部注释),这里只负责把
+   * 「内容变了」与「程序性跳转」两个信号接进去。 */
+  const follower = useStickToBottom(scrollRef, { active: running || compactingAt !== null })
+  const stick = follower.stick
+  const snapToBottom = follower.snapToBottom
+  const releaseFollow = follower.release
+  const resetFollow = follower.reset
+  const follow = follower.follow
 
   const activeWs: WorkspaceRecord | null = getActiveWorkspace()
 
@@ -478,13 +481,11 @@ export default function SessionsPage({
     setTodos([])
     setQueuedMessages([])
     queueSeqRef.current = 0
-    stickRef.current = true
-    setStick(true)
-    samplePendingRef.current = false
-    observedTopRef.current = 0
+    // 新会话从顶部开始且重新吸底:复位归属,不写 DOM(scrollTop 归零)。
+    resetFollow()
     const el = scrollRef.current
     if (el !== null) el.scrollTop = 0
-  }, [activeId, closeMention])
+  }, [activeId, closeMention, resetFollow])
 
   useEffect(() => {
     let cancelled = false
@@ -1086,102 +1087,14 @@ export default function SessionsPage({
     })
   }, [])
 
-  /* ---- 对话流贴底跟随(抄 dsh ChatView observed-top 账本)----
-   * 归属(stick)只由「读者的滚动」改变,程序滚动不参与判定:
-   * 每次程序滚动把落点 scrollTop 同步记入账本;scroll 事件落点与账本一致
-   * (或因内容收缩被钳到 floor)即程序滚动,不改归属;不一致即读者输入
-   * (wheel/滚动条/触摸/键盘一视同仁,无需点名设备),按几何判吸底。
-   * 程序滚动永远精确落底,天然不会误判;内层滚动区(思考框/代码卡)的
-   * scroll 事件不冒泡,天然不会串扰外层归属。
-   * 旧实现两处病根随本方案一并消失:平滑追尾以 scrollHeight 为目标,
-   * delta 恒含 clientHeight,退出分支永不可达 → rAF 永转 + programmatic
-   * 遮罩永挂,几何判定永久失明;onWheel 分不清事件来自外层还是内层滚动区,
-   * 在思考框里向上滚会直接打断外层跟随。 */
-  const observedTopRef = useRef(0)
-  const samplePendingRef = useRef(false)
-  const sampleTimerRef = useRef<number | undefined>(undefined)
+  /* ---- 对话流贴底跟随 ---- *
+   * 判断与驱动都在 useStickToBottom 里(见该 hook 顶部注释),这里只负责
+   * 把「内容变了」与「程序性跳转」两个信号接进去。 */
 
-  /** 程序滚动:瞬间落底并同步记账。逐块追加每块只差几十 px,视觉即连续跟随。 */
-  const toBottom = useCallback(() => {
-    const el = scrollRef.current
-    if (el === null) return
-    el.scrollTop = el.scrollHeight
-    observedTopRef.current = el.scrollTop
-  }, [])
-
-  /** 几何判定归属:仅读者滚动(movedByReader)允许改变 stick,程序滚动保持原状。 */
-  const judgeFollow = useCallback(() => {
-    const el = scrollRef.current
-    if (el === null) return
-    const floor = Math.max(0, el.scrollHeight - el.clientHeight)
-    const movedByReader = Math.abs(el.scrollTop - Math.min(observedTopRef.current, floor)) > 0.5
-    const atBottom = movedByReader
-      ? floor - el.scrollTop <= FOLLOW_THRESHOLD + 1
-      : stickRef.current
-    if (atBottom !== stickRef.current) {
-      stickRef.current = atBottom
-      setStick(atBottom)
-    }
-    if (!movedByReader && atBottom) {
-      // 程序滚动收在底部且仍吸底:重申落底,补回采样挂起期间被跳过的跟随
-      // (如切会话后首屏内容在 500ms 采样窗内到达的情形)。
-      toBottom()
-      return
-    }
-    observedTopRef.current = el.scrollTop
-  }, [toBottom])
-
-  // 原生监听 scroll + scrollend(React 无 onScrollEnd):raw scroll 只排采样,
-  // 一次滚动风暴至多判一次几何,scrollend 收尾兜底(dsh SCROLL_SAMPLE_INTERVAL_MS)。
+  // 回合启动推一把:首块内容到达前先落到底,后续由 onNodesChange 接管。
   useEffect(() => {
-    const el = scrollRef.current
-    if (el === null) return
-    const sample = () => {
-      if (!samplePendingRef.current) return
-      samplePendingRef.current = false
-      if (sampleTimerRef.current !== undefined) {
-        window.clearTimeout(sampleTimerRef.current)
-        sampleTimerRef.current = undefined
-      }
-      judgeFollow()
-    }
-    const onScroll = () => {
-      samplePendingRef.current = true
-      sampleTimerRef.current ??= window.setTimeout(sample, SCROLL_SAMPLE_INTERVAL_MS)
-    }
-    el.addEventListener('scroll', onScroll, { passive: true })
-    el.addEventListener('scrollend', sample, { passive: true })
-    return () => {
-      el.removeEventListener('scroll', onScroll)
-      el.removeEventListener('scrollend', sample)
-      if (sampleTimerRef.current !== undefined) window.clearTimeout(sampleTimerRef.current)
-      samplePendingRef.current = false
-    }
-  }, [judgeFollow])
-
-  /** 内容增长/视口变化时的跟随入口;采样挂起(读者可能在滚)期间按兵不动。 */
-  const followRef = useRef<(() => void) | null>(null)
-  followRef.current = () => {
-    if (samplePendingRef.current) return
-    if (stickRef.current) toBottom()
-  }
-
-  /** 显式落底(发送消息/点回底按钮):清采样、恢复吸底、立即落底。 */
-  const snapToBottom = useCallback(() => {
-    samplePendingRef.current = false
-    if (sampleTimerRef.current !== undefined) {
-      window.clearTimeout(sampleTimerRef.current)
-      sampleTimerRef.current = undefined
-    }
-    stickRef.current = true
-    setStick(true)
-    toBottom()
-  }, [toBottom])
-
-  // 回合启动推一把:首块内容到达前 stick 已就位,后续由 onNodesChange 接管。
-  useEffect(() => {
-    followRef.current?.()
-  }, [running])
+    follow()
+  }, [running, follow])
 
   // 运行中的会话才需要 SSE follow 长连接;普通浏览走分页快照,
   // 避免打开长会话就把完整历史加载进服务端 live cache。
@@ -1203,7 +1116,7 @@ export default function SessionsPage({
     const observer = new ResizeObserver(() => {
       scroller.style.setProperty('--composer-height', `${seat.offsetHeight}px`)
       scroller.style.setProperty('--conversation-viewport-height', `${scroller.clientHeight}px`)
-      followRef.current?.()
+      follow()
     })
     observer.observe(seat)
     observer.observe(scroller)
@@ -2318,14 +2231,20 @@ export default function SessionsPage({
       )}
       <div
         className="conversation-scroll"
-        ref={scrollRef}
+        ref={follower.setNode}
         data-conversation-scroll=""
       >
         {phase === 'active' && view === 'chat' && (
           <ConversationAxis
             anchors={axisAnchors}
             scrollRef={scrollRef}
-            onJumpMiss={(seq) => setAxisJump((prev) => ({ seq, nonce: (prev?.nonce ?? 0) + 1 }))}
+            onJump={releaseFollow}
+            onJumpMiss={(seq) => {
+              // 锚点在分页窗口外:先脱跟,翻页补齐后 SessionView 再定位,
+              // 否则每来一页内容都会被心跳拉回底部。
+              releaseFollow()
+              setAxisJump((prev) => ({ seq, nonce: (prev?.nonce ?? 0) + 1 }))
+            }}
           />
         )}
         <div
@@ -2353,7 +2272,7 @@ export default function SessionsPage({
                 }}
                 onNodesChange={(nodes) => {
                   setTranscriptNodes(nodes)
-                  followRef.current?.()
+                  follow()
                 }}
                 onAnchorsChange={setAxisAnchors}
                 jumpRequest={axisJump}

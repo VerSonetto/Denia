@@ -34,11 +34,14 @@ export function ConversationAxis({
   anchors,
   scrollRef,
   onJumpMiss,
+  onJump,
 }: {
   anchors: SessionAnchor[]
   scrollRef: React.RefObject<HTMLDivElement | null>
   /** 点击的刻度尚未加载(锚点在分页窗口之外):交由视图翻页覆盖后定位。 */
   onJumpMiss?: (seq: number) => void
+  /** 跳转开始:通知外层解开吸底,免得心跳把平滑滚动拉回底部。 */
+  onJump?: () => void
 }) {
   const items = anchors
 
@@ -64,9 +67,11 @@ export function ConversationAxis({
         onJumpMiss?.(anchor)
         return
       }
+      // 定位期间必须解开吸底:否则内容一到就落底,把平滑滚动拉回去。
+      onJump?.()
       target.scrollIntoView({ behavior: 'smooth', block: 'center' })
     },
-    [scrollRef, onJumpMiss],
+    [scrollRef, onJumpMiss, onJump],
   )
 
   // active = 可视带中线最近的那条用户消息;滚动与内容变化时重算。

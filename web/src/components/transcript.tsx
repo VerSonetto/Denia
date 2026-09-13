@@ -1,4 +1,4 @@
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { memo, useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import { localeRevision, t } from '../i18n'
 import {
@@ -10,6 +10,7 @@ import {
 } from '../fold'
 import { MarkdownText } from '../markdown/MarkdownText'
 import type { MarkdownLabels } from '../markdown/MarkdownText'
+import { useStickToBottom } from '../hooks/useStickToBottom'
 import { useTypewriter } from '../typewriter'
 import {
   toolCallInput,
@@ -512,51 +513,16 @@ function ThinkRow({
   useEffect(() => {
     setOpen(streaming)
   }, [streaming])
-  // 内部滚动跟随:思考内容长在 240px 内部滚动框里,外层对话容器不撑高。
-  // 流式期间框内吸底(新行出现即滚到最新);在框内手动向上滚即打断,
-  // 滚回底部自动恢复跟随 —— 语义与外层对话流的贴底一致,判定同走
-  // observed-top 账本(见 SessionsPage):程序滚动同步记账,scroll 落点
-  // ==账本即程序滚动不改归属;落点不一致才是读者输入,按几何改判。
-  // 旧实现按几何裸判:程序滚动的 scroll 事件下一帧才派发,期间打字机
-  // setShown 已让 React 提交新内容,事件读到的 dist = 两次提交间的增长量,
-  // 打字机追帧(快模型/积压跳底)时远超 24px,一眼就会误判脱跟且无法自愈。
+  // 思考框是 240px 的内部滚动框(外层对话容器不被撑高),跟随发生在它自己
+  // 身上:流式期间框内吸底,框内手动上翻即脱跟,滚回底部自动恢复。
+  // 判定/驱动见 useStickToBottom —— 与对话流同一套,不再各自为政。
+  // alignOnAttach 只在流式时对齐:流式展开=看最新,流式结束后手动展开=从头读。
   const preRef = useRef<HTMLPreElement | null>(null)
-  const pinnedRef = useRef(true)
-  const observedTopRef = useRef(0)
-  const toBottomInner = useCallback(() => {
-    const el = preRef.current
-    if (el === null) return
-    el.scrollTop = el.scrollHeight
-    observedTopRef.current = el.scrollTop
-  }, [])
-  const handleInnerScroll = useCallback(() => {
-    const el = preRef.current
-    if (el === null) return
-    const floor = Math.max(0, el.scrollHeight - el.clientHeight)
-    const movedByReader = Math.abs(el.scrollTop - Math.min(observedTopRef.current, floor)) > 0.5
-    if (movedByReader) {
-      pinnedRef.current = floor - el.scrollTop <= 24
-    }
-    observedTopRef.current = el.scrollTop
-  }, [])
-  useEffect(() => {
-    if (!streaming || !open) return
-    // 重新展开 = 全新视角,默认吸到最新;用户随后仍可在框内滚开打断。
-    pinnedRef.current = true
-    toBottomInner()
-    let raf = 0
-    let lastHeight = -1
-    const tick = () => {
-      const el = preRef.current
-      if (el !== null && el.scrollHeight !== lastHeight) {
-        lastHeight = el.scrollHeight
-        if (pinnedRef.current) toBottomInner()
-      }
-      raf = requestAnimationFrame(tick)
-    }
-    raf = requestAnimationFrame(tick)
-    return () => cancelAnimationFrame(raf)
-  }, [streaming, open, toBottomInner])
+  const follower = useStickToBottom(preRef, {
+    active: streaming,
+    snap: 24,
+    alignOnAttach: streaming,
+  })
   // 思考框正文:流式时逐字 reveal(打字机),settle 立即全量。
   const displayText = useTypewriter(text, streaming)
   const summary = firstLine(text, 80)
@@ -587,9 +553,8 @@ function ThinkRow({
           <div className="code-card">
             {/* 跟随滚动发生在 240px 内部框自己身上,外层不撑高。 */}
             <pre
-              ref={preRef}
+              ref={follower.setNode}
               className={streaming ? 'think-streaming' : undefined}
-              onScroll={handleInnerScroll}
               style={{ color: 'var(--label-tertiary)' }}
             >
               {displayText}

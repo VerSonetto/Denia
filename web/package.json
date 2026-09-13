@@ -5,8 +5,8 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "check": "node scripts/check-hooks.mjs && node scripts/check-fold.mjs && node scripts/check-tool-display.mjs",
-    "build": "node scripts/check-hooks.mjs && tsc -b && vite build",
+    "check": "node scripts/check-hooks.mjs && node scripts/check-fold.mjs && node scripts/check-tool-display.mjs && node scripts/check-stick.mjs",
+    "build": "node scripts/check-hooks.mjs && node scripts/check-stick.mjs && tsc -b && vite build",
     "preview": "vite preview"
   },
   "dependencies": {
