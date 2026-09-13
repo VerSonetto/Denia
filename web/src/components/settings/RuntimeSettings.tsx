@@ -54,7 +54,6 @@ export function RuntimeSettings() {
           </Field>
         ))}
       </div>
-      {/* customSkillDirs 不再提供编辑入口;value 原样透传,保存不丢已有配置。 */}
       <p className={styles.hint}>{t('runtimeConfigHint')}</p>
       <div className={styles.actions}>
         <Button variant="primary" type="submit" disabled={saving}>{saving ? t('loading') : t('save')}</Button>

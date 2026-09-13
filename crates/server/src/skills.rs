@@ -142,7 +142,7 @@ pub fn truncate_chars(text: &str, max: usize) -> String {
     out
 }
 
-pub fn discover(home: &Path, cwd: &Path, custom: &[PathBuf]) -> Result<Vec<Skill>, String> {
+pub fn discover(home: &Path, cwd: &Path) -> Result<Vec<Skill>, String> {
     let project = cwd
         .ancestors()
         .find(|p| p.join(".git").exists())
@@ -152,11 +152,7 @@ pub fn discover(home: &Path, cwd: &Path, custom: &[PathBuf]) -> Result<Vec<Skill
         (project.join(".dsh/skills"), "project-dsh"),
         (project.join(".agents/skills"), "project-agents"),
     ];
-    roots.extend(custom.iter().cloned().map(|p| (p, "custom")));
     roots.push((home.join("skills"), "user-denia"));
-    if let Some(user) = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME")) {
-        roots.push((PathBuf::from(user).join(".agents/skills"), "user-agents"));
-    }
     let mut found = BTreeMap::new();
     for (root, source) in roots {
         let entries = match std::fs::read_dir(&root) {
@@ -267,7 +263,7 @@ mod tests {
         )
         .unwrap();
         std::fs::write(home.join("skills/review.md"), "用户版本").unwrap();
-        let skills = discover(&home, &cwd, &[]).unwrap();
+        let skills = discover(&home, &cwd).unwrap();
         let bundled = skills.iter().find(|s| s.name == "skill-creator").unwrap();
         assert_eq!(bundled.source, "bundled");
         assert!(
@@ -288,7 +284,7 @@ mod tests {
         .unwrap();
         std::fs::write(cwd.join(".denia/skills/review/reference.md"), "技能参考").unwrap();
         std::fs::write(cwd.join(".denia/skills/outside.md"), "外部文件").unwrap();
-        let fresh = discover(&home, &cwd, &[]).unwrap();
+        let fresh = discover(&home, &cwd).unwrap();
         assert_eq!(
             resource(&fresh, "review", "reference.md").unwrap()["text"],
             "技能参考"

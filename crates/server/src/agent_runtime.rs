@@ -30,7 +30,6 @@ pub struct RuntimeConfig {
     pub job_timeout_ms: u64,
     pub max_pending_messages: usize,
     pub max_consecutive_wakes: usize,
-    pub custom_skill_dirs: Vec<PathBuf>,
     /// 工作区指令渲染总预算（字节）；0 = 禁用 AGENTS.md 注入。
     pub workspace_instructions_max_bytes: u64,
     /// 单个 AGENTS.md 的读取上限（字节）；超限整份跳过。
@@ -57,7 +56,6 @@ impl Default for RuntimeConfig {
             job_timeout_ms: 600_000,
             max_pending_messages: 64,
             max_consecutive_wakes: 3,
-            custom_skill_dirs: Vec::new(),
             workspace_instructions_max_bytes: 65_536,
             workspace_instructions_max_source_bytes: 1_048_576,
             skill_catalog_description_max_chars: 500,
@@ -80,13 +78,12 @@ pub fn validate_config(value: Value) -> Result<Value, String> {
         || !(1..=86_400_000).contains(&c.job_timeout_ms)
         || !(1..=1024).contains(&c.max_pending_messages)
         || !(1..=16).contains(&c.max_consecutive_wakes)
-        || c.custom_skill_dirs.iter().any(|p| !p.is_absolute())
         || c.workspace_instructions_max_bytes > 1_048_576
         || !(1..=16_777_216).contains(&c.workspace_instructions_max_source_bytes)
         || !(1..=65_536).contains(&c.skill_catalog_description_max_chars)
         || !(1..=1_048_576).contains(&c.project_memory_max_bytes)
     {
-        return Err("运行时配置超出允许范围；技能自定义目录必须为绝对路径".into());
+        return Err("运行时配置超出允许范围".into());
     }
     serde_json::to_value(c).map_err(|e| e.to_string())
 }
@@ -1177,8 +1174,7 @@ impl Runtime {
     }
     pub async fn skills(&self, cwd: PathBuf) -> Result<Vec<crate::skills::Skill>, String> {
         let home = self.inner.home.clone();
-        let custom = self.config().custom_skill_dirs;
-        tokio::task::spawn_blocking(move || crate::skills::discover(&home, &cwd, &custom))
+        tokio::task::spawn_blocking(move || crate::skills::discover(&home, &cwd))
             .await
             .map_err(|e| e.to_string())?
     }
@@ -2314,12 +2310,6 @@ mod tests {
             state
                 .settings
                 .update("runtime", json!({"maxDepth":0}), None)
-                .is_err()
-        );
-        assert!(
-            state
-                .settings
-                .update("runtime", json!({"customSkillDirs":["relative"]}), None)
                 .is_err()
         );
         // 项目记忆预算:越界拒绝;布尔开关与合法预算放行。
