@@ -1,5 +1,7 @@
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import type { CSSProperties } from 'react'
 import { setLocale, t } from './i18n'
+import { relativeTime } from './relativeTime'
 import SessionsPage from './pages/SessionsPage'
 import * as api from './api'
 import {
@@ -31,6 +33,7 @@ import {
 } from './appStore'
 import { useBrowserSidebar } from './hooks/useBrowserSidebar'
 import {
+  IconCaretRight,
   IconClose,
   IconCollapseAll,
   IconExpandAll,
@@ -755,8 +758,12 @@ const COLLAPSED_LIMIT = 5
 /**
  * 血缘嵌套排序(抄 dsh parentSessionId 列表嵌套):子会话紧跟其父会话
  * 之后(先序遍历);父不在本组(跨组/已删)的子会话留在顶层。
+ * `hideSubtreeOf` 里的会话只渲染自身,其整棵后代子树不进列表(折叠)。
  */
-function nestByParent(members: SessionSummary[]): { session: SessionSummary; depth: number }[] {
+function nestByParent(
+  members: SessionSummary[],
+  hideSubtreeOf?: ReadonlySet<string>,
+): { session: SessionSummary; depth: number }[] {
   const ids = new Set(members.map((s) => s.id))
   const byParent = new Map<string, SessionSummary[]>()
   const roots: SessionSummary[] = []
@@ -774,11 +781,63 @@ function nestByParent(members: SessionSummary[]): { session: SessionSummary; dep
   const walk = (list: SessionSummary[], depth: number) => {
     for (const session of list) {
       out.push({ session, depth })
+      if (hideSubtreeOf?.has(session.id)) continue
       walk(byParent.get(session.id) ?? [], depth + 1)
     }
   }
   walk(roots, 0)
   return out
+}
+
+const TIME_UNIT_KEYS = {
+  minutes: 'timeMinutes',
+  hours: 'timeHours',
+  days: 'timeDays',
+  months: 'timeMonths',
+  years: 'timeYears',
+} as const
+
+/** 会话行尾相对时间:now 桶不带"前"。 */
+function relativeTimeLabel(at: number, now: number): string {
+  const { unit, n } = relativeTime(at, now)
+  if (unit === 'now') return t('timeNow')
+  return t('timeAgo', { t: t(TIME_UNIT_KEYS[unit], { n }) })
+}
+
+/** 一组会话的血缘计量:每个会话的后代总数与"有运行中后代"的祖先集合。 */
+function lineageStats(
+  members: SessionSummary[],
+  runningIds: Record<string, boolean>,
+): { descendantCount: Map<string, number>; runningAncestors: Set<string> } {
+  const ids = new Set(members.map((s) => s.id))
+  const parentOf = new Map<string, string>()
+  for (const session of members) {
+    if (session.parent_session && ids.has(session.parent_session)) {
+      parentOf.set(session.id, session.parent_session)
+    }
+  }
+  const descendantCount = new Map<string, number>()
+  for (const session of members) {
+    const seen = new Set<string>()
+    let cursor = parentOf.get(session.id)
+    while (cursor && !seen.has(cursor)) {
+      seen.add(cursor)
+      descendantCount.set(cursor, (descendantCount.get(cursor) ?? 0) + 1)
+      cursor = parentOf.get(cursor)
+    }
+  }
+  const runningAncestors = new Set<string>()
+  for (const session of members) {
+    if (!runningIds[session.id]) continue
+    const seen = new Set<string>()
+    let cursor = parentOf.get(session.id)
+    while (cursor && !seen.has(cursor)) {
+      seen.add(cursor)
+      runningAncestors.add(cursor)
+      cursor = parentOf.get(cursor)
+    }
+  }
+  return { descendantCount, runningAncestors }
 }
 
 function SidebarWorkspaces({
@@ -812,6 +871,10 @@ function SidebarWorkspaces({
 }) {
   const [expanded, setExpanded] = useState<Record<string, boolean>>({})
   const [showAll, setShowAll] = useState<Record<string, boolean>>({})
+  // 血缘折叠:sessionId → 是否收起其后代子树(默认展开)。
+  const [collapsedChildren, setCollapsedChildren] = useState<Record<string, boolean>>({})
+  // 行尾相对时间的时钟;60s 一跳足够分钟级分桶。
+  const [now, setNow] = useState(() => Date.now())
   const [query, setQuery] = useState('')
   const searchInputRef = useRef<HTMLInputElement>(null)
   const lastExpandTickRef = useRef(0)
@@ -885,6 +948,8 @@ function SidebarWorkspaces({
     const next: Record<string, boolean> = {}
     for (const key of keys) next[key] = wantExpand
     setExpanded((prev) => ({ ...prev, ...next }))
+    // 全部展开时连带展开血缘折叠;收起只收组,不动子树。
+    if (wantExpand) setCollapsedChildren({})
   }, [expandAllTick, groupKeys, isGroupOpen, membersOf, workspaces, activeId])
 
   useEffect(() => {
@@ -895,6 +960,31 @@ function SidebarWorkspaces({
     const id = requestAnimationFrame(() => searchInputRef.current?.focus())
     return () => cancelAnimationFrame(id)
   }, [searchOpen])
+
+  useEffect(() => {
+    const id = window.setInterval(() => setNow(Date.now()), 60_000)
+    return () => window.clearInterval(id)
+  }, [])
+
+  // 活动会话的折叠祖先自动展开,保证侧栏始终可见当前会话。
+  useEffect(() => {
+    if (!activeId) return
+    setCollapsedChildren((prev) => {
+      let changed = false
+      const next = { ...prev }
+      const seen = new Set<string>()
+      let cursor = sessionsById.get(activeId)?.parent_session
+      while (cursor && !seen.has(cursor)) {
+        seen.add(cursor)
+        if (next[cursor]) {
+          next[cursor] = false
+          changed = true
+        }
+        cursor = sessionsById.get(cursor)?.parent_session
+      }
+      return changed ? next : prev
+    })
+  }, [activeId, sessionsById])
 
   const normalizedQuery = query.trim().toLowerCase()
   const matchesQuery = useCallback(
@@ -959,7 +1049,15 @@ function SidebarWorkspaces({
         )}
         {filteredGroups.map(({ ws, members }) => {
           const open = searching || isGroupOpen(ws.id, members.some((s) => s.id === activeId))
-          const nested = nestByParent(members)
+          const { descendantCount, runningAncestors } = lineageStats(members, runningIds)
+          const collapsedSet = searching
+            ? undefined
+            : new Set(
+                Object.keys(collapsedChildren).filter(
+                  (id) => collapsedChildren[id] && descendantCount.has(id),
+                ),
+              )
+          const nested = nestByParent(members, collapsedSet)
           const visible =
             searching || showAll[ws.id] ? nested : nested.slice(0, COLLAPSED_LIMIT)
           return (
@@ -1012,6 +1110,16 @@ function SidebarWorkspaces({
                       depth={depth}
                       active={session.id === activeId}
                       running={!!runningIds[session.id]}
+                      now={now}
+                      childCount={descendantCount.get(session.id) ?? 0}
+                      collapsed={collapsedChildren[session.id] === true}
+                      childRunning={runningAncestors.has(session.id)}
+                      onToggleCollapse={() =>
+                        setCollapsedChildren((prev) => ({
+                          ...prev,
+                          [session.id]: !prev[session.id],
+                        }))
+                      }
                       onOpen={() => onOpenSession(session.id, ws.id)}
                       onDelete={() => onDeleteSession(session)}
                     />
@@ -1071,17 +1179,42 @@ function SidebarWorkspaces({
                 className={`ws-group-body${searching || isGroupOpen(UNGROUPED_KEY, true) ? ' open' : ''}`}
               >
                 <div className="ws-group-body-inner">
-                  {nestByParent(filteredUngrouped).map(({ session, depth }) => (
-                    <SessionRow
-                      key={session.id}
-                      session={session}
-                      depth={depth}
-                      active={session.id === activeId}
-                      running={!!runningIds[session.id]}
-                      onOpen={() => onOpenSession(session.id)}
-                      onDelete={() => onDeleteSession(session)}
-                    />
-                  ))}
+                  {(() => {
+                    const { descendantCount, runningAncestors } = lineageStats(
+                      filteredUngrouped,
+                      runningIds,
+                    )
+                    const collapsedSet = searching
+                      ? undefined
+                      : new Set(
+                          Object.keys(collapsedChildren).filter(
+                            (id) => collapsedChildren[id] && descendantCount.has(id),
+                          ),
+                        )
+                    return nestByParent(filteredUngrouped, collapsedSet).map(
+                      ({ session, depth }) => (
+                        <SessionRow
+                          key={session.id}
+                          session={session}
+                          depth={depth}
+                          active={session.id === activeId}
+                          running={!!runningIds[session.id]}
+                          now={now}
+                          childCount={descendantCount.get(session.id) ?? 0}
+                          collapsed={collapsedChildren[session.id] === true}
+                          childRunning={runningAncestors.has(session.id)}
+                          onToggleCollapse={() =>
+                            setCollapsedChildren((prev) => ({
+                              ...prev,
+                              [session.id]: !prev[session.id],
+                            }))
+                          }
+                          onOpen={() => onOpenSession(session.id)}
+                          onDelete={() => onDeleteSession(session)}
+                        />
+                      ),
+                    )
+                  })()}
                 </div>
               </div>
           </div>
@@ -1096,33 +1229,64 @@ function SessionRow({
   depth = 0,
   active,
   running,
+  now,
+  childCount = 0,
+  collapsed = false,
+  childRunning = false,
   onOpen,
   onDelete,
+  onToggleCollapse,
 }: {
   session: SessionSummary
   /** 血缘嵌套深度:0 = 顶层,>0 = 分支子会话(缩进显示)。 */
   depth?: number
   active: boolean
   running: boolean
+  /** 行尾相对时间的当前时刻(侧栏级 60s 时钟)。 */
+  now: number
+  /** 后代总数:>0 时渲染折叠钮,折叠时显示 +n 徽标。 */
+  childCount?: number
+  collapsed?: boolean
+  /** 有后代正在运行(折叠时把运行圆点顶到本行)。 */
+  childRunning?: boolean
   onOpen: () => void
   onDelete: () => void
+  onToggleCollapse: () => void
 }) {
   // 标题前补"(父)"提示,让用户一眼看出这是分支出来的子会话(已嵌套显示,
   // 但同工作区里有多个分支时文字也帮回忆),只对子会话生效,顶会不画。
   const isSubagent = Boolean(session.subagent)
   const isBranch = depth > 0 && !isSubagent
   const isChild = depth > 0
+  const showCaret = childCount > 0
+  const dotRunning = running || (collapsed && childRunning)
   return (
     <div
       className={`session-row-wrap${active ? ' active' : ''}${isChild ? ' nested' : ''}`}
-      style={isChild ? { paddingLeft: 10 + depth * 14 } : undefined}
+      style={isChild ? ({ '--depth': depth } as CSSProperties) : undefined}
     >
-      <button type="button" className={`session-row${active ? ' active' : ''}`} onClick={onOpen}>
+      <span className="session-caret-slot">
+        {showCaret && (
+          <button
+            type="button"
+            className={`session-caret${collapsed ? '' : ' open'}`}
+            title={collapsed ? t('expandChildren', { n: childCount }) : t('collapseChildren')}
+            aria-expanded={!collapsed}
+            onClick={onToggleCollapse}
+          >
+            <IconCaretRight size={10} />
+          </button>
+        )}
+      </span>
+      <button type="button" className="session-row" onClick={onOpen}>
         <span className="lead">
           {session.cwd_alive === false ? (
             <span className="dot err" title={t('deadCwd')} />
-          ) : running ? (
-            <span className="dot run" />
+          ) : dotRunning ? (
+            <span
+              className="dot run"
+              title={collapsed && !running ? t('childRunningHint') : undefined}
+            />
           ) : null}
         </span>
         <span className="excerpt">{sessionDisplayTitle(session)}</span>
@@ -1136,7 +1300,13 @@ function SessionRow({
             {t('branchTag')}
           </span>
         )}
+        {showCaret && collapsed && (
+          <span className="child-count" title={t('childSessions', { n: childCount })}>
+            +{childCount}
+          </span>
+        )}
       </button>
+      {session.created_at > 0 && <span className="session-time">{relativeTimeLabel(session.created_at, now)}</span>}
       <span className="row-actions">
         <button
           type="button"

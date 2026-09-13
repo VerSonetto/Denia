@@ -365,7 +365,28 @@ export function IconPlus(props: IconProps) {
 export function IconTrash(props: IconProps) {
   return (
     <Svg {...props}>
-      <path d="M3 4.5h10M6.5 4V3h3v1M4.5 4.5l.6 8.5h5.8l.6-8.5M6.7 7v4M9.3 7v4" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" />
+      <path
+        d="M2 4h12M5.3 4V2.7c0-.7.7-1.4 1.4-1.4h2.6c.7 0 1.4.7 1.4 1.4V4M12.7 4v9.3c0 .7-.7 1.4-1.4 1.4H4.7c-.7 0-1.4-.7-1.4-1.4V4M6.7 7.3v4M9.3 7.3v4"
+        stroke="currentColor"
+        strokeWidth="1.3"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </Svg>
+  )
+}
+
+/** 树形折叠指示:默认朝右(收起),展开时由 CSS 旋转朝下。 */
+export function IconCaretRight(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <path
+        d="M6.1 4.1 10.9 8l-4.8 3.9Z"
+        fill="currentColor"
+        stroke="currentColor"
+        strokeWidth="1"
+        strokeLinejoin="round"
+      />
     </Svg>
   )
 }

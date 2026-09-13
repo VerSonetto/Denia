@@ -789,15 +789,32 @@ button {
 }
 
 .session-row-wrap {
+  position: relative;
   display: flex;
   align-items: center;
   min-width: 0;
   border-radius: 8px;
 }
 
-.session-row-wrap:hover .row-actions,
-.session-row-wrap.active .row-actions {
-  display: flex;
+/* 悬停/选中底色画在整行(含折叠钮与时间列),行内元素不各画各的。 */
+.session-row-wrap:hover,
+.session-row-wrap.active {
+  background: var(--hover-fill);
+}
+
+/* 血缘缩进与树导轨:深度经 --depth 传入,导轨对齐父行折叠钮的中线。 */
+.session-row-wrap.nested {
+  padding-left: calc(var(--depth, 1) * 14px);
+}
+
+.session-row-wrap.nested::before {
+  content: '';
+  position: absolute;
+  left: calc(8px + (var(--depth, 1) - 1) * 14px);
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: color-mix(in srgb, var(--label-caption) 22%, transparent);
 }
 
 .session-row-wrap .session-row {
@@ -805,6 +822,15 @@ button {
   min-width: 0;
   margin-left: 0;
   width: auto;
+}
+
+/* 行尾时间常显,悬停时让位给删除钮。 */
+.session-row-wrap:hover .session-time {
+  display: none;
+}
+
+.session-row-wrap:hover .row-actions {
+  display: flex;
 }
 
 .session-row {
@@ -825,7 +851,6 @@ button {
 
 .session-row:hover,
 .session-row.active {
-  background: var(--hover-fill);
   color: var(--label-primary);
 }
 
@@ -876,6 +901,69 @@ button {
   color: var(--violet-fg);
   border: 1px solid color-mix(in srgb, var(--violet-base) 42%, transparent);
   letter-spacing: 0.02em;
+  user-select: none;
+}
+
+/* 折叠列:所有会话行统一预留,无子会话者为空位,保证标题左缘对齐。 */
+.session-caret-slot {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+}
+
+.session-caret {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 18px;
+  padding: 0;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--label-caption);
+  cursor: pointer;
+  transition:
+    color 0.15s var(--ease),
+    background 0.15s var(--ease);
+}
+
+.session-caret:hover {
+  color: var(--label-primary);
+  background: var(--active-fill);
+}
+
+.session-caret svg {
+  transition: transform 0.18s var(--ease);
+}
+
+.session-caret.open svg {
+  transform: rotate(90deg);
+}
+
+/* 行尾相对时间:常显,悬停时让位给删除钮。 */
+.session-time {
+  flex: none;
+  padding-right: 8px;
+  font-size: 11px;
+  line-height: 18px;
+  color: var(--label-caption);
+  font-variant-numeric: tabular-nums;
+  user-select: none;
+}
+
+/* 折叠时的后代计数徽标。 */
+.session-row .child-count {
+  flex: none;
+  padding: 0 5px;
+  font-size: 9.5px;
+  line-height: 14px;
+  border-radius: var(--r-pill);
+  color: var(--label-caption);
+  background: color-mix(in srgb, var(--label-caption) 12%, transparent);
+  font-variant-numeric: tabular-nums;
   user-select: none;
 }
 
