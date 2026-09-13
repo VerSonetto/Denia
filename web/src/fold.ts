@@ -361,6 +361,9 @@ export function foldEvents(events: SessionEnvelope[]): TranscriptNode[] {
         break
       }
       case 'tool-result': {
+        // 带 replaces 的 tool-result 是模型侧的原位替换(微压缩清理),
+        // 对话流里继续显示原始调用/结果,不落占位行。
+        if (event.replaces != null) break
         const node = tools.get(event.call_id)
         const result = { content: event.content, isError: event.is_error }
         if (node) {
@@ -710,6 +713,9 @@ function applyEnvelopeStep(
         },
       ]
     case 'tool-result': {
+      // 带 replaces 的 tool-result 是模型侧的原位替换(微压缩清理),
+      // 对话流里继续显示原始调用/结果,不落占位行。
+      if (event.replaces != null) return nodes
       for (let i = nodes.length - 1; i >= 0; i--) {
         const node = nodes[i]
         if (node.kind === 'tool' && node.callId === event.call_id) {

@@ -511,31 +511,49 @@ function ThinkRow({
   }, [streaming])
   // 内部滚动跟随:思考内容长在 240px 内部滚动框里,外层对话容器不撑高。
   // 流式期间框内吸底(新行出现即滚到最新);在框内手动向上滚即打断,
-  // 滚回底部自动恢复跟随 —— 语义与外层对话流的贴底跟随一致。
+  // 滚回底部自动恢复跟随 —— 语义与外层对话流的贴底一致,判定同走
+  // observed-top 账本(见 SessionsPage):程序滚动同步记账,scroll 落点
+  // ==账本即程序滚动不改归属;落点不一致才是读者输入,按几何改判。
+  // 旧实现按几何裸判:程序滚动的 scroll 事件下一帧才派发,期间打字机
+  // setShown 已让 React 提交新内容,事件读到的 dist = 两次提交间的增长量,
+  // 打字机追帧(快模型/积压跳底)时远超 24px,一眼就会误判脱跟且无法自愈。
   const preRef = useRef<HTMLPreElement | null>(null)
   const pinnedRef = useRef(true)
+  const observedTopRef = useRef(0)
+  const toBottomInner = useCallback(() => {
+    const el = preRef.current
+    if (el === null) return
+    el.scrollTop = el.scrollHeight
+    observedTopRef.current = el.scrollTop
+  }, [])
   const handleInnerScroll = useCallback(() => {
     const el = preRef.current
     if (el === null) return
-    pinnedRef.current = el.scrollHeight - el.scrollTop - el.clientHeight <= 24
+    const floor = Math.max(0, el.scrollHeight - el.clientHeight)
+    const movedByReader = Math.abs(el.scrollTop - Math.min(observedTopRef.current, floor)) > 0.5
+    if (movedByReader) {
+      pinnedRef.current = floor - el.scrollTop <= 24
+    }
+    observedTopRef.current = el.scrollTop
   }, [])
   useEffect(() => {
     if (!streaming || !open) return
     // 重新展开 = 全新视角,默认吸到最新;用户随后仍可在框内滚开打断。
     pinnedRef.current = true
+    toBottomInner()
     let raf = 0
     let lastHeight = -1
     const tick = () => {
       const el = preRef.current
       if (el !== null && el.scrollHeight !== lastHeight) {
         lastHeight = el.scrollHeight
-        if (pinnedRef.current) el.scrollTop = el.scrollHeight
+        if (pinnedRef.current) toBottomInner()
       }
       raf = requestAnimationFrame(tick)
     }
     raf = requestAnimationFrame(tick)
     return () => cancelAnimationFrame(raf)
-  }, [streaming, open])
+  }, [streaming, open, toBottomInner])
   // 思考框正文:流式时逐字 reveal(打字机),settle 立即全量。
   const displayText = useTypewriter(text, streaming)
   const summary = firstLine(text, 80)

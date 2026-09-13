@@ -21,7 +21,7 @@ import {
   useWorkspaces,
 } from '../appStore'
 import { t } from '../i18n'
-import { attach, ensureFollowing } from '../sessionStreams'
+import { attach, ensureFollowing, invalidateSession } from '../sessionStreams'
 import { sessionDisplayTitle } from '../sessionDisplay'
 import type { TranscriptNode } from '../fold'
 import type { TrajectoryQuote } from '../trajectory'
@@ -123,6 +123,8 @@ function firstAvailableSelection(catalog: ModelCatalog): ModelSelection | null {
 
 /** dsh ChatView FOLLOW_THRESHOLD */
 const FOLLOW_THRESHOLD = 24
+/** dsh ChatView SCROLL_SAMPLE_INTERVAL_MS:raw scroll 只排采样,几何每 interval 至多判一次。 */
+const SCROLL_SAMPLE_INTERVAL_MS = 500
 
 /** 乐观行内容指纹:文本 + 内联图片都参与匹配,避免多条纯图片消息("图片")互相误删。 */
 function pendingMessageKey(message: { text: string; images?: UserMessageImage[] }): string {
@@ -277,6 +279,9 @@ export default function SessionsPage({
   const promptRef = useRef<HTMLDivElement | null>(null)
   const scrollRef = useRef<HTMLDivElement | null>(null)
   const stickRef = useRef(true)
+  // 对话内容列:增长(工具卡展开/图片加载/markdown 回流)不一定伴随 nodes 变化,
+  // ResizeObserver 观察它才能兜住所有内容增高路径(同 dsh columnRef)。
+  const viewRef = useRef<HTMLDivElement | null>(null)
   const seatRef = useRef<HTMLDivElement | null>(null)
 
   const activeWs: WorkspaceRecord | null = getActiveWorkspace()
@@ -474,11 +479,8 @@ export default function SessionsPage({
     queueSeqRef.current = 0
     stickRef.current = true
     setStick(true)
-    if (smoothRafRef.current !== null) {
-      cancelAnimationFrame(smoothRafRef.current)
-      smoothRafRef.current = null
-      programmaticRef.current = Math.max(0, programmaticRef.current - 1)
-    }
+    samplePendingRef.current = false
+    observedTopRef.current = 0
     const el = scrollRef.current
     if (el !== null) el.scrollTop = 0
   }, [activeId, closeMention])
@@ -1083,123 +1085,102 @@ export default function SessionsPage({
     })
   }, [])
 
-  /* ---- 对话流贴底跟随 ----
-   * 吸底时内容追加自动滚动;用户手动滚动打断;滚回底部恢复。
-   * 打断判定不靠"scroll 事件里 dist 是否超阈"这一单一信号——内容增长、
-   * 浏览器滚动锚定、折叠引起的布局回缩都会产生方向不明的 scroll 事件,
-   * 误把跟随打断(表现:发送后界面停住不再跟随,手动滚到底才恢复)。
-   * 因此:程序滚动一律打标,其触发的 scroll 事件不参与判定;
-   * 用户意图单独识别(wheel 向上 = 明确离开);滚动条/触摸滚动按几何判定。 */
-  const programmaticRef = useRef(0)
-  const followQueuedRef = useRef(false)
-  // 平滑跟随的 rAF 句柄:内容持续增长时逐帧追尾,不瞬间跳变。
-  const smoothRafRef = useRef<number | null>(null)
+  /* ---- 对话流贴底跟随(抄 dsh ChatView observed-top 账本)----
+   * 归属(stick)只由「读者的滚动」改变,程序滚动不参与判定:
+   * 每次程序滚动把落点 scrollTop 同步记入账本;scroll 事件落点与账本一致
+   * (或因内容收缩被钳到 floor)即程序滚动,不改归属;不一致即读者输入
+   * (wheel/滚动条/触摸/键盘一视同仁,无需点名设备),按几何判吸底。
+   * 程序滚动永远精确落底,天然不会误判;内层滚动区(思考框/代码卡)的
+   * scroll 事件不冒泡,天然不会串扰外层归属。
+   * 旧实现两处病根随本方案一并消失:平滑追尾以 scrollHeight 为目标,
+   * delta 恒含 clientHeight,退出分支永不可达 → rAF 永转 + programmatic
+   * 遮罩永挂,几何判定永久失明;onWheel 分不清事件来自外层还是内层滚动区,
+   * 在思考框里向上滚会直接打断外层跟随。 */
+  const observedTopRef = useRef(0)
+  const samplePendingRef = useRef(false)
+  const sampleTimerRef = useRef<number | undefined>(undefined)
 
-  /** 瞬间滚到底(用户显式操作/切会话);不打平滑动画。 */
-  const scrollBottomNow = useCallback(() => {
+  /** 程序滚动:瞬间落底并同步记账。逐块追加每块只差几十 px,视觉即连续跟随。 */
+  const toBottom = useCallback(() => {
     const el = scrollRef.current
     if (el === null) return
-    if (smoothRafRef.current !== null) {
-      cancelAnimationFrame(smoothRafRef.current)
-      smoothRafRef.current = null
-      // 动画被取消:把它启动时打的 programmatic 标记还回去,
-      // 否则后续用户滚动会被误屏蔽。
-      programmaticRef.current = Math.max(0, programmaticRef.current - 1)
-    }
-    programmaticRef.current += 1
     el.scrollTop = el.scrollHeight
-    // scroll 事件在本帧 rendering steps 派发,下一帧解除标记
-    requestAnimationFrame(() => {
-      programmaticRef.current -= 1
-    })
+    observedTopRef.current = el.scrollTop
   }, [])
 
-  /**
-   * 平滑追尾:吸底时内容增长,用指数缓动逐帧逼近底部而不是瞬跳,
-   * 视觉上「吐字跟着走」的连贯感;内容每帧继续增长,目标值每帧重取,
-   * 距离恒小所以永不抖动。动画期间持续打 programmatic 标记,scroll
-   * 事件不参与打断判定;用户上滚(wheel)或手动拖离后 stickRef 变 false,
-   * 循环自然停止。
-   */
-  const scrollBottomSmooth = useCallback(() => {
+  /** 几何判定归属:仅读者滚动(movedByReader)允许改变 stick,程序滚动保持原状。 */
+  const judgeFollow = useCallback(() => {
     const el = scrollRef.current
-    if (el === null || !stickRef.current) return
-    if (smoothRafRef.current !== null) return
-    const step = () => {
-      if (el === null || !stickRef.current) {
-        smoothRafRef.current = null
-        programmaticRef.current -= 1
-        return
-      }
-      const target = el.scrollHeight
-      const current = el.scrollTop
-      const delta = target - current
-      if (Math.abs(delta) < 0.6) {
-        el.scrollTop = target
-        smoothRafRef.current = null
-        programmaticRef.current -= 1
-        return
-      }
-      // 追尾缓动:差距大(整段追加)时快速逼近,差距小(逐字吐)时平滑跟随,
-      // 避免"永远差一点"或"跳变"两个极端。
-      const ease = delta > 480 ? 0.6 : delta > 160 ? 0.45 : 0.32
-      el.scrollTop = current + delta * ease
-      smoothRafRef.current = requestAnimationFrame(step)
+    if (el === null) return
+    const floor = Math.max(0, el.scrollHeight - el.clientHeight)
+    const movedByReader = Math.abs(el.scrollTop - Math.min(observedTopRef.current, floor)) > 0.5
+    const atBottom = movedByReader
+      ? floor - el.scrollTop <= FOLLOW_THRESHOLD + 1
+      : stickRef.current
+    if (atBottom !== stickRef.current) {
+      stickRef.current = atBottom
+      setStick(atBottom)
     }
-    programmaticRef.current += 1
-    smoothRafRef.current = requestAnimationFrame(step)
-  }, [])
+    if (!movedByReader && atBottom) {
+      // 程序滚动收在底部且仍吸底:重申落底,补回采样挂起期间被跳过的跟随
+      // (如切会话后首屏内容在 500ms 采样窗内到达的情形)。
+      toBottom()
+      return
+    }
+    observedTopRef.current = el.scrollTop
+  }, [toBottom])
 
+  // 原生监听 scroll + scrollend(React 无 onScrollEnd):raw scroll 只排采样,
+  // 一次滚动风暴至多判一次几何,scrollend 收尾兜底(dsh SCROLL_SAMPLE_INTERVAL_MS)。
+  useEffect(() => {
+    const el = scrollRef.current
+    if (el === null) return
+    const sample = () => {
+      if (!samplePendingRef.current) return
+      samplePendingRef.current = false
+      if (sampleTimerRef.current !== undefined) {
+        window.clearTimeout(sampleTimerRef.current)
+        sampleTimerRef.current = undefined
+      }
+      judgeFollow()
+    }
+    const onScroll = () => {
+      samplePendingRef.current = true
+      sampleTimerRef.current ??= window.setTimeout(sample, SCROLL_SAMPLE_INTERVAL_MS)
+    }
+    el.addEventListener('scroll', onScroll, { passive: true })
+    el.addEventListener('scrollend', sample, { passive: true })
+    return () => {
+      el.removeEventListener('scroll', onScroll)
+      el.removeEventListener('scrollend', sample)
+      if (sampleTimerRef.current !== undefined) window.clearTimeout(sampleTimerRef.current)
+      samplePendingRef.current = false
+    }
+  }, [judgeFollow])
+
+  /** 内容增长/视口变化时的跟随入口;采样挂起(读者可能在滚)期间按兵不动。 */
+  const followRef = useRef<(() => void) | null>(null)
+  followRef.current = () => {
+    if (samplePendingRef.current) return
+    if (stickRef.current) toBottom()
+  }
+
+  /** 显式落底(发送消息/点回底按钮):清采样、恢复吸底、立即落底。 */
   const snapToBottom = useCallback(() => {
+    samplePendingRef.current = false
+    if (sampleTimerRef.current !== undefined) {
+      window.clearTimeout(sampleTimerRef.current)
+      sampleTimerRef.current = undefined
+    }
     stickRef.current = true
     setStick(true)
-    scrollBottomNow()
-  }, [scrollBottomNow])
+    toBottom()
+  }, [toBottom])
 
-  /** 吸底时的内容跟随:rAF 合并,一帧最多推进一次平滑追尾。 */
-  const scheduleFollow = useCallback(() => {
-    if (!stickRef.current || followQueuedRef.current) return
-    followQueuedRef.current = true
-    requestAnimationFrame(() => {
-      followQueuedRef.current = false
-      if (!stickRef.current) return
-      scrollBottomSmooth()
-    })
-  }, [scrollBottomSmooth])
-
-  const handleScroll = useCallback(() => {
-    if (programmaticRef.current > 0) return
-    const el = scrollRef.current
-    if (el === null) return
-    const bottom = el.scrollHeight - el.scrollTop - el.clientHeight <= FOLLOW_THRESHOLD + 1
-    if (bottom !== stickRef.current) {
-      stickRef.current = bottom
-      setStick(bottom)
-    }
-  }, [])
-
-  const handleWheel = useCallback((event: WheelEvent<HTMLDivElement>) => {
-    if (event.deltaY < 0 && stickRef.current) {
-      // 用户向上滚:立即打断,内容继续追加也不再跟随
-      stickRef.current = false
-      setStick(false)
-    }
-  }, [])
-
-  // 卸载兜底:平滑跟随动画随组件销毁停止。
+  // 回合启动推一把:首块内容到达前 stick 已就位,后续由 onNodesChange 接管。
   useEffect(() => {
-    return () => {
-      if (smoothRafRef.current !== null) {
-        cancelAnimationFrame(smoothRafRef.current)
-        smoothRafRef.current = null
-        programmaticRef.current = Math.max(0, programmaticRef.current - 1)
-      }
-    }
-  }, [])
-
-  useEffect(() => {
-    scheduleFollow()
-  }, [running, scheduleFollow])
+    followRef.current?.()
+  }, [running])
 
   // 运行中的会话才需要 SSE follow 长连接;普通浏览走分页快照,
   // 避免打开长会话就把完整历史加载进服务端 live cache。
@@ -1211,33 +1192,47 @@ export default function SessionsPage({
     syncPromptHeight()
   }, [prompt, phase])
 
-  // dsh: composer seat 高度变化时,贴底读者保持视野。
+  // dsh: composer seat / 内容列 / 滚动口尺寸变化时,贴底读者保持视野。
+  // 内容列观察兜住不伴随 nodes 变化的增高(展开工具卡、图片加载等)。
   useEffect(() => {
     const seat = seatRef.current
     const scroller = scrollRef.current
-    if (seat === null || scroller === null) return
+    const view = viewRef.current
+    if (seat === null || scroller === null || view === null) return
     const observer = new ResizeObserver(() => {
       scroller.style.setProperty('--composer-height', `${seat.offsetHeight}px`)
       scroller.style.setProperty('--conversation-viewport-height', `${scroller.clientHeight}px`)
-      scheduleFollow()
+      followRef.current?.()
     })
     observer.observe(seat)
     observer.observe(scroller)
+    observer.observe(view)
     return () => observer.disconnect()
-  }, [scheduleFollow, phase])
+  }, [phase])
 
   /**
    * 乐观行协调:
    * - push:发送 202 后注入乐观行。
    * - settle:流中已出现同文本 user-message(可能先于 push,
-   *   因为 202 返回前服务端已落库并推送)→ 从列表移除并计数确认。
-   * 确认计数保证竞态下不丢:settle 先到时,push 不再注入。
+   *   因为 202 返回前服务端已落库并推送)→ 从列表移除并记录确认。
+   * 确认记录带短 TTL(settle 先到时 push 不再注入):快照重放会把
+   * 历史消息也 settle 一遍,永久计数会让之后"同文本重发"(回退后
+   * 常见)的乐观行被误吞——TTL 过期即失效,只有紧邻 202 的竞态窗口
+   * (2 秒)内才生效,这正是它要保护的范围。
    */
+  const CONFIRM_TTL_MS = 2000
   const confirmedRef = useRef(new Map<string, number>())
 
   const settlePending = useCallback((message: { text: string; images?: UserMessageImage[] }) => {
     const key = pendingMessageKey(message)
-    confirmedRef.current.set(key, (confirmedRef.current.get(key) ?? 0) + 1)
+    const now = Date.now()
+    // 惰性清理:快照重放会写入大量历史 key,过期项在读路径顺手删。
+    if (confirmedRef.current.size > 64) {
+      for (const [k, expiresAt] of confirmedRef.current) {
+        if (expiresAt <= now) confirmedRef.current.delete(k)
+      }
+    }
+    confirmedRef.current.set(key, now + CONFIRM_TTL_MS)
     setPendingMessages((previous) => {
       const index = previous.findIndex((candidate) => pendingMessageKey(candidate) === key)
       if (index < 0) return previous
@@ -1386,6 +1381,11 @@ export default function SessionsPage({
     setRewindBusy(true)
     try {
       const result = await api.rewindSession(activeId, rewindReq.seq)
+      // 后端物理截断后事件 seq 重新编号,本页流引擎的 cursor 与 follow
+      // 连接已失真:显式重连对齐(重拉快照校正 cursor、按需重开 follow),
+      // 不依赖 SessionView 重挂载这类间接效应——否则快照竞态失败或另一
+      // 标签页回退时,新事件帧会整段落在旧 cursor 之下被静默吞掉。
+      invalidateSession(activeId)
       // 恢复目标消息文本/图片到输入框,方便修改后重发。
       applyDraft(result.toMessage ?? rewindReq.text)
       if (rewindReq.images && rewindReq.images.length > 0) {
@@ -1402,7 +1402,10 @@ export default function SessionsPage({
         setPastedImages([])
       }
       setAttachments([])
+      // 时间线已截断:乐观行、确认记录与排队消息一并作废。
+      confirmedRef.current.clear()
       setPendingMessages([])
+      setQueuedMessages([])
       setTranscriptNodes([])
       // 强制重挂载 SessionView,重新拉截断后的快照。
       setTranscriptReloadTick((tick) => tick + 1)
@@ -1441,11 +1444,12 @@ export default function SessionsPage({
   const pushPending = useCallback((text: string, images?: UserMessageImage[]) => {
     const message = { text, images }
     const key = pendingMessageKey(message)
-    const confirmed = confirmedRef.current.get(key) ?? 0
-    if (confirmed > 0) {
-      // 该条已被服务端流确认:无需乐观行。
-      confirmedRef.current.set(key, confirmed - 1)
-      return
+    const expiresAt = confirmedRef.current.get(key)
+    if (expiresAt !== undefined) {
+      // 确认记录一次性消耗:202 返回前服务端已落库推送(同文本已出现在
+      // 流中)→ 不再注入乐观行。TTL 之外(历史快照的 settle)不算数。
+      confirmedRef.current.delete(key)
+      if (Date.now() < expiresAt) return
     }
     setPendingMessages((previous) => [...previous, message])
   }, [])
@@ -2314,8 +2318,6 @@ export default function SessionsPage({
       <div
         className="conversation-scroll"
         ref={scrollRef}
-        onScroll={handleScroll}
-        onWheel={handleWheel}
         data-conversation-scroll=""
       >
         {phase === 'active' && view === 'chat' && (
@@ -2325,7 +2327,10 @@ export default function SessionsPage({
             onJumpMiss={(seq) => setAxisJump((prev) => ({ seq, nonce: (prev?.nonce ?? 0) + 1 }))}
           />
         )}
-        <div className={view === 'trajectory' ? 'conversation-view full-bleed' : 'conversation-view'}>
+        <div
+          className={view === 'trajectory' ? 'conversation-view full-bleed' : 'conversation-view'}
+          ref={viewRef}
+        >
           {showTranscript && activeId ? (
             <SessionView
               key={`${activeId}-${transcriptReloadTick}`}
@@ -2344,7 +2349,7 @@ export default function SessionsPage({
               }}
               onNodesChange={(nodes) => {
                 setTranscriptNodes(nodes)
-                scheduleFollow()
+                followRef.current?.()
               }}
               onAnchorsChange={setAxisAnchors}
               jumpRequest={axisJump}

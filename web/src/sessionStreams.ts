@@ -17,6 +17,8 @@ import type { SessionEnvelope, SessionHeader } from './types'
  *
  * 每次(重)连接/快照递增 `generation`,一切回调先校验 generation,
  * 过期回调直接丢弃;不可能出现旧快照覆盖新状态的竞态。
+ * 后端日志被外部改写(回退物理截断 → seq 重新编号)时,任何与本地
+ * cursor 不符的帧都会触发快照重对齐,不会静默吞帧。
  *
  * ## 自愈重连
  *
@@ -203,12 +205,17 @@ function openFollow(id: string, state: StreamState, gen: number) {
     (envelope) => {
       if (state.dead || gen !== state.generation) return
       state.lastFrameAt = now()
-      if (envelope.seq <= state.cursor) return
       if (envelope.seq === state.cursor + 1) {
         state.cursor = envelope.seq
         for (const listener of state.listeners) listener.onEnvelope(envelope)
       } else {
-        // 帧断档(follow lag 会静默丢帧):重拿快照自愈。
+        // 与本地认知不符的帧一律重拿快照自愈(resnapshot 内有 300ms 节流):
+        // - seq > cursor+1:断档(follow lag 静默丢帧);
+        // - seq <= cursor:正常只应是连接建立时 replay 与广播的重叠重复帧;
+        //   但后端日志被外部改写(回退物理截断后 seq 重新编号、其他标签页/
+        //   其他实例回退)时,新帧 seq 会整段落回 cursor 之下——旧 cursor 从此
+        //   永久失真,若静默丢弃,新消息将一条都收不到,只能靠用户刷新。
+        //   所以重复帧不再无脑吞掉:节流触发一次重对齐,快照校正后即收敛。
         resnapshot(id, state)
       }
     },
@@ -256,6 +263,22 @@ export function attach(id: string, listener: SessionStreamListener): () => void 
 export function dropSession(id: string): void {
   const state = streams.get(id)
   if (state) disposeState(state)
+}
+
+/**
+ * 会话状态失效(回退/外部截断):强制立即重连对齐。
+ *
+ * 后端 rewind 物理截断日志后事件 seq 重新编号,本地 cursor 与 follow
+ * 连接全部失真。这里不销毁流(销毁会让仍在挂载的监听者——如会话级
+ * 权限/审批监听——永久掉线),而是 abort 旧连接 + 立即重拉快照:
+ * 快照成功后 cursor 校正为截断后的日志尾,onSnapshot 让所有监听者
+ * 全量重建,既存的 follow 意愿(运行中)也会按新 cursor 重开。
+ * 显式调用让"回退后对齐"不依赖视图重挂载这类间接效应。
+ */
+export function invalidateSession(id: string): void {
+  const state = streams.get(id)
+  if (!state || state.dead) return
+  reconnect(id, state)
 }
 
 /** 引擎全量清理(仅测试/应用卸载)。 */

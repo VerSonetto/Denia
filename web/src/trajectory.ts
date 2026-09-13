@@ -287,6 +287,9 @@ export function deriveTrajectory(events: SessionEnvelope[]): TrajectoryLayout {
         break
       }
       case 'tool-result': {
+        // 带 replaces 的 tool-result 是模型侧的原位替换(微压缩清理),
+        // 轨迹里继续显示原始调用/结果,不落占位行。
+        if (event.replaces != null) break
         const record = toolByCall.get(event.call_id)
         const result = { content: event.content, isError: event.is_error }
         if (record) {
