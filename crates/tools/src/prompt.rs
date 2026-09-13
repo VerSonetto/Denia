@@ -4,8 +4,8 @@ use std::sync::Arc;
 
 use denia_core::tool::ToolSchema;
 use denia_system_prompt::{
-    AssembleContext, PromptContext, PromptSection, PromptText, SectionAudience, SectionOrder,
-    SystemPrompt, ToolProviderResult,
+    AssembleContext, AssembledSection, PromptContext, PromptSection, PromptText, SectionAudience,
+    SectionOrder, SystemPrompt, ToolProviderResult,
 };
 
 use crate::browser::BrowserHub;
@@ -265,7 +265,7 @@ pub fn register_plan_prompt_section(prompt: &mut SystemPrompt) -> Result<(), Str
         name: "tool:plan".to_string(),
         order: SectionOrder::ToolPlan.value(),
         text: PromptText::Static(
-            "计划模式的收尾义务:调研完成后必须用 exit_plan 提交结构化计划(plan 用 markdown 写清目标、分步方案、将修改或新建的文件、风险、验证方式),不要把计划散落在回复里等用户自己领会;一次提交完整计划,不要拆成多次试探性提交。提交后本轮阻塞等待用户决策,期间不要继续调用其他工具。拿到决策后的动作:批准 → 按计划直接开始执行,不要再次向用户确认;批准并附带补充建议 → 把建议一并落实;拒绝并附带补充建议 → 按建议修订计划后重新 exit_plan,只改受影响的部分,除非用户要求否则不要推倒重来;拒绝且无建议 → 先用 ask 询问用户的顾虑再修订。计划获批执行时,若发现必须偏离计划(额外破坏性操作、方案走不通),停下来向用户说明现状与建议,不要擅自扩大范围。"
+            "计划模式(plan)的收尾义务:进入计划模式后,调研完成时必须用 exit_plan 提交结构化计划(plan 用 markdown 写清目标、分步方案、将修改或新建的文件、风险、验证方式),不要把计划散落在回复里等用户自己领会;一次提交完整计划,不要拆成多次试探性提交。提交后本轮阻塞等待用户决策,期间不要继续调用其他工具。拿到决策后的动作:批准 → 按计划直接开始执行,不要再次向用户确认;批准并附带补充建议 → 把建议一并落实;拒绝并附带补充建议 → 按建议修订计划后重新 exit_plan,只改受影响的部分,除非用户要求否则不要推倒重来;拒绝且无建议 → 先用 ask 询问用户的顾虑再修订。非计划模式下 exit_plan 会被拒绝——计划获批执行后不要再次提交,除非用户明确要求重新进入计划模式。计划获批执行时,若发现必须偏离计划(额外破坏性操作、方案走不通),停下来向用户说明现状与建议,不要擅自扩大范围。"
                 .to_string(),
         ),
         complete: false,
@@ -710,7 +710,8 @@ mod tests {
         }
     }
 
-    /// 段位顺序:行为/表达纪律排在全部工具段之后。
+    /// 段位顺序(缓存前缀策略):工具纪律段在前,行为/表达纪律在后;
+    /// 权限模式翻转**不得**改变任何段的存在性与顺序。
     #[test]
     fn behavior_sections_come_after_tool_sections() {
         let (prompt, _tools) = default_shipped();
@@ -733,6 +734,37 @@ mod tests {
         assert!(index_of("harness:context-management") > index_of("harness:communication"));
         assert!(index_of("harness:code-style") > index_of("harness:context-management"));
         assert!(index_of("harness:risk-honesty") > index_of("harness:code-style"));
+    }
+
+    /// 权限模式(plan / auto-edit / full / read-only)互切时,段集合与
+    /// 工具 schema 集合必须逐字节稳定:模式语义由权限引擎与运行时快照
+    /// 承担,系统提示与工具面跨模式不变(提供方前缀缓存不破)。
+    #[test]
+    fn permission_mode_flip_keeps_sections_and_tools_identical() {
+        let (prompt, _tools) = default_shipped();
+        let base = AssembleContext {
+            cwd: Some("/work".to_string()),
+            model: Some("mock".to_string()),
+            provider: Some("mock".to_string()),
+            ..Default::default()
+        };
+        let mut reference: Option<(Vec<AssembledSection>, Vec<String>)> = None;
+        for mode in ["read-only", "auto-edit", "plan", "full"] {
+            let assembly = prompt
+                .assemble(&AssembleContext {
+                    permission_mode: Some(mode.to_string()),
+                    ..base.clone()
+                })
+                .unwrap();
+            let tool_names: Vec<String> = assembly.tools.iter().map(|t| t.name.clone()).collect();
+            match &reference {
+                None => reference = Some((assembly.sections.clone(), tool_names)),
+                Some((sections, tools)) => {
+                    assert_eq!(&assembly.sections, sections, "模式 {mode} 改变了段集合");
+                    assert_eq!(&tool_names, tools, "模式 {mode} 改变了工具 schema 集合");
+                }
+            }
+        }
     }
 
     #[test]

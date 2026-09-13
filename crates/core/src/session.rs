@@ -677,6 +677,17 @@ pub enum SessionEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         replaces: Option<u64>,
     },
+    /// 超长工具参数打桩(模型侧投影):把 `call_id` 对应的工具调用参数在
+    /// 派生历史里替换为 `placeholder`。日志与 UI 保留全文,只有模型面变短。
+    /// write_file/edit 的大参数执行成功后即成死重——文件已在磁盘,按纪律
+    /// 重读走 read_file;打桩让后续请求不再重复携带全部内容,且替换对每个
+    /// 请求确定一致,不破坏提供方前缀缓存。
+    ArgsCleared {
+        turn: u32,
+        step: u32,
+        call_id: String,
+        placeholder: String,
+    },
     /// LLM 总结压缩(对齐 Claude Code compact 设计):把 `replaces_from..=
     /// replaces_to` 的事件区间折叠成一条摘要消息,保留窗口从 `keep_from`
     /// 开始。日志保持 append-only:区间内旧事件仍在磁盘上,只是不再进入
@@ -1014,6 +1025,29 @@ fn derive_surface_inner(events: &[SessionEnvelope]) -> Vec<SurfaceMessage> {
                         message,
                         is_error: *is_error,
                     });
+                }
+            }
+            SessionEvent::ArgsCleared {
+                call_id,
+                placeholder,
+                ..
+            } => {
+                // 找最近一条含该调用的 assistant 表面条目,原位替换参数。
+                // 事件序保证目标唯一且已入 surface(调用先于结果,打桩
+                // 在结果之后);被压缩折叠掉时静默跳过。
+                for item in surface.iter_mut().rev() {
+                    if item.message.role != crate::message::ChatRole::Assistant {
+                        continue;
+                    }
+                    if let Some(call) = item
+                        .message
+                        .tool_calls
+                        .iter_mut()
+                        .find(|call| call.id == *call_id)
+                    {
+                        call.arguments = placeholder.clone();
+                        break;
+                    }
                 }
             }
             _ => {}

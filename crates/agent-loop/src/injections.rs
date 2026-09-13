@@ -18,6 +18,10 @@ use crate::{SessionDriver, TurnState, append};
 /// 目标状态注入通道名;goal 模式唯一的模型侧目标消息通道。
 pub const GOAL_CHANNEL: &str = "goal";
 
+/// 系统提示更新通道:system 字节冻结后,变化的新提示词全文经此通道
+/// 追加到已缓存历史之后(对齐 dsh `systemPromptUpdate: 'in-history'`)。
+pub const SYSTEM_UPDATE_CHANNEL: &str = "system-prompt-update";
+
 /// 项目记忆索引注入通道名(MEMORY.md 全文,记忆启用时主会话可见)。
 pub const MEMORY_CHANNEL: &str = "project-memory";
 
@@ -63,7 +67,7 @@ impl InjectionBaselines {
 }
 
 /// 按通道名取日志中最后一条注入消息(新事件模型:channel 字段)。
-fn last_injected_channel(session: &Session, channel: &str) -> Option<String> {
+pub(crate) fn last_injected_channel(session: &Session, channel: &str) -> Option<String> {
     session.events().iter().rev().find_map(|envelope| match &envelope.event {
         SessionEvent::UserMessage {
             text,

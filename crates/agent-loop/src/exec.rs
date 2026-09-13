@@ -148,7 +148,52 @@ async fn commit_result(
             replaces: None,
         },
     )?;
+    // —— 超长参数打桩:write_file/edit 的大参数执行成功后即成死重 ——
+    // 文件内容已在磁盘(纪律:改前重读),历史里保留全文只会让后续每个
+    // 请求重复携带并推高上下文压力。落 ArgsCleared 把派生历史里的参数
+    // 替换为短占位(保留 path 与体量),日志与 UI 仍存全文;打桩发生在
+    // 参数刚进入历史的时点,下一次请求本就要为新内容付一次 miss,此后
+    // 每个请求都省下这份死重,且替换对每个请求确定一致,不破坏前缀缓存。
+    if !output.is_error
+        && matches!(call.name.as_str(), "write_file" | "edit")
+        && call.arguments.len() >= ARGS_STUB_THRESHOLD_CHARS
+        && let Some(placeholder) = stub_arguments(&call.arguments)
+    {
+        append(
+            &state.session,
+            &state.emit,
+            SessionEvent::ArgsCleared {
+                turn: state.turn,
+                step,
+                call_id: call.id.clone(),
+                placeholder,
+            },
+        )?;
+    }
     Ok(())
+}
+
+/// 打桩阈值:参数达到这个字符数才打桩(对应约 2k+ token 的死重)。
+const ARGS_STUB_THRESHOLD_CHARS: usize = 8192;
+
+/// 构造打桩占位符:保留 `path`(模型定位文件用)与原体量说明。
+/// 参数解析失败时返回 None——宁可不打桩,不损坏历史里的参数结构。
+fn stub_arguments(arguments: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(arguments.trim()).ok()?;
+    let path = value
+        .get("path")
+        .and_then(|path| path.as_str())
+        .unwrap_or("(未知路径)");
+    Some(
+        serde_json::json!({
+            "path": path,
+            "_args_cleared": format!(
+                "本次调用的参数已归档(共 {} 字符),文件内容在磁盘上;需要查看或修改时先 read_file 读取。",
+                arguments.len()
+            ),
+        })
+        .to_string(),
+    )
 }
 
 /// 派发前的硬性校验:子代理白名单与未知工具。命中则返回错误结果,

@@ -115,6 +115,8 @@ enum MockScript {
 
 struct MockAdapter {
     scripts: Mutex<VecDeque<MockScript>>,
+    /// 录制每次请求的 system 字节(冻结断言用);None = 不录制。
+    capture: Option<Arc<Mutex<Vec<Option<String>>>>>,
 }
 
 #[async_trait]
@@ -158,8 +160,11 @@ impl LlmAdapter for MockAdapter {
     async fn stream(
         &self,
         _provider: &str,
-        _request: &GenerateRequest,
+        request: &GenerateRequest,
     ) -> Result<ChunkStream, LlmError> {
+        if let Some(capture) = &self.capture {
+            capture.lock().unwrap().push(request.system.clone());
+        }
         match self.scripts.lock().unwrap().pop_front() {
             Some(MockScript::Fail(failure)) => {
                 Err(denia_core::error::LlmError::from_failure(failure))
@@ -303,6 +308,7 @@ fn driver_with_tools(
             &["mock".to_string()],
             Arc::new(MockAdapter {
                 scripts: Mutex::new(VecDeque::from(scripts)),
+                capture: None,
             }),
             denia_llm::RetryPolicy::default(),
         )
@@ -346,6 +352,37 @@ fn temp_session() -> Arc<Session> {
             .as_nanos()
     ));
     Arc::new(Session::create(&dir, uuid::Uuid::new_v4().to_string(), &dir, true, None).unwrap())
+}
+
+/// 带请求录制的驱动器:捕获每次派发请求的 system 字节,供冻结断言用。
+fn recording_driver(
+    scripts: Vec<MockScript>,
+) -> (SessionDriver, Arc<Mutex<Vec<Option<String>>>>) {
+    let capture = Arc::new(Mutex::new(Vec::new()));
+    let registry = Arc::new(LlmRegistry::new());
+    registry
+        .register(
+            &["mock".to_string()],
+            Arc::new(MockAdapter {
+                scripts: Mutex::new(VecDeque::from(scripts)),
+                capture: Some(capture.clone()),
+            }),
+            denia_llm::RetryPolicy::default(),
+        )
+        .unwrap();
+    let tools = ToolRegistry::default();
+    let prompt = SystemPrompt::new(denia_system_prompt::SystemPromptConfig {
+        include_runtime_context: false,
+        ..Default::default()
+    });
+    (
+        SessionDriver::new(
+            registry,
+            Arc::new(tools),
+            Arc::new(ArcSwap::from_pointee(prompt)),
+        ),
+        capture,
+    )
 }
 
 fn selection() -> ModelSelection {
@@ -454,6 +491,101 @@ async fn tool_call_continues_to_second_step() {
         messages
             .iter()
             .any(|m| m.role == denia_core::message::ChatRole::Tool)
+    );
+}
+
+/// 系统提示变更 in-history 追加(dsh `systemPromptUpdate: 'in-history'` 对齐):
+/// 已发过请求的会话里,system 字节冻结在最后一次发出的值,提示词变化以
+/// 注入消息全文追加(声明取代旧版),内容不变不重发。请求首条消息字节
+/// 稳定,提供方前缀缓存不因提示词变化从第 0 个 token 失效。
+#[tokio::test]
+async fn system_prompt_change_appends_in_history_and_freezes_system() {
+    let (driver, capture) = recording_driver(vec![
+        MockScript::Chunks(text_script("t1")),
+        MockScript::Chunks(text_script("t2")),
+        MockScript::Chunks(text_script("t3")),
+    ]);
+    let session = temp_session();
+    async fn run(
+        driver: &SessionDriver,
+        session: &Arc<Session>,
+        prompt: &str,
+    ) -> TurnEndReason {
+        driver
+            .run_turn(
+                session,
+                &selection(),
+                prompt,
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                true,
+                CancellationToken::new(),
+                noop_emit(),
+            )
+            .await
+    }
+
+    // 第一轮:出厂 persona(尚未发过请求时,当前提示词即基准)。
+    assert_eq!(run(&driver, &session, "u1").await, TurnEndReason::Completed);
+    // 换 persona(SYSTEM.md 热更新等价场景)后再跑两轮:第二轮应追加更新,
+    // 第三轮内容未变不得重发。
+    let swapped = SystemPrompt::new_with_persona(
+        denia_system_prompt::SystemPromptConfig {
+            include_runtime_context: false,
+            ..Default::default()
+        },
+        "热更新后的身份句。".to_string(),
+    );
+    driver.system_prompt_handle().store(Arc::new(swapped));
+    assert_eq!(run(&driver, &session, "u2").await, TurnEndReason::Completed);
+    assert_eq!(run(&driver, &session, "u3").await, TurnEndReason::Completed);
+
+    // 三次请求的 system 字节全部等于第一轮的提示词(冻结生效):新 persona
+    // 不进 system 字段,只经更新通道追加。
+    let captured = capture.lock().unwrap().clone();
+    assert_eq!(captured.len(), 3);
+    let frozen = captured[0].as_deref().expect("first request has system");
+    assert!(frozen.contains("你是由 denia 驱动的"));
+    for (index, system) in captured.iter().enumerate() {
+        assert_eq!(
+            system.as_deref(),
+            Some(frozen),
+            "第 {index} 次请求的 system 字节必须与首次一致(冻结)"
+        );
+        assert!(
+            !system.as_ref().unwrap().contains("热更新后的身份句"),
+            "冻结的 system 字节不得混入新提示词"
+        );
+    }
+
+    // 更新通道:恰好一条,携带新提示词全文与取代声明;派生历史包含它。
+    let updates: Vec<String> = session
+        .events()
+        .iter()
+        .filter_map(|envelope| match &envelope.event {
+            SessionEvent::UserMessage {
+                text,
+                injected: true,
+                channel: Some(name),
+                ..
+            } if name == crate::injections::SYSTEM_UPDATE_CHANNEL => Some(text.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(updates.len(), 1, "内容未变不得重发更新");
+    assert!(updates[0].contains("系统提示更新"));
+    assert!(updates[0].contains("取代此前系统消息中的旧版本"));
+    assert!(
+        updates[0].contains("热更新后的身份句"),
+        "更新消息必须携带新提示词全文"
+    );
+    assert!(
+        session
+            .derive_messages()
+            .iter()
+            .any(|m| m.content.contains("热更新后的身份句")),
+        "更新消息必须进派生历史,模型才能真正看到新提示词"
     );
 }
 
@@ -1636,7 +1768,7 @@ async fn run_simple_turn(driver: &SessionDriver, session: &Arc<Session>, prompt:
 }
 
 #[tokio::test]
-async fn plan_mode_denies_writes_and_hides_write_schemas() {
+async fn plan_mode_denies_writes_and_keeps_tool_face_stable() {
     let (driver, _registry) = driver_with_tools(
         vec![
             MockScript::Chunks(tool_calls_script(&[(
@@ -1661,12 +1793,104 @@ async fn plan_mode_denies_writes_and_hides_write_schemas() {
         !std::path::Path::new(&session.header().cwd).join("a.txt").exists(),
         "plan mode must not write files"
     );
-    // schema 面:计划档隐藏 write_file/edit,保留 bash 与 exit_plan。
+    // 工具面跨模式稳定(缓存前缀不破):计划档**保留** write_file/edit
+    // schema,越权由权限引擎拒绝;不再按模式增删 schema。
     let names = last_header_tool_names(&session);
     assert!(names.iter().any(|n| n == "exit_plan"), "{names:?}");
     assert!(names.iter().any(|n| n == "bash"), "{names:?}");
-    assert!(!names.iter().any(|n| n == "write_file"), "{names:?}");
-    assert!(!names.iter().any(|n| n == "edit"), "{names:?}");
+    assert!(names.iter().any(|n| n == "write_file"), "{names:?}");
+    assert!(names.iter().any(|n| n == "edit"), "{names:?}");
+}
+
+#[tokio::test]
+async fn exit_plan_outside_plan_mode_is_denied_without_approval() {
+    // 非计划档调用 exit_plan:权限引擎直接拒绝(不弹审批卡),模型拿
+    // isError 自纠正;工具面保持稳定(执行档不隐藏 exit_plan)。
+    let (driver, _registry) = driver_with_tools(
+        vec![
+            MockScript::Chunks(tool_calls_script(&[(
+                "call_p",
+                "exit_plan",
+                r##"{"plan":"# 计划\n\n- 步骤一"}"##,
+            )])),
+            MockScript::Chunks(text_script("understood")),
+        ],
+        |tools| *tools = denia_tools::default_registry(),
+    );
+    let session = temp_session(); // 默认 auto-edit
+    run_simple_turn(&driver, &session, "submit anyway").await;
+
+    let results = result_texts(&session);
+    assert_eq!(results.len(), 1, "exactly one result");
+    assert!(results[0].0, "exit_plan must be denied outside plan mode");
+    assert!(
+        !session.events().iter().any(|envelope| {
+            matches!(envelope.event, SessionEvent::ApprovalAsked { .. })
+        }),
+        "denial must not pop an approval card"
+    );
+    assert_eq!(session.permission_mode(), PermissionMode::AutoEdit);
+}
+
+#[tokio::test]
+async fn oversized_write_args_are_stubbed_in_derived_history() {
+    // write_file 大参数(≥8KB):执行成功后参数在**派生历史**里替换为短
+    // 占位(保留 path 与体量说明),日志与 UI 保留全文;小参数不打桩。
+    let big = "x".repeat(9000);
+    let (driver, _registry) = driver_with_tools(
+        vec![
+            MockScript::Chunks(tool_calls_script(&[
+                (
+                    "call_big",
+                    "write_file",
+                    &format!(r#"{{"path":"big.js","content":"{big}"}}"#),
+                ),
+                ("call_small", "write_file", r#"{"path":"small.txt","content":"tiny"}"#),
+            ])),
+            MockScript::Chunks(text_script("done")),
+        ],
+        |tools| *tools = denia_tools::default_registry(),
+    );
+    let session = temp_session();
+    run_simple_turn(&driver, &session, "write files").await;
+
+    // 日志诚实:ToolCall 事件里大参数原样在案(UI 展示不受影响)。
+    assert!(
+        session.events().iter().any(|envelope| matches!(
+            &envelope.event,
+            SessionEvent::ToolCall { name, arguments, .. }
+                if name == "write_file" && arguments.contains(&big)
+        )),
+        "log must keep full arguments"
+    );
+
+    // 模型面:大参数换成占位,小参数原样保留。
+    let messages = session.derive_messages();
+    let find_call = |id: &str| {
+        messages
+            .iter()
+            .find_map(|m| m.tool_calls.iter().find(|c| c.id == id))
+            .unwrap_or_else(|| panic!("{id} must be in derived history"))
+    };
+    let big_call = find_call("call_big");
+    assert!(
+        big_call.arguments.len() < 500,
+        "big args must be stubbed, got {} chars: {}",
+        big_call.arguments.len(),
+        &big_call.arguments[..big_call.arguments.len().min(120)]
+    );
+    assert!(big_call.arguments.contains("big.js"), "{}", big_call.arguments);
+    assert!(
+        big_call.arguments.contains("_args_cleared"),
+        "{}",
+        big_call.arguments
+    );
+    let small_call = find_call("call_small");
+    assert!(
+        small_call.arguments.contains("tiny"),
+        "small args stay intact: {}",
+        small_call.arguments
+    );
 }
 
 #[tokio::test]

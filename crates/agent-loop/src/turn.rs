@@ -19,7 +19,9 @@ use denia_system_prompt::{
 use denia_token_meter::estimate_system_tokens;
 
 use crate::errors::MAX_FEEDBACK;
-use crate::injections::{InjectionBaselines, refresh_background_injections};
+use crate::injections::{
+    InjectionBaselines, refresh_background_injections, last_injected_channel,
+};
 use crate::rescue::{detect_fake_names, fake_tool_call_feedback, log_rescued, rescue_from_blocks};
 use crate::runtime_context::RuntimeContextProjection;
 use crate::workspace_instructions::skill_gesture;
@@ -31,6 +33,11 @@ struct TurnAssembly {
     projection: RuntimeContextProjection,
     touched: Vec<PathBuf>,
     gesture_skill: Option<(String, String, String)>,
+    /// system 字节冻结基准:日志最后一条请求头携带的 system 全文,即
+    /// 提供方缓存前缀的第一段。None = 会话尚未发过任何请求。
+    system_frozen: Option<String>,
+    /// 已通过系统提示更新通道追加的最新提示词全文(幂等基准)。
+    system_update: Option<String>,
 }
 
 pub(crate) async fn run_turn_inner(
@@ -65,6 +72,12 @@ pub(crate) async fn run_turn_inner(
         projection: RuntimeContextProjection::restore(&state.session),
         touched: Vec::new(),
         gesture_skill: detect_gesture_skill(driver, state, prompt, &cwd).await,
+        system_frozen: last_request_header_system(&state.session),
+        system_update: last_injected_channel(
+            &state.session,
+            crate::injections::SYSTEM_UPDATE_CHANNEL,
+        )
+        .and_then(|message| extract_system_update(&message).map(|body| body.to_string())),
     };
 
     'step_loop: loop {
@@ -141,7 +154,36 @@ pub(crate) async fn run_turn_inner(
             )?;
         }
         let model_prompt = render_prompt(&prompt_assembly);
-        let framed_system = frame_system_prompt_for_model(&model_prompt);
+        let framed_current = frame_system_prompt_for_model(&model_prompt);
+        // —— 系统提示变更 in-history 追加(对齐 dsh `systemPromptUpdate: 'in-history'`)——
+        // wire 层把 system 序列化为请求首条消息:已发过请求的会话里改写它,
+        // 等于从第 0 个 token 打碎提供方前缀缓存。因此 system 字节冻结在
+        // 最后一次发出的值;提示词变化(权限模式段位进退 / SYSTEM.md 热更新 /
+        // 模型名插值)把新提示词全文以注入消息追加到已缓存历史之后,声明
+        // 取代旧版。首个请求直接采用当前提示词(RequestHeader 落盘即基准)。
+        let framed_system = match assembly.system_frozen.as_deref() {
+            Some(frozen) if frozen != framed_current => {
+                if assembly.system_update.as_deref() != Some(framed_current.as_str()) {
+                    append(
+                        &state.session,
+                        &state.emit,
+                        SessionEvent::UserMessage {
+                            text: format!(
+                                "<system-reminder>\n系统提示更新:以下为当前生效的完整系统指令,\
+                                 取代此前系统消息中的旧版本;与旧版本冲突时以本更新为准。\n\n\
+                                 {framed_current}\n</system-reminder>"
+                            ),
+                            injected: true,
+                            channel: Some(crate::injections::SYSTEM_UPDATE_CHANNEL.into()),
+                            images: Vec::new(),
+                        },
+                    )?;
+                    assembly.system_update = Some(framed_current.clone());
+                }
+                frozen.to_string()
+            }
+            _ => framed_current,
+        };
         state
             .session
             .set_system_tokens(estimate_system_tokens(&framed_system));
@@ -428,6 +470,30 @@ async fn detect_gesture_skill(
     }
 }
 
+/// 日志中最后一条请求头携带的 system 字节:已发过请求的会话里,这就是
+/// 提供方缓存前缀的第一段(in-history 追加的冻结基准)。
+/// None = 会话尚未发过任何请求,当前提示词即为基准。
+fn last_request_header_system(session: &Session) -> Option<String> {
+    session
+        .events()
+        .iter()
+        .rev()
+        .find_map(|envelope| match &envelope.event {
+            SessionEvent::RequestHeader { header, .. } => header.system.clone(),
+            _ => None,
+        })
+}
+
+/// 从系统提示更新注入消息中提取携带的提示词全文(与写入时的
+/// `framed_current` 逐字节一致),供恢复后的幂等比较。结构:
+/// `<system-reminder>\n{头行}\n\n{framed_current}\n</system-reminder>`。
+fn extract_system_update(message: &str) -> Option<&str> {
+    let inner = message
+        .strip_prefix("<system-reminder>\n")?
+        .strip_suffix("\n</system-reminder>")?;
+    inner.split_once("\n\n").map(|(_, body)| body)
+}
+
 /// 工具纪律段名 → 它对应的工具名(可能多个)。
 ///
 /// 段与工具严格同步是 AGENTS.md 的硬要求;子代理按 `allowed_tools` 过滤时,
@@ -511,23 +577,11 @@ fn assemble_step(
                 });
         }
     }
-    // 权限模式决定工具面:计划档隐藏 write_file/edit(执行面只读,bash
-    // 保留给只读命令);非计划档隐藏 exit_plan。schema 与纪律段同进退
-    // (AGENTS.md 同步要求,映射见 `section_tools`)。
-    let mode = state.session.permission_mode();
-    let mode_denies = |name: &str| match mode {
-        denia_core::session::PermissionMode::Plan => name == "write_file" || name == "edit",
-        _ => name == "exit_plan",
-    };
-    if assembly.tools.iter().any(|s| mode_denies(&s.name)) {
-        assembly.tools.retain(|s| !mode_denies(&s.name));
-        assembly
-            .sections
-            .retain(|section| match section_tools(&section.name) {
-                Some(tools) => tools.iter().any(|name| !mode_denies(name)),
-                None => true,
-            });
-    }
+    // 权限模式**不再**增删 schema 与纪律段(计划档保留写工具、执行档保留
+    // exit_plan):工具面与系统提示跨模式字节稳定,plan↔执行互切零缓存
+    // 代价。越权由权限引擎在执行时拒绝(decide 矩阵:计划档拒绝一切写、
+    // 非计划档拒绝 PlanSubmit),模型拿 isError 自纠正;当前模式语义由
+    // `harness:permission` 运行时快照承担(变化走注入追加,不碰前缀)。
     // 项目记忆:纪律段仅在记忆启用时注入(runtime.memory_root_for 与
     // 权限层、注入通道同源);未注册(如无 runtime 部署)自然不存在。
     let session_cwd = std::path::PathBuf::from(state.session.header().cwd.clone());

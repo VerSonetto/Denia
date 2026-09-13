@@ -490,6 +490,10 @@ function injectionDisplay(text: string): { title: string; body: string } {
         body: lines,
       }
     }
+    if (head.startsWith('系统提示更新:')) {
+      // system 字节冻结后,变化的新提示词全文经此通道追加(缓存前缀不变)。
+      return { title: t('injectionSystemPromptUpdate'), body }
+    }
     return { title: t('contextInjectionTitle'), body: inner }
   }
   return { title: t('contextInjectionTitle'), body: text }

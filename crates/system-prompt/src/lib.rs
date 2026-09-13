@@ -31,6 +31,11 @@ pub const RUNTIME_CONTEXT_CLEARED: &str =
     "Current runtime context: none. Earlier runtime-context snapshots no longer apply.";
 
 /// Centrally allocated section positions (subset for the shipped tool set).
+///
+/// 缓存前缀策略(对齐 dsh system-prompt 的位置纪律):**全部段落在会话内
+/// 字节稳定**——权限模式等运行状态不得增删段落或工具 schema,语义变化由
+/// `harness:permission` 运行时快照(注入追加)与 agent-loop 的 system
+/// 冻结 + in-history 追加机制承担,系统提示正文一经发出不再改写。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SectionOrder {
     HarnessIdentity,
