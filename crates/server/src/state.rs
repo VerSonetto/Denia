@@ -250,6 +250,8 @@ pub struct AppState {
     pub browser: Arc<denia_browser::BrowserManager>,
     /// MCP 运行时:外部 MCP 服务器的连接与工具面同步。
     pub mcp: Arc<crate::mcp_runtime::McpRuntime>,
+    /// 会话头部「用应用打开」:host 侧应用探测、图标与启动。
+    pub open_in_app: Arc<crate::open_in_app::OpenInAppState>,
     /// 绑定地址非回环 ⇒ 远程浏览器 ⇒ 目录选择器走 browse。
     pub bound_remote: bool,
 }
@@ -905,6 +907,7 @@ pub async fn build_state(
         file_history,
         browser,
         mcp,
+        open_in_app: Arc::new(crate::open_in_app::OpenInAppState::new(bound_remote)),
         bound_remote,
     };
 

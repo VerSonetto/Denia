@@ -96,6 +96,138 @@
   color: var(--label-tertiary);
 }
 
+/* ---- 用应用打开:会话头部的分裂按钮 ---- */
+
+.open-in-app {
+  position: relative;
+  display: inline-flex;
+}
+
+.open-in-app-split {
+  display: inline-flex;
+  align-items: stretch;
+  height: 30px;
+  border: 1px solid var(--border-l);
+  border-radius: var(--r-pill);
+  background: var(--bg-base);
+  transition: border-color 0.15s var(--ease), background 0.15s var(--ease);
+}
+
+.open-in-app.open .open-in-app-split,
+.open-in-app-split:hover {
+  border-color: var(--border-l2, var(--border-l));
+  background: var(--hover-fill);
+}
+
+.open-in-app-main {
+  width: 27px;
+  padding: 0 0 0 7px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-start;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  border-radius: var(--r-pill) 0 0 var(--r-pill);
+  color: var(--label-secondary);
+}
+
+.open-in-app-main[data-state='busy'] {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.open-in-app-main[data-state='error'] {
+  color: var(--danger);
+}
+
+.open-in-app-chevron {
+  width: 18px;
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-left: 1px solid var(--border-l);
+  background: transparent;
+  cursor: pointer;
+  color: var(--label-tertiary);
+  border-radius: 0 var(--r-pill) var(--r-pill) 0;
+}
+
+.open-in-app-chevron:hover {
+  color: var(--label-primary);
+}
+
+.open-in-app-icon {
+  display: block;
+  object-fit: contain;
+}
+
+.open-in-app-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 45;
+  min-width: 210px;
+  max-height: min(420px, 60dvh);
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 4px;
+  border: 1px solid var(--border-l);
+  border-radius: var(--r-md);
+  background: var(--bg-layer-3);
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.35);
+  animation: session-export-in 0.14s var(--ease);
+}
+
+.open-in-app-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  border: none;
+  background: transparent;
+  color: var(--label-secondary);
+  border-radius: var(--r-sm);
+  padding: 7px 10px;
+  font: inherit;
+  font-size: 12.5px;
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.15s var(--ease), color 0.15s var(--ease);
+}
+
+.open-in-app-item:hover {
+  background: var(--hover-fill);
+  color: var(--label-primary);
+}
+
+.open-in-app-item.active {
+  background: var(--hover-fill);
+  color: var(--label-primary);
+}
+
+.open-in-app-item-icon {
+  flex: none;
+  width: 18px;
+  height: 18px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--label-tertiary);
+}
+
+.open-in-app-item-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .view-switch-tab {
   border: none;
   background: transparent;

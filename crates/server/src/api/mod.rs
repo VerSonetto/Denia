@@ -10,6 +10,7 @@ mod goal;
 mod llm;
 mod mcp;
 mod memories;
+mod open_in_app;
 mod runtime;
 mod sessions;
 mod settings;
@@ -40,4 +41,5 @@ pub fn router() -> Router<Arc<AppState>> {
         .merge(global_rules::router())
         .merge(mcp::router())
         .merge(memories::router())
+        .merge(open_in_app::router())
 }

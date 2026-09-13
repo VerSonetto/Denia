@@ -1117,3 +1117,17 @@ export function toggleMcpTool(
     30_000,
   )
 }
+
+/** 「用应用打开」:本机探测到的应用 id,保持菜单顺序。 */
+export function getOpenInAppApps(): Promise<{ apps: string[] }> {
+  return http('/api/open-in-app/apps')
+}
+
+/** 用一个应用打开工作区目录;启动观察窗最长约 2s,超时放宽。 */
+export function openInAppOpen(app: string, path: string): Promise<{ ok: boolean }> {
+  return http(
+    '/api/open-in-app/open',
+    { method: 'POST', body: JSON.stringify({ app, path }) },
+    20_000,
+  )
+}

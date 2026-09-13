@@ -26,6 +26,7 @@ import { sessionDisplayTitle } from '../sessionDisplay'
 import type { TranscriptNode } from '../fold'
 import type { TrajectoryQuote } from '../trajectory'
 import { SessionView } from '../components/SessionView'
+import { OpenInApp } from '../components/OpenInApp'
 import { ErrorBoundary } from '../components/ErrorBoundary'
 import { StatsBar } from '../components/StatsBar'
 import { ComposerModelMenu } from '../components/ComposerModelMenu'
@@ -2231,6 +2232,9 @@ export default function SessionsPage({
               {t('viewTrajectory')}
             </button>
           </div>
+          <OpenInApp
+            cwd={activeSession?.cwd_alive === false ? null : activeSession?.cwd ?? null}
+          />
           <div className={`session-export${exportOpen ? ' open' : ''}`}>
             <button
               type="button"
