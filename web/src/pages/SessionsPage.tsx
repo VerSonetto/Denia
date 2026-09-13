@@ -26,6 +26,7 @@ import { sessionDisplayTitle } from '../sessionDisplay'
 import type { TranscriptNode } from '../fold'
 import type { TrajectoryQuote } from '../trajectory'
 import { SessionView } from '../components/SessionView'
+import { ErrorBoundary } from '../components/ErrorBoundary'
 import { StatsBar } from '../components/StatsBar'
 import { ComposerModelMenu } from '../components/ComposerModelMenu'
 import { ComposerEffortControl } from '../components/ComposerEffortControl'
@@ -2332,52 +2333,56 @@ export default function SessionsPage({
           ref={viewRef}
         >
           {showTranscript && activeId ? (
-            <SessionView
-              key={`${activeId}-${transcriptReloadTick}`}
-              id={activeId}
-              view={view}
-              pendingMessages={pendingMessages}
-              compacting={compactingAt}
-              onTodosChange={setTodos}
-              onGoalTouch={() => {
-                if (activeId) refreshGoal(activeId)
-              }}
-              onPendingSettled={settlePending}
-              onNotFound={() => {
-                // 会话已被删除(其他窗口/流 404):清空视图。
-                setActiveId(null, null)
-              }}
-              onNodesChange={(nodes) => {
-                setTranscriptNodes(nodes)
-                followRef.current?.()
-              }}
-              onAnchorsChange={setAxisAnchors}
-              jumpRequest={axisJump}
-              onJumpSettled={() => setAxisJump(null)}
-              onRewind={(seq) => void handleRewind(seq)}
-              onFork={(seq) => void handleFork(seq)}
-              onQuote={handleQuote}
-              onLoopContinue={() => {
-                // 死循环保护提示行的「继续」:程序化发送继续消息。
-                void postMessage('继续', { clearInput: false })
-              }}
-              onAskAnswer={(requestId, answers) => {
-                if (!activeId) return
-                api
-                  .answerAsk(activeId, requestId, answers)
-                  .catch((error) =>
-                    notify('err', error instanceof Error ? error.message : String(error)),
-                  )
-              }}
-              onAskCancel={(requestId) => {
-                if (!activeId) return
-                api
-                  .cancelAsk(activeId, requestId)
-                  .catch((error) =>
-                    notify('err', error instanceof Error ? error.message : String(error)),
-                  )
-              }}
-            />
+            // 局部边界:transcript 子树崩了不该带走侧栏/输入框(只降级这一块)。
+            // key 与会话/重挂 tick 对齐,回退重挂时边界一并重置。
+            <ErrorBoundary key={`${activeId}-${transcriptReloadTick}`}>
+              <SessionView
+                key={`${activeId}-${transcriptReloadTick}`}
+                id={activeId}
+                view={view}
+                pendingMessages={pendingMessages}
+                compacting={compactingAt}
+                onTodosChange={setTodos}
+                onGoalTouch={() => {
+                  if (activeId) refreshGoal(activeId)
+                }}
+                onPendingSettled={settlePending}
+                onNotFound={() => {
+                  // 会话已被删除(其他窗口/流 404):清空视图。
+                  setActiveId(null, null)
+                }}
+                onNodesChange={(nodes) => {
+                  setTranscriptNodes(nodes)
+                  followRef.current?.()
+                }}
+                onAnchorsChange={setAxisAnchors}
+                jumpRequest={axisJump}
+                onJumpSettled={() => setAxisJump(null)}
+                onRewind={(seq) => void handleRewind(seq)}
+                onFork={(seq) => void handleFork(seq)}
+                onQuote={handleQuote}
+                onLoopContinue={() => {
+                  // 死循环保护提示行的「继续」:程序化发送继续消息。
+                  void postMessage('继续', { clearInput: false })
+                }}
+                onAskAnswer={(requestId, answers) => {
+                  if (!activeId) return
+                  api
+                    .answerAsk(activeId, requestId, answers)
+                    .catch((error) =>
+                      notify('err', error instanceof Error ? error.message : String(error)),
+                    )
+                }}
+                onAskCancel={(requestId) => {
+                  if (!activeId) return
+                  api
+                    .cancelAsk(activeId, requestId)
+                    .catch((error) =>
+                      notify('err', error instanceof Error ? error.message : String(error)),
+                    )
+                }}
+              />
+            </ErrorBoundary>
           ) : (
             <div className="session-hero">
               <div className="hero-headline">
