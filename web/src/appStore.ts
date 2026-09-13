@@ -95,33 +95,6 @@ function writeCompacting(map: Record<string, number>) {
   }
 }
 
-/* ---- 浏览器侧栏开合(跨刷新):页面级状态 ----
-
-   用户看着浏览器画面刷新页面,侧栏应原样回来 —— 开合不能只放组件
-   useState。取 sessionStorage:标签页刷新保留、关闭即清空,新开标签页
-   不带旧状态,与"压缩中"标记同一取舍。存单值标记而非按会话记忆:
-   刷新后活跃会话可能落到新空白会话,按会话恢复必然丢失。 */
-
-const BROWSER_SIDEBAR_KEY = 'denia.browserSidebar'
-
-export function readBrowserSidebarFlag(): boolean {
-  try {
-    return window.sessionStorage.getItem(BROWSER_SIDEBAR_KEY) === '1'
-  } catch {
-    /* storage 不可用(隐私模式):退化成纯内存。 */
-    return false
-  }
-}
-
-export function writeBrowserSidebarFlag(open: boolean) {
-  try {
-    if (open) window.sessionStorage.setItem(BROWSER_SIDEBAR_KEY, '1')
-    else window.sessionStorage.removeItem(BROWSER_SIDEBAR_KEY)
-  } catch {
-    /* 写失败只影响刷新恢复,不影响当前页面。 */
-  }
-}
-
 let state: AppSnapshot = {
   sessions: [],
   workspaces: [],

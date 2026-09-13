@@ -28,9 +28,8 @@ import {
   useStartedIds,
   useToast,
   useWorkspaces,
-  readBrowserSidebarFlag,
-  writeBrowserSidebarFlag,
 } from './appStore'
+import { useBrowserSidebar } from './hooks/useBrowserSidebar'
 import {
   IconClose,
   IconCollapseAll,
@@ -52,7 +51,6 @@ const LazySettingsModal = lazy(() =>
   import('./components/SettingsModal').then((module) => ({ default: module.SettingsModal })),
 )
 const LazyBrowserPanel = lazy(() => import('./components/BrowserPanel'))
-import { fetchBrowserState, subscribeBrowserEvents } from './browserApi'
 import { sessionDisplayTitle } from './sessionDisplay'
 import type { SessionSummary, WorkspaceRecord } from './types'
 
@@ -80,68 +78,9 @@ export default function App() {
   const runningIds = useRunningIds()
 
   const [settingsOpen, setSettingsOpen] = useState(false)
-  // 浏览器侧栏是页面级开关,sessionStorage 持久化:刷新后按最后一次的
-  // 开合原样恢复。不按会话归属 —— 刷新后活跃会话可能落到新空白会话,
-  // 按会话记忆恢复必然丢失,也与"侧栏是页面家具"的直觉不符。
-  const [browserOpen, setBrowserOpen] = useState(() => readBrowserSidebarFlag())
-  // 自动展开的收口:模型显式请求可视化模式(visualMode)时右侧视图出现。
-  // 用户手动收起只挡当轮:新一轮 AI 轮次开始后重新允许展开。
-  const browserAutoDismissedRef = useRef(false)
-  const browserOpenRef = useRef(browserOpen)
-  useEffect(() => {
-    browserOpenRef.current = browserOpen
-  }, [browserOpen])
-  useEffect(() => {
-    writeBrowserSidebarFlag(browserOpen)
-  }, [browserOpen])
-  // 自动收起的防竞速复核定时器:关光标签 → 延迟复查仍为空才收。
-  const tabsEmptyCheckRef = useRef<number | undefined>(undefined)
-
-  // 浏览器事件订阅:可视化模式自动展开 + 收尾自动收口。
-  useEffect(() => {
-    // AI 收尾口径 = 关光自己开的 tab、进程保持存活(纪律段"绝不退出
-    // 浏览器"),所以"标签清空"是比 exited 更常走的收尾信号;进程退出
-    // (崩溃/被杀)是兜底。两者都意味着侧栏没有可看的内容。
-    const maybeCollapseOnEmptyTabs = async () => {
-      if (!browserOpenRef.current) return
-      const snapshot = await fetchBrowserState().catch(() => null)
-      if (!snapshot?.running || snapshot.tabs.length > 0) return
-      // 防竞速:关光后立刻又开新 tab 是正常节奏,延迟复核一次再收。
-      window.clearTimeout(tabsEmptyCheckRef.current)
-      tabsEmptyCheckRef.current = window.setTimeout(() => {
-        void fetchBrowserState()
-          .then((again) => {
-            if (again.running && again.tabs.length === 0) setBrowserOpen(false)
-          })
-          .catch(() => {})
-      }, 1200)
-    }
-    const close = subscribeBrowserEvents((event) => {
-      // 可视化模式:模型显式带 visualMode 的浏览器命令才展开侧栏;
-      // frame/navigated 只驱动面板内画面刷新,不自动展开,后台任务不打扰。
-      if (event.type === 'visual-mode-requested') {
-        if (!browserAutoDismissedRef.current) setBrowserOpen(true)
-      } else if (event.type === 'exited') {
-        // 不是用户拒绝,不标记 autoDismissed:后续可视化请求仍应展开。
-        setBrowserOpen(false)
-      } else if (event.type === 'tabs-changed') {
-        void maybeCollapseOnEmptyTabs()
-      }
-    })
-    // 刷新恢复的兜底:浏览器在跑但标签已清空(上一页面的收尾残留),
-    // 侧栏即便恢复开合也无可看,复核后收起。
-    void maybeCollapseOnEmptyTabs()
-    return () => {
-      window.clearTimeout(tabsEmptyCheckRef.current)
-      close()
-    }
-  }, [])
-  const prevRunningRef = useRef<Record<string, boolean>>({})
-  useEffect(() => {
-    const freshRun = Object.keys(runningIds).some((id) => !prevRunningRef.current[id])
-    prevRunningRef.current = runningIds
-    if (freshRun) browserAutoDismissedRef.current = false
-  }, [runningIds])
+  // 浏览器侧栏编排(会话绑定 / 收尾自动销毁 / 刷新恢复)全部在 hook 内,
+  // App 只负责按 open 渲染。
+  const { open: browserOpen, userClose: closeBrowserSidebar } = useBrowserSidebar(activeId)
   const [sidebarSearchOpen, setSidebarSearchOpen] = useState(false)
   const [sidebarExpandAllTick, setSidebarExpandAllTick] = useState(0)
   const [sidebarAllExpanded, setSidebarAllExpanded] = useState(false)
@@ -767,12 +706,7 @@ export default function App() {
             <aside className="browser-sidebar" data-open="true">
               <Suspense fallback={<div className="empty-hint">{t('loading')}</div>}>
                 {/* 面板自带完整 chrome(tab 条右侧收编收起按钮),不再套外层标题行 */}
-                <LazyBrowserPanel
-                  onClose={() => {
-                    browserAutoDismissedRef.current = true
-                    setBrowserOpen(false)
-                  }}
-                />
+                <LazyBrowserPanel onClose={closeBrowserSidebar} />
               </Suspense>
             </aside>
           )}
