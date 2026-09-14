@@ -24,6 +24,7 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/api/fs/mkdir", post(mkdir))
         .route("/api/fs/capability", get(capability))
         .route("/api/fs/mentions", get(list_mentions))
+        .route("/api/fs/tree", get(list_tree))
 }
 
 /// 目录选择器 seam 的能力决策(抄 dsh directory-picker-auto):
@@ -399,9 +400,9 @@ fn mentions_impl(path: &str, raw_query: &str) -> Result<Vec<MentionItem>, ApiErr
     }
 }
 
-/// 解析目录前缀(相对 cwd):拒绝 `..` 逃逸、绝对路径段与 Windows 盘符段;
-/// 目录缺失/不可读返回 None(按空列表处理,候选是辅助性的)。
-fn resolve_mention_directory(root: &Path, directory: &str) -> Option<PathBuf> {
+/// 解析目录前缀(相对根):拒绝 `..` 逃逸、绝对路径段与 Windows 盘符段;
+/// 目录缺失/不可读返回 None(调用方决定是回空列表还是报错)。
+fn resolve_relative_directory(root: &Path, directory: &str) -> Option<PathBuf> {
     if directory.is_empty() {
         return Some(root.to_path_buf());
     }
@@ -424,7 +425,7 @@ fn resolve_mention_directory(root: &Path, directory: &str) -> Option<PathBuf> {
 /// 目录定向列举:按 basename 大小写不敏感子串过滤 fragment,目录优先 +
 /// 路径字典序。隐藏条目只在 fragment 以 `.` 开头时出现(显式引用点文件)。
 fn list_mention_directory(root: &Path, directory: &str, fragment: &str) -> Vec<MentionItem> {
-    let Some(abs) = resolve_mention_directory(root, directory) else {
+    let Some(abs) = resolve_relative_directory(root, directory) else {
         return Vec::new();
     };
     let needle = fragment.to_lowercase();
@@ -472,6 +473,227 @@ fn sort_mention_items(items: &mut [MentionItem]) {
 
 fn kind_rank(kind: &str) -> u8 {
     if kind == "directory" { 0 } else { 1 }
+}
+
+/* ---- 工作区文件树(右侧「工作区文件」面板) ----
+ *
+ * 与上面的 @ 提及候选**分工不同**,所以不复用同一条链路:
+ * - 提及候选是"全树索引 + 模糊匹配",要一次给出任意深度的命中;
+ * - 文件树是**逐层懒加载**:展开哪层列哪层,首屏只读根目录一次。
+ *   大仓库(几万文件)不可能整树灌进浏览器,而懒加载的代价是展开时才读盘,
+ *   正好与"用户看哪展开哪"的节奏一致。
+ *
+ * 与 Git 无关:直接读文件系统,不查 git 追踪状态 —— 未跟踪的文件同样要在
+ * 树里可见(这正是"不是 Git 工作区"的含义)。
+ */
+
+/// 单层列举上限:超大目录(如 `node_modules`)截断并显式告知,不静默丢弃。
+const TREE_MAX_ENTRIES: usize = 2000;
+
+#[derive(Debug, serde::Serialize)]
+struct TreeEntry {
+    name: String,
+    /// 相对根目录的路径(以 `/` 分隔);拖拽引用与 `@` 提及共用同一坐标。
+    path: String,
+    kind: &'static str,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct TreeListing {
+    /// 根目录绝对路径(回显,便于前端确认自己在哪棵树上)。
+    root: String,
+    /// 本次列举的目录(相对根,空串 = 根)。
+    dir: String,
+    entries: Vec<TreeEntry>,
+    truncated: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct TreeQuery {
+    path: String,
+    #[serde(default)]
+    dir: Option<String>,
+}
+
+/// 逐层列举工作区目录。fs 访问放 spawn_blocking,不挡异步运行时。
+async fn list_tree(Query(query): Query<TreeQuery>) -> Result<impl IntoResponse, ApiError> {
+    let inner = tokio::task::spawn_blocking(move || {
+        tree_impl(query.path.as_str(), query.dir.as_deref().unwrap_or(""))
+    })
+    .await
+    .map_err(|e| {
+        ApiError::new(
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            "fs/tree-failed",
+            e.to_string(),
+        )
+    })?;
+    Ok(Json(inner?))
+}
+
+fn tree_impl(root_path: &str, raw_dir: &str) -> Result<TreeListing, ApiError> {
+    let root = PathBuf::from(root_path.trim());
+    if !root.is_dir() {
+        return Err(ApiError::bad_request(
+            "fs/tree-not-a-directory",
+            format!("'{}' is not a directory", root.display()),
+        ));
+    }
+    // 归一化:反斜杠统一为 `/`(前端一律用 `/`),容忍首尾斜杠。
+    let dir = raw_dir.replace('\\', "/");
+    let dir = dir.trim_matches('/').to_string();
+    // 与提及候选的宽容(拿不到就当空列表)不同:树面板的目录来自它自己的
+    // 展开动作,解析不出来只可能是路径非法或目录刚被删 —— 静默回空列表会
+    // 让"点了没反应"这类 bug 藏起来,这里显式报错让前端能提示。
+    let Some(abs) = resolve_relative_directory(&root, &dir) else {
+        return Err(ApiError::bad_request(
+            "fs/tree-bad-directory",
+            format!("'{}' is not a directory under the root", raw_dir),
+        ));
+    };
+    let read = std::fs::read_dir(&abs).map_err(|e| {
+        ApiError::bad_request("fs/tree-unreadable", format!("cannot read directory: {e}"))
+    })?;
+    let prefix = if dir.is_empty() {
+        String::new()
+    } else {
+        format!("{dir}/")
+    };
+    let mut entries: Vec<TreeEntry> = Vec::new();
+    let mut truncated = false;
+    for entry in read.flatten() {
+        if entries.len() >= TREE_MAX_ENTRIES {
+            truncated = true;
+            break;
+        }
+        let name = entry.file_name().to_string_lossy().to_string();
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        // 符号链接等其他类型不收录(与提及索引一致,避免跟随链接绕出工作区)。
+        let kind = if file_type.is_dir() {
+            "directory"
+        } else if file_type.is_file() {
+            "file"
+        } else {
+            continue;
+        };
+        entries.push(TreeEntry {
+            path: format!("{prefix}{name}"),
+            name,
+            kind,
+        });
+    }
+    sort_tree_entries(&mut entries);
+    Ok(TreeListing {
+        root: root.to_string_lossy().to_string(),
+        dir,
+        entries,
+        truncated,
+    })
+}
+
+/// 目录优先,其次按名称大小写不敏感字典序(与提及候选同一套排序语义)。
+fn sort_tree_entries(entries: &mut [TreeEntry]) {
+    entries.sort_by(|left, right| {
+        kind_rank(left.kind)
+            .cmp(&kind_rank(right.kind))
+            .then_with(|| left.name.to_lowercase().cmp(&right.name.to_lowercase()))
+            .then_with(|| left.name.cmp(&right.name))
+    });
+}
+
+#[cfg(test)]
+mod tree_tests {
+    use super::*;
+
+    fn scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("denia-tree-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create scratch dir");
+        dir
+    }
+
+    fn names(listing: &TreeListing) -> Vec<&str> {
+        listing.entries.iter().map(|item| item.name.as_str()).collect()
+    }
+
+    #[test]
+    fn root_listing_puts_directories_first() {
+        let root = scratch("root");
+        std::fs::create_dir(root.join("zeta")).unwrap();
+        std::fs::create_dir(root.join("alpha")).unwrap();
+        std::fs::write(root.join("beta.txt"), "x").unwrap();
+        let listing = tree_impl(root.to_str().unwrap(), "").unwrap();
+        assert_eq!(names(&listing), vec!["alpha", "zeta", "beta.txt"]);
+        assert_eq!(listing.entries[0].kind, "directory");
+        assert_eq!(listing.entries[2].path, "beta.txt");
+        assert!(!listing.truncated);
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// 隐藏文件与 `node_modules` 这类目录**照常列出**:这是文件浏览器,
+    /// 不是 Git 工作区,也不套用提及候选的排除集。
+    #[test]
+    fn hidden_and_heavy_directories_are_listed() {
+        let root = scratch("hidden");
+        std::fs::create_dir(root.join("node_modules")).unwrap();
+        std::fs::write(root.join(".env"), "").unwrap();
+        let listing = tree_impl(root.to_str().unwrap(), "").unwrap();
+        assert_eq!(names(&listing), vec!["node_modules", ".env"]);
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn subdirectory_listing_uses_relative_paths() {
+        let root = scratch("sub");
+        std::fs::create_dir_all(root.join("src/nested")).unwrap();
+        std::fs::write(root.join("src/main.rs"), "").unwrap();
+        // 尾斜杠与反斜杠都要能容忍(前端与 Windows 各自可能给不同形态)。
+        let listing = tree_impl(root.to_str().unwrap(), "src/").unwrap();
+        assert_eq!(listing.dir, "src");
+        assert_eq!(names(&listing), vec!["nested", "main.rs"]);
+        assert_eq!(listing.entries[1].path, "src/main.rs");
+        let backslash = tree_impl(root.to_str().unwrap(), "src\\").unwrap();
+        assert_eq!(names(&backslash), vec!["nested", "main.rs"]);
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// 逃逸与不存在都必须**报错**而不是回空列表:树面板靠这个区分
+    /// "目录是空的"与"路径有问题"。
+    #[test]
+    fn escape_and_missing_directory_are_errors() {
+        let root = scratch("escape");
+        std::fs::create_dir_all(root.join("a/b")).unwrap();
+        assert!(tree_impl(root.to_str().unwrap(), "..").is_err());
+        assert!(tree_impl(root.to_str().unwrap(), "../").is_err());
+        assert!(tree_impl(root.to_str().unwrap(), "a/../..").is_err());
+        assert!(tree_impl(root.to_str().unwrap(), "nope").is_err());
+        // 绝对路径同样拒绝(否则根约束形同虚设)。
+        assert!(tree_impl(root.to_str().unwrap(), "/etc").is_err());
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn non_directory_root_is_bad_request() {
+        let root = scratch("file-root");
+        let file = root.join("plain.txt");
+        std::fs::write(&file, "").unwrap();
+        assert!(tree_impl(file.to_str().unwrap(), "").is_err());
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn oversized_directory_is_truncated_loudly() {
+        let root = scratch("big");
+        for index in 0..(TREE_MAX_ENTRIES + 5) {
+            std::fs::write(root.join(format!("f{index:05}.txt")), "").unwrap();
+        }
+        let listing = tree_impl(root.to_str().unwrap(), "").unwrap();
+        assert_eq!(listing.entries.len(), TREE_MAX_ENTRIES);
+        assert!(listing.truncated);
+        std::fs::remove_dir_all(&root).ok();
+    }
 }
 
 #[cfg(test)]
