@@ -61,7 +61,9 @@ let appsPromise: Promise<string[]> | null = null
 /** 图标已 404 的应用:本页只请求一次,之后直接画占位方块。 */
 const failedIcons = new Set<string>()
 
-function fetchApps(): Promise<string[]> {
+/** 可用应用每页只探测一次,产物 chip 等其它调用方复用同一份缓存;失败按
+ * 空表处理(控件隐藏)。 */
+export function fetchApps(): Promise<string[]> {
   appsPromise ??= getOpenInAppApps()
     .then((data) => {
       appsCache = data.apps

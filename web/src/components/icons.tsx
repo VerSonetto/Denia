@@ -467,6 +467,31 @@ export function IconFile(props: IconProps) {
   )
 }
 
+/** 代码文件(产物 chip 等处的代码条目)。 */
+export function IconCode(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <path
+        d="m5.2 4.7-3.4 3.3 3.4 3.3"
+        stroke="currentColor"
+        strokeWidth="1.3"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        fill="none"
+      />
+      <path
+        d="m10.8 4.7 3.4 3.3-3.4 3.3"
+        stroke="currentColor"
+        strokeWidth="1.3"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        fill="none"
+      />
+      <path d="M9.1 3.6 6.9 12.4" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
+    </Svg>
+  )
+}
+
 /** 收起侧栏:面板左收(lucide panel-left-close)。 */
 export function IconPanelClose(props: IconProps) {
   return (

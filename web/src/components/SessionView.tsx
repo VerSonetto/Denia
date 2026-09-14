@@ -118,6 +118,8 @@ export function SessionView({
   compacting?: number | null
 }) {
   const [nodes, setNodes] = useState<TranscriptNode[]>([])
+  /** 会话头 cwd(不可变):产物 chip 的相对路径锚点。 */
+  const [cwd, setCwd] = useState<string | null>(null)
   // 原始事件流:轨迹视图的 fold 源(与 transcript 共用一次订阅)。
   const [events, setEvents] = useState<SessionEnvelope[]>([])
   const [pageMeta, setPageMeta] = useState<SessionPageMeta>({ total: 0, hasMoreBefore: false, anchors: [] })
@@ -188,13 +190,15 @@ export function SessionView({
       }
     }
     const unsubscribe = attach(id, {
-      onSnapshot: (_header, snapshot, meta) => {
+      onSnapshot: (header, snapshot, meta) => {
         queueRef.current = []
         const pageInfo = meta ?? { total: snapshot.length, hasMoreBefore: false, anchors: [] }
         eventsRef.current = snapshot
         setEvents(snapshot)
         setPageMeta(pageInfo)
         setNodes(foldEvents(snapshot))
+        // 会话头 cwd 不可变,产物 chip 的相对路径锚点取它(不依赖侧栏会话摘要)。
+        setCwd(header.cwd)
         publishTodos(snapshot)
         settlePending(snapshot)
         goalTouchRef.current?.()
@@ -331,6 +335,7 @@ export function SessionView({
       )}
       <Transcript
         nodes={nodes}
+        cwd={cwd}
         pendingMessages={pendingMessages}
         compactingAt={compacting}
         onRewind={onRewind}

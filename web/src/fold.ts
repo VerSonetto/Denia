@@ -8,6 +8,7 @@ import type {
   TurnEndReason,
   UserMessageImage,
 } from './types'
+import { parseArgsObject } from './toolDisplay'
 import type { TodoSnapshotItem } from './toolDisplay'
 
 /** `ask` 工具的问答载荷(挂在对应工具行上)。 */
@@ -74,6 +75,12 @@ export type TranscriptNode =
       time: number
       reason: TurnEndReason
       usage?: TokenUsage
+      /**
+       * 本轮成功落盘的文件产物:write_file/edit 调用且工具结果非 error 的
+       * path,按首次出现去重。仅 groupTranscript 在分组时填充,事件 fold
+       * 不产此字段。
+       */
+      produced?: string[]
     }
   | {
       kind: 'compaction'
@@ -798,6 +805,72 @@ export type TranscriptRow =
   | { kind: 'node'; node: TranscriptNode }
   | OverviewRow
 
+/* ---- 收尾轮次的文件产物 ---- */
+
+/**
+ * 变更类工具调用参数里的目标文件路径;非变更调用、参数不完整或路径为空
+ * 返回 null。只有 write_file 与 edit 是第一方文件变更工具。
+ */
+function mutationPath(name: string, args: string): string | null {
+  if (name !== 'write_file' && name !== 'edit') return null
+  const parsed = parseArgsObject(args)
+  if (!parsed) return null
+  const path = typeof parsed.path === 'string' && parsed.path.trim().length > 0 ? parsed.path : null
+  if (path === null) return null
+  if (name === 'write_file') return typeof parsed.content === 'string' ? path : null
+  const oldString = parsed.old_string
+  return typeof oldString === 'string' &&
+    oldString.length > 0 &&
+    typeof parsed.new_string === 'string' &&
+    oldString !== parsed.new_string &&
+    (parsed.replace_all === undefined || typeof parsed.replace_all === 'boolean')
+    ? path
+    : null
+}
+
+type ToolNode = Extract<TranscriptNode, { kind: 'tool' }>
+type TurnEndNode = Extract<TranscriptNode, { kind: 'turn-end' }>
+
+/**
+ * 单个工具节点的产物路径缓存。分组在每次渲染都会重跑,而 write_file 的
+ * 参数可能很大,不能每帧 JSON.parse;键是节点引用,结果到达(result 引用
+ * 变化)时重算一次。
+ */
+const producedPathCache = new WeakMap<ToolNode, { result: unknown; path: string | null }>()
+
+function toolProducedPath(node: ToolNode): string | null {
+  const cached = producedPathCache.get(node)
+  if (cached && cached.result === node.result) return cached.path
+  const path =
+    node.result && !node.result.isError ? mutationPath(node.name, node.args) : null
+  producedPathCache.set(node, { result: node.result, path })
+  return path
+}
+
+/**
+ * 给收尾轮次挂上本轮文件产物;无产物时原节点返回(引用稳定,行 memo 不
+ * 失效)。按收尾节点身份在首次分组时冻结:工具结果先于 turn-end 落盘,
+ * 之后才到的结果不在口径内。
+ */
+const producedTurnCache = new WeakMap<TurnEndNode, TranscriptNode>()
+
+function withProduced(endNode: TurnEndNode, span: TranscriptNode[]): TranscriptNode {
+  const cached = producedTurnCache.get(endNode)
+  if (cached) return cached
+  const paths: string[] = []
+  const seen = new Set<string>()
+  for (const node of span) {
+    if (node.kind !== 'tool') continue
+    const path = toolProducedPath(node)
+    if (path === null || seen.has(path)) continue
+    seen.add(path)
+    paths.push(path)
+  }
+  const next: TranscriptNode = paths.length === 0 ? endNode : { ...endNode, produced: paths }
+  producedTurnCache.set(endNode, next)
+  return next
+}
+
 /**
  * Groups transcript nodes for display. A closed turn folds everything through
  * its last tool call (inclusive) into one "worked X · N tool calls" overview
@@ -828,14 +901,10 @@ export function groupTranscript(nodes: TranscriptNode[]): TranscriptRow[] {
       }
       break
     }
-    rows.push(
-      ...closedTurnRows(
-        nodes.slice(index + 1, end),
-        marker,
-        nodes[end] as Extract<TranscriptNode, { kind: 'turn-end' }>,
-      ),
-    )
-    rows.push({ kind: 'node', node: nodes[end] })
+    const span = nodes.slice(index + 1, end)
+    const endNode = nodes[end] as TurnEndNode
+    rows.push(...closedTurnRows(span, marker, endNode))
+    rows.push({ kind: 'node', node: withProduced(endNode, span) })
     index = end + 1
   }
   return rows

@@ -27,15 +27,21 @@ import {
 import { DiffCard, DiffStat } from './DiffCard'
 import { TodoCard } from './TodoCard'
 import { BashCard } from './BashCard'
+import { formatTokens } from '../stats'
+import { openInAppOpen } from '../api'
 import type { AskAnswer, UserMessageImage } from '../types'
 import { UserMessageBubble } from './UserMessageImages'
 import { BranchMessageButton, CopyMessageButton } from './CopyMessageButton'
 import { AskCard } from './AskCard'
+import { fetchApps } from './OpenInApp'
 import {
   IconChevron,
+  IconCode,
   IconEdit,
+  IconFile,
   IconFolder,
   IconGlob,
+  IconImage,
   IconPrompt,
   IconRead,
   IconSearch,
@@ -49,6 +55,7 @@ import {
 
 export function Transcript({
   nodes,
+  cwd = null,
   pendingMessages = [],
   compactingAt,
   onRewind,
@@ -58,6 +65,8 @@ export function Transcript({
   onAskCancel,
 }: {
   nodes: TranscriptNode[]
+  /** 会话头 cwd:收尾产物行里相对路径的锚点。 */
+  cwd?: string | null
   /** 已发送未获确认的用户消息:渲染为尾部"发送中"行。 */
   pendingMessages?: { text: string; images?: UserMessageImage[] }[]
   /**
@@ -106,6 +115,7 @@ export function Transcript({
           <NodeView
             key={index}
             node={row.node}
+            cwd={cwd}
             onRewind={onRewind}
             onFork={onFork}
             onLoopContinue={onLoopContinue}
@@ -199,6 +209,7 @@ function TurnOverview({ row }: { row: OverviewRow }) {
 // 行组件 memo 化:流式帧只有引用变化的行重渲染,历史行全部跳过。
 const NodeView = memo(function NodeView({
   node,
+  cwd = null,
   onRewind,
   onFork,
   onLoopContinue,
@@ -207,6 +218,8 @@ const NodeView = memo(function NodeView({
   showActions = false,
 }: {
   node: TranscriptNode
+  /** 会话头 cwd:收尾产物行里相对路径的锚点。 */
+  cwd?: string | null
   onRewind?: (seq: number) => void
   onFork?: (seq: number) => void
   /** 死循环提示行点「继续」:自动发送继续消息。 */
@@ -248,7 +261,7 @@ const NodeView = memo(function NodeView({
       // Boundary marker; only carries the turn's start time.
       return null
     case 'turn-end':
-      return <TurnChrome node={node} onLoopContinue={onLoopContinue} />
+      return <TurnChrome node={node} cwd={cwd} onLoopContinue={onLoopContinue} />
     case 'tool':
       return <ToolRow node={node} onAskAnswer={onAskAnswer} onAskCancel={onAskCancel} />
     case 'compaction':
@@ -855,11 +868,122 @@ function ToolRow({
   )
 }
 
+/** 路径的 basename(兼容 / 与 \):chip 显示短名,完整路径挂在 title。 */
+function pathBasename(path: string): string {
+  const idx = Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\'))
+  return idx < 0 ? path : path.slice(idx + 1)
+}
+
+/** chip 最多显示的文件数,余量以「+N 个文件」计数收尾。 */
+const PRODUCED_SHOWN_LIMIT = 6
+
+/** 图片扩展名:产物 chip 用图片 glyph(对齐 dsh 的链接图标分类)。 */
+const IMAGE_EXTS = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'ico', 'bmp', 'avif'])
+
+/** 代码/配置扩展名:产物 chip 用代码 glyph;其余扩展名走纸张文件 glyph。 */
+const CODE_EXTS = new Set([
+  'ts', 'tsx', 'js', 'jsx', 'mjs', 'cjs', 'py', 'rs', 'go', 'java', 'kt', 'swift',
+  'c', 'h', 'cpp', 'hpp', 'cc', 'cs', 'rb', 'php', 'sh', 'bash', 'zsh', 'ps1',
+  'json', 'yaml', 'yml', 'toml', 'xml', 'html', 'htm', 'css', 'scss', 'less',
+  'sql', 'lua', 'r', 'dart', 'vue', 'svelte', 'proto', 'graphql', 'cmake', 'mk',
+])
+
+function fileExtension(path: string): string {
+  const name = pathBasename(path)
+  const dot = name.lastIndexOf('.')
+  return dot <= 0 ? '' : name.slice(dot + 1).toLowerCase()
+}
+
+function ProducedFileIcon({ path }: { path: string }) {
+  const ext = fileExtension(path)
+  if (IMAGE_EXTS.has(ext)) return <IconImage size={12} />
+  if (CODE_EXTS.has(ext)) return <IconCode size={12} />
+  return <IconFile size={12} />
+}
+
+/**
+ * 文件所在目录(参数相对路径锚定会话 cwd);绝对路径直接取父目录。
+ * 解析不出目录(无 cwd 且相对)返回 null。
+ */
+function containingDir(path: string, cwd: string | null): string | null {
+  const absolute = /^[a-zA-Z]:[\\/]/.test(path) || path.startsWith('/') || path.startsWith('\\\\')
+    ? path
+    : cwd && cwd.trim() !== ''
+      ? `${cwd.replace(/[\\/]+$/, '')}/${path}`
+      : null
+  if (absolute === null) return null
+  const idx = Math.max(absolute.lastIndexOf('/'), absolute.lastIndexOf('\\'))
+  return idx > 0 ? absolute.slice(0, idx) : null
+}
+
+/** 平台文件管理器的应用 id(open-in-app 目录表里的 ShellOpen 条目)。 */
+function platformFileManagerId(): string {
+  const ua = navigator.userAgent
+  if (ua.includes('Mac')) return 'finder'
+  if (ua.includes('Win')) return 'explorer'
+  return 'filemanager'
+}
+
+/**
+ * chip 点击:用平台的文件管理器打开文件所在文件夹。open-in-app 端点目前
+ * 只收目录,这是现有端点内能达成的最近动作;用默认应用直接打开文件需要
+ * 放开端点的文件路径校验。应用表复用 OpenInApp 的模块级探测缓存。
+ */
+async function openContainingFolder(path: string, cwd: string | null): Promise<void> {
+  const dir = containingDir(path, cwd)
+  if (dir === null) return
+  const apps = await fetchApps()
+  const preferred = platformFileManagerId()
+  const app = apps.includes(preferred)
+    ? preferred
+    : (['explorer', 'finder', 'filemanager'] as const).find((id) => apps.includes(id))
+  if (app === undefined) return
+  await openInAppOpen(app, dir).catch(() => undefined)
+}
+
+/**
+ * 收尾轮次的文件产物行:label + 文件 chip 列。chip 沿用链接语言(文件名
+ * 短名 + 类别 glyph,悬停虚下划线),点击打开所在文件夹;单行放不下时
+ * 换行,不用省略号吞掉中间的文件。
+ */
+function ProducedFilesRow({ paths, cwd }: { paths: readonly string[]; cwd: string | null }) {
+  const shown = paths.slice(0, PRODUCED_SHOWN_LIMIT)
+  const remainder = paths.length - shown.length
+  return (
+    <div className="turn-produced">
+      <span className="turn-produced-label">{t('producedFilesLabel')}</span>
+      <span className="turn-produced-lane">
+        {shown.map((path) => (
+          <button
+            key={path}
+            type="button"
+            className="turn-produced-file"
+            title={path}
+            aria-label={t('producedFilesOpenFolder', { name: pathBasename(path) })}
+            onClick={() => { void openContainingFolder(path, cwd) }}
+          >
+            <ProducedFileIcon path={path} />
+            <span className="turn-produced-name">{pathBasename(path)}</span>
+          </button>
+        ))}
+        {remainder > 0 && (
+          <span className="turn-produced-more" title={paths.join('\n')}>
+            {t('producedFilesMore', { count: remainder })}
+          </span>
+        )}
+      </span>
+    </div>
+  )
+}
+
 function TurnChrome({
   node,
+  cwd = null,
   onLoopContinue,
 }: {
   node: Extract<TranscriptNode, { kind: 'turn-end' }>
+  /** 会话头 cwd:产物行里相对路径的锚点。 */
+  cwd?: string | null
   /** 死循环提示行点「继续」:自动发送继续消息。 */
   onLoopContinue?: () => void
 }) {
@@ -880,31 +1004,42 @@ function TurnChrome({
     reason.kind === 'completed' ? '' : reason.kind === 'error' ? 'err' : 'warn'
   return (
     <div className="turn-chrome">
-      <span
-        className={`dot ${reason.kind === 'completed' ? 'ok' : reason.kind === 'error' ? 'err' : 'run'}`}
-      />
-      {reason.kind === 'loop-detected' ? (
-        // 死循环保护提示行:「继续」为下划线可点文字,点击自动发送继续消息。
-        <span className="reason loop-hint">
-          {t('loopDetectedHint')}
-          <button
-            type="button"
-            className="loop-continue"
-            onClick={onLoopContinue}
+      <div className="turn-reason-row">
+        <span
+          className={`dot ${reason.kind === 'completed' ? 'ok' : reason.kind === 'error' ? 'err' : 'run'}`}
+        />
+        {reason.kind === 'loop-detected' ? (
+          // 死循环保护提示行:「继续」为下划线可点文字,点击自动发送继续消息。
+          <span className="reason loop-hint">
+            {t('loopDetectedHint')}
+            <button
+              type="button"
+              className="loop-continue"
+              onClick={onLoopContinue}
+            >
+              {t('loopDetectedContinue')}
+            </button>
+          </span>
+        ) : (
+          <span className={`reason ${cls}`} title={label}>
+            {label}
+          </span>
+        )}
+        {usage && (
+          // 用量与状态同处一行:状态说"这轮怎么结束的",用量是它的量级注脚。
+          // 拆成两行会让两者读作并列的两条信息,而它们本是同一件事。
+          // 紧凑计数与底部状态栏同一套语言,精确值挂在悬停提示里。
+          <span
+            className="turn-usage"
+            title={`${t('inputTokens')} ${usage.inputTokens} · ${t('outputTokens')} ${usage.outputTokens}`}
           >
-            {t('loopDetectedContinue')}
-          </button>
-        </span>
-      ) : (
-        <span className={`reason ${cls}`} title={label}>
-          {label}
-        </span>
-      )}
-      {usage && (
-        <span className="usage-pill">
-          {t('inputTokens')} {usage.inputTokens} · {t('outputTokens')}{' '}
-          {usage.outputTokens}
-        </span>
+            {t('inputTokens')} {formatTokens(usage.inputTokens)} ·{' '}
+            {t('outputTokens')} {formatTokens(usage.outputTokens)}
+          </span>
+        )}
+      </div>
+      {node.produced !== undefined && node.produced.length > 0 && (
+        <ProducedFilesRow paths={node.produced} cwd={cwd} />
       )}
     </div>
   )

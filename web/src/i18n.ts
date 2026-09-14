@@ -535,6 +535,10 @@ const zh = {
   // 死循环保护:检测到重复输出后的提示行,「继续」为可点击下划线文字。
   loopDetectedHint: '检测到模型疑似陷入死循环,请手动',
   loopDetectedContinue: '继续',
+  // 轮次收尾的文件产物行:罗列本轮成功写入/编辑的文件,超出的以计数收尾。
+  producedFilesLabel: '本轮文件改动',
+  producedFilesMore: '+{count} 个文件',
+  producedFilesOpenFolder: '打开 {name} 所在文件夹',
   currentModel: '当前模型',
 
   messageBranch: '在新对话中分支',
@@ -1353,6 +1357,9 @@ const en: typeof zh = {
   reasonInterrupted: 'Interrupted',
   loopDetectedHint: 'The model seems stuck in a loop. Continue manually',
   loopDetectedContinue: 'Continue',
+  producedFilesLabel: 'Files changed',
+  producedFilesMore: '+{count} files',
+  producedFilesOpenFolder: 'Open folder containing {name}',
   currentModel: 'Current model',
 
   messageBranch: 'Branch into a new conversation',
