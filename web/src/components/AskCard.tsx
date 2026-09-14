@@ -5,15 +5,17 @@ import { t } from '../i18n'
 /**
  * 模型提问卡片(denia `ask` 工具)。
  *
- * 交互形态与 dsh 的 QuestionComposer 刻意区分:
- * - dsh:一次只显示一道题,底部「上一题/下一题」翻页,答完最后一题才提交;
- * - denia:整组问题同屏(清单式),顶部有进度点,可任意顺序作答,底部一次提交。
- *   理由:dsh 的翻页在大屏上浪费空间、且用户必须按顺序走完才能提交;同屏
- *   清单让"这组问题一共几个、我答了几个"始终可见,也允许先答确定的、再回头
- *   处理需要思考的。
+ * 交互形态(对照 dsh 的 QuestionComposer,分页思路一致):
+ * - 一次只显示一道题:顶部题目导航(点序号直接跳题)、底部「上一题 / 下一题」;
+ * - 单选选中、或点「跳过本题」后自动前进到下一题,一路答下去不必回点翻页;
+ * - 每题仍可独立跳过,全部处理完(作答或跳过)才允许提交。
  *
- * 其余差异:推荐项用结构化字段高亮(而非 dsh 的 "(Recommended)" 标签后缀)、
- * 每题独立跳过、自由填写与选项同区并列、等待期显示剩余时间(超时可见)。
+ * 为什么分页:一组最多 8 道题,每题还带选项与自由填写,同屏平铺会把卡片撑得
+ * 很长,"当前答到第几题"的焦点也散了。分页把单题放到视野中心,再用顶部导航
+ * 保住全局感——"一共几题、答了几题、哪题跳过了"在导航条上一眼可见。
+ *
+ * 其余与 dsh 的差异:推荐项用结构化字段高亮(而非 dsh 的 "(Recommended)" 标签
+ * 后缀)、每题独立跳过、自由填写与选项同区并列、等待期显示剩余时间(超时可见)。
  */
 export interface AskCardProps {
   requestId: string
@@ -116,12 +118,15 @@ function QuestionBlock({
   draft,
   disabled,
   onChange,
+  onAdvance,
 }: {
   question: AskQuestion
   index: number
   draft: Draft
   disabled: boolean
   onChange: (next: Draft) => void
+  /** 本题处理完(单选选中 / 跳过)后的前进动作;分页模式下切到下一题。 */
+  onAdvance: () => void
 }) {
   const options = question.options ?? []
   const multi = question.multiSelect === true
@@ -134,11 +139,13 @@ function QuestionBlock({
         ? draft.selected.filter((item) => item !== label)
         : [...draft.selected, label]
       onChange({ ...draft, selected, skipped: false })
-    } else {
-      // 单选:再点一次取消,方便改主意(自定义文本随之清空)。
-      const selected = draft.selected.includes(label) ? [] : [label]
-      onChange({ selected, custom: selected.length > 0 ? '' : draft.custom, skipped: false })
+      return
     }
+    // 单选:再点一次取消,方便改主意(自定义文本随之清空)。
+    const selected = draft.selected.includes(label) ? [] : [label]
+    onChange({ selected, custom: selected.length > 0 ? '' : draft.custom, skipped: false })
+    // 选中即视为答完本题,自动前进;取消选择不前进(多选无法判定"答完")。
+    if (selected.length > 0) onAdvance()
   }
 
   const answered = draftAnswered(draft)
@@ -212,7 +219,12 @@ function QuestionBlock({
           type="button"
           className="ask-skip"
           disabled={disabled}
-          onClick={() => onChange({ ...emptyDraft(), skipped: !draft.skipped })}
+          onClick={() => {
+            const skipped = !draft.skipped
+            onChange({ ...emptyDraft(), skipped })
+            // 跳过也算处理完本题,同样自动前进;取消跳过则留在原地。
+            if (skipped) onAdvance()
+          }}
         >
           {draft.skipped ? t('askUnskip') : t('askSkip')}
         </button>
@@ -228,7 +240,7 @@ function QuestionBlock({
   )
 }
 
-/** 模型提问卡片:整组同屏、任意顺序作答、底部一次提交。 */
+/** 模型提问卡片:分页作答,全部处理完后一次提交。 */
 export function AskCard({
   questions,
   timeoutMs,
@@ -238,7 +250,18 @@ export function AskCard({
   onCancel,
 }: AskCardProps) {
   const [drafts, setDrafts] = useState<Draft[]>(() => questions.map(emptyDraft))
+  const [page, setPage] = useState(0)
   const [now, setNow] = useState(() => Date.now())
+  const bodyRef = useRef<HTMLDivElement | null>(null)
+  // 只有用户主动切题(点序号/翻页/作答后自动前进)才把焦点交给题目区;
+  // 首次渲染不算——卡片是随消息流出现的,抢焦点会把页面拽到卡片上。
+  // 用「意图标记」而不是「是否挂载过」:StrictMode 会双跑 effect,
+  // 后者在开发模式下会把首帧误判成切题。
+  const focusPending = useRef(false)
+
+  const total = questions.length
+  // 页码夹在题目范围内:题目集合不会中途变短,这里只是兜底。
+  const current = Math.max(0, Math.min(page, total - 1))
 
   // 倒计时:等待期每 500ms 刷新剩余时间(超时后服务端会结算,卡片转只读)。
   useEffect(() => {
@@ -247,21 +270,46 @@ export function AskCard({
     return () => window.clearInterval(timer)
   }, [resolution])
 
+  // 切题:题目区滚回顶部;若这次切换由用户操作触发,再把焦点交给题目区——
+  // 键盘作答自动前进后焦点不会掉到 body 上,可以接着按 Tab 选下一题的选项。
+  useEffect(() => {
+    const element = bodyRef.current
+    if (!element) return
+    element.scrollTop = 0
+    if (!focusPending.current) return
+    focusPending.current = false
+    element.focus({ preventScroll: true })
+  }, [current])
+
   const remaining = timeoutMs - (now - startedAt)
   const expired = remaining <= 0
   const done = useMemo(
     () => drafts.filter((draft) => draftAnswered(draft) || draft.skipped).length,
     [drafts],
   )
-  const ready = drafts.every((draft) => draftAnswered(draft) || draft.skipped)
+  const ready = done === total
 
   if (resolution) {
     return <ResolvedCard questions={questions} resolution={resolution} />
   }
+  // 后端保证至少一题;空数组直接不渲染,避免下面的索引越界。
+  if (total === 0) return null
 
   const update = (index: number, next: Draft) => {
-    setDrafts((current) => current.map((draft, i) => (i === index ? next : draft)))
+    setDrafts((list) => list.map((draft, i) => (i === index ? next : draft)))
   }
+
+  /** 切到指定题(点导航序号 / 翻页按钮 / 作答后自动前进)。
+   *  停在原地时不置焦点标记,免得留给下一次切换去抢焦点。 */
+  const goTo = (index: number) => {
+    const target = Math.max(0, Math.min(index, total - 1))
+    if (target === current) return
+    focusPending.current = true
+    setPage(target)
+  }
+
+  /** 处理完本题后前进;最后一题停在原地,由用户点提交。 */
+  const advance = () => goTo(current + 1)
 
   const submit = () => {
     if (!ready || expired) return
@@ -286,7 +334,7 @@ export function AskCard({
       <div className="ask-head">
         <span className="ask-title">{t('askTitle')}</span>
         <span className="ask-progress" title={t('askProgressHint')}>
-          {t('askProgress', { done, total: questions.length })}
+          {t('askProgress', { done, total })}
         </span>
         <span className={`ask-timer${remaining < 30_000 ? ' urgent' : ''}`}>
           {expired ? t('askExpired') : t('askRemaining', { time: remainingLabel(remaining) })}
@@ -295,21 +343,59 @@ export function AskCard({
           {t('askCancel')}
         </button>
       </div>
-      <div className="ask-body">
-        {questions.map((question, index) => (
-          <QuestionBlock
-            key={question.id}
-            question={question}
-            index={index}
-            draft={drafts[index]}
-            disabled={expired}
-            onChange={(next) => update(index, next)}
-          />
-        ))}
+      {/* 题目导航:分页后仍要一眼看见"共几题、答到哪、哪题跳过了"。
+          单题时没有可跳的目标,整条隐藏。 */}
+      {total > 1 && (
+        <div className="ask-nav" role="group" aria-label={t('askNavLabel')}>
+          {questions.map((question, index) => {
+            const draft = drafts[index]
+            const state = draft.skipped ? ' skipped' : draftAnswered(draft) ? ' answered' : ''
+            return (
+              <button
+                key={question.id}
+                type="button"
+                className={`ask-nav-item${state}${index === current ? ' current' : ''}`}
+                aria-current={index === current ? 'step' : undefined}
+                aria-label={t('askNavJump', { index: index + 1 })}
+                title={question.header ?? question.question}
+                onClick={() => goTo(index)}
+              >
+                {index + 1}
+              </button>
+            )
+          })}
+        </div>
+      )}
+      {/* tabIndex=-1:仅供程序化聚焦(切题后接管焦点),不进 Tab 序列。 */}
+      <div className="ask-body" ref={bodyRef} tabIndex={-1}>
+        <QuestionBlock
+          key={questions[current].id}
+          question={questions[current]}
+          index={current}
+          draft={drafts[current]}
+          disabled={expired}
+          onChange={(next) => update(current, next)}
+          onAdvance={advance}
+        />
       </div>
+      {total > 1 && (
+        <div className="ask-pager">
+          <button type="button" disabled={current === 0} onClick={() => goTo(current - 1)}>
+            {t('askPrev')}
+          </button>
+          <span className="ask-page">{t('askPage', { index: current + 1, total })}</span>
+          <button
+            type="button"
+            disabled={current === total - 1}
+            onClick={() => goTo(current + 1)}
+          >
+            {t('askNext')}
+          </button>
+        </div>
+      )}
       <div className="ask-foot">
         <span className="ask-hint">
-          {ready ? t('askReadyHint') : t('askNotReadyHint')}
+          {ready ? t('askReadyHint') : t('askNotReadyHint', { count: total - done })}
         </span>
         <button
           type="button"

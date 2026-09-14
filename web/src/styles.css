@@ -6779,19 +6779,92 @@ button.btn.form-action {
   color: var(--label-primary);
 }
 
-.ask-body {
+/* 题目导航:分页后"共几题、答到哪、哪题跳过了"必须仍然一眼可见,
+   所以每题一个可点的序号方块,当前题用外环标出,已答/已跳过各有状态。
+   题目上限 8 道,不会撑破一行;真要溢出就换行,不横向滚动。 */
+.ask-nav {
   display: flex;
-  flex-direction: column;
-}
-
-/* 题与题之间用分隔线,而不是 dsh 的翻页——同屏可扫读全部问题。 */
-.ask-question {
-  padding: 12px;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 12px;
   border-bottom: 1px solid var(--border-l1);
 }
 
-.ask-question:last-child {
-  border-bottom: none;
+.ask-nav-item {
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 1px solid var(--border-l1);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--label-caption);
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+  cursor: pointer;
+  transition: background 120ms ease, color 120ms ease, border-color 120ms ease;
+}
+
+.ask-nav-item:hover {
+  border-color: var(--border-l3);
+  color: var(--label-primary);
+}
+
+/* 已作答:淡底 + 亮字,和下面的选项选中态同一套语义色 */
+.ask-nav-item.answered {
+  border-color: var(--accent-tint);
+  background: var(--accent-soft);
+  color: var(--label-primary);
+}
+
+/* 已跳过:虚线边框,与"作答"区分开——跳过是显式决定,不是没填 */
+.ask-nav-item.skipped {
+  border-style: dashed;
+}
+
+/* 当前题:外环标注位置。用环而不是实心填充,已答/已跳过的状态才不会
+   被"我在哪一题"盖掉 —— 两种信息同时可见。 */
+.ask-nav-item.current {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px var(--accent-tint);
+  color: var(--label-primary);
+}
+
+/* 题目区:分页后一次只放一道题。超长题目(选项多 + 说明长)内部滚动,
+   不让卡片把底部的翻页与提交按钮顶出视野。 */
+.ask-body {
+  display: flex;
+  flex-direction: column;
+  max-height: min(56vh, 440px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+/* 切题靠 key 变化重挂载,入场动画因此每次重放,给出"换了一题"的方向感 */
+.ask-body > .ask-question {
+  animation: ask-page-in 0.18s var(--ease);
+}
+
+@keyframes ask-page-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* 焦点是切题时程序化转移过来的(tabIndex=-1),不是用户 Tab 到的,
+   所以不留焦点环;之后按 Tab 会落到题内的选项按钮上。 */
+.ask-body:focus {
+  outline: none;
+}
+
+.ask-question {
+  padding: 12px;
 }
 
 .ask-question.skipped {
@@ -7001,6 +7074,45 @@ button.btn.form-action {
 .ask-state {
   font-size: 11.5px;
   color: var(--label-caption);
+}
+
+/* 翻页:上一题 / 页码 / 下一题。页码 flex:1 居中,两个按钮因此各贴一边。 */
+.ask-pager {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-top: 1px solid var(--border-l1);
+}
+
+.ask-pager button {
+  border: 1px solid var(--border-l2);
+  border-radius: 7px;
+  padding: 4px 10px;
+  background: transparent;
+  color: var(--label-secondary);
+  font-size: 11.5px;
+  cursor: pointer;
+  transition: background 120ms ease, color 120ms ease, border-color 120ms ease;
+}
+
+.ask-pager button:hover:not(:disabled) {
+  border-color: var(--border-l3);
+  background: var(--bg-hover);
+  color: var(--label-primary);
+}
+
+.ask-pager button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.ask-page {
+  flex: 1;
+  text-align: center;
+  color: var(--label-caption);
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
 }
 
 .ask-foot {
