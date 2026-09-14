@@ -240,6 +240,16 @@ export type SessionEnvelope =
   | {
       seq: number
       time: number
+      type: 'args-cleared'
+      turn: number
+      step: number
+      call_id: string
+      /** 派生历史里替换原参数的桩文本。 */
+      placeholder: string
+    }
+  | {
+      seq: number
+      time: number
       type: 'compaction-summary'
       turn: number
       step: number
@@ -259,6 +269,8 @@ export type SessionEnvelope =
       todos: TodoItem[]
     }
   | { seq: number; time: number; type: 'permission-mode'; mode: PermissionMode }
+  /** 会话标题快照(服务端后台生成);latest-wins、仅日志持久。 */
+  | { seq: number; time: number; type: 'session-title'; title: string }
   /** 会话运行用的 agent preset(决定工具面与 persona);仅空白会话可改选。 */
   | { seq: number; time: number; type: 'agent-preset'; preset: string }
   | {
@@ -329,6 +341,18 @@ export type SessionEnvelope =
       provider: string
       model: string
       contextWindow?: number
+    }
+  | {
+      seq: number
+      time: number
+      type: 'retry-attempt'
+      turn: number
+      step: number
+      attempt: number
+      code: string
+      message: string
+      /** 本次失败后的退避毫秒数(下一次尝试前等待)。 */
+      delay_ms: number
     }
 
 /* ---- ask 工具(模型向用户提问) ---- */

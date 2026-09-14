@@ -1529,6 +1529,7 @@ export default function SessionsPage({
         downloadFile(payload.content, payload.filename, payload.mimeType)
         notify('ok', t('exportDownloaded', { name: payload.filename }))
       } catch (error) {
+        console.error('[export] 会话导出失败', error)
         notify('err', t('exportFailed'))
       } finally {
         setExportBusy(false)

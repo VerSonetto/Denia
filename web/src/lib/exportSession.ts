@@ -140,6 +140,8 @@ function headLine(envelope: SessionEnvelope): string {
       return `todo-write · ${envelope.todos.length} 项`
     case 'permission-mode':
       return `permission-mode · ${envelope.mode}`
+    case 'session-title':
+      return `session-title · ${envelope.title}`
     case 'agent-preset':
       return `agent-preset · ${envelope.preset}`
     case 'goal':
@@ -162,6 +164,14 @@ function headLine(envelope: SessionEnvelope): string {
       return `request-header · turn=${envelope.turn} step=${envelope.step} · ${envelope.reason} · ${envelope.header.config.provider}/${envelope.header.config.model}`
     case 'request-context':
       return `request-context · turn=${envelope.turn} step=${envelope.step} · ${envelope.provider}/${envelope.model}`
+    case 'args-cleared':
+      return `args-cleared · turn=${envelope.turn} step=${envelope.step} · call_id=${envelope.call_id}`
+    case 'retry-attempt':
+      return `retry-attempt · turn=${envelope.turn} step=${envelope.step} · attempt=${envelope.attempt} · ${envelope.code}`
+    default:
+      // 后端新增事件类型而前端未跟进时的保底:至少渲染类型标签,不抛错。
+      // (穷尽 switch 下 TS 把 envelope 收窄成 never,运行时值仍在,断言取标签。)
+      return (envelope as { type: string }).type
   }
 }
 
@@ -303,6 +313,9 @@ function eventBody(envelope: SessionEnvelope): string {
     case 'permission-mode':
       lines.push(`- mode: \`${envelope.mode}\``)
       return lines.join('\n')
+    case 'session-title':
+      lines.push(`- 标题: ${safeText(envelope.title) || '`(空)`'}`)
+      return lines.join('\n')
     case 'agent-preset':
       lines.push(`- preset: \`${envelope.preset}\``)
       return lines.join('\n')
@@ -386,6 +399,25 @@ function eventBody(envelope: SessionEnvelope): string {
       }
       return lines.join('\n')
     }
+    case 'args-cleared': {
+      lines.push(`- call_id: \`${envelope.call_id}\``)
+      lines.push('- placeholder(派生历史中替换原参数的桩文本):')
+      lines.push('')
+      lines.push('```')
+      lines.push(fenceSafe(envelope.placeholder))
+      lines.push('```')
+      return lines.join('\n')
+    }
+    case 'retry-attempt': {
+      lines.push(`- attempt: ${envelope.attempt}`)
+      lines.push(`- code: \`${envelope.code}\``)
+      lines.push(`- message: ${safeText(envelope.message).replace(/\n/g, ' ')}`)
+      lines.push(`- delay_ms: ${envelope.delay_ms}`)
+      return lines.join('\n')
+    }
+    default:
+      // 后端新增事件类型而前端未跟进时的保底:整条事件铺 JSON,导出不丢事件也不抛错。
+      return '```json\n' + JSON.stringify(envelope, null, 2) + '\n```'
   }
 }
 
@@ -428,7 +460,8 @@ function toMarkdown(input: ExportInput): string {
     return lines.join('\n')
   }
   for (const envelope of events) {
-    lines.push(`### seq=${envelope.seq} · ${formatTimeMs(envelope.time)} · ${headLine(envelope)}`)
+    // 标题行压成单行:headLine 可能内嵌换行(如 agent-inbox 全文),多行会破坏标题结构。
+    lines.push(`### seq=${envelope.seq} · ${formatTimeMs(envelope.time)} · ${trimHead(headLine(envelope))}`)
     lines.push('')
     const body = eventBody(envelope)
     if (body) {
