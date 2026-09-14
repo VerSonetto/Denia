@@ -7,6 +7,7 @@
 pub mod config;
 pub mod error;
 pub mod message;
+pub mod preset;
 pub mod session;
 pub mod stream;
 pub mod tool;

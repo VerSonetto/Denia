@@ -23,13 +23,13 @@
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use denia_core::message::ChatMessage;
 use denia_core::session::{
     GoalOp, GoalState, PermissionMode, SESSION_FORMAT_VERSION, SessionEnvelope, SessionEvent,
-    SessionHeader, SessionHeaderKind, TurnEndReason, apply_goal_op, derive_messages,
+    SessionHeader, SessionHeaderKind, TurnEndReason, apply_goal_op,
 };
 use denia_core::stream::ContentBlock;
 use denia_token_meter::{ContextBreakdown, ContextMeter, ContextPressure, TurnTokenUsage};
@@ -116,10 +116,28 @@ struct SessionInner {
     pending_turn: Vec<SessionEnvelope>,
     /// 当前权限模式(由 permission-mode 事件 fold;新会话默认 auto-edit)。
     permission_mode: PermissionMode,
+    /// 当前会话的 agent preset(由 agent-preset 事件 fold,latest-wins;
+    /// None = 未指定,按部署默认值组装)。
+    agent_preset: Option<String>,
     /// 当前会话目标(goal 事件折叠;None = 无目标)。
     goal: Option<GoalState>,
     /// 会话标题(session-title 事件折叠,latest-wins;None = 尚未生成)。
     title: Option<String>,
+    /// 派生面缓存:`events` 的每次变更都会使它失效(见 `derived_revision`)。
+    ///
+    /// agent 每个 step 至少派生两次(微压缩闸门 + 请求构造),每次都是全量
+    /// 重建整条历史并克隆所有正文/工具参数 —— 长会话里这是每 step 数 MB 级
+    /// 的搬运。事件是 append-only 的,同一份 `events` 派生结果恒等,缓存下来
+    /// 即可把"每 step 两次"降为"每个新事件一次"。
+    derived_surface: Option<Arc<[denia_core::session::SurfaceMessage]>>,
+    /// 缓存对应的日志版本号;与 `log_revision` 不符即视为失效。
+    derived_revision: u64,
+    /// 日志版本号:每次 append 与回退(截断)都自增。
+    ///
+    /// 不能用 `events.len()` 当键:回退会把日志截断,截断后的长度可能与
+    /// 某次旧派生时的长度恰好相同,那时长度键会误判为"命中",把回退掉的
+    /// 内容当成仍然存在。单调递增的版本号没有这个歧义。
+    log_revision: u64,
 }
 
 /// One live session: header, in-memory log, and its append handle. The log is
@@ -186,8 +204,12 @@ impl Session {
                     meter: ContextMeter::new(),
                     pending_turn: Vec::new(),
                     permission_mode: PermissionMode::AutoEdit,
+                    agent_preset: None,
                     goal: None,
                     title: None,
+                    derived_surface: None,
+                    derived_revision: 0,
+                    log_revision: 0,
                 }),
             });
         }
@@ -218,6 +240,7 @@ impl Session {
         let mut last_turn = 0u32;
         let mut last_system_prompt: Option<String> = None;
         let mut permission_mode = PermissionMode::AutoEdit;
+        let mut agent_preset: Option<String> = None;
         let mut goal: Option<GoalState> = None;
         let mut title: Option<String> = None;
         let mut meter = ContextMeter::new();
@@ -236,6 +259,7 @@ impl Session {
                             last_system_prompt = Some(text.clone())
                         }
                         SessionEvent::PermissionMode { mode } => permission_mode = *mode,
+                        SessionEvent::AgentPreset { preset } => agent_preset = Some(preset.clone()),
                         SessionEvent::SessionTitle { title: t } => title = Some(t.clone()),
                         _ => {}
                     }
@@ -278,8 +302,12 @@ impl Session {
                 meter,
                 pending_turn: Vec::new(),
                 permission_mode,
+                agent_preset,
                 goal,
                 title,
+                derived_surface: None,
+                derived_revision: 0,
+                log_revision: 0,
             }),
         };
         session.close_orphaned_turn()?;
@@ -317,6 +345,19 @@ impl Session {
             return Vec::new();
         }
         events[after as usize..].to_vec()
+    }
+
+    /// 在日志锁内只读地跑一段闭包,不克隆日志。
+    ///
+    /// [`Session::events`] 的语义是"给我一份日志副本",被当只读迭代器用时
+    /// 就变成了"为了数 3 个 step 先克隆整条日志(含全部 chunk)"。这个入口
+    /// 让读路径零拷贝;闭包内**不得**再调用任何需要本会话锁的方法(会自锁)。
+    pub fn with_events<R>(&self, f: impl FnOnce(&[SessionEnvelope]) -> R) -> R {
+        let inner = self
+            .inner
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        f(&inner.events)
     }
 
     pub fn file(&self) -> &Path {
@@ -373,6 +414,9 @@ impl Session {
             SessionEvent::PermissionMode { mode } => {
                 inner.permission_mode = *mode;
             }
+            SessionEvent::AgentPreset { preset } => {
+                inner.agent_preset = Some(preset.clone());
+            }
             SessionEvent::SessionTitle { title } => {
                 inner.title = Some(title.clone());
             }
@@ -412,6 +456,7 @@ impl Session {
             | SessionEvent::ToolResult { .. }
             | SessionEvent::TodoWrite { .. }
             | SessionEvent::PermissionMode { .. }
+            | SessionEvent::AgentPreset { .. }
             | SessionEvent::SessionTitle { .. }
             | SessionEvent::Goal { .. }
             | SessionEvent::CommandRun { .. } => {
@@ -424,6 +469,9 @@ impl Session {
             }
         }
         inner.events.push(envelope.clone());
+        // 日志变了:派生面缓存失效,版本号自增(回退截断也走这里)。
+        inner.derived_surface = None;
+        inner.log_revision += 1;
         Ok(envelope)
     }
 
@@ -480,13 +528,19 @@ impl Session {
         // 内存与派生状态回退。
         inner.events.truncate(target_idx);
         inner.offsets.truncate(target_idx);
+        // 派生面缓存随截断作废(版本号自增,即使截断后长度恰好等于某个
+        // 旧缓存时的长度,也不会误命中)。
+        inner.derived_surface = None;
+        inner.log_revision += 1;
         inner.last_turn = 0;
         inner.last_system_prompt = None;
         inner.permission_mode = PermissionMode::AutoEdit;
         inner.goal = None;
         inner.meter = ContextMeter::new();
         inner.pending_turn.clear();
-        let kept = inner.events.clone();
+        // 取出日志就地回放(而不是克隆一份):29MB 级的长会话下,这份副本
+        // 是回退时峰值内存的主要来源。回放完放回原位。
+        let kept = std::mem::take(&mut inner.events);
         for envelope in &kept {
             match &envelope.event {
                 SessionEvent::TurnStart { turn } => inner.last_turn = inner.last_turn.max(*turn),
@@ -495,6 +549,9 @@ impl Session {
                 }
                 SessionEvent::PermissionMode { mode } => {
                     inner.permission_mode = *mode;
+                }
+                SessionEvent::AgentPreset { preset } => {
+                    inner.agent_preset = Some(preset.clone());
                 }
                 _ => {}
             }
@@ -512,6 +569,7 @@ impl Session {
                 inner.goal = apply_goal_op(inner.goal.take(), op, envelope.time, total);
             }
         }
+        inner.events = kept;
 
         // 回退审计:独立于 session.jsonl 追加,物理截断不会抹掉这段记录。
         let rewind_file = self.file.with_file_name("rewinds.jsonl");
@@ -561,19 +619,27 @@ impl Session {
             .inner
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
-        let events = inner.events.clone();
-        let mut pending: Vec<SessionEnvelope> = Vec::new();
-        for envelope in &events {
+        // 借日志而不是克隆:与 `events` 同时驻留一份完整副本会让加载长会话的
+        // 峰值内存翻倍(实测 29MB 级会话即多出几十 MB)。`meter` 与 `events`
+        // 同为 inner 的字段,拆借用取出。
+        let SessionInner {
+            events,
+            meter,
+            pending_turn,
+            ..
+        } = &mut *inner;
+        for envelope in events.iter() {
             if matches!(&envelope.event, SessionEvent::TurnStart { .. }) {
-                pending.clear();
+                pending_turn.clear();
             }
-            pending.push(envelope.clone());
+            pending_turn.push(envelope.clone());
             if matches!(&envelope.event, SessionEvent::TurnEnd { .. }) {
-                let slice: Vec<SessionEnvelope> = pending.drain(..).collect();
-                inner.meter.fold_turn(&slice);
+                meter.fold_turn(pending_turn);
+                pending_turn.clear();
             }
-            inner.meter.apply_one(envelope);
+            meter.apply_one(envelope);
         }
+        pending_turn.clear();
         Ok(())
     }
 
@@ -628,6 +694,25 @@ impl Session {
             .lock()
             .unwrap_or_else(|poison| poison.into_inner())
             .permission_mode
+    }
+
+    /// 当前会话的 agent preset(由事件 fold,O(1));`None` = 未指定,
+    /// 按部署默认值组装。
+    pub fn agent_preset(&self) -> Option<String> {
+        self.inner
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .agent_preset
+            .clone()
+    }
+
+    /// 切换会话的 agent preset:追加 agent-preset 事件(事件源折叠,
+    /// O(1) 生效)。是否允许切换由调用方判定——只有尚未产出内容的会话
+    /// 可以换工具面,事后换会让已记录的工具调用无工具可执行。
+    pub fn set_agent_preset(&self, preset: &str) -> Result<SessionEnvelope, SessionError> {
+        self.append(SessionEvent::AgentPreset {
+            preset: preset.to_string(),
+        })
     }
 
     /// 当前会话目标(goal 事件折叠,O(1));`None` = 无目标。
@@ -687,20 +772,33 @@ impl Session {
 
     /// The model-facing history projected from the log.
     pub fn derive_messages(&self) -> Vec<ChatMessage> {
-        let inner = self
-            .inner
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
-        derive_messages(&inner.events)
+        self.derive_surface()
+            .iter()
+            .map(|item| item.message.clone())
+            .collect()
     }
 
     /// 派生带 seq 的表面消息(微压缩/压缩需要 seq 定位 `replaces` 目标)。
-    pub fn derive_surface(&self) -> Vec<denia_core::session::SurfaceMessage> {
-        let inner = self
+    ///
+    /// 结果按日志版本号缓存并交给调用方共享:`derive_messages` 与
+    /// `derive_surface` 是每 step 必跑的热路径,而事件是 append-only 的,
+    /// 同一份日志派生结果恒等。缓存把"每 step 两次全量重建"降为"每个
+    /// 新事件一次"。
+    pub fn derive_surface(&self) -> Arc<[denia_core::session::SurfaceMessage]> {
+        let mut inner = self
             .inner
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
-        denia_core::session::derive_surface(&inner.events)
+        if let Some(cached) = &inner.derived_surface
+            && inner.derived_revision == inner.log_revision
+        {
+            return cached.clone();
+        }
+        let surface: Arc<[denia_core::session::SurfaceMessage]> =
+            denia_core::session::derive_surface(&inner.events).into();
+        inner.derived_surface = Some(surface.clone());
+        inner.derived_revision = inner.log_revision;
+        surface
     }
 
     /// 距最后一条 assistant 消息落盘过了多少分钟(微压缩的空闲触发用)。
@@ -754,7 +852,11 @@ impl Session {
                 .unwrap_or_else(|poison| poison.into_inner());
             let mut open_turn: Option<u32> = None;
             let mut last_step: Option<u32> = None;
-            let mut answered: Vec<String> = Vec::new();
+            // 集合化:工具调用多的会话(含压缩前的历史)用 Vec 做 contains/any
+            // 是平方级扫描,而这段每次 load 会话都要跑。
+            let mut answered: std::collections::HashSet<String> = std::collections::HashSet::new();
+            let mut announced_ids: std::collections::HashSet<String> =
+                std::collections::HashSet::new();
             let mut announced: Vec<(String, u32, u32)> = Vec::new();
             let mut last_time: u64 = 0;
             for envelope in &inner.events {
@@ -779,14 +881,16 @@ impl Session {
                         if Some(*turn) == open_turn {
                             for block in blocks {
                                 if let ContentBlock::ToolCall { id, .. } = block {
-                                    if !announced.iter().any(|(c, _, _)| c == id) {
+                                    if announced_ids.insert(id.clone()) {
                                         announced.push((id.clone(), *turn, *step));
                                     }
                                 }
                             }
                         }
                     }
-                    SessionEvent::ToolResult { call_id, .. } => answered.push(call_id.clone()),
+                    SessionEvent::ToolResult { call_id, .. } => {
+                        answered.insert(call_id.clone());
+                    }
                     _ => {}
                 }
             }
@@ -864,6 +968,10 @@ pub struct SessionSummary {
     pub parent_session: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subagent: Option<denia_core::session::SubagentDescriptor>,
+    /// 会话运行的 agent preset(创建时写入日志);`None` = 旧会话或未指定。
+    /// 新会话页与侧栏据此显示组装,不必为一行摘要加载整个会话。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub agent_preset: Option<String>,
 }
 
 /// 轮次轴锚点:一条非注入 user-message 的定位与预览文本。
@@ -951,6 +1059,7 @@ pub struct SessionMeta {
     pub sandbox: bool,
     pub parent_session: Option<String>,
     pub subagent: Option<denia_core::session::SubagentDescriptor>,
+    pub agent_preset: Option<String>,
 }
 
 /// The sessions root: `<home>/sessions` + 内存索引。
@@ -1081,6 +1190,14 @@ impl SessionStore {
             },
         );
         Ok(session)
+    }
+
+    /// 会话是否存在:只看文件在不在,不做任何解析。
+    ///
+    /// 上传接口原先为这一句判断走完整 `load` —— 整份 JSONL 读入、逐行反序列化、
+    /// torn-tail 修复,还会**写盘**(孤儿轮次闭合),代价与收益完全不成比例。
+    pub fn exists(&self, id: &str) -> bool {
+        self.file_for(id).map(|file| file.is_file()).unwrap_or(false)
     }
 
     pub fn load(&self, id: &str) -> Result<Session, SessionError> {
@@ -1442,6 +1559,7 @@ fn meta_of(session: &Session) -> SessionMeta {
         sandbox: session.header().sandbox,
         parent_session: session.header().parent_session.clone(),
         subagent: session.header().subagent.clone(),
+        agent_preset: session.agent_preset(),
     }
 }
 
@@ -1460,6 +1578,7 @@ fn summary_of_meta(meta: &SessionMeta) -> SessionSummary {
         cwd_alive: Path::new(&meta.cwd).is_dir(),
         parent_session: meta.parent_session.clone(),
         subagent: meta.subagent.clone(),
+        agent_preset: meta.agent_preset.clone(),
     }
 }
 
@@ -1473,6 +1592,7 @@ fn read_summary(file: &Path) -> Option<(SessionMeta, FileStamp)> {
     let mut first_line: Option<String> = None;
     let mut excerpt: Option<String> = None;
     let mut title: Option<String> = None;
+    let mut agent_preset: Option<String> = None;
     loop {
         if bytes_read >= SUMMARY_SCAN_LIMIT {
             break;
@@ -1512,6 +1632,11 @@ fn read_summary(file: &Path) -> Option<(SessionMeta, FileStamp)> {
                     break;
                 }
             }
+            // 组装事件落在会话创建处(远在摘要扫描目标之前);latest-wins,
+            // 但这里只做"是否已扫到"的短路,继续扫其余目标。
+            SessionEvent::AgentPreset { preset } => {
+                agent_preset = Some(preset);
+            }
             _ => {}
         }
     }
@@ -1531,6 +1656,7 @@ fn read_summary(file: &Path) -> Option<(SessionMeta, FileStamp)> {
             sandbox: header.sandbox,
             parent_session: header.parent_session,
             subagent: header.subagent,
+            agent_preset,
         },
         stamp,
     ))
@@ -1562,6 +1688,79 @@ mod tests {
         ));
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn agent_preset_folds_across_reload_and_rewind() {
+        // preset 是会话事实:latest-wins,并且必须跨越"落盘 → 重新加载"
+        // 存活——否则恢复的会话会悄悄换回默认组装。
+        let root = temp_root();
+        let store = SessionStore::open(&root).unwrap();
+        let cwd = root.join("work");
+        std::fs::create_dir_all(&cwd).unwrap();
+
+        let session = store.create(&cwd, true).unwrap();
+        let id = session.id().to_string();
+        assert_eq!(session.agent_preset(), None, "新会话未指定组装");
+        session.set_agent_preset("minimal").unwrap();
+        assert_eq!(session.agent_preset().as_deref(), Some("minimal"));
+        session.set_agent_preset("explore").unwrap();
+        drop(session);
+
+        let loaded = store.load(&id).unwrap();
+        assert_eq!(
+            loaded.agent_preset().as_deref(),
+            Some("explore"),
+            "latest-wins 的组装必须从日志恢复"
+        );
+        let folded = loaded.derive_messages();
+        assert!(folded.is_empty(), "组装事件不进模型历史");
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// 会话列表摘要必须带上组装:新会话页要在不加载会话的前提下显示它
+    /// (活跃会话走内存折叠,冷启动走磁盘头部扫描,两条路径都要对)。
+    #[test]
+    fn session_list_carries_agent_preset() {
+        let root = temp_root();
+        let cwd = root.join("work");
+        std::fs::create_dir_all(&cwd).unwrap();
+
+        let store = SessionStore::open(&root).unwrap();
+        let session = store.create(&cwd, true).unwrap();
+        let id = session.id().to_string();
+        session.set_agent_preset("minimal").unwrap();
+        assert_eq!(
+            store.list().unwrap()[0].agent_preset.as_deref(),
+            Some("minimal"),
+            "活跃会话的摘要从内存折叠读"
+        );
+        drop(session);
+
+        // 冷启动:进程重开后建索引,摘要只能从日志头扫描得来。
+        let reopened = SessionStore::open(&root).unwrap();
+        let summaries = reopened.list().unwrap();
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(summaries[0].id, id);
+        assert_eq!(
+            summaries[0].agent_preset.as_deref(),
+            Some("minimal"),
+            "冷启动后仍能从会话日志读出组装"
+        );
+
+        // 没记过组装的老会话:字段缺省,由前端落到部署默认值。
+        let plain = reopened.create(&cwd, true).unwrap();
+        let plain_id = plain.id().to_string();
+        drop(plain);
+        let fresh = SessionStore::open(&root).unwrap();
+        let plain_summary = fresh
+            .list()
+            .unwrap()
+            .into_iter()
+            .find(|summary| summary.id == plain_id)
+            .expect("plain session is listed");
+        assert_eq!(plain_summary.agent_preset, None);
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]
@@ -2221,6 +2420,55 @@ mod tests {
         std::fs::remove_dir_all(&root).unwrap();
     }
 
+    /// 回退必须立刻反映在派生结果里。
+    ///
+    /// 回退把日志截断后,长度可能与某个更早时刻**恰好相同**(本例:回到 2 条,
+    /// 而先前也出现过 2 条事件的状态)。缓存若被误判命中,模型就会看到本该
+    /// 消失的历史。这里锁住"截断后的派生结果只含保留的事件"。
+    #[test]
+    fn derive_cache_invalidates_after_rewind() {
+        let root = temp_root();
+        let dir = root.join("s");
+        let cwd = root.join("work");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let session = Session::create(&dir, "s".to_string(), &cwd, true, None).unwrap();
+        session
+            .append(SessionEvent::UserMessage {
+                text: "first".into(),
+                injected: false,
+                images: Vec::new(),
+                channel: None,
+            })
+            .unwrap();
+        session
+            .append(SessionEvent::UserMessage {
+                text: "second".into(),
+                injected: false,
+                images: Vec::new(),
+                channel: None,
+            })
+            .unwrap();
+        // 在这一长度上派生一次并缓存。
+        assert_eq!(session.derive_messages().len(), 2);
+
+        session
+            .append(SessionEvent::UserMessage {
+                text: "third".into(),
+                injected: false,
+                images: Vec::new(),
+                channel: None,
+            })
+            .unwrap();
+        assert_eq!(session.derive_messages().len(), 3);
+
+        // 回退到第三条之前:长度回到 2,与最早那次派生时的长度相同。
+        session.rewind(3).unwrap();
+        let messages = session.derive_messages();
+        assert_eq!(messages.len(), 2, "回退后不得命中回退前的派生缓存");
+        assert_eq!(messages[1], ChatMessage::user("second"));
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
     #[test]
     fn forked_session_replays_seed_with_lineage() {
         use denia_core::session::fork_cut_index;
@@ -2284,7 +2532,7 @@ mod tests {
         }
         assert_eq!(
             child.derive_messages(),
-            derive_messages(&source_events[..cut]),
+            denia_core::session::derive_messages(&source_events[..cut]),
         );
         // 未完成轮次的消息不属于子会话。
         assert!(child.first_prompt_excerpt(80).unwrap().contains("first"));

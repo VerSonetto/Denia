@@ -739,6 +739,14 @@ CommandRun {
     SessionTitle {
         title: String,
     },
+    /// 会话运行用的 agent preset(抄 dsh `agent-preset/selected`):决定
+    /// 模型看到的工具 schema 与 persona,因此属于会话事实而非运行时状态。
+    /// 创建会话时写入;只有尚未产出内容的会话可以改选(切换会换掉工具面,
+    /// 事后改会让已记录的工具调用无工具可执行)。latest-wins、仅日志持久,
+    /// 不进入模型历史。
+    AgentPreset {
+        preset: String,
+    },
     /// 会话审批策略切换(遗留事件):新代码不再发射;变体保留以解析
     /// 旧日志,折叠为 no-op。
     ApprovalPolicy {
