@@ -248,6 +248,8 @@ pub struct AppState {
     pub file_history: Arc<crate::file_history::FileHistoryStore>,
     /// 内嵌浏览器中枢(工具与 REST API 共用)。
     pub browser: Arc<denia_browser::BrowserManager>,
+    /// 面板终端中枢:交互式 PTY 会话(右侧「终端」标签用)。
+    pub terminals: Arc<denia_terminal::TerminalManager>,
     /// MCP 运行时:外部 MCP 服务器的连接与工具面同步。
     pub mcp: Arc<crate::mcp_runtime::McpRuntime>,
     /// 会话头部「用应用打开」:host 侧应用探测、图标与启动。
@@ -827,6 +829,8 @@ pub async fn build_state(
     spawn_live_evictor(live.clone(), 30, 600);
     let browser = Arc::new(denia_browser::BrowserManager::new(home.to_path_buf()));
     let browser_hub: denia_tools::BrowserHub = browser.clone();
+    // 面板终端中枢:交互式 PTY,与 `bash` 工具的非交互进程互不影响。
+    let terminals = denia_terminal::TerminalManager::new();
     let system_prompt = Arc::new(crate::system_prompt_store::SystemPromptState::load(
         home,
         Some(browser_hub.clone()),
@@ -906,6 +910,7 @@ pub async fn build_state(
         system_prompt,
         file_history,
         browser,
+        terminals,
         mcp,
         open_in_app: Arc::new(crate::open_in_app::OpenInAppState::new(bound_remote)),
         bound_remote,

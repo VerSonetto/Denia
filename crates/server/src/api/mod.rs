@@ -5,6 +5,7 @@ mod browser;
 mod credentials;
 mod events;
 mod fs;
+mod git;
 mod global_rules;
 mod goal;
 mod llm;
@@ -15,6 +16,7 @@ mod runtime;
 mod sessions;
 mod settings;
 mod system_prompt;
+mod terminals;
 mod uploads;
 mod workspaces;
 
@@ -42,4 +44,6 @@ pub fn router() -> Router<Arc<AppState>> {
         .merge(mcp::router())
         .merge(memories::router())
         .merge(open_in_app::router())
+        .merge(terminals::router())
+        .merge(git::router())
 }
