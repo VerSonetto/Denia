@@ -104,6 +104,7 @@ import type {
 } from '../types'
 import { normalizePermissionMode } from '../types'
 import { isGenericImageName } from '../userImages'
+import { setModelSelection as setSharedModelSelection } from '../modelSelectionStore'
 
 function normalizeSelection(catalog: ModelCatalog, selection: ModelSelection): ModelSelection {
   const group = catalog.groups.find((entry) => entry.id === selection.provider)
@@ -582,6 +583,12 @@ export default function SessionsPage({
       /* storage unavailable */
     }
   }
+
+  // 把当前模型选择同步给右侧面板的「AI 生成提交信息」(见 modelSelectionStore):
+  // 它复用同一个模型,不让用户再选一次。
+  useEffect(() => {
+    setSharedModelSelection(selection)
+  }, [selection])
 
   useEffect(() => {
     if (running && sending) {

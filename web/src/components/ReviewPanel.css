@@ -350,3 +350,129 @@
   font-size: 12px;
   line-height: 1.5;
 }
+
+/* ---- 提交区(面板底部常驻) ---- */
+
+.review-commit {
+  display: flex;
+  flex: 0 0 auto;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px;
+  border-top: 1px solid var(--border-l1);
+  background: var(--bg-layer-2);
+}
+
+.review-commit-input {
+  width: 100%;
+  padding: 7px 9px;
+  border: 1px solid var(--border-l1);
+  border-radius: var(--r-xs);
+  background: var(--input-major);
+  color: var(--label-primary);
+  font-size: 12px;
+  font-family: inherit;
+  line-height: 1.5;
+  /* 只允许纵向拉伸:横向拉伸会撑破面板宽度。 */
+  resize: vertical;
+  min-height: 44px;
+  max-height: 160px;
+}
+
+.review-commit-input::placeholder {
+  color: var(--label-caption);
+}
+
+.review-commit-input:focus {
+  outline: none;
+  border-color: var(--border-l3);
+}
+
+.review-commit-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* 生成按钮靠左,推送与提交靠右 —— 视觉上把"写信息"与"发出去"分开。 */
+.review-commit-spacer {
+  flex: 1 1 auto;
+}
+
+.review-commit-generate,
+.review-commit-push,
+.review-commit-submit {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 10px;
+  border: 1px solid var(--border-l1);
+  border-radius: var(--r-xs);
+  background: transparent;
+  color: var(--label-secondary);
+  font-size: 12px;
+  font-family: inherit;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background 0.12s var(--ease), color 0.12s var(--ease);
+}
+
+.review-commit-generate:hover:not(:disabled),
+.review-commit-push:hover:not(:disabled) {
+  background: var(--hover-fill);
+  color: var(--label-primary);
+}
+
+/* 提交是主操作:实心按钮,与两个次要操作拉开层级。 */
+.review-commit-submit {
+  border-color: transparent;
+  background: var(--accent-send);
+  color: var(--accent-on);
+  font-weight: 500;
+}
+
+.review-commit-submit:hover:not(:disabled) {
+  filter: brightness(0.92);
+}
+
+.review-commit-generate:disabled,
+.review-commit-push:disabled,
+.review-commit-submit:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+/* 成功/失败反馈:一次性提示,出现在编辑框上方。 */
+.review-commit-feedback {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 7px 9px;
+  border: 1px solid var(--border-l1);
+  border-radius: var(--r-xs);
+  background: var(--bg-layer-3);
+  color: var(--label-secondary);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.review-commit-feedback.error {
+  border-color: var(--danger-border);
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
+.review-commit-feedback-text {
+  /* git 的原文常含换行(提示 + 原文两段),保留换行比压成一行好读。 */
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.review-commit-feedback-hint {
+  color: var(--label-tertiary);
+}
+
+.review-commit-feedback.error .review-commit-feedback-hint {
+  color: var(--danger);
+  opacity: 0.85;
+}

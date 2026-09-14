@@ -37,6 +37,7 @@ import { SidePane } from './components/SidePane'
 import { TerminalHost } from './components/TerminalHost'
 import { closeTerminal } from './terminalApi'
 import { dropScope, peekSidePane } from './sidePaneStore'
+import { useModelSelection } from './modelSelectionStore'
 import type { SidePaneTab } from './sidePane'
 import {
   IconCaretRight,
@@ -102,6 +103,9 @@ export default function App() {
   // 而用户在空白页也已经选好了工作区。
   const paneWorkspacePath = activeSessionForPane?.cwd ?? getActiveWorkspace()?.path ?? null
   const pane = useSidePaneController(activeId, paneWorkspacePath)
+  // 对话区当前选择的模型:右侧「审查」面板的 AI 生成提交信息复用它
+  // (同一个用户不该为同一件事选两次模型)。
+  const modelSelection = useModelSelection()
 
   // 启动/切会话时对账终端:清掉指向已消失 PTY 的僵尸标签。
   useTerminalReconcile(activeId, true, (liveIds) => {
@@ -833,6 +837,7 @@ export default function App() {
             collapsed={pane.collapsed}
             workspacePath={paneWorkspacePath}
             supportsBrowser={true}
+            modelSelection={modelSelection}
             recentClosed={pane.recentClosed}
             onChange={(updater) => pane.update(updater)}
             onCollapsedChange={(next) => pane.setCollapsed(next)}

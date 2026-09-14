@@ -28,16 +28,23 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { t } from '../i18n'
 import {
   GIT_SOURCES,
+  GitApiError,
+  canCommit,
+  canPush,
+  commitChanges,
+  failureHint,
   fetchGitDiff,
   fetchGitStatus,
   flattenSections,
+  generateCommitMessage,
+  pushChanges,
   sectionize,
   type GitDiff,
   type GitEntry,
   type GitSource,
   type GitStatus,
 } from '../gitApi'
-import { IconBranch, IconChevronDown, IconFile, IconRefresh, IconSpinner } from './icons'
+import { IconBranch, IconChevronDown, IconFile, IconRefresh, IconSparkles, IconSpinner } from './icons'
 import './ReviewPanel.css'
 
 /** 单个文件行的展开态。 */
@@ -48,14 +55,23 @@ interface RowState {
   error: string
 }
 
+/** 提交/推送的一次性结果反馈(显示后自动消失)。 */
+interface ActionFeedback {
+  kind: 'ok' | 'error'
+  text: string
+  hint?: string
+}
+
 export interface ReviewPanelProps {
   /** 工作区绝对路径。 */
   workspacePath: string
   /** 会话 id:状态按会话缓存,切会话重拉。 */
   sessionId: string | null
+  /** 当前对话选择的模型(AI 生成提交信息复用同一条链路);未选则禁用该入口。 */
+  selection?: { provider: string; model: string; reasoningEffort?: string } | null
 }
 
-export function ReviewPanel({ workspacePath, sessionId }: ReviewPanelProps) {
+export function ReviewPanel({ workspacePath, sessionId, selection }: ReviewPanelProps) {
   const [status, setStatus] = useState<GitStatus | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
@@ -64,6 +80,13 @@ export function ReviewPanel({ workspacePath, sessionId }: ReviewPanelProps) {
   const [filter, setFilter] = useState('')
   /** 请求代号:防止慢响应覆盖新状态(切来源/刷新时的竞态)。 */
   const revisionRef = useRef(0)
+  /** 提交信息草稿:跨刷新保留(用户可能写了半天才提交)。 */
+  const [message, setMessage] = useState('')
+  /** 正在跑的写操作:提交与推送互斥,期间按钮禁用。 */
+  const [busy, setBusy] = useState<'commit' | 'push' | 'generate' | null>(null)
+  const [feedback, setFeedback] = useState<ActionFeedback | null>(null)
+  /** 生成请求的中止句柄(切工作区/卸载时取消在途请求)。 */
+  const generateAbortRef = useRef<AbortController | null>(null)
 
   const refresh = useCallback(async () => {
     revisionRef.current += 1
@@ -88,6 +111,106 @@ export function ReviewPanel({ workspacePath, sessionId }: ReviewPanelProps) {
   useEffect(() => {
     void refresh()
   }, [refresh, sessionId])
+
+  /* ---- 提交 / 推送 / AI 生成 ---- */
+
+  // 反馈几秒后自动消失:它是一次性结果,不该长期占着面板底部。
+  useEffect(() => {
+    if (!feedback) return
+    const timer = window.setTimeout(() => setFeedback(null), 6000)
+    return () => window.clearTimeout(timer)
+  }, [feedback])
+
+  // 卸载/切工作区时取消在途的生成请求。
+  useEffect(() => {
+    return () => generateAbortRef.current?.abort()
+  }, [workspacePath])
+
+  const hasChanges = useMemo(
+    () => (status?.isRepository ? status.entries.length > 0 : false),
+    [status],
+  )
+
+  /** 提交:成功后就地刷新(改动列表清空、ahead 计数 +1)。 */
+  const submit = useCallback(async () => {
+    if (busy) return
+    setBusy('commit')
+    setFeedback(null)
+    try {
+      const result = await commitChanges(workspacePath, message)
+      setMessage('')
+      setFeedback({ kind: 'ok', text: t('reviewCommitted', { head: result.head }) })
+      // 重新拉状态:提交后的改动列表、分支领先数都变了。
+      await refresh()
+    } catch (cause) {
+      const code = cause instanceof GitApiError ? cause.code : ''
+      setFeedback({
+        kind: 'error',
+        text: cause instanceof Error ? cause.message : String(cause),
+        hint: failureHint(code),
+      })
+    } finally {
+      setBusy(null)
+    }
+  }, [busy, message, workspacePath, refresh])
+
+  const runPush = useCallback(async () => {
+    if (busy) return
+    setBusy('push')
+    setFeedback(null)
+    try {
+      const result = await pushChanges(workspacePath)
+      setFeedback({ kind: 'ok', text: `${t('reviewPushSuccess')} · ${result.upstream}` })
+      await refresh()
+    } catch (cause) {
+      const code = cause instanceof GitApiError ? cause.code : ''
+      setFeedback({
+        kind: 'error',
+        text: cause instanceof Error ? cause.message : String(cause),
+        hint: failureHint(code),
+      })
+    } finally {
+      setBusy(null)
+    }
+  }, [busy, workspacePath, refresh])
+
+  /** AI 生成:结果填入编辑框,用户可改后再提交(不自动提交)。 */
+  const generate = useCallback(async () => {
+    if (busy) return
+    if (!selection) {
+      setFeedback({ kind: 'error', text: t('reviewGenerateNeedsModel') })
+      return
+    }
+    generateAbortRef.current?.abort()
+    const controller = new AbortController()
+    generateAbortRef.current = controller
+    setBusy('generate')
+    setFeedback(null)
+    try {
+      const result = await generateCommitMessage(
+        {
+          path: workspacePath,
+          provider: selection.provider,
+          model: selection.model,
+          reasoningEffort: selection.reasoningEffort,
+        },
+        controller.signal,
+      )
+      if (controller.signal.aborted) return
+      setMessage(result.message)
+    } catch (cause) {
+      if (controller.signal.aborted) return
+      const code = cause instanceof GitApiError ? cause.code : ''
+      setFeedback({
+        kind: 'error',
+        text: `${t('reviewGenerateFailed')}:${cause instanceof Error ? cause.message : String(cause)}`,
+        hint: failureHint(code),
+      })
+    } finally {
+      if (generateAbortRef.current === controller) generateAbortRef.current = null
+      setBusy(null)
+    }
+  }, [busy, selection, workspacePath])
 
   const sections = useMemo(
     () => (status?.isRepository ? sectionize(status.entries, source) : []),
@@ -316,6 +439,112 @@ export function ReviewPanel({ workspacePath, sessionId }: ReviewPanelProps) {
           <p className="review-empty-title">{t('loading')}</p>
         </div>
       )}
+
+      {/* 提交区:常驻在面板底部。
+          放在底部而不是顶部,是因为阅读顺序是"先看改动、再写信息、最后提交";
+          常驻而不是点击展开,是因为它就是这个面板的主操作 —— 藏起来会让人
+          以为审查面板仍然只读。 */}
+      {status?.isRepository && (
+        <CommitArea
+          message={message}
+          onMessageChange={setMessage}
+          busy={busy}
+          feedback={feedback}
+          commitEnabled={canCommit({ hasChanges, message, busy: busy !== null })}
+          pushEnabled={canPush(status, busy !== null)}
+          canGenerate={selection != null}
+          onSubmit={() => void submit()}
+          onPush={() => void runPush()}
+          onGenerate={() => void generate()}
+        />
+      )}
+    </div>
+  )
+}
+
+/** 提交区:信息编辑框 + AI 生成 + 提交 + 推送。 */
+function CommitArea({
+  message,
+  onMessageChange,
+  busy,
+  feedback,
+  commitEnabled,
+  pushEnabled,
+  canGenerate,
+  onSubmit,
+  onPush,
+  onGenerate,
+}: {
+  message: string
+  onMessageChange(value: string): void
+  busy: 'commit' | 'push' | 'generate' | null
+  feedback: ActionFeedback | null
+  commitEnabled: boolean
+  pushEnabled: boolean
+  canGenerate: boolean
+  onSubmit(): void
+  onPush(): void
+  onGenerate(): void
+}) {
+  return (
+    <div className="review-commit">
+      {feedback && (
+        <div
+          className={`review-commit-feedback${feedback.kind === 'error' ? ' error' : ''}`}
+          role={feedback.kind === 'error' ? 'alert' : 'status'}
+        >
+          <span className="review-commit-feedback-text">{feedback.text}</span>
+          {feedback.hint && <span className="review-commit-feedback-hint">{feedback.hint}</span>}
+        </div>
+      )}
+      <textarea
+        className="review-commit-input"
+        value={message}
+        rows={2}
+        placeholder={t('reviewCommitPlaceholder')}
+        aria-label={t('reviewCommitPlaceholder')}
+        onChange={(event) => onMessageChange(event.target.value)}
+        onKeyDown={(event) => {
+          // Ctrl/Cmd+Enter 提交:与大多数 Git 客户端一致,避免误触回车。
+          if ((event.ctrlKey || event.metaKey) && event.key === 'Enter' && commitEnabled) {
+            event.preventDefault()
+            onSubmit()
+          }
+        }}
+      />
+      <div className="review-commit-actions">
+        <button
+          type="button"
+          className="review-commit-generate"
+          title={canGenerate ? t('reviewGenerateAction') : t('reviewGenerateNeedsModel')}
+          disabled={busy !== null || !canGenerate}
+          onClick={onGenerate}
+        >
+          {busy === 'generate' ? <IconSpinner size={13} /> : <IconSparkles size={13} />}
+          <span>{busy === 'generate' ? t('reviewGenerateBusy') : t('reviewGenerateAction')}</span>
+        </button>
+        <span className="review-commit-spacer" />
+        <button
+          type="button"
+          className="review-commit-push"
+          title={t('reviewPushAction')}
+          disabled={!pushEnabled}
+          onClick={onPush}
+        >
+          {busy === 'push' ? <IconSpinner size={13} /> : <IconBranch size={13} />}
+          <span>{busy === 'push' ? t('reviewPushBusy') : t('reviewPushAction')}</span>
+        </button>
+        <button
+          type="button"
+          className="review-commit-submit"
+          title={t('reviewCommitAll')}
+          disabled={!commitEnabled}
+          onClick={onSubmit}
+        >
+          {busy === 'commit' ? <IconSpinner size={13} /> : null}
+          <span>{busy === 'commit' ? t('reviewCommitBusy') : t('reviewCommitAction')}</span>
+        </button>
+      </div>
     </div>
   )
 }

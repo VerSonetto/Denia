@@ -877,6 +877,24 @@ const zh = {
   sidePaneDiffTruncated: '差异内容过大，已省略预览。',
   sidePaneDiffUnavailable: '暂时无法预览这个差异。',
 
+  /* ---- 审查面板:提交与推送 ---- */
+  reviewCommitPlaceholder: '提交信息（Ctrl+Enter 提交）',
+  reviewCommitAction: '提交',
+  reviewCommitAll: '提交全部改动',
+  reviewCommitBusy: '提交中…',
+  reviewPushAction: '推送',
+  reviewPushBusy: '推送中…',
+  reviewGenerateAction: 'AI 生成',
+  reviewGenerateBusy: '生成中…',
+  reviewGenerateNeedsModel: '请先在对话输入框选择模型，再使用 AI 生成',
+  reviewGenerateFailed: '生成提交信息失败',
+  reviewCommitSuccess: '已提交',
+  reviewCommitFailed: '提交失败',
+  reviewPushSuccess: '已推送',
+  reviewPushFailed: '推送失败',
+  reviewCommitNoChanges: '没有可提交的改动',
+  reviewCommitted: '已提交 {head}',
+
   /* ---- 工作区文件面板 ---- */
   sidePaneFilesRefresh: '刷新',
   sidePaneFilesFilter: '筛选文件...',
@@ -1764,6 +1782,24 @@ const en: typeof zh = {
   sidePaneDiffBinary: 'Binary file diff cannot be previewed.',
   sidePaneDiffTruncated: 'The diff is too large to preview.',
   sidePaneDiffUnavailable: 'This diff cannot be previewed right now.',
+
+  /* ---- Review panel: commit & push ---- */
+  reviewCommitPlaceholder: 'Commit message (Ctrl+Enter to commit)',
+  reviewCommitAction: 'Commit',
+  reviewCommitAll: 'Commit all changes',
+  reviewCommitBusy: 'Committing…',
+  reviewPushAction: 'Push',
+  reviewPushBusy: 'Pushing…',
+  reviewGenerateAction: 'AI generate',
+  reviewGenerateBusy: 'Generating…',
+  reviewGenerateNeedsModel: 'Pick a model in the composer before using AI generate',
+  reviewGenerateFailed: 'Failed to generate the commit message',
+  reviewCommitSuccess: 'Committed',
+  reviewCommitFailed: 'Commit failed',
+  reviewPushSuccess: 'Pushed',
+  reviewPushFailed: 'Push failed',
+  reviewCommitNoChanges: 'Nothing to commit',
+  reviewCommitted: 'Committed {head}',
 
   /* ---- Workspace files panel ---- */
   sidePaneFilesRefresh: 'Refresh',

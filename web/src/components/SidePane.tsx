@@ -52,6 +52,8 @@ export interface SidePaneProps {
   workspacePath: string | null
   /** 内嵌浏览器是否可用。 */
   supportsBrowser: boolean
+  /** 当前对话选择的模型(审查面板的 AI 生成提交信息复用同一条模型链路)。 */
+  modelSelection?: import('../types').ModelSelection | null
   /** 最近关闭的标签。 */
   recentClosed: import('../sidePane').ClosedTab[]
   /** 面板状态变更回调(由 App 转发到 store)。 */
@@ -76,6 +78,7 @@ export function SidePane({
   collapsed,
   workspacePath,
   supportsBrowser,
+  modelSelection,
   recentClosed,
   onChange,
   onCollapsedChange,
@@ -366,7 +369,11 @@ export function SidePane({
                   >
                     {tab.type === 'review' &&
                       (workspacePath ? (
-                        <ReviewSlot workspacePath={workspacePath} sessionId={sessionId} />
+                        <ReviewSlot
+                          workspacePath={workspacePath}
+                          sessionId={sessionId}
+                          selection={modelSelection ?? null}
+                        />
                       ) : (
                         <div className="pane-placeholder">{t('sidePaneNeedsWorkspace')}</div>
                       ))}
@@ -415,10 +422,18 @@ function FileTreeSlot({ workspacePath, sessionId }: { workspacePath: string; ses
   )
 }
 
-function ReviewSlot({ workspacePath, sessionId }: { workspacePath: string; sessionId: string | null }) {
+function ReviewSlot({
+  workspacePath,
+  sessionId,
+  selection,
+}: {
+  workspacePath: string
+  sessionId: string | null
+  selection: import('../types').ModelSelection | null
+}) {
   return (
     <Suspense fallback={<div className="pane-placeholder">{t('loading')}</div>}>
-      <LazyReviewPanel workspacePath={workspacePath} sessionId={sessionId} />
+      <LazyReviewPanel workspacePath={workspacePath} sessionId={sessionId} selection={selection} />
     </Suspense>
   )
 }

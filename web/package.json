@@ -5,8 +5,8 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "check": "node scripts/check-hooks.mjs && node scripts/check-fold.mjs && node scripts/check-turn-usage.mjs && node scripts/check-tool-display.mjs && node scripts/check-stick.mjs && node scripts/check-side-pane.mjs && node scripts/check-side-pane-render.mjs && node scripts/check-file-tree.mjs",
-    "build": "node scripts/check-hooks.mjs && node scripts/check-stick.mjs && node scripts/check-side-pane.mjs && node scripts/check-side-pane-render.mjs && node scripts/check-file-tree.mjs && tsc -b && vite build",
+    "check": "node scripts/check-hooks.mjs && node scripts/check-fold.mjs && node scripts/check-turn-usage.mjs && node scripts/check-tool-display.mjs && node scripts/check-stick.mjs && node scripts/check-side-pane.mjs && node scripts/check-side-pane-render.mjs && node scripts/check-file-tree.mjs && node scripts/check-review-commit.mjs",
+    "build": "node scripts/check-hooks.mjs && node scripts/check-stick.mjs && node scripts/check-side-pane.mjs && node scripts/check-side-pane-render.mjs && node scripts/check-file-tree.mjs && node scripts/check-review-commit.mjs && tsc -b && vite build",
     "preview": "vite preview"
   },
   "dependencies": {
