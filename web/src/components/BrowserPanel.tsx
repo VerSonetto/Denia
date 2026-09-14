@@ -54,7 +54,21 @@ interface ToastState {
  * AI 通过 browser 工具与用户操作同一实例;用户在侧栏可导航/点选/滚动/输入、
  * 处理页面弹窗、拾取元素信息、截取画面。
  */
-export default function BrowserPanel({ onClose }: { onClose?: () => void }) {
+export default function BrowserPanel({
+  onClose,
+  visible = true,
+}: {
+  onClose?: () => void
+  /**
+   * 面板标签是否处于激活态。
+   *
+   * 切到别的标签时它是 false。用途只有一个:不再消费画面帧 —— 帧是整条
+   * 广播通道里最重的负载(每帧一张 JPEG),不可见的标签继续收帧纯属浪费。
+   * 这与 ZCode 的 `residency: suspended` 是同一个思路,只是 denia 的浏览器
+   * 是单实例,不必真挂起进程,停止消费即可(订阅断开,服务端自然不再推)。
+   */
+  visible?: boolean
+}) {
   const [state, setState] = useState<BrowserState | null>(null)
   const [frame, setFrame] = useState<string | null>(null)
   // 地址栏草稿:跟随活跃 tab 同步,点击后进入编辑态。
@@ -118,6 +132,12 @@ export default function BrowserPanel({ onClose }: { onClose?: () => void }) {
 
   /* ---- 状态订阅(时序纪律:订阅先建立,再开 screencast) ---- */
 
+  // 可见性进 ref:订阅只建立一次,而 visible 会随标签切换变化。
+  // 用 ref 而不是把 visible 加进依赖 —— 后者会反复拆建 SSE 订阅,
+  // 每次重建都会丢掉重连窗口里的事件。
+  const visibleRef = useRef(visible)
+  visibleRef.current = visible
+
   useEffect(() => {
     let disposed = false
     // 面板挂载即重拉一次状态:侧栏是按 AI 触发(visualMode)自动展开的,
@@ -150,6 +170,11 @@ export default function BrowserPanel({ onClose }: { onClose?: () => void }) {
             // StartScreencast 自动迁移流),**不要按 tabId 过滤**:面板刚挂载
             // 时 activeTabRef 尚为 null,首帧早于状态刷新,过滤会永久丢帧,
             // 画面停在"启动浏览器"空态。
+            //
+            // 但**要按面板可见性过滤**:切到别的标签后画面看不见,继续
+            // 每秒重渲几十帧纯属浪费(JPEG 解码 + React setState)。
+            // 重新可见时靠下面的 effect 补一帧最新画面。
+            if (!visibleRef.current) break
             setFrame(`data:image/jpeg;base64,${event.data}`)
             if (event.viewport) {
               const next = event.viewport
@@ -218,8 +243,22 @@ export default function BrowserPanel({ onClose }: { onClose?: () => void }) {
     }
   }, [])
 
-  /* ---- 地址栏跟随活跃 tab(编辑中不打断) ---- */
+  /* ---- 重新可见:补一帧最新画面 ---- */
 
+  // 不可见期间的 frame 事件被丢掉了,切回来时画面停在旧帧。这里主动
+  // 重开一次 screencast(幂等),让服务端立刻推当前画面。
+  useEffect(() => {
+    if (!visible) return
+    if (!state?.running) return
+    void browserCommand({
+      method: 'startScreencast',
+      tabId: activeTabRef.current ?? undefined,
+    }).catch(() => {})
+    // 只在"变为可见"时触发;state.running 变化由订阅路径覆盖。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [visible])
+
+  /* ---- 地址栏跟随活跃 tab(编辑中不打断) ---- */
   const active = state?.tabs.find((tab) => tab.tabId === state?.activeTabId)
   const activeUrl = active?.url ?? ''
   useEffect(() => {

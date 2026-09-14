@@ -1,0 +1,352 @@
+/* 审查面板:来源切换 + 文件列表 + Diff 正文。
+ *
+ * 信息层级抄 ZCode 的 `MOt`:头部(来源 + 刷新)→ 元信息(分支)→
+ * 列表(分组 + 行 + 展开的 Diff)。视觉用 denia 自己的 token,不搬 ZCode 的
+ * Tailwind 类 —— 两套 token 体系混用会让暗/亮主题下出现不协调的灰阶。 */
+
+.review-panel {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  background: var(--bg-base);
+}
+
+/* ---- 头部:来源切换 ---- */
+
+.review-head {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border-l1);
+}
+
+.review-sources {
+  display: flex;
+  flex: 1 1 auto;
+  min-width: 0;
+  gap: 2px;
+  padding: 2px;
+  border: 1px solid var(--border-l1);
+  border-radius: var(--r-sm);
+  background: var(--bg-layer-2);
+}
+
+.review-source {
+  flex: 1 1 0;
+  min-width: 0;
+  padding: 4px 8px;
+  border: none;
+  border-radius: var(--r-xs);
+  background: transparent;
+  color: var(--label-tertiary);
+  font-size: 12px;
+  font-family: inherit;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: pointer;
+  transition: background 0.12s var(--ease), color 0.12s var(--ease);
+}
+
+.review-source:hover {
+  color: var(--label-secondary);
+}
+
+.review-source[aria-selected='true'] {
+  background: var(--bg-layer-3);
+  color: var(--label-primary);
+}
+
+.review-refresh {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border: 1px solid var(--border-l1);
+  border-radius: var(--r-xs);
+  background: transparent;
+  color: var(--label-tertiary);
+  cursor: pointer;
+  transition: background 0.12s var(--ease), color 0.12s var(--ease);
+}
+
+.review-refresh:hover:not(:disabled) {
+  background: var(--hover-fill);
+  color: var(--label-primary);
+}
+
+.review-refresh:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+/* ---- 元信息:分支 + 领先/落后 ---- */
+
+.review-meta {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--border-l1);
+  color: var(--label-tertiary);
+  font-size: 11px;
+}
+
+.review-branch {
+  display: inline-flex;
+  min-width: 0;
+  align-items: center;
+  gap: 4px;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.review-ahead-behind {
+  flex: 0 0 auto;
+  font-family: var(--font-mono);
+  letter-spacing: 0.02em;
+}
+
+/* ---- 筛选 ---- */
+
+.review-filter {
+  flex: 0 0 auto;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border-l1);
+}
+
+.review-filter-input {
+  width: 100%;
+  padding: 5px 9px;
+  border: 1px solid var(--border-l1);
+  border-radius: var(--r-xs);
+  background: var(--input-major);
+  color: var(--label-primary);
+  font-size: 12px;
+  font-family: inherit;
+}
+
+.review-filter-input::placeholder {
+  color: var(--label-caption);
+}
+
+.review-filter-input:focus {
+  outline: none;
+  border-color: var(--border-l3);
+}
+
+/* ---- 列表 ---- */
+
+.review-list {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+
+.review-section {
+  display: block;
+}
+
+.review-section-title {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  padding: 5px 12px;
+  background: var(--bg-layer-2);
+  border-bottom: 1px solid var(--border-l1);
+  color: var(--label-tertiary);
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.02em;
+}
+
+.review-section-count {
+  padding: 0 5px;
+  border-radius: var(--r-pill);
+  background: var(--bg-layer-3);
+  color: var(--label-caption);
+  font-family: var(--font-mono);
+  font-size: 10px;
+}
+
+/* ---- 单行 ---- */
+
+.review-row {
+  border-bottom: 1px solid var(--border-l1);
+}
+
+.review-row-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  /* 行高 28px:比 ZCode 的 32px 略紧,因为 denia 的面板默认更窄。 */
+  min-height: 28px;
+  padding: 0 12px;
+  border: none;
+  background: transparent;
+  color: var(--label-secondary);
+  font-size: 12px;
+  font-family: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.1s var(--ease);
+}
+
+.review-row-head:hover {
+  background: var(--hover-fill);
+}
+
+.review-row-icon {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  color: var(--label-caption);
+}
+
+.review-row-path {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  /* 路径用等宽字体:文件名对齐更好读,也和 diff 正文一致。 */
+  font-family: var(--font-mono);
+}
+
+.review-row-renamed {
+  color: var(--label-caption);
+}
+
+.review-row-status {
+  flex: 0 0 auto;
+  width: 14px;
+  text-align: center;
+  color: var(--label-tertiary);
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+
+.review-row-chevron {
+  flex: 0 0 auto;
+  color: var(--label-caption);
+  transition: transform 0.15s var(--ease);
+}
+
+.review-row-chevron.open {
+  transform: rotate(180deg);
+}
+
+/* ---- Diff 正文 ---- */
+
+.review-diff {
+  background: var(--code-block);
+  border-top: 1px solid var(--border-l1);
+}
+
+.review-diff-hint {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 10px 12px;
+  color: var(--label-tertiary);
+  font-size: 12px;
+}
+
+.review-diff-hint.error {
+  color: var(--danger);
+}
+
+.review-patch {
+  margin: 0;
+  padding: 6px 0;
+  /* 横向滚动交给 pre 自己:长行不折行,否则 diff 的列对齐会散。 */
+  overflow-x: auto;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  line-height: 1.55;
+}
+
+.review-line {
+  padding: 0 12px;
+  white-space: pre;
+  color: var(--label-secondary);
+}
+
+.review-line.add {
+  background: color-mix(in srgb, var(--success-fg) 12%, transparent);
+  color: var(--success-fg);
+}
+
+.review-line.del {
+  background: color-mix(in srgb, var(--danger) 12%, transparent);
+  color: var(--danger);
+}
+
+.review-line.hunk {
+  background: var(--bg-layer-2);
+  color: var(--violet-fg);
+}
+
+.review-line.meta {
+  color: var(--label-caption);
+}
+
+/* ---- 空态 ---- */
+
+.review-empty {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 24px 20px;
+  color: var(--label-caption);
+  text-align: center;
+}
+
+.review-empty-title {
+  margin: 0;
+  color: var(--label-secondary);
+  font-size: 13px;
+}
+
+.review-empty-desc {
+  margin: 0;
+  max-width: 260px;
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.review-empty-line {
+  margin: 0;
+  padding: 14px 12px;
+  color: var(--label-caption);
+  font-size: 12px;
+  text-align: center;
+}
+
+.review-error {
+  margin: 0;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--danger-border);
+  background: var(--danger-soft);
+  color: var(--danger);
+  font-size: 12px;
+  line-height: 1.5;
+}

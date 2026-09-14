@@ -49,6 +49,7 @@ import {
   IconFile,
   IconFolder,
   IconImage,
+  IconPanelOpen,
   IconPlus,
   IconPaperclip,
   IconSend,
@@ -199,6 +200,8 @@ export default function SessionsPage({
   onSelectWorkspace,
   onOpenPicker,
   onAddWorkspace,
+  sidePaneOpen = false,
+  onToggleSidePane,
 }: {
   activeId: string | null
   locked: boolean
@@ -206,6 +209,10 @@ export default function SessionsPage({
   onSelectWorkspace: (ws: WorkspaceRecord) => void
   onOpenPicker: () => void
   onAddWorkspace: () => void
+  /** 右侧面板是否展开(切换按钮的激活态)。 */
+  sidePaneOpen?: boolean
+  /** 切换右侧面板。 */
+  onToggleSidePane?: () => void
 }) {
   const sessions = useSessions()
   const workspaces = useWorkspaces()
@@ -2235,6 +2242,20 @@ export default function SessionsPage({
           <OpenInApp
             cwd={activeSession?.cwd_alive === false ? null : activeSession?.cwd ?? null}
           />
+          {/* 右侧面板开关:与 ZCode 的工作区头部按钮同位置(最右、紧邻导出)。 */}
+          {onToggleSidePane && (
+            <button
+              type="button"
+              className={`icon-btn session-pane-btn${sidePaneOpen ? ' active' : ''}`}
+              title={t('sidePaneToggle')}
+              aria-label={sidePaneOpen ? t('sidePaneCollapse') : t('sidePaneExpand')}
+              aria-pressed={sidePaneOpen}
+              data-testid="side-pane-toggle"
+              onClick={onToggleSidePane}
+            >
+              <IconPanelOpen size={15} />
+            </button>
+          )}
           <div className={`session-export${exportOpen ? ' open' : ''}`}>
             <button
               type="button"

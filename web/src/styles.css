@@ -6501,12 +6501,12 @@ button.btn.form-action {
   }
 }
 
-/* ---------- 浏览器侧栏布局 ----------
- * 面板本体样式在 components/BrowserPanel.css(随懒加载分包);
+/* ---------- 右侧面板布局(ZCode 式多标签工作区) ----------
+ * 面板本体样式在 components/SidePane.css(与标签栏一起);
  * 这里只保留与整体布局耦合的主行结构。
  */
 
-/* 常驻侧栏形态(ZCode 式):聊天区缩窄,右侧并排实时画面 */
+/* 常驻侧栏形态:聊天区缩窄,右侧并排多标签工作区 */
 .main-row {
   display: flex;
   flex: 1;
@@ -6517,6 +6517,18 @@ button.btn.form-action {
 .main-row .page-pane {
   flex: 1 1 auto;
   min-width: 0;
+}
+
+/* 面板由自身 width 驱动(拖拽调宽写内联 style),这里不设 flex 基准,
+ * 否则拖拽宽度会被 flex 布局重新分配掉。 */
+.main-row .side-pane {
+  flex: 0 0 auto;
+}
+
+/* 会话头部右侧面板开关:激活态与其它 icon-btn 的 active 视觉一致。 */
+.session-pane-btn.active {
+  background: var(--active-fill);
+  color: var(--label-primary);
 }
 
 

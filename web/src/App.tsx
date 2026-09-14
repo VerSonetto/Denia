@@ -32,6 +32,12 @@ import {
   useWorkspaces,
 } from './appStore'
 import { useBrowserSidebar } from './hooks/useBrowserSidebar'
+import { useSidePaneController, useTerminalReconcile } from './hooks/useSidePane'
+import { SidePane } from './components/SidePane'
+import { TerminalHost } from './components/TerminalHost'
+import { closeTerminal } from './terminalApi'
+import { dropScope, peekSidePane } from './sidePaneStore'
+import type { SidePaneTab } from './sidePane'
 import {
   IconCaretRight,
   IconClose,
@@ -81,9 +87,102 @@ export default function App() {
   const runningIds = useRunningIds()
 
   const [settingsOpen, setSettingsOpen] = useState(false)
-  // 浏览器侧栏编排(会话绑定 / 收尾自动销毁 / 刷新恢复)全部在 hook 内,
-  // App 只负责按 open 渲染。
-  const { open: browserOpen, userClose: closeBrowserSidebar } = useBrowserSidebar(activeId)
+  // 浏览器侧栏编排(会话绑定 / 收尾自动销毁 / 刷新恢复)全部在 hook 内。
+  // 面板标签现在统一由 SidePane 承载,所以这里只用它的 `userClose`
+  // 把"用户手动收起浏览器"这个意图转达给 hook(停止 AI 自动重开)。
+  const { userClose: closeBrowserSidebar } = useBrowserSidebar(activeId)
+
+  /* ---- 右侧面板(ZCode 式多标签工作区) ---- */
+
+  // 面板归属:当前会话的工作区路径。会话头 cwd 不可变,所以直接取。
+  const activeSessionForPane = activeId
+    ? (sessions.find((s) => s.id === activeId) ?? null)
+    : null
+  // 没有活跃会话(空白态)时退回"待发工作区":终端要有起点目录,
+  // 而用户在空白页也已经选好了工作区。
+  const paneWorkspacePath = activeSessionForPane?.cwd ?? getActiveWorkspace()?.path ?? null
+  const pane = useSidePaneController(activeId, paneWorkspacePath)
+
+  // 启动/切会话时对账终端:清掉指向已消失 PTY 的僵尸标签。
+  useTerminalReconcile(activeId, true, (liveIds) => {
+    const live = new Set(liveIds)
+    pane.update((current) => {
+      const stale = current.tabs.filter(
+        (tab) => tab.type === 'terminal' && !live.has(tab.id),
+      )
+      if (stale.length === 0) return current
+      const staleIds = new Set(stale.map((tab) => tab.id))
+      const tabs = current.tabs.filter((tab) => !staleIds.has(tab.id))
+      if (tabs.length === 0) return { tabs: [], activeTabId: '' }
+      return {
+        tabs,
+        activeTabId: tabs.some((tab) => tab.id === current.activeTabId)
+          ? current.activeTabId
+          : (tabs[tabs.length - 1]?.id ?? ''),
+      }
+    })
+  })
+
+  /** 新建一个终端标签。 */
+  const openTerminalTab = useCallback(() => {
+    pane.openPanel('terminal', { cwd: paneWorkspacePath ?? undefined })
+  }, [pane, paneWorkspacePath])
+
+  /** 终端进程退出:抄 ZCode 的 `lMt` —— 最后一个终端退出时连带收起面板。 */
+  const handleTerminalExit = useCallback(
+    (tabId: string, _exitCode: number) => {
+      // 不自动关标签:用户可能还要看退出前的输出。只在最后一个终端退出
+      // 且面板里没有别的标签时收起面板,避免留一个空壳。
+      const current = pane.state
+      const remaining = current.tabs.filter((tab) => tab.id !== tabId)
+      if (remaining.length === 0) {
+        // 没有别的标签:收起面板(标签保留,用户可以再展开看到退出画面)。
+        pane.setCollapsed(true)
+      }
+    },
+    [pane],
+  )
+
+  /** shell 解析出来后回填标签标题。 */
+  const handleTerminalTitle = useCallback(
+    (tabId: string, title: string) => {
+      pane.update((current) => {
+        const tab = current.tabs.find((item) => item.id === tabId)
+        if (!tab || tab.title === title) return current
+        return {
+          ...current,
+          tabs: current.tabs.map((item) =>
+            item.id === tabId ? { ...item, title } : item,
+          ),
+        }
+      })
+    },
+    [pane],
+  )
+
+  /** 关闭一个终端标签:同时关掉服务端 PTY(否则进程泄漏)。 */
+  const handleCloseTerminalTab = useCallback((tabs: SidePaneTab[]) => {
+    for (const tab of tabs) {
+      if (tab.type !== 'terminal') continue
+      void closeTerminal(tab.id).catch(() => {
+        // 服务端已经没有这个终端(重启过/已被回收):不是错误。
+      })
+    }
+  }, [])
+
+  /**
+   * 会话被删除后的面板收尾。
+   *
+   * 两件事都必须做,否则都会泄漏:
+   * - **终端进程**:标签没了但 PTY 还在跑,进程与内存都不回收;
+   * - **localStorage 桶**:该 scope 永远不会再被读到,却仍占着分桶上限名额
+   *   (`SCOPE_LIMIT`),长期使用会把真正在用的 scope 挤出去。
+   */
+  const cleanupSessionPane = useCallback((sessionId: string) => {
+    const tabs = peekSidePane(sessionId).tabs
+    handleCloseTerminalTab(tabs)
+    dropScope(sessionId)
+  }, [handleCloseTerminalTab])
   const [sidebarSearchOpen, setSidebarSearchOpen] = useState(false)
   const [sidebarExpandAllTick, setSidebarExpandAllTick] = useState(0)
   const [sidebarAllExpanded, setSidebarAllExpanded] = useState(false)
@@ -490,13 +589,19 @@ export default function App() {
         desc: t('confirmDeleteWorkspaceDesc', { name: ws.title }),
         danger: true,
         onConfirm: () => {
+          // 工作区删除会级联删掉它的全部会话,所以它们的面板桶与终端
+          // 进程也要一起收掉 —— 只删服务端数据会留下跑着的 PTY。
+          const doomed = sessions.filter((s) => s.cwd === ws.path).map((s) => s.id)
           void deleteWorkspaceAction(ws.id)
-            .then(() => notify('ok', t('workspaceDeleted')))
+            .then(() => {
+              for (const id of doomed) cleanupSessionPane(id)
+              notify('ok', t('workspaceDeleted'))
+            })
             .catch((error) => notify('err', error instanceof Error ? error.message : String(error)))
         },
       })
     },
-    [],
+    [sessions, cleanupSessionPane],
   )
 
   const deleteSession = useCallback((session: SessionSummary) => {
@@ -506,11 +611,17 @@ export default function App() {
       danger: true,
       onConfirm: () => {
         void deleteSessionAction(session.id)
-          .then(() => notify('ok', t('sessionDeleted')))
+          .then(() => {
+            // 会话没了,它的面板桶也就永远不会再被读到:清掉,
+            // 免得长期使用后 localStorage 里堆满孤儿桶、把在用的 scope
+            // 挤出上限。同时把该会话的终端进程一并回收。
+            cleanupSessionPane(session.id)
+            notify('ok', t('sessionDeleted'))
+          })
           .catch((error) => notify('err', error instanceof Error ? error.message : String(error)))
       },
     })
-  }, [])
+  }, [cleanupSessionPane])
 
   const deleteUngrouped = useCallback(
     (items: SessionSummary[]) => {
@@ -526,6 +637,7 @@ export default function App() {
                 throw new Error(t('sessionRunningDelete'))
               }
               await deleteSessionAction(session.id)
+              cleanupSessionPane(session.id)
             }
           })()
             .then(() => notify('ok', t('sessionDeleted')))
@@ -533,7 +645,7 @@ export default function App() {
         },
       })
     },
-    [runningIds],
+    [runningIds, cleanupSessionPane],
   )
 
   const openSession = useCallback((id: string, wsId?: string) => {
@@ -703,16 +815,57 @@ export default function App() {
                 else setPickerOpen(true)
               }}
               onAddWorkspace={openDirectoryFlow}
+              sidePaneOpen={!pane.collapsed && pane.state.tabs.length > 0}
+              onToggleSidePane={() => {
+                // 从折叠态点开时,如果还没有任何标签,顺手开一个审查面板 ——
+                // 否则用户点了按钮只看到引导页,还要再点一次才有内容。
+                if (pane.collapsed && pane.state.tabs.length === 0) {
+                  pane.openPanel('review')
+                  return
+                }
+                pane.toggle()
+              }}
             />
           </div>
-          {browserOpen && (
-            <aside className="browser-sidebar" data-open="true">
+          <SidePane
+            sessionId={activeId}
+            state={pane.state}
+            collapsed={pane.collapsed}
+            workspacePath={paneWorkspacePath}
+            supportsBrowser={true}
+            recentClosed={pane.recentClosed}
+            onChange={(updater) => pane.update(updater)}
+            onCollapsedChange={(next) => pane.setCollapsed(next)}
+            onRememberClosed={(tabs) => {
+              // 终端标签关闭时连带关掉服务端 PTY:标签没了但进程还在跑
+              // 就是泄漏。TerminalPanel 卸载时也会关一次(幂等),
+              // 这里显式做是为了在"标签被移除但组件还没卸载"的窗口里
+              // 立刻释放进程。
+              handleCloseTerminalTab(tabs)
+              pane.rememberClosed(tabs)
+            }}
+            onForgetClosed={(id) => pane.forgetClosed(id)}
+            onOpenPanel={(type) => {
+              if (type === 'terminal') openTerminalTab()
+              else pane.openPanel(type)
+            }}
+            renderTerminals={(tabs: SidePaneTab[], activeId2: string, paneVisible: boolean) => (
+              <TerminalHost
+                tabs={tabs}
+                activeId={activeId2}
+                cwd={paneWorkspacePath ?? ''}
+                paneVisible={paneVisible}
+                onTitle={handleTerminalTitle}
+                onExit={handleTerminalExit}
+                onNewTerminal={openTerminalTab}
+              />
+            )}
+            renderBrowser={(_tab, visible) => (
               <Suspense fallback={<div className="empty-hint">{t('loading')}</div>}>
-                {/* 面板自带完整 chrome(tab 条右侧收编收起按钮),不再套外层标题行 */}
-                <LazyBrowserPanel onClose={closeBrowserSidebar} />
+                <LazyBrowserPanel visible={visible} onClose={closeBrowserSidebar} />
               </Suspense>
-            </aside>
-          )}
+            )}
+          />
         </div>
       </main>
       {settingsOpen && (

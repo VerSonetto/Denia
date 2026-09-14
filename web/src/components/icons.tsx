@@ -4,12 +4,13 @@ import type { ReactNode } from 'react'
 
 import { COMMAND_GLYPHS } from '../lib/slashGlyphs'
 
-type IconProps = { size?: number }
+type IconProps = { size?: number; className?: string }
 
 function Svg({
   size = 16,
   children,
   viewBox = '0 0 16 16',
+  className,
 }: IconProps & { children: ReactNode; viewBox?: string }) {
   return (
     <svg
@@ -18,6 +19,7 @@ function Svg({
       viewBox={viewBox}
       fill="none"
       aria-hidden="true"
+      className={className}
       style={{ flex: 'none', display: 'block' }}
     >
       {children}

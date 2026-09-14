@@ -1,0 +1,97 @@
+/* 终端面板:xterm 宿主 + 错误/退出提示。
+ *
+ * 面板外壳(padding、边框)由 SidePane 提供;这里只管 xterm 的挂载点。
+ * xterm 需要**确定的像素尺寸**才能算 cols/rows,所以宿主必须 h-full 且
+ * 不能被内容撑开(overflow:hidden)。 */
+
+.terminal-panel {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  background: var(--code-block);
+}
+
+.terminal-host {
+  flex: 1 1 auto;
+  min-height: 0;
+  width: 100%;
+  /* xterm 会自己往里塞 canvas/rows;宿主不能滚动,滚动由 xterm 的
+   * .xterm-viewport 负责,否则会出现双滚动条。 */
+  overflow: hidden;
+  padding: 6px 2px 2px 8px;
+}
+
+/* xterm 自身样式微调 */
+
+.terminal-host .xterm {
+  height: 100%;
+  padding: 0;
+}
+
+.terminal-host .xterm-viewport {
+  /* 隐藏原生滚动条:14px 的全局滚动条在终端里太占地方,
+   * 且与 xterm 的 scrollback 视觉冲突。滚轮仍然可用。 */
+  scrollbar-width: none;
+}
+
+.terminal-host .xterm-viewport::-webkit-scrollbar {
+  width: 0;
+  height: 0;
+  display: none;
+}
+
+/* 聚焦时不要全局的 focus-visible ring:终端整个区域就是输入焦点,
+ * 加一圈描边会显得整个面板被选中。 */
+.terminal-host .xterm:focus,
+.terminal-host .xterm:focus-visible {
+  outline: none;
+  box-shadow: none;
+}
+
+/* ---- 错误条 ---- */
+
+.terminal-error {
+  flex: 0 0 auto;
+  padding: 6px 10px;
+  border-top: 1px solid var(--danger-border);
+  background: var(--danger-soft);
+  color: var(--danger);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+/* ---- 退出条 ---- */
+
+.terminal-exited {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 10px;
+  border-top: 1px solid var(--border-l2);
+  background: var(--bg-layer-2);
+  color: var(--label-tertiary);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.terminal-exited-action {
+  flex: 0 0 auto;
+  padding: 2px 8px;
+  border: 1px solid var(--border-l2);
+  border-radius: var(--r-xs);
+  background: var(--bg-layer-3);
+  color: var(--label-secondary);
+  font-size: 12px;
+  cursor: pointer;
+  transition: background 0.12s var(--ease), color 0.12s var(--ease);
+}
+
+.terminal-exited-action:hover {
+  background: var(--hover-fill);
+  color: var(--label-primary);
+}
