@@ -48,8 +48,9 @@ async fn upload_attachment(
             "session id is not usable",
         ));
     };
-    // 会话必须已存在(上传只属于真实会话)。
-    if !state.sessions.load(&session_id).is_ok() {
+    // 会话必须已存在(上传只属于真实会话)。只看文件在不在:完整 load
+    // 会把整份日志解析一遍还会写盘,与这一句判断的代价完全不成比例。
+    if !state.sessions.exists(&session_id) {
         return Err(ApiError::new(
             StatusCode::NOT_FOUND,
             "session/not-found",

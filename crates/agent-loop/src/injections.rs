@@ -45,37 +45,47 @@ pub(crate) struct InjectionBaselines {
 impl InjectionBaselines {
     /// 从日志恢复注入通道的基准(通道字段优先,旧日志走前缀判断)。
     pub(crate) fn restore(state: &TurnState) -> Self {
+        // 一次进锁把 5 个通道基准全部扫出来:每调一次 events() 就是一次
+        // 整条日志的克隆,而这里原本要克隆 4~5 次。
+        let session = &state.session;
+        let (capability_fallback, workspace_baseline, skill_catalog) = session.with_events(|events| {
+            let capability_fallback = events.iter().rev().find_map(|e| match &e.event {
+                SessionEvent::UserMessage {
+                    text,
+                    injected: true,
+                    ..
+                } if text.starts_with("[denia 能力上下文]") => Some(text.clone()),
+                _ => None,
+            });
+            (
+                capability_fallback,
+                restore_injected_text(events, WORKSPACE_PREFIX),
+                restore_injected_text(events, SKILL_CATALOG_PREFIX),
+            )
+        });
         Self {
-            capability_context: last_injected_channel(&state.session, "capability").or_else(
-                || {
-                    state.session.events().iter().rev().find_map(|e| match &e.event {
-                        SessionEvent::UserMessage {
-                            text,
-                            injected: true,
-                            ..
-                        } if text.starts_with("[denia 能力上下文]") => Some(text.clone()),
-                        _ => None,
-                    })
-                },
-            ),
-            workspace_baseline: restore_injected_text(&state.session.events(), WORKSPACE_PREFIX),
-            skill_catalog: restore_injected_text(&state.session.events(), SKILL_CATALOG_PREFIX),
-            project_memory: last_injected_channel(&state.session, MEMORY_CHANNEL),
-            goal: last_injected_channel(&state.session, GOAL_CHANNEL),
+            capability_context: last_injected_channel(session, "capability")
+                .or(capability_fallback),
+            workspace_baseline,
+            skill_catalog,
+            project_memory: last_injected_channel(session, MEMORY_CHANNEL),
+            goal: last_injected_channel(session, GOAL_CHANNEL),
         }
     }
 }
 
 /// 按通道名取日志中最后一条注入消息(新事件模型:channel 字段)。
 pub(crate) fn last_injected_channel(session: &Session, channel: &str) -> Option<String> {
-    session.events().iter().rev().find_map(|envelope| match &envelope.event {
-        SessionEvent::UserMessage {
-            text,
-            injected: true,
-            channel: Some(name),
-            ..
-        } if name == channel => Some(text.clone()),
-        _ => None,
+    session.with_events(|events| {
+        events.iter().rev().find_map(|envelope| match &envelope.event {
+            SessionEvent::UserMessage {
+                text,
+                injected: true,
+                channel: Some(name),
+                ..
+            } if name == channel => Some(text.clone()),
+            _ => None,
+        })
     })
 }
 

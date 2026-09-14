@@ -23,6 +23,13 @@ const DEFAULT_READ_LIMIT: u64 = 400;
 /// 单行最大保留字符数:超长行(如压缩过的 JS)截断并标注,防止一行撑爆预算。
 const MAX_LINE_CHARS: usize = 2_000;
 
+/// 读状态里为"压缩后恢复注入"保留正文的单文件上限。
+///
+/// 正文只在压缩后重新注入时被消费;为它无上限地常驻每个读过的文件,会让
+/// 长会话的内存随"读过的文件数 × 文件大小"增长。超限的文件压缩后降级为
+/// "需重读"提示 —— 代价是一次读取,收益是内存不再随会话变长而膨胀。
+const MAX_RETAINED_CONTENT_BYTES: usize = 64 * 1024;
+
 /// 图片魔数表:(magic 前缀, mime)。
 const IMAGE_MAGICS: &[(&[u8], &str)] = &[
     (&[0x89, b'P', b'N', b'G'], "image/png"),
@@ -30,6 +37,36 @@ const IMAGE_MAGICS: &[(&[u8], &str)] = &[
     (&[0x47, 0x49, 0x46, 0x38], "image/gif"),
     (&[0x42, 0x4D], "image/bmp"),
 ];
+
+/// 嗅探只需文件头:魔数最长 4 字节,尺寸字段最远落在 BMP 的第 26 字节。
+const SNIFF_HEADER_BYTES: usize = 32;
+
+/// 读取文件头(最多 [`SNIFF_HEADER_BYTES`] 字节);读不到返回 `None`。
+///
+/// 早期实现为嗅探魔数整读整个文件 —— 读一份几十 MB 的日志只为看前 12 字节,
+/// 峰值内存白白多出一份完整文件内容,而文本分支随后还会自己再打开一次。
+fn read_header(path: &std::path::Path) -> Option<Vec<u8>> {
+    use std::io::Read;
+    let mut file = std::fs::File::open(path).ok()?;
+    let mut buffer = vec![0u8; SNIFF_HEADER_BYTES];
+    let mut filled = 0usize;
+    while filled < buffer.len() {
+        match file.read(&mut buffer[filled..]) {
+            Ok(0) => break,
+            Ok(count) => filled += count,
+            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(_) => return None,
+        }
+    }
+    buffer.truncate(filled);
+    Some(buffer)
+}
+
+/// 文件头是否像一张受支持的图片(纯魔数判定,不解析尺寸)。
+fn looks_like_image(header: &[u8]) -> bool {
+    IMAGE_MAGICS.iter().any(|(magic, _)| header.starts_with(magic))
+        || (header.len() >= 12 && &header[8..12] == b"WEBP")
+}
 
 /// 嗅探图片类型并尽力解析尺寸(失败给 None)。
 /// WebP 需要 8..12 的 "WEBP" 标记,单独判断。
@@ -203,50 +240,63 @@ impl Tool for ReadFileTool {
                 );
             }
         };
-        // 图片嗅探 + 文本读取都是阻塞 IO,整体丢进 blocking 池。
+        // 图片嗅探只看文件头;确认是图片才整读(文本分支自己会打开文件,
+        // 这里多读一份完整内容纯属浪费)。
         let path_for_sniff = path.clone();
-        let sniffed = tokio::task::spawn_blocking(move || std::fs::read(&path_for_sniff).ok())
+        let header = tokio::task::spawn_blocking(move || read_header(&path_for_sniff))
             .await
             .ok()
             .flatten();
         // 图片文件:不走文本截断,而是作为视觉输入注入会话。
-        if let Some(data) = &sniffed
-            && let Some((mime, width, height)) = sniff_image(data)
+        // 只有"确实是受支持的图片"才在这里返回;头像图片但解析/读取不成
+        // (被删、截断的 webp 头等)一律落回文本路径 —— 与原实现一致。
+        if let Some(header) = &header
+            && looks_like_image(header)
         {
-            if !ctx.vision_supported {
-                return tool_error(
-                    format!(
-                        "图片需要识图模型:{} 是 {}(尺寸 {:?}x{:?}),当前模型未标记为可识图",
-                        args.path, mime, width, height
-                    ),
-                    "切换到支持图片输入的模型后再读取该文件",
-                );
+            let path_for_image = path.clone();
+            let data = tokio::task::spawn_blocking(move || std::fs::read(&path_for_image))
+                .await
+                .ok()
+                .and_then(|result| result.ok());
+            if let Some(data) = data
+                && let Some((mime, width, height)) = sniff_image(&data)
+            {
+                if !ctx.vision_supported {
+                    return tool_error(
+                        format!(
+                            "图片需要识图模型:{} 是 {}(尺寸 {:?}x{:?}),当前模型未标记为可识图",
+                            args.path, mime, width, height
+                        ),
+                        "切换到支持图片输入的模型后再读取该文件",
+                    );
+                }
+                let b64 =
+                    base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &data);
+                let image = denia_core::message::ImageData {
+                    mime: mime.to_string(),
+                    data: b64,
+                };
+                // 注入视觉输入(下一条模型请求即可见),与 dsh read-image 的语义一致。
+                if let Some(sink) = &ctx.emit_event {
+                    sink(denia_core::session::SessionEvent::UserMessage {
+                        text: format!("[harness] 读取图片:{}({})", args.path, mime),
+                        injected: true,
+                        channel: Some("image".into()),
+                        images: vec![image],
+                    });
+                }
+                let dimension = match (width, height) {
+                    (Some(w), Some(h)) => format!("{w}x{h}"),
+                    _ => "尺寸未知".to_string(),
+                };
+                return ToolOutput::text(format!(
+                    "已读取图片 {} ({} · {} · {} 字节),图片内容已作为视觉输入注入会话,后续步骤可见。",
+                    args.path,
+                    mime,
+                    dimension,
+                    data.len()
+                ));
             }
-            let b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, data);
-            let image = denia_core::message::ImageData {
-                mime: mime.to_string(),
-                data: b64,
-            };
-            // 注入视觉输入(下一条模型请求即可见),与 dsh read-image 的语义一致。
-            if let Some(sink) = &ctx.emit_event {
-                sink(denia_core::session::SessionEvent::UserMessage {
-                    text: format!("[harness] 读取图片:{}({})", args.path, mime),
-                    injected: true,
-                    channel: Some("image".into()),
-                    images: vec![image],
-                });
-            }
-            let dimension = match (width, height) {
-                (Some(w), Some(h)) => format!("{w}x{h}"),
-                _ => "尺寸未知".to_string(),
-            };
-            return ToolOutput::text(format!(
-                "已读取图片 {} ({} · {} · {} 字节),图片内容已作为视觉输入注入会话,后续步骤可见。",
-                args.path,
-                mime,
-                dimension,
-                data.len()
-            ));
         }
         // 文本文件:按行读取 offset/limit;字符级预算由落盘层统一兜底。
         //
@@ -309,13 +359,17 @@ impl Tool for ReadFileTool {
                     // 单行被截断意味着内容不完整,标记为部分视图(不得作为写依据)。
                     let is_partial_view = truncated_lines > 0;
                     let is_full_read = args.offset <= 1 && reached_eof && !is_partial_view;
+                    // 保留全文只为压缩后恢复注入;超出预算就不留正文(压缩后
+                    // 会退化成"需重读"提示),免得会话把读过的每个大文件都
+                    // 常驻内存。
+                    let keep_content = is_full_read && body.len() <= MAX_RETAINED_CONTENT_BYTES;
                     let entry = crate::read_state::ReadEntry {
                         mtime_ms: stamp.mtime_ms,
                         size_bytes: stamp.size_bytes,
                         is_partial_view,
                         is_full_read,
                         read_at: std::time::SystemTime::now(),
-                        content: is_full_read.then(|| body.clone()),
+                        content: keep_content.then(|| body.clone()),
                     };
                     if let Ok(mut state) = shared.lock() {
                         state.record(read_key, entry);
