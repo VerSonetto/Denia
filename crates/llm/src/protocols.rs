@@ -607,10 +607,15 @@ impl ResponsesStream {
 
     fn map_usage(response: &serde_json::Value) -> TokenUsage {
         let usage = &response["usage"];
+        // `input_tokens` 是**含缓存的总 prompt**,`input_tokens_details.cached_tokens`
+        // 是它的子集;契约要求 `input_tokens` 为未缓存部分,所以必须减
+        // (与 `wire::map_usage` 同一口径,见那里的注释)。
+        let prompt = usage["input_tokens"].as_u64().unwrap_or(0);
+        let cache_read = usage["input_tokens_details"]["cached_tokens"].as_u64();
         TokenUsage {
-            input_tokens: usage["input_tokens"].as_u64().unwrap_or(0),
+            input_tokens: prompt.saturating_sub(cache_read.unwrap_or(0)),
             output_tokens: usage["output_tokens"].as_u64().unwrap_or(0),
-            cache_read_tokens: usage["input_tokens_details"]["cached_tokens"].as_u64(),
+            cache_read_tokens: cache_read,
             reasoning_tokens: usage["output_tokens_details"]["reasoning_tokens"].as_u64(),
         }
     }
@@ -1306,7 +1311,9 @@ mod tests {
                 _ => None,
             })
             .unwrap();
-        assert_eq!(usage.input_tokens, 10);
+        // 契约:`input_tokens` 是**未缓存**输入。provider 报的
+        // `input_tokens: 10` 含 4 个缓存命中,归一后应当是 6。
+        assert_eq!(usage.input_tokens, 6);
         assert_eq!(usage.cache_read_tokens, Some(4));
         assert_eq!(usage.reasoning_tokens, Some(2));
     }

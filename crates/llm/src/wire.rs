@@ -102,12 +102,18 @@ pub struct WireCompletionTokensDetails {
     pub reasoning_tokens: Option<u64>,
 }
 
-/// How `prompt_tokens` accounts cache hits on one wire flavor.
+/// 一种 wire 风格的缓存记账方式。
+///
+/// 两种风格**都**在总 prompt 里含缓存命中(即 `cache_read` 是总 prompt 的
+/// **子集**),区别只在命中数放在哪个字段。归一后的契约由
+/// `denia_core::stream::TokenUsage` 定义:`input_tokens` 是**未缓存输入**,
+/// 与 `cache_read_tokens` 互斥。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UsageStyle {
-    /// DeepSeek: `prompt_tokens` includes cache hits; subtract them.
+    /// DeepSeek 原生:命中数在 `prompt_cache_hit_tokens`。
     DeepSeek,
-    /// OpenAI-compatible: `prompt_tokens` is the uncached count.
+    /// OpenAI 系(`chat.completions` 与 `responses` 同构):命中数在
+    /// `prompt_tokens_details.cached_tokens` / `input_tokens_details.cached_tokens`。
     OpenAi,
 }
 
@@ -120,10 +126,11 @@ pub fn map_usage(wire: &WireUsage, style: UsageStyle) -> TokenUsage {
             .as_ref()
             .and_then(|details| details.cached_tokens),
     };
-    let input_tokens = match style {
-        UsageStyle::DeepSeek => prompt.saturating_sub(cache_read.unwrap_or(0)),
-        UsageStyle::OpenAi => prompt,
-    };
+    // 两种风格都要减:`prompt_tokens` 报的是**含缓存的总 prompt**。
+    // 不减的后果是 `input_tokens` 变成总 prompt,而下游(core 的契约、
+    // token-meter 的 `uncached_input_tokens`、前端的命中率与上下文环)
+    // 一律按"未缓存"消费 —— 命中率会被算成 cache/(cache+未缓存),腰斩一半。
+    let input_tokens = prompt.saturating_sub(cache_read.unwrap_or(0));
     TokenUsage {
         input_tokens,
         output_tokens: wire.completion_tokens.unwrap_or(0),
@@ -535,7 +542,7 @@ impl StreamTranslator {
 
 #[cfg(test)]
 mod tests {
-    use super::{StreamTranslator, UsageStyle, WireChunk, build_wire_messages};
+    use super::{StreamTranslator, UsageStyle, WireChunk, WireUsage, build_wire_messages, map_usage};
 
     fn chunk(json: &str) -> WireChunk {
         serde_json::from_str(json).unwrap()
@@ -593,6 +600,42 @@ mod tests {
             .unwrap();
         assert_eq!(usage.input_tokens, 10);
         assert_eq!(usage.cache_read_tokens, Some(2));
+    }
+
+    /// 口径契约:两种 wire 风格归一到同一个 `TokenUsage` 语义 ——
+    /// `input_tokens` 是**未缓存**输入,与 `cache_read_tokens` 互斥。
+    ///
+    /// 这条守的是一个曾经真实发生的 bug:OpenAI 系分支直接把
+    /// `prompt_tokens`(含缓存的总 prompt)当成了 `input_tokens`,于是下游
+    /// (前端的命中率公式、token-meter 的 `uncached_input_tokens`、上下文环)
+    /// 全部按"未缓存"消费时把分母算成 cache+未缓存,命中率显示成真值的一半。
+    /// 两家的差别只在缓存字段叫什么,减法两边都要做。
+    #[test]
+    fn both_wire_flavors_normalize_to_uncached_input() {
+        // DeepSeek 原生:命中数在 prompt_cache_hit_tokens。
+        let deepseek: WireUsage = serde_json::from_str(
+            r#"{"prompt_tokens":100,"completion_tokens":7,"prompt_cache_hit_tokens":80}"#,
+        )
+        .unwrap();
+        let mapped = map_usage(&deepseek, UsageStyle::DeepSeek);
+        assert_eq!(mapped.input_tokens, 20, "DeepSeek:未缓存 = 100 - 80");
+        assert_eq!(mapped.cache_read_tokens, Some(80));
+
+        // OpenAI 系:命中数在 prompt_tokens_details.cached_tokens。
+        let openai: WireUsage = serde_json::from_str(
+            r#"{"prompt_tokens":100,"completion_tokens":7,"prompt_tokens_details":{"cached_tokens":80}}"#,
+        )
+        .unwrap();
+        let mapped = map_usage(&openai, UsageStyle::OpenAi);
+        assert_eq!(mapped.input_tokens, 20, "OpenAI:未缓存 = 100 - 80");
+        assert_eq!(mapped.cache_read_tokens, Some(80));
+
+        // 没有任何缓存字段:整个 prompt 都是未缓存的(命中为 0)。
+        let plain: WireUsage =
+            serde_json::from_str(r#"{"prompt_tokens":100,"completion_tokens":7}"#).unwrap();
+        let mapped = map_usage(&plain, UsageStyle::OpenAi);
+        assert_eq!(mapped.input_tokens, 100);
+        assert_eq!(mapped.cache_read_tokens, None);
     }
 
     #[test]

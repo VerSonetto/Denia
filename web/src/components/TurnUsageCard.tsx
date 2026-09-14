@@ -109,7 +109,7 @@ export function TurnUsageCard({ usage }: { usage: TokenUsage }) {
         aria-expanded={open}
         onClick={() => setOpen((value) => !value)}
       >
-        {t('inputTokens')} {formatTokens(usage.inputTokens)} ·{' '}
+        {t('turnUsageInputUncached')} {formatTokens(usage.inputTokens)} ·{' '}
         {t('outputTokens')} {formatTokens(usage.outputTokens)}
       </button>
       {open && createPortal(

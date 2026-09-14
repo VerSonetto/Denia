@@ -118,10 +118,15 @@ export function formatTokens(count: number): string {
 /**
  * 缓存命中率:缓存读 /(未缓存输入 + 缓存读)。
  *
- * 分母必须是**计费输入总量**:core 的 `TokenUsage` 里 `cache_read_tokens`
- * 与 `input_tokens` 互斥(见 crates/core/src/stream.rs,真实日志也印证:
- * 12429 未缓存 + 9088 缓存)。先前用 `cacheRead / inputTokens` 把分母算成
- * 了未缓存部分,命中率被系统性高估(该例真值 42%,旧式算出 73%)。
+ * 分母是**计费输入总量**。`TokenUsage` 的契约是 `cache_read_tokens` 与
+ * `input_tokens` 互斥(`input_tokens` 只含未缓存部分),所以两者相加才是
+ * 这次请求真正的 prompt 总量 —— 命中率 = 命中 / 总 prompt。
+ *
+ * 注意:这个公式只有在 `input_tokens` 确实是"未缓存"时才成立。曾经
+ * OpenAI 系协议的映射漏了减法(`prompt_tokens` 是含缓存的总量),导致
+ * `input_tokens` 变成总 prompt,于是这里的加法把分母算成了近两倍,
+ * 命中率显示成真值的一半。口径的归一在 `crates/llm/src/wire.rs` 的
+ * `map_usage`;那边有回归用例 `both_wire_flavors_normalize_to_uncached_input`。
  * 无任何计费输入返回 null。
  */
 export function cacheHitPercent(inputTokens: number, cacheReadTokens: number): string | null {
@@ -131,7 +136,7 @@ export function cacheHitPercent(inputTokens: number, cacheReadTokens: number): s
   return Math.min(100, percent).toFixed(2)
 }
 
-/** 计费输入总量 = 未缓存输入 + 缓存读。 */
+/** 计费输入总量 = 未缓存输入 + 缓存读(= 本次请求的 prompt 总量)。 */
 export function billedInputTokens(inputTokens: number, cacheReadTokens: number): number {
   return inputTokens + cacheReadTokens
 }

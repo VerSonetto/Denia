@@ -129,9 +129,15 @@ check('增量:缓存读进 turn-end', incrUsage.cacheReadTokens, 900)
 check('增量:推理进 turn-end', incrUsage.reasoningTokens, 7)
 check('两条路径的 turn-end 用量逐字一致', incrUsage, coldUsage)
 
-/* 10) 缓存命中率分母回归:core 里 cacheRead 与 inputTokens 互斥,
-       分母必须是两者之和。旧式 cacheRead/inputTokens 会系统性高估
-       (真实日志 12429 未缓存 + 9088 缓存:真值 42.2%,旧式算出 73.1%)。 */
+/* 10) 缓存命中率分母回归:`TokenUsage` 契约里 cacheRead 与 inputTokens 互斥
+       (inputTokens 只含未缓存部分),所以分母是两者之和,命中率 = 命中/总prompt。
+
+       这里用一个真实会话的两组数当夹具,注意它们的**口径**:
+       - (未缓存 12429, 缓存 9088):命中率 42.24%
+       - (未缓存 1996, 缓存 13454):命中率 87.08%  ← 健康前缀缓存的典型形状
+       第二组是刻意加的:健康会话里命中率应当很高(九成上下),而不是四成。
+       如果哪天 wire 层又把含缓存的总 prompt 塞进 inputTokens,第二组会掉到
+       45% 左右(分母翻倍),这条用例就会失败 —— 它是那个 bug 的哨兵。 */
 const statsFile = join(dir, 'stats.mjs')
 await build({
   entryPoints: [fileURLToPath(new URL('../src/stats.ts', import.meta.url))],
@@ -146,6 +152,11 @@ const stats = await import(pathToFileURL(statsFile).href)
 
 check('计费输入 = 未缓存 + 缓存读', stats.billedInputTokens(12429, 9088), 21517)
 check('缓存命中率以计费输入为分母', stats.cacheHitPercent(12429, 9088), '42.24')
+check(
+  '健康会话命中率应在九成上下(口径哨兵)',
+  stats.cacheHitPercent(1996, 13454),
+  '87.08',
+)
 check('全命中为 100%', stats.cacheHitPercent(0, 500), '100.00')
 check('无缓存为 0%', stats.cacheHitPercent(500, 0), '0.00')
 check('无计费输入返回 null', stats.cacheHitPercent(0, 0), null)
