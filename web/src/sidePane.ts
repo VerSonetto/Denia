@@ -22,6 +22,8 @@ export type SidePaneTabType =
   | 'terminal'
   /** 浏览器:内嵌实时画面。可多开。 */
   | 'browser'
+  /** 工作区文件:文件系统目录树(与 Git 无关)。单例。 */
+  | 'files'
 
 export interface SidePaneTab {
   id: string

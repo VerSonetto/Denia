@@ -140,7 +140,8 @@ const baseProps = {
   else if (!html.includes('data-pane-open-item="review"')) fail('空态渲染', '没有审查按钮')
   else if (!html.includes('data-pane-open-item="terminal"')) fail('空态渲染', '没有终端按钮')
   else if (!html.includes('data-pane-open-item="browser"')) fail('空态渲染', '没有浏览器按钮')
-  else ok('空态渲染:引导页 + 三个面板按钮')
+  else if (!html.includes('data-pane-open-item="files"')) fail('空态渲染', '没有工作区文件按钮')
+  else ok('空态渲染:引导页 + 四个面板按钮')
 }
 
 /* 2) 有标签:应渲染标签栏、标签、空态消失 */
@@ -202,6 +203,22 @@ const baseProps = {
     fail('能力过滤', '终端入口不应受浏览器能力影响')
   } else {
     ok('能力过滤:不支持浏览器时隐藏其入口,终端不受影响')
+  }
+}
+
+/* 4b) 没有工作区时:工作区文件入口消失(树是相对工作区根的,没有根就没有内容) */
+{
+  const { html } = await render({
+    ...baseProps,
+    state: pure.EMPTY_SIDE_PANE,
+    workspacePath: null,
+  })
+  if (html.includes('data-pane-open-item="files"')) {
+    fail('能力过滤(工作区)', '没有工作区时不应出现工作区文件入口')
+  } else if (!html.includes('data-pane-open-item="terminal"')) {
+    fail('能力过滤(工作区)', '终端入口不应受工作区影响')
+  } else {
+    ok('能力过滤:没有工作区时隐藏工作区文件入口,终端不受影响')
   }
 }
 

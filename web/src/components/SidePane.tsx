@@ -370,6 +370,12 @@ export function SidePane({
                       ) : (
                         <div className="pane-placeholder">{t('sidePaneNeedsWorkspace')}</div>
                       ))}
+                    {tab.type === 'files' &&
+                      (workspacePath ? (
+                        <FileTreeSlot workspacePath={workspacePath} sessionId={sessionId} />
+                      ) : (
+                        <div className="pane-placeholder">{t('sidePaneNeedsWorkspace')}</div>
+                      ))}
                     {tab.type === 'browser' && renderBrowser?.(tab, visible)}
                   </div>
                 )
@@ -397,6 +403,17 @@ export function SidePane({
 
 /** 审查面板槽:懒加载(它带着 diff 逻辑,不必进首包)。 */
 const LazyReviewPanel = lazy(() => import('./ReviewPanel'))
+
+/** 工作区文件面板槽:同样懒加载(树只在真打开该标签时才需要)。 */
+const LazyFileTreePanel = lazy(() => import('./FileTreePanel'))
+
+function FileTreeSlot({ workspacePath, sessionId }: { workspacePath: string; sessionId: string | null }) {
+  return (
+    <Suspense fallback={<div className="pane-placeholder">{t('loading')}</div>}>
+      <LazyFileTreePanel workspacePath={workspacePath} sessionId={sessionId} />
+    </Suspense>
+  )
+}
 
 function ReviewSlot({ workspacePath, sessionId }: { workspacePath: string; sessionId: string | null }) {
   return (

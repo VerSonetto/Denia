@@ -114,7 +114,7 @@ function isValidTab(value: unknown): value is SidePaneTab {
 }
 
 function isTabType(value: unknown): value is SidePaneTabType {
-  return value === 'review' || value === 'terminal' || value === 'browser'
+  return value === 'review' || value === 'terminal' || value === 'browser' || value === 'files'
 }
 
 function readCollapsed(): Record<string, boolean> {

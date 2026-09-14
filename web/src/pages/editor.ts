@@ -172,6 +172,62 @@ export function caretRightAfterChip(editor: HTMLElement): boolean {
   return previous ? chipName(previous) !== null : false
 }
 
+/**
+ * 把视口坐标解析成草稿偏移(拖拽落点用)。
+ *
+ * 用 `caretRangeFromPoint`(Chromium/Safari)或 `caretPositionFromPoint`
+ * (Firefox)拿到"该像素落在哪个文本位置",再换算成草稿偏移。落点不在编辑器
+ * 内时返回 null,调用方据此决定是插入到末尾还是忽略这次拖拽 —— 这一点必须
+ * 由调用方显式决定,不能在这里默默回退(否则"拖到输入框外面"会被当成
+ * "拖到了末尾")。
+ */
+export function caretOffsetAtPoint(editor: HTMLElement, x: number, y: number): number | null {
+  if (typeof document === 'undefined') return null
+  let container: Node | null = null
+  let offset = 0
+  const anyDocument = document as Document & {
+    caretRangeFromPoint?: (x: number, y: number) => Range | null
+    caretPositionFromPoint?: (x: number, y: number) => { offsetNode: Node; offset: number } | null
+  }
+  const range = anyDocument.caretRangeFromPoint?.(x, y)
+  if (range) {
+    container = range.startContainer
+    offset = range.startOffset
+  } else {
+    const position = anyDocument.caretPositionFromPoint?.(x, y)
+    if (position) {
+      container = position.offsetNode
+      offset = position.offset
+    }
+  }
+  if (!container || !editor.contains(container)) return null
+  if (container === editor) {
+    let total = 0
+    const nodes = Array.from(editor.childNodes)
+    for (let index = 0; index < Math.min(offset, nodes.length); index++) {
+      total += draftLength(nodes[index]!)
+    }
+    return total
+  }
+  // 文本节点内的落点:累加它之前所有兄弟节点的草稿长度。
+  let total = 0
+  const walk = (root: Node): boolean => {
+    for (const child of Array.from(root.childNodes)) {
+      if (child === container) {
+        total += child.nodeType === Node.TEXT_NODE ? offset : 0
+        return true
+      }
+      if (child.contains(container)) {
+        if (walk(child)) return true
+        return false
+      }
+      total += draftLength(child)
+    }
+    return false
+  }
+  return walk(editor) ? total : null
+}
+
 /** kind 兜底:command = 终端提示符,skill = 四角星(路径取自 components/icons)。 */
 const CHIP_ICONS: Record<SlashChipKind, string> = {
   command:

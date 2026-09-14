@@ -607,6 +607,33 @@ export function searchMentions(
   return http(`/api/fs/mentions?${params.toString()}`, { signal })
 }
 
+/** 工作区文件树的一层条目(相对根的路径,以 `/` 分隔)。 */
+export interface TreeEntry {
+  name: string
+  path: string
+  kind: 'file' | 'directory'
+}
+
+export interface TreeListing {
+  root: string
+  /** 本次列举的目录(相对根;空串 = 根目录)。 */
+  dir: string
+  entries: TreeEntry[]
+  /** 该层条目超过上限被截断(界面据此显式提示,不静默丢弃)。 */
+  truncated: boolean
+}
+
+/** 列举工作区某一层目录(dir 为空 = 根目录)。 */
+export function fetchTree(
+  path: string,
+  dir: string,
+  signal?: AbortSignal,
+): Promise<TreeListing> {
+  const params = new URLSearchParams({ path })
+  if (dir) params.set('dir', dir)
+  return http(`/api/fs/tree?${params.toString()}`, { signal })
+}
+
 export function getSession(id: string, signal?: AbortSignal): Promise<{
   header: SessionHeader
   events: SessionEnvelope[]

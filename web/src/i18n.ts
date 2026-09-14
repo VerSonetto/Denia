@@ -833,6 +833,7 @@ const zh = {
   sidePaneReview: '审查',
   sidePaneTerminal: '终端',
   sidePaneBrowser: '浏览器',
+  sidePaneFiles: '工作区文件',
   sidePaneResize: '调整面板宽度',
   sidePaneExpand: '展开侧边面板',
   sidePaneCollapse: '收起侧边面板',
@@ -875,6 +876,16 @@ const zh = {
   sidePaneDiffBinary: '无法预览二进制文件的差异。',
   sidePaneDiffTruncated: '差异内容过大，已省略预览。',
   sidePaneDiffUnavailable: '暂时无法预览这个差异。',
+
+  /* ---- 工作区文件面板 ---- */
+  sidePaneFilesRefresh: '刷新',
+  sidePaneFilesFilter: '筛选文件...',
+  sidePaneFilesEmpty: '这个目录是空的。',
+  sidePaneFilesNoMatch: '没有匹配的文件。',
+  sidePaneFilesLoading: '加载中…',
+  sidePaneFilesTruncated: '条目过多，只显示前 2000 项。',
+  sidePaneFilesRetry: '重试',
+  sidePaneFilesDragHint: '拖到输入框引用',
 
   /* ---- 终端面板 ---- */
   terminalStartFailed: '终端启动失败',
@@ -1710,6 +1721,7 @@ const en: typeof zh = {
   sidePaneReview: 'Review',
   sidePaneTerminal: 'Terminal',
   sidePaneBrowser: 'Browser',
+  sidePaneFiles: 'Workspace files',
   sidePaneResize: 'Resize panel',
   sidePaneExpand: 'Expand side pane',
   sidePaneCollapse: 'Collapse side pane',
@@ -1752,6 +1764,16 @@ const en: typeof zh = {
   sidePaneDiffBinary: 'Binary file diff cannot be previewed.',
   sidePaneDiffTruncated: 'The diff is too large to preview.',
   sidePaneDiffUnavailable: 'This diff cannot be previewed right now.',
+
+  /* ---- Workspace files panel ---- */
+  sidePaneFilesRefresh: 'Refresh',
+  sidePaneFilesFilter: 'Filter files…',
+  sidePaneFilesEmpty: 'This folder is empty.',
+  sidePaneFilesNoMatch: 'No matching files.',
+  sidePaneFilesLoading: 'Loading…',
+  sidePaneFilesTruncated: 'Too many entries; showing the first 2000.',
+  sidePaneFilesRetry: 'Retry',
+  sidePaneFilesDragHint: 'Drag into the composer to reference',
 
   /* ---- Terminal panel ---- */
   terminalStartFailed: 'Failed to start terminal',

@@ -64,6 +64,7 @@ import { useStickToBottom } from '../hooks/useStickToBottom'
 import { activeAtToken, formatFileMention } from './mention'
 import { activeSlashToken, collectSkillTokens, parseLeadingCommand } from './slash'
 import {
+  caretOffsetAtPoint,
   caretOffsetIn,
   caretRightAfterChip,
   createSlashChip,
@@ -73,6 +74,12 @@ import {
   setCaretOffset,
   type SlashChipKind,
 } from './editor'
+import {
+  REFERENCE_MIME,
+  decodeReference,
+  insertReferenceAt,
+  referenceText,
+} from '../fileTree'
 import { formatTokens } from '../stats'
 import { TodoPanel } from '../components/TodoPanel'
 import { GoalBar } from '../components/GoalBar'
@@ -413,6 +420,15 @@ export default function SessionsPage({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mentionOpen, mentionActive, mentionItems])
 
+  /* ---- 从侧栏「工作区文件」树拖入的引用 ---- */
+
+  /** 拖拽悬停:只有本应用树里拖来的引用才接受,其余(外部文本/文件)交回浏览器。 */
+  const onEditorDragOver = useCallback((event: React.DragEvent<HTMLDivElement>) => {
+    if (!event.dataTransfer.types.includes(REFERENCE_MIME)) return
+    event.preventDefault()
+    event.dataTransfer.dropEffect = 'copy'
+  }, [])
+
   // cwd 失效/会话切换时确保菜单关闭。
   useEffect(() => {
     if (!mentionCwd) closeMention()
@@ -620,7 +636,7 @@ export default function SessionsPage({
   slashKindRef.current = slashKinds
 
   /** 外部写路径:把草稿文本重建进编辑器 DOM(命中词典的 token 重建为卡片)。 */
-  const applyDraft = (text: string) => {
+  const applyDraft = useCallback((text: string) => {
     setPrompt(text)
     setOptimizedPrompt(null)
     originalPromptRef.current = ''
@@ -629,12 +645,43 @@ export default function SessionsPage({
       renderDraft(el, text, slashKindRef.current)
       syncPromptHeight()
     }
-  }
+  }, [])
 
   const closeSlash = useCallback(() => {
     setSlashOpen(false)
     setSlashItems([])
   }, [])
+
+  /**
+   * 从侧栏「工作区文件」树拖入的引用:在鼠标落点插入 `@路径`。
+   *
+   * 结果与手打 `@` 选中候选**完全一致**(共用 `formatFileMention` 的格式化),
+   * 所以模型侧看到的引用语法只有一种形态。落点用 `caretOffsetAtPoint` 解析;
+   * 解析不出来(拖到了输入框的空白边距、或浏览器不支持该 API)就插到**末尾**
+   * —— 那仍是用户期望的"加进这段草稿",而丢弃这次拖拽会让操作看起来失效。
+   */
+  const onEditorDrop = useCallback(
+    (event: React.DragEvent<HTMLDivElement>) => {
+      const raw = event.dataTransfer.getData(REFERENCE_MIME)
+      if (!raw) return
+      const payload = decodeReference(raw)
+      if (!payload) return
+      event.preventDefault()
+      const reference = referenceText(payload)
+      if (!reference) return
+      const el = promptRef.current
+      if (!el) return
+      const draft = serializeEditor(el)
+      const at = caretOffsetAtPoint(el, event.clientX, event.clientY) ?? draft.length
+      const { text, caret } = insertReferenceAt(draft, at, reference)
+      applyDraft(text)
+      setCaretOffset(el, caret)
+      closeMention()
+      closeSlash()
+      el.focus()
+    },
+    [applyDraft, closeMention, closeSlash],
+  )
 
   /** 检测光标处 `/` token 并按词典出候选(同步,无网络);@ 提及优先,二者互斥。 */
   const refreshSlash = useCallback(
@@ -1982,6 +2029,8 @@ export default function SessionsPage({
             refreshMenus()
           }}
           onPaste={onEditorPaste}
+          onDragOver={onEditorDragOver}
+          onDrop={onEditorDrop}
           onFocus={() => {
             if (inert) onOpenPicker()
           }}

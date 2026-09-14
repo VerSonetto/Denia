@@ -1,0 +1,197 @@
+/* 工作区文件面板:筛选头 + 目录树。
+ *
+ * 视觉沿用审查面板那套结构(头部一条分隔线 + 列表铺满剩余高度),颜色全部
+ * 走语义 token,暗/亮主题自动跟随;树行只靠缩进与图标区分层级,不画连接线
+ * —— 缩进已经足够表达从属关系,连接线在窄面板里反而是噪音。 */
+
+.file-tree {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  background: var(--bg-base);
+}
+
+/* ---- 头部:筛选 + 刷新 ---- */
+
+.file-tree-head {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 6px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border-l1);
+}
+
+.file-tree-filter {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 28px;
+  padding: 0 9px;
+  border: 1px solid var(--border-l1);
+  border-radius: var(--r-xs);
+  background: var(--bg-layer-2);
+  color: var(--label-primary);
+  font-size: 12px;
+  font-family: inherit;
+}
+
+.file-tree-filter::placeholder {
+  color: var(--label-tertiary);
+}
+
+.file-tree-filter:focus {
+  outline: none;
+  border-color: var(--accent-tint);
+}
+
+.file-tree-icon-btn {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border: 1px solid var(--border-l1);
+  border-radius: var(--r-xs);
+  background: transparent;
+  color: var(--label-tertiary);
+  cursor: pointer;
+  transition: background 0.12s var(--ease), color 0.12s var(--ease);
+}
+
+.file-tree-icon-btn:hover {
+  background: var(--hover-fill);
+  color: var(--label-primary);
+}
+
+/* ---- 树体 ---- */
+
+.file-tree-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  padding: 6px 0 12px;
+}
+
+.file-tree-row {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  /* 行高与审查面板的文件行一致(32px),两个面板并排时视觉节奏统一。 */
+  height: 28px;
+  padding-right: 10px;
+  color: var(--label-secondary);
+  font-size: 12px;
+  cursor: default;
+  user-select: none;
+  /* 缩进由内联 paddingLeft 给(层级在运行时才知道),这里只留右边距。 */
+}
+
+.file-tree-row.dir {
+  color: var(--label-primary);
+  cursor: pointer;
+}
+
+.file-tree-row:hover {
+  background: var(--hover-fill);
+}
+
+/* 拖拽时给源行一个"正在被拖走"的弱化反馈 */
+.file-tree-row:active {
+  background: var(--active-fill);
+}
+
+.file-tree-caret {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  color: var(--label-tertiary);
+}
+
+/* 折叠指示:默认朝右,展开时旋转朝下(与侧栏工作区树同一套语言)。 */
+.file-tree-caret-icon {
+  display: inline-flex;
+  transition: transform 0.12s var(--ease);
+}
+
+.file-tree-caret-icon.open {
+  transform: rotate(90deg);
+}
+
+.file-tree-icon {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  color: var(--label-tertiary);
+}
+
+.file-tree-row.dir .file-tree-icon {
+  color: var(--label-secondary);
+}
+
+.file-tree-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.file-tree-truncated {
+  flex: 0 0 auto;
+  color: var(--label-tertiary);
+  letter-spacing: 0.1em;
+}
+
+/* ---- 提示 / 错误 ---- */
+
+.file-tree-hint {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 10px 14px;
+  color: var(--label-tertiary);
+  font-size: 12px;
+}
+
+.file-tree-error,
+.file-tree-row-error {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 14px;
+  color: var(--danger);
+  font-size: 12px;
+}
+
+.file-tree-error {
+  flex-direction: column;
+  align-items: flex-start;
+}
+
+.file-tree-error p {
+  margin: 0;
+  word-break: break-word;
+}
+
+.file-tree-retry {
+  flex: 0 0 auto;
+  padding: 3px 8px;
+  border: 1px solid var(--danger-border);
+  border-radius: var(--r-xs);
+  background: var(--danger-soft);
+  color: var(--danger);
+  font-size: 11px;
+  font-family: inherit;
+  cursor: pointer;
+}
+
+.file-tree-retry:hover {
+  background: var(--danger-soft);
+  filter: brightness(1.15);
+}

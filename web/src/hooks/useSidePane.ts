@@ -86,13 +86,14 @@ export function useSidePaneController(
   const openPanel = useCallback(
     (type: SidePaneTabType, options: { cwd?: string; title?: string } = {}) => {
       const current = peekSidePane(sessionId)
-      // 审查与浏览器是单例:
+      // 审查、浏览器、工作区文件是单例:
       // - 审查:同一时刻只可能看一份 git 状态,开两个没有意义;
       // - 浏览器:denia 的 BrowserManager 是**单实例 + 内部 tab 列表**
       //   (见 crates/browser),开多个侧栏浏览器标签会全部显示同一个实例,
       //   反而让人以为"新开了一个浏览器"。
+      // - 工作区文件:树是相对工作区根的唯一一份,两个标签必然同内容。
       // 终端相反:每个终端是独立 PTY,必须可多开。
-      if (type === 'review' || type === 'browser') {
+      if (type === 'review' || type === 'browser' || type === 'files') {
         const existing = current.tabs.find((tab) => tab.type === type)
         if (existing) {
           updateSidePane(sessionId, (value) => ({ ...value, activeTabId: existing.id }))

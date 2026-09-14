@@ -31,7 +31,16 @@ import {
   type SidePaneTab,
   type SidePaneTabType,
 } from '../sidePane'
-import { IconClose, IconGlobe, IconPlus, IconSearch, IconStack, IconTerminal, IconTool } from './icons'
+import {
+  IconClose,
+  IconFiles,
+  IconGlobe,
+  IconPlus,
+  IconSearch,
+  IconStack,
+  IconTerminal,
+  IconTool,
+} from './icons'
 import { PanePopover } from './PanePopover'
 
 /** 单个标签的宽度基准:与 ZCode 的 `flex-[1_1_9.75rem]` 对齐(156px)。 */
@@ -44,12 +53,14 @@ const ADD_BUTTON_WIDTH = 26 + TAB_GAP
 export function tabTypeLabel(type: SidePaneTabType): string {
   if (type === 'review') return t('sidePaneReview')
   if (type === 'terminal') return t('sidePaneTerminal')
+  if (type === 'files') return t('sidePaneFiles')
   return t('sidePaneBrowser')
 }
 
 export function TabIcon({ type, size = 13 }: { type: SidePaneTabType; size?: number }) {
   if (type === 'review') return <IconTool size={size} />
   if (type === 'terminal') return <IconTerminal size={size} />
+  if (type === 'files') return <IconFiles size={size} />
   return <IconGlobe size={size} />
 }
 

@@ -448,6 +448,27 @@ export function IconFolder(props: IconProps) {
   )
 }
 
+/** 工作区文件(文件系统树,与 Git 无关)。 */
+export function IconFiles(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <path
+        d="M2.2 5.2c0-.77.62-1.4 1.4-1.4h2.55c.3 0 .58.12.78.34l.72.78c.2.22.48.34.78.34h4.95c.77 0 1.4.63 1.4 1.4v5.74c0 .77-.63 1.4-1.4 1.4H3.6c-.78 0-1.4-.63-1.4-1.4V5.2Z"
+        stroke="currentColor"
+        strokeWidth="1.15"
+        strokeLinejoin="round"
+      />
+      <path
+        d="M5.6 7.3h4.8M5.6 9.5h3.2"
+        stroke="currentColor"
+        strokeWidth="1.1"
+        strokeLinecap="round"
+        opacity="0.55"
+      />
+    </Svg>
+  )
+}
+
 /** 普通文件(@ 提及菜单等处的文件条目)。 */
 export function IconFile(props: IconProps) {
   return (

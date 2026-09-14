@@ -6,7 +6,8 @@
  * 几个布尔),这里收成 `available(ctx)` 一个纯函数,好测也好读。
  *
  * 关键约束(与 ZCode 一致):
- * - **审查是单例**:已经开着就不在菜单里出现(避免点两次得到两个一样的面板);
+ * - **审查与工作区文件是单例**:已经开着就不在菜单里出现(避免点两次得到
+ *   两个一样的面板);
  * - **终端与浏览器可多开**:菜单项永远在(只要能力支持)。
  */
 
@@ -24,7 +25,7 @@ export interface PanelContext {
 export interface PanelDescriptor {
   type: SidePaneTabType
   /** i18n 键;标签栏与菜单共用同一份文案。 */
-  labelKey: 'sidePaneReview' | 'sidePaneTerminal' | 'sidePaneBrowser'
+  labelKey: 'sidePaneReview' | 'sidePaneTerminal' | 'sidePaneBrowser' | 'sidePaneFiles'
   /** 该面板此刻能否打开。 */
   available(ctx: PanelContext): boolean
   /** 单例面板已开时是否从菜单隐藏。 */
@@ -32,6 +33,15 @@ export interface PanelDescriptor {
 }
 
 export const PANELS: PanelDescriptor[] = [
+  {
+    type: 'files',
+    labelKey: 'sidePaneFiles',
+    // 单例:一棵工作区树开两个没有意义(它们必然显示同一份内容)。
+    // 也要求有工作区 —— 树是相对工作区根的,没有根就没有可看的内容,
+    // 此时不给入口比给一个空壳按钮诚实。
+    available: (ctx) => ctx.workspacePath !== null && !ctx.isOpen('files'),
+    singleton: true,
+  },
   {
     type: 'review',
     labelKey: 'sidePaneReview',
