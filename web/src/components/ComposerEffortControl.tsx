@@ -15,8 +15,9 @@ function snap(position: number, maxIndex: number): number {
   return Math.min(maxIndex, Math.max(0, Math.round(position)))
 }
 
-/** 把手半径(px):与 CSS 的 --knob 保持一致,用于把把手夹在轨道内部。 */
-const KNOB_RADIUS = 13
+/** 把手半径(px):与 CSS 的 --knob 同口径(直径 28px,与轨道等高)。
+ *  既用于把把手夹在轨道内部,也决定填充段右端伸入的长度 —— 两者因此同心同径。 */
+const KNOB_RADIUS = 14
 
 /**
  * 思考强度控件:模型选择器右侧的独立 chip,点击展开滑块浮层。
@@ -164,8 +165,8 @@ export function ComposerEffortControl({
     )
   }
 
-  // 把手位置:夹在轨道内(留出半径),与 CSS 的 clamp 同口径。
-  const knobLeft = `clamp(${KNOB_RADIUS}px, ${ratio * 100}%, calc(100% - ${KNOB_RADIUS}px))`
+  // 把手中心:夹在轨道内(两侧各留一个半径),填充段右端以它为圆心画等径半圆、被把手盖住。
+  const knobCenter = `clamp(${KNOB_RADIUS}px, ${ratio * 100}%, calc(100% - ${KNOB_RADIUS}px))`
 
   return (
     <div className={`effort-control${open ? ' open' : ''}`} ref={rootRef} onKeyDown={onKeyDown}>
@@ -193,11 +194,12 @@ export function ComposerEffortControl({
               <span className="effort-popover-value">{label}</span>
             </div>
             {/* 胶囊轨道 + 轨道内圆钮;原生 input 透明覆盖,承载拖动/键盘。
+                把手中心经 --knob-center 同时喂给圆钮位置与填充段宽度,两者恒同步。
                 data-tier 只驱动填充段的静态深浅分级,无动画。 */}
             <div
               className={`effort-slider${dragging ? ' dragging' : ''}`}
               data-tier={tier}
-              style={{ '--progress': `${ratio * 100}%` } as CSSProperties}
+              style={{ '--knob-center': knobCenter } as CSSProperties}
             >
               <div className="effort-track" aria-hidden="true" />
               <input
@@ -216,7 +218,7 @@ export function ComposerEffortControl({
                 onPointerCancel={() => setDragging(false)}
                 onKeyDown={onRangeKeyDown}
               />
-              <span className="effort-knob" style={{ left: knobLeft }} aria-hidden="true" />
+              <span className="effort-knob" style={{ left: knobCenter }} aria-hidden="true" />
             </div>
             {/* 档位刻度:按整条轨道等分对齐,可直接点选 */}
             <div className="effort-ticks">

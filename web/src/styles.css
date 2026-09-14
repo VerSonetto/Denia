@@ -3068,15 +3068,19 @@ button {
 
 /* 滑块(对照 dsh 社区 reasoning-effort 插件):胶囊轨道 + 轨道内嵌圆钮,
    原生 input 透明覆盖整条轨道承载拖动与键盘交互。
-   进度由 --progress 驱动:轨道已填充段用主前景色,未填充段用层级底色。 */
+   已填充段用主前景色、未填充段用层级底色;两者的分界由把手位置决定,
+   位置经 --knob-center 从组件传入,填充段与把手因此共用同一个坐标。 */
 .effort-slider {
   position: relative;
   width: 100%;
   height: 28px;
   border-radius: 999px;
   isolation: isolate;
-  /* 把手直径:圆钮与轨道内缩量同源,改一处即同步。 */
-  --knob: 26px;
+  /* 把手几何单一来源:外径 28px 与轨道等高,半径 14px。
+     半径同时用于三处:把手中心距轨道端点的最小距离、填充段右端伸入的长度、
+     填充段右端圆角半径。三处同源,末端圆才与轨道端圆角同心同径、严丝合缝。 */
+  --knob: 28px;
+  --knob-radius: calc(var(--knob) / 2);
 }
 
 .effort-track {
@@ -3090,20 +3094,26 @@ button {
     inset 0 -1px 0 rgba(0, 0, 0, 0.25);
 }
 
-/* 已填充段:左端圆角随轨道,右端直角(被把手覆盖处自然衔接)。
-   档位分级只靠静态颜色深浅表达,不做任何动画/发光。 */
+/* 已填充段:左端圆角随轨道;右端始终伸到把手有效圆的外缘(中心 + 有效半径),
+   于是右端那个半圆与把手同心同径、被把手整个盖住 —— 填充不会在把手旁边
+   留下没填到的缺口,也不会从末端探出一角。档位分级只靠静态颜色深浅表达,
+   不做任何动画/发光。 */
 .effort-track::before {
   content: "";
   position: absolute;
   inset: 0 auto 0 0;
-  width: var(--progress, 0%);
+  width: calc(var(--knob-center, 0px) + var(--knob-radius));
   border-radius: inherit;
   background: linear-gradient(
     90deg,
     color-mix(in srgb, var(--label-primary) 78%, var(--bg-layer-3)) 0%,
     var(--label-primary) 100%
   );
-  transition: background 0.2s var(--ease);
+  /* 宽度与把手位移同曲线同步:点刻度时两者一起滑到位,不会出现"填充先到、
+     把手后到"的脱节。拖动中值连续变化,过渡只起平滑作用。 */
+  transition:
+    background 0.2s var(--ease),
+    width 0.18s cubic-bezier(0.22, 1, 0.36, 1);
 }
 
 /* 关闭档:没有思考强度可言,填充降到最低调(暗灰),不抢视线 */
@@ -3116,9 +3126,12 @@ button {
   background: var(--label-primary);
 }
 
-/* 拖动中:轨道轻微提亮,呼应把手放大 */
+/* 拖动中:轨道轻微提亮,呼应把手放大。
+   同时停掉宽度过渡——拖动时位置每帧都在变,再叠 0.18s 缓动就变成"追不上指针";
+   松手吸附(点刻度、键盘)才需要那一下平滑。把手同理,见下面 .dragging 的规则。 */
 .effort-slider.dragging .effort-track::before {
   filter: brightness(1.08);
+  transition: background 0.2s var(--ease);
 }
 
 /* 原生 input:透明覆盖整条轨道,承担指针与键盘交互 */
@@ -3153,8 +3166,13 @@ button {
   border: none;
 }
 
-/* 圆钮:轨道内嵌的实心圆点,位置由组件内联 clamp 夹在轨道内。
-   用底色(而非前景色)填充,才能在深色填充段上依然清晰可辨。 */
+/* 圆钮:轨道内嵌的实心圆点,中心由组件内联的 left 给出(clamp 夹在轨道内)。
+   外径与轨道等高,用底色(而非前景色)填充,才能在深色填充段上依然清晰可辨。
+
+   与填充段的衔接:填充段右端是半径 14px 的半圆,圆心即把手中心 —— 半圆正好
+   内切于把手,被把手完全盖住,所以任何档位都不会在把手旁留下没填到的缺口,
+   也不会从末端探出一角。描边一律走 inset(画在圆内),不向外扩张:向外加环会
+   让把手比轨道高一圈,在轨道两端顶出边界,正是末端不协调的来源。 */
 .effort-knob {
   position: absolute;
   z-index: 4;
@@ -3164,7 +3182,7 @@ button {
   border-radius: 50%;
   background: var(--bg-layer-2);
   box-shadow:
-    0 0 0 1px var(--border-l3),
+    inset 0 0 0 1px var(--border-l3),
     0 1px 4px rgba(0, 0, 0, 0.4);
   transform: translate(-50%, -50%);
   transition:
@@ -3183,7 +3201,7 @@ button {
    仅在键盘导航时出现(:focus-visible)——鼠标点开控件不留这圈描边。 */
 .effort-input:focus-visible + .effort-knob {
   box-shadow:
-    0 0 0 1px var(--border-l3),
+    inset 0 0 0 1px var(--border-l3),
     0 0 0 2px var(--label-caption);
 }
 
