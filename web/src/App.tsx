@@ -1043,6 +1043,13 @@ function SidebarWorkspaces({
     [sessions],
   )
 
+  // 工作区路径集合:ungrouped 判定与"是否已有同路径工作区"都改走 Set,
+  // 把每次渲染的 O(会话数 × 工作区数) 比较降为 O(会话数)。
+  const workspacePaths = useMemo(
+    () => new Set(workspaces.map((workspace) => workspace.path)),
+    [workspaces],
+  )
+
   const membersOf = useCallback(
     (ws: WorkspaceRecord) =>
       ws.sessionIds
@@ -1051,7 +1058,10 @@ function SidebarWorkspaces({
     [sessionsById],
   )
 
-  const ungrouped = sessions.filter((s) => !workspaces.some((w) => w.path === s.cwd))
+  const ungrouped = useMemo(
+    () => sessions.filter((s) => s.cwd === undefined || !workspacePaths.has(s.cwd)),
+    [sessions, workspacePaths],
+  )
 
   const groupKeys = useCallback(() => {
     const keys = workspaces.map((ws) => ws.id)

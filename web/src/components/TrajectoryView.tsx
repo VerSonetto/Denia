@@ -577,7 +577,7 @@ function TrajectoryTurnBlock({
               selected={record.key === selectedKey}
               hot={record.key === hoverKey}
               onHover={onHover}
-              onSelect={() => onSelect(record)}
+              onSelect={onSelect}
               registerRow={registerRow}
             />
           ))}
@@ -621,7 +621,7 @@ function TrajectoryRowImpl({
   selected: boolean
   hot: boolean
   onHover: (key: string | null) => void
-  onSelect: () => void
+  onSelect: (record: TrajectoryRecord) => void
   registerRow: (key: string, el: HTMLElement | null) => void
 }) {
   const running = record.kind === 'tool' && record.result === undefined && record.durationMs === undefined
@@ -630,6 +630,12 @@ function TrajectoryRowImpl({
     record.kind === 'tool'
       ? (record.result?.content ?? '')
       : (record.text ?? record.content ?? '')
+  // toolCallSummary 是逐字符 JSON 扫描:同一个 (toolName, args) 在一行里
+  // 被用了两次(判断有无 + 取文本),按引用缓存一次算好。
+  const summaryLine = useMemo(
+    () => (record.kind === 'tool' ? toolCallSummary(record.toolName ?? '', record.args ?? '') : ''),
+    [record.kind, record.toolName, record.args],
+  )
   const barPct =
     record.durationMs !== undefined && record.durationMs > 0 && durationMax > 0
       ? Math.max(4, (record.durationMs / durationMax) * 100)
@@ -639,7 +645,7 @@ function TrajectoryRowImpl({
       type="button"
       ref={(el) => registerRow(record.key, el)}
       className={`traj-row ${record.kind}${selected ? ' selected' : ''}${hot ? ' hot' : ''}${running ? ' running' : ''}${isError ? ' err' : ''}`}
-      onClick={onSelect}
+      onClick={() => onSelect(record)}
       onMouseEnter={() => onHover(record.key)}
       onMouseLeave={() => onHover(null)}
     >
@@ -648,10 +654,8 @@ function TrajectoryRowImpl({
         {record.kind === 'tool' ? (
           <>
             <code className="traj-tool-chip">{record.toolName ?? '?'}</code>
-            {toolCallSummary(record.toolName ?? '', record.args ?? '') && (
-              <span className="traj-summary-text">
-                {toolCallSummary(record.toolName ?? '', record.args ?? '')}
-              </span>
+            {summaryLine && (
+              <span className="traj-summary-text">{summaryLine}</span>
             )}
             {record.result?.content && !running && (
               <span className="traj-summary-text dim">

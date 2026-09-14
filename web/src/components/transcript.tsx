@@ -96,17 +96,23 @@ export function Transcript({
   // hook 数量变化,React 抛 #310(Rendered more hooks than during the
   // previous render),异常冒泡到根 →整页白屏。
   const workStartedAt = useMemo(() => openTurnStartedAt(nodes), [nodes])
-  if (nodes.length === 0 && pendingMessages.length === 0 && !compactingAt) {
-    return <div className="empty-hint">{t('emptyTranscript')}</div>
-  }
-  const rows = groupTranscript(viewNodes)
+  // 分组与轮次索引都按引用缓存:流式帧每帧产生新 nodes 数组,但历史节点的
+  // 对象引用不变 —— 重跑这两遍全量遍历(含 groupTranscript 内的 slice 与
+  // row 对象分配)不会产出任何新结果,只是每帧白付一次 O(n)。
+  const rows = useMemo(() => groupTranscript(viewNodes), [viewNodes])
   // 每个已完成轮次的最后一条助手消息挂复制/分支按钮;运行中/中间 step 不显示。
   // dsh 语义:任意已完成轮次都可分支,不再限制"仅 transcript 尾部"。
-  const lastAssistantStep = new Map<number, number>()
-  const endedTurns = new Set<number>()
-  for (const node of nodes) {
-    if (node.kind === 'assistant') lastAssistantStep.set(node.turn, node.step)
-    else if (node.kind === 'turn-end') endedTurns.add(node.turn)
+  const turnIndex = useMemo(() => {
+    const lastStep = new Map<number, number>()
+    const ended = new Set<number>()
+    for (const node of nodes) {
+      if (node.kind === 'assistant') lastStep.set(node.turn, node.step)
+      else if (node.kind === 'turn-end') ended.add(node.turn)
+    }
+    return { lastStep, ended }
+  }, [nodes])
+  if (nodes.length === 0 && pendingMessages.length === 0 && !compactingAt) {
+    return <div className="empty-hint">{t('emptyTranscript')}</div>
   }
   return (
     <>
@@ -123,8 +129,8 @@ export function Transcript({
             onAskCancel={onAskCancel}
             showActions={
               row.node.kind === 'assistant' &&
-              endedTurns.has(row.node.turn) &&
-              row.node.step === lastAssistantStep.get(row.node.turn)
+              turnIndex.ended.has(row.node.turn) &&
+              row.node.step === turnIndex.lastStep.get(row.node.turn)
             }
           />
         ) : (
@@ -761,7 +767,10 @@ function ToolRow({
     () => (node.name === 'bash' ? bashExitCode(node.result?.content) : undefined),
     [node.name, node.result?.content],
   )
-  const inputBody = toolCallInput(node.name, node.args)
+  const inputBody = useMemo(
+    () => toolCallInput(node.name, node.args),
+    [node.name, node.args],
+  )
   // Hook 常驻组件顶层:条件 JSX 内挂 hook 会在展开/收起时改变 hook 数量。
   const labels = useMemo<MarkdownLabels>(
     () => ({

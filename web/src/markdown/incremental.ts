@@ -122,7 +122,10 @@ export class IncrementalMarkdownParser {
       node,
       key: blockKey(node, base, index),
     }))
-    this.cached = { frozen: [...this.frozen], tail, generation: this.generation }
+    // `frozen` 只增不改:直接交出去,不每次复制一份。消费者只读它的
+    // `.length` 与 `slice(frozenCount)`(取本次新冻结的块),拿到同一份
+    // 追加中的数组不会看到矛盾状态;每帧整份复制则是 O(N²) 的搬运。
+    this.cached = { frozen: this.frozen, tail, generation: this.generation }
     return this.cached
   }
 }
