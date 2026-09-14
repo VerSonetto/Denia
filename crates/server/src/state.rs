@@ -307,6 +307,8 @@ pub struct LiveSession {
     pub running: AtomicBool,
     /// 最近一次被访问(挂载/发消息/follow)的 epoch ms;空闲淘汰依据。
     pub last_touch: AtomicU64,
+    /// 驻留内存预算的代理量:加载时的日志文件字节数(见 [`Session::log_bytes`])。
+    resident_bytes: u64,
     pub cancel: std::sync::Mutex<Option<CancellationToken>>,
     /// 等待用户决策的审批请求(request_id → oneshot)。计划审批的决策
     /// 可携带执行档位/模型/补充建议(PlanReviewDecision)。
@@ -321,6 +323,13 @@ pub struct LiveSession {
         std::sync::Mutex<HashMap<String, tokio::sync::oneshot::Sender<denia_core::session::AskResolution>>>,
 }
 
+/// 驻留会话数上限。超出后按 LRU 淘汰非运行、无订阅者会话。
+const LIVE_MAX_RESIDENT: usize = 32;
+/// 驻留会话的日志字节总预算(内存代理量,见 [`Session::log_bytes`])。
+/// 会话数没超但字节超时同样淘汰——32 个百 MB 级大会话足以把常驻内存
+/// 撑到数 GB,数量上限约束不了字节。
+const LIVE_MAX_RESIDENT_BYTES: u64 = 512 * 1024 * 1024;
+
 /// Live sessions keyed by id; loads (and repairs) on first touch.
 ///
 /// ## 生命周期(内存上限)
@@ -329,24 +338,30 @@ pub struct LiveSession {
 /// - 后台淘汰任务(见 [`spawn_live_evictor`])周期清理:非运行中、
 ///   无 SSE 订阅者、且超过 `idle_after` 未使用的会话被卸载,事件内存
 ///   随之释放;下次访问按日志重新加载。运行中的会话永不淘汰。
+/// - **驻留上限双约束**:会话数(`LIVE_MAX_RESIDENT`)+ 日志字节预算
+///   (`LIVE_MAX_RESIDENT_BYTES`),加载新会话触顶时按 LRU 淘汰非运行、
+///   无订阅者的会话,防止连续打开长会话把常驻内存撑到 O(全部历史)。
 pub struct LiveSessions {
     inner: std::sync::Mutex<HashMap<String, Arc<LiveSession>>>,
     /// 最多同时驻留的完整会话数。超出后按 LRU 淘汰非运行、无订阅者会话,
     /// 防止连续打开长会话把后端常驻内存撑到 O(全部历史)。
     max_resident: usize,
+    /// 驻留会话的日志字节总预算(代理量)。
+    max_resident_bytes: u64,
 }
 
 impl Default for LiveSessions {
     fn default() -> Self {
-        Self::new(32)
+        Self::new(LIVE_MAX_RESIDENT, LIVE_MAX_RESIDENT_BYTES)
     }
 }
 
 impl LiveSessions {
-    pub fn new(max_resident: usize) -> Self {
+    pub fn new(max_resident: usize, max_resident_bytes: u64) -> Self {
         Self {
             inner: std::sync::Mutex::new(HashMap::new()),
             max_resident: max_resident.max(1),
+            max_resident_bytes,
         }
     }
 }
@@ -374,6 +389,7 @@ impl LiveSessions {
         let session = Arc::new(session);
         store.track_session(&session);
         let live = Arc::new(LiveSession {
+            resident_bytes: session.log_bytes(),
             session,
             followers: broadcast::channel(1024).0,
             running: AtomicBool::new(false),
@@ -387,20 +403,27 @@ impl LiveSessions {
         Ok(live)
     }
 
-    /// 在已持锁的 map 上执行容量裁剪:超过上限时,按 last_touch 从旧到新
+    /// 淘汰判定口径:非运行、无 SSE 订阅者、且除注册表外无其他持有者。
+    /// 运行中的会话绝不卸载。
+    fn evictable(live: &Arc<LiveSession>) -> bool {
+        !live.running.load(std::sync::atomic::Ordering::SeqCst)
+            && live.followers.receiver_count() == 0
+            && Arc::strong_count(live) == 1
+    }
+
+    /// 在已持锁的 map 上执行容量裁剪:会话数超过 `max_resident` **或**
+    /// 日志字节总量超过 `max_resident_bytes` 时,按 last_touch 从旧到新
     /// 淘汰“非运行、无订阅者”的会话。运行中的会话绝不卸载。
     fn trim_capacity_locked(&self, map: &mut HashMap<String, Arc<LiveSession>>) {
         let max = self.max_resident;
-        if map.len() <= max {
+        let max_bytes = self.max_resident_bytes;
+        let mut resident_bytes: u64 = map.values().map(|live| live.resident_bytes).sum();
+        if map.len() <= max && resident_bytes <= max_bytes {
             return;
         }
         let mut candidates: Vec<(String, u64)> = map
             .iter()
-            .filter(|(_, live)| {
-                !live.running.load(std::sync::atomic::Ordering::SeqCst)
-                    && live.followers.receiver_count() == 0
-                    && Arc::strong_count(live) == 1
-            })
+            .filter(|(_, live)| Self::evictable(live))
             .map(|(id, live)| {
                 (
                     id.clone(),
@@ -409,14 +432,17 @@ impl LiveSessions {
             })
             .collect();
         candidates.sort_by_key(|(_, touched)| *touched);
-        let remove_count = map.len() - max;
-        for (id, _) in candidates.into_iter().take(remove_count) {
+        let mut count = map.len();
+        for (id, _) in candidates {
+            if count <= max && resident_bytes <= max_bytes {
+                break;
+            }
             if let Some(live) = map.get(&id) {
-                if !live.running.load(std::sync::atomic::Ordering::SeqCst)
-                    && live.followers.receiver_count() == 0
-                    && Arc::strong_count(live) == 1
-                {
-                    map.remove(&id);
+                // 双检:可能在收集候选后被其他路径挂上订阅/转运行。
+                if Self::evictable(live) {
+                    let live = map.remove(&id).expect("checked above");
+                    resident_bytes = resident_bytes.saturating_sub(live.resident_bytes);
+                    count -= 1;
                 }
             }
         }
@@ -454,12 +480,10 @@ impl LiveSessions {
         {
             let map = self.inner.lock().unwrap();
             for (id, live) in map.iter() {
-                let running = live.running.load(std::sync::atomic::Ordering::SeqCst);
-                let subscribed = live.followers.receiver_count() > 0;
                 let idle = now
                     .saturating_sub(live.last_touch.load(std::sync::atomic::Ordering::Relaxed))
                     >= idle_ms;
-                if !running && !subscribed && idle && Arc::strong_count(live) == 1 {
+                if idle && Self::evictable(live) {
                     to_remove.push(id.clone());
                 }
             }
@@ -468,10 +492,7 @@ impl LiveSessions {
         for id in &to_remove {
             // 双检:可能已被其他路径移除。
             if let Some(live) = map.get(id) {
-                if !live.running.load(std::sync::atomic::Ordering::SeqCst)
-                    && live.followers.receiver_count() == 0
-                    && Arc::strong_count(live) == 1
-                {
+                if Self::evictable(live) {
                     map.remove(id);
                 }
             }
@@ -1091,7 +1112,7 @@ mod tests {
         let store = SessionStore::open(&root).unwrap();
         let idle = store.create(&cwd, true).unwrap();
         let active = store.create(&cwd, true).unwrap();
-        let live = LiveSessions::new(8);
+        let live = LiveSessions::new(8, u64::MAX);
         let idle_live = live.get_or_load(&store, idle.id()).unwrap();
         let active_live = live.get_or_load(&store, active.id()).unwrap();
         active_live.running.store(true, Ordering::SeqCst);
@@ -1110,6 +1131,27 @@ mod tests {
         let value = serde_json::to_value(&event).unwrap();
         assert_eq!(value["type"], "running-snapshot");
         assert_eq!(value["ids"], serde_json::json!(["s1", "s2"]));
+    }
+
+    #[test]
+    fn byte_budget_evicts_idle_resident_sessions() {
+        let root = temp_root();
+        let cwd = root.join("work");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let store = SessionStore::open(&root).unwrap();
+        let first = store.create(&cwd, true).unwrap();
+        let second = store.create(&cwd, true).unwrap();
+        // 预算 0:任何驻留字节都超限,逼出 LRU 淘汰路径。
+        let live = LiveSessions::new(8, 0);
+        // 持有期间即使超预算也不得淘汰(外部引用即“可能正在用”)。
+        let handle = live.get_or_load(&store, first.id()).unwrap();
+        assert!(live.get(first.id()).is_some());
+        drop(handle);
+        // 第二次加载触发裁剪:idle 且无引用的 first 被卸载,新会话保留。
+        live.get_or_load(&store, second.id()).unwrap();
+        assert!(live.get(first.id()).is_none());
+        assert!(live.get(second.id()).is_some());
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     fn ask_questions() -> Vec<denia_core::session::AskQuestion> {
@@ -1136,7 +1178,7 @@ mod tests {
         let store = SessionStore::open(&root).unwrap();
         let session = store.create(&cwd, true).unwrap();
         let id = session.id().to_string();
-        let live = Arc::new(LiveSessions::new(8));
+        let live = Arc::new(LiveSessions::new(8, u64::MAX));
         live.get_or_load(&store, &id).unwrap();
         (root, live, id)
     }
@@ -1261,7 +1303,7 @@ mod tests {
                 },
             )
             .unwrap();
-        let live = Arc::new(LiveSessions::new(8));
+        let live = Arc::new(LiveSessions::new(8, u64::MAX));
         live.get_or_load(&store, child.id()).unwrap();
         let bridge = ServerAskBridge::new(live);
         let resolution = bridge
@@ -1285,7 +1327,7 @@ mod tests {
     #[tokio::test]
     async fn ask_bridge_reports_unavailable_without_session() {
         use denia_core::session::AskOutcome;
-        let live = Arc::new(LiveSessions::new(8));
+        let live = Arc::new(LiveSessions::new(8, u64::MAX));
         let bridge = ServerAskBridge::new(live);
         let resolution = bridge
             .ask(

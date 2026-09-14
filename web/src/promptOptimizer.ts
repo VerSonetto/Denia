@@ -92,11 +92,35 @@ export function cleanOptimizedPrompt(text: string): string {
   return out
 }
 
+/** 分页近端拉取:从日志尾部向前收集足够切出 5 完整轮的事件窗口。
+ *
+ *  上下文只需要 turn 边界与人话消息(分页端点本来就不含 chunk 过程事件),
+ *  不必拉全量快照——大会话全量响应可达数百 MB。收集到 6 个 turn-start
+ *  即停:buildRecentContext 的 slice(-5) 会把头部残轮弃掉,结果与全量
+ *  遍历一致。 */
+async function fetchRecentEvents(sessionId: string, signal?: AbortSignal): Promise<SessionEnvelope[]> {
+  const PAGE_LIMIT = 500
+  const MAX_PAGES = 20
+  const TURN_STARTS_NEEDED = 6
+  let collected: SessionEnvelope[] = []
+  let before: number | undefined
+  for (let page = 0; page < MAX_PAGES; page++) {
+    const data = await api.getSessionPage(sessionId, { limit: PAGE_LIMIT, before }, signal)
+    if (data.events.length === 0) break
+    collected = [...data.events, ...collected]
+    if (!data.hasMoreBefore) break
+    const turnStarts = collected.reduce((n, event) => (event.type === 'turn-start' ? n + 1 : n), 0)
+    if (turnStarts >= TURN_STARTS_NEEDED) break
+    before = data.events[0].seq
+  }
+  return collected
+}
+
 /** 拉取会话上下文 + 调用当前模型,返回优化后的提示词正文。 */
 export async function optimizePromptText(
   options: OptimizePromptOptions,
 ): Promise<string> {
-  const { events } = await api.getSession(options.sessionId, options.signal)
+  const events = await fetchRecentEvents(options.sessionId, options.signal)
   const context = buildRecentContext(events)
   const contextBlock = context
     ? `最近 5 轮对话上下文(已排除工具调用消息):\n\n${context}\n\n`

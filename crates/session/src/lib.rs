@@ -21,7 +21,7 @@
 //! `turn-end { aborted }` 关闭崩溃遗留的孤儿轮次——事件不会静默丢失。
 
 use std::fs::{File, OpenOptions};
-use std::io::{BufRead, BufReader, BufWriter, Read, Write};
+use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -216,13 +216,19 @@ impl Session {
     }
 
     /// Loads one session, repairing torn tails and orphaned turns.
+    ///
+    /// 流式逐行读取:不把整个日志读成 String(数百 MB 大会话会多出一份
+    /// 等体量的瞬时拷贝),峰值内存 = 解析后的事件 + 一个行缓冲。
     pub fn load(file: &Path) -> Result<Session, SessionError> {
+        let mut reader = BufReader::new(File::open(file)?);
         let mut raw = String::new();
-        File::open(file)?.read_to_string(&mut raw)?;
 
-        let mut lines = raw.split('\n');
-        let header_line = lines.next().unwrap_or_default();
-        let header: SessionHeader = serde_json::from_str(header_line)
+        raw.clear();
+        let header_read = reader.read_line(&mut raw)?;
+        if header_read == 0 {
+            return Err(SessionError::Corrupt("empty session log".into()));
+        }
+        let header: SessionHeader = serde_json::from_str(raw.trim_end_matches(['\n', '\r']))
             .map_err(|e| SessionError::Corrupt(format!("bad header: {e}")))?;
         if header.version != SESSION_FORMAT_VERSION {
             return Err(SessionError::Corrupt(format!(
@@ -232,7 +238,7 @@ impl Session {
         }
 
         // Byte offsets track the committed prefix for torn-tail truncation.
-        let consumed_base = header_line.len() + 1;
+        let consumed_base = header_read as u64;
         let mut consumed = consumed_base;
         let mut offsets: Vec<u64> = Vec::new();
         let mut events: Vec<SessionEnvelope> = Vec::new();
@@ -244,15 +250,20 @@ impl Session {
         let mut goal: Option<GoalState> = None;
         let mut title: Option<String> = None;
         let mut meter = ContextMeter::new();
-        for line in lines {
-            let with_newline = line.len() + 1;
+        loop {
+            raw.clear();
+            let read = reader.read_line(&mut raw)?;
+            if read == 0 {
+                break;
+            }
+            let line = raw.trim_end_matches(['\n', '\r']);
             if line.trim().is_empty() {
-                consumed += with_newline;
+                consumed += read as u64;
                 continue;
             }
             match serde_json::from_str::<SessionEnvelope>(line) {
                 Ok(envelope) => {
-                    offsets.push(consumed as u64 + with_newline as u64);
+                    offsets.push(consumed + read as u64);
                     match &envelope.event {
                         SessionEvent::TurnStart { turn } => last_turn = last_turn.max(*turn),
                         SessionEvent::SystemPrompt { text, .. } => {
@@ -273,14 +284,14 @@ impl Session {
                     if line.trim_end().ends_with('}') {
                         // Retired or unknown event types are skipped so older
                         // logs keep loading.
-                        consumed += with_newline;
+                        consumed += read as u64;
                         continue;
                     }
-                    torn_at = Some(consumed);
+                    torn_at = Some(consumed as usize);
                     break;
                 }
             }
-            consumed += with_newline;
+            consumed += read as u64;
         }
 
         if let Some(torn) = torn_at {
@@ -358,6 +369,30 @@ impl Session {
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
         f(&inner.events)
+    }
+
+    /// 会话日志文件的字节数(O(1) metadata)。
+    ///
+    /// 用磁盘日志体积作驻留内存的代理量做预算控制,避免为记账而遍历
+    /// 全部事件;内存实际占用约为该值的 1.5~2.5 倍(结构体 + 分配器开销)。
+    pub fn log_bytes(&self) -> u64 {
+        std::fs::metadata(&self.file).map(|m| m.len()).unwrap_or(0)
+    }
+
+    /// 从事件下标 `from` 起克隆至多 `max` 条,返回 (当前日志长度, 批次)。
+    ///
+    /// 供流式导出/快照分批拉取:既不克隆全量日志,也不长时间持锁阻塞
+    /// 运行中的 turn。日志 append-only、下标稳定;rewind 物理截断后旧
+    /// `from` 可能越界,此时返回空批次,调用方以返回的长度判断终止。
+    pub fn snapshot_batch(&self, from: usize, max: usize) -> (usize, Vec<SessionEnvelope>) {
+        let inner = self
+            .inner
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let len = inner.events.len();
+        let start = from.min(len);
+        let end = (start + max).min(len);
+        (len, inner.events[start..end].to_vec())
     }
 
     pub fn file(&self) -> &Path {

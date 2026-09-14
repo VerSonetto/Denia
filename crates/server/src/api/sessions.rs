@@ -13,8 +13,10 @@ use std::convert::Infallible;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
+use axum::body::Body;
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
+use axum::http::header;
 use axum::response::IntoResponse;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::routing::{get, post};
@@ -23,6 +25,7 @@ use denia_core::config::ModelSelection;
 use denia_core::session::{
     ApprovalOutcome, PermissionMode, PlanReviewDecision, SessionEnvelope, SessionEvent,
 };
+use denia_session::Session;
 use futures::StreamExt;
 use serde::Deserialize;
 use serde_json::json;
@@ -208,10 +211,83 @@ async fn get_session(
         .get_or_load(&state.sessions, &id)
         .map_err(ApiError::from_session)?;
     let session = live.session.clone();
-    Ok(Json(json!({
-        "header": session.header(),
-        "events": session.events(),
-    })))
+    Ok((
+        [(header::CONTENT_TYPE, "application/json")],
+        snapshot_response_body(session),
+    ))
+}
+
+/// 全量快照的流式响应体:分批克隆事件、逐批序列化,峰值内存只有
+/// “会话驻留 + 一个小缓冲”,不再构建完整的 serde_json DOM,也不为读
+/// 路径克隆全量日志(大会话旧实现三者相加可达 GB 级瞬时分配)。
+fn snapshot_response_body(session: Arc<Session>) -> Body {
+    /// 每批从日志锁内克隆的事件数;批越小锁持有越短。
+    const SNAPSHOT_BATCH: usize = 256;
+    /// 缓冲达到该字节数即向响应流推送一块,后续块靠 channel 容量背压。
+    const FLUSH_BYTES: usize = 64 * 1024;
+
+    let (tx, rx) = tokio::sync::mpsc::channel::<Result<axum::body::Bytes, std::io::Error>>(8);
+    std::thread::spawn(move || {
+        // 序列化只可能因底层数据损坏失败;失败即截断连接,与流中途出错
+        // 的语义一致,不产出伪造的截断 JSON。
+        let failed = |tx: &tokio::sync::mpsc::Sender<Result<axum::body::Bytes, std::io::Error>>| {
+            let _ = tx.blocking_send(Err(std::io::Error::other("snapshot serialization failed")));
+        };
+        let mut out: Vec<u8> = Vec::with_capacity(FLUSH_BYTES * 2);
+        macro_rules! flush {
+            ($tx:expr) => {
+                if out.len() >= FLUSH_BYTES {
+                    let chunk = std::mem::take(&mut out);
+                    if $tx
+                        .blocking_send(Ok(axum::body::Bytes::from(chunk)))
+                        .is_err()
+                    {
+                        return; // 客户端断开,停止生产。
+                    }
+                }
+            };
+        }
+        let header_json = match serde_json::to_vec(session.header()) {
+            Ok(bytes) => bytes,
+            Err(_) => {
+                failed(&tx);
+                return;
+            }
+        };
+        out.extend_from_slice(b"{\"header\":");
+        out.extend_from_slice(&header_json);
+        out.extend_from_slice(b",\"events\":[");
+        flush!(tx);
+        let mut from = 0usize;
+        let mut first = true;
+        loop {
+            let (_total, batch) = session.snapshot_batch(from, SNAPSHOT_BATCH);
+            if batch.is_empty() {
+                break;
+            }
+            let batch_len = batch.len();
+            for envelope in batch {
+                let event_json = match serde_json::to_vec(&envelope) {
+                    Ok(bytes) => bytes,
+                    Err(_) => {
+                        failed(&tx);
+                        return;
+                    }
+                };
+                if !first {
+                    out.push(b',');
+                }
+                first = false;
+                out.extend_from_slice(&event_json);
+                flush!(tx);
+            }
+            from += batch_len;
+        }
+        out.extend_from_slice(b"]}");
+        let _ = tx.blocking_send(Ok(axum::body::Bytes::from(out)));
+        // tx drop:关闭通道,响应体结束。
+    });
+    Body::from_stream(tokio_stream::wrappers::ReceiverStream::new(rx))
 }
 
 #[derive(Debug, Deserialize)]
@@ -260,14 +336,18 @@ async fn delete_session(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, ApiError> {
-    if let Ok(live) = state.live.get_or_load(&state.sessions, &id) {
-        if live.running.load(Ordering::SeqCst) {
-            return Err(ApiError::new(
-                StatusCode::CONFLICT,
-                "session/running",
-                "cancel the running turn before deleting",
-            ));
-        }
+    // 运行中的会话必然驻留 live 表,未驻留即未运行;不为读一个标志把
+    // 大会话整载进内存(旧实现 get_or_load 会为此加载完整日志)。
+    let running = state
+        .live
+        .get(&id)
+        .is_some_and(|live| live.running.load(Ordering::SeqCst));
+    if running {
+        return Err(ApiError::new(
+            StatusCode::CONFLICT,
+            "session/running",
+            "cancel the running turn before deleting",
+        ));
     }
     state
         .runtime
