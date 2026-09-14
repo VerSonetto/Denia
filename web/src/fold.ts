@@ -281,6 +281,10 @@ export function foldEvents(events: SessionEnvelope[]): TranscriptNode[] {
         break
       case 'step-end':
         break
+      case 'agent-preset':
+        // 会话事实(会话运行哪份组装),不产生转录节点:当前值由会话流的
+        // 订阅方单独取用,这里只保证 fold 不把它当未知事件截断后续。
+        break
       case 'assistant-chunk': {
         if (!open || open.turn !== event.turn || open.step !== event.step) {
           closeOpen()
@@ -598,6 +602,8 @@ function applyEnvelopeStep(
       incrementalStepStarts.set(`${event.turn}:${event.step}`, event.time)
       return nodes
     case 'step-end':
+      return nodes
+    case 'agent-preset':
       return nodes
     case 'assistant-chunk': {
       const last = nodes[nodes.length - 1]

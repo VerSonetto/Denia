@@ -599,6 +599,21 @@ export function IconCollapseAll(props: IconProps) {
   )
 }
 
+/** agent preset(组装模式):三块咬合成一体 —— 一块居中压在两块的接缝上,
+    读作"这个会话由哪些部件装成"。刻意不复用星芒(那是提示词优化,见
+    IconSparkles),也不复用齿轮/滑块(设置与模型);三者会同屏出现在新会话页。 */
+export function IconAgentPreset(props: IconProps) {
+  return (
+    <Svg {...props}>
+      {/* 底座两块:留出 1.2 的中缝,让上面那块有位置 */}
+      <rect x="2.6" y="8.5" width="4.8" height="4.4" rx="1.3" stroke="currentColor" strokeWidth="1.2" />
+      <rect x="8.6" y="8.5" width="4.8" height="4.4" rx="1.3" stroke="currentColor" strokeWidth="1.2" />
+      {/* 顶上那块:跨在接缝上方,间距 1.0(收紧到一个整体,不散成三颗点) */}
+      <rect x="5.6" y="3.1" width="4.8" height="4.4" rx="1.3" stroke="currentColor" strokeWidth="1.2" />
+    </Svg>
+  )
+}
+
 /** 提示词优化:魔法/星芒,表示“优化”。 */
 export function IconSparkles(props: IconProps) {
   return (

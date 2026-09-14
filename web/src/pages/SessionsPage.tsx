@@ -26,6 +26,7 @@ import { sessionDisplayTitle } from '../sessionDisplay'
 import type { TranscriptNode } from '../fold'
 import type { TrajectoryQuote } from '../trajectory'
 import { SessionView } from '../components/SessionView'
+import { AgentPresetSelector } from '../components/AgentPresetSelector'
 import { OpenInApp } from '../components/OpenInApp'
 import { ErrorBoundary } from '../components/ErrorBoundary'
 import { StatsBar } from '../components/StatsBar'
@@ -91,6 +92,7 @@ import {
   type ExportFormat,
 } from '../lib/exportSession'
 import type {
+  AskAnswer,
   CatalogModel,
   ModelCatalog,
   ModelSelection,
@@ -119,6 +121,38 @@ function normalizeSelection(catalog: ModelCatalog, selection: ModelSelection): M
 const LAST_MODEL_KEY = 'denia.last-model'
 // 品牌改名前的旧 key 字面量,故意保留 dsh-rs:只用于读取并搬运老用户的选择。
 const LAST_MODEL_KEY_LEGACY = 'dsh-rs.last-model'
+/**
+ * transcript nodes 落 state 的节流间隔(ms)。统计条等下游只需"跟得上",
+ * 不需要 60Hz;真正的流式渲染发生在会话流子树内部(它自持 nodes)。
+ */
+const NODES_THROTTLE_MS = 200
+
+/** 上下文占用轮询的响应是否与上一份等价(等价则沿用旧引用,不惊动渲染)。 */
+function sameBreakdown(
+  previous: api.ContextBreakdownResponse | null,
+  next: api.ContextBreakdownResponse,
+): boolean {
+  if (previous === null) return false
+  const a = previous.breakdown
+  const b = next.breakdown
+  const pa = previous.pressure
+  const pb = next.pressure
+  const ua = previous.usage
+  const ub = next.usage
+  return (
+    a.systemTokens === b.systemTokens &&
+    a.toolsTokens === b.toolsTokens &&
+    a.messageTokens === b.messageTokens &&
+    pa.contextWindow === pb.contextWindow &&
+    pa.pressureTokens === pb.pressureTokens &&
+    pa.projectedTokens === pb.projectedTokens &&
+    ua.uncachedInputTokens === ub.uncachedInputTokens &&
+    ua.outputTokens === ub.outputTokens &&
+    ua.cacheReadTokens === ub.cacheReadTokens &&
+    ua.cacheWriteTokens === ub.cacheWriteTokens &&
+    ua.reasoningTokens === ub.reasoningTokens
+  )
+}
 /**
  * 初始模型选择(默认模型功能已删,交互改为本地记忆):
  * 1. 上一次使用的模型(localStorage,跨进程持久)——从别的会话新建会话、
@@ -268,7 +302,37 @@ export default function SessionsPage({
    */
   const compactingAt = useCompactingFor(activeId)
   // 当前会话的 transcript 节点,供状态栏统计。
+  //
+  // 节流写入:流式期间 nodes 每帧都是新数组,若直接 setState,这个 2500 行的
+  // 页面(连同 composer/侧栏/统计条/对话轴)会跟着每帧重渲染一次 —— 帧内的
+  // React 工作量从"会话流子树"放大成"整页"。这里只在节拍上落一次 state
+  // (StatsBar 这类只吃统计的下游不需要 60Hz),其余时刻由 nodesRef 承载
+  // 最新值给异步逻辑(回退找节点等)读。
   const [transcriptNodes, setTranscriptNodes] = useState<TranscriptNode[]>([])
+  const nodesRef = useRef<TranscriptNode[]>([])
+  const nodesThrottleRef = useRef<number | null>(null)
+  const applyNodes = useCallback((nodes: TranscriptNode[], flush = false) => {
+    nodesRef.current = nodes
+    if (flush) {
+      if (nodesThrottleRef.current !== null) {
+        window.clearTimeout(nodesThrottleRef.current)
+        nodesThrottleRef.current = null
+      }
+      setTranscriptNodes(nodes)
+      return
+    }
+    if (nodesThrottleRef.current !== null) return
+    nodesThrottleRef.current = window.setTimeout(() => {
+      nodesThrottleRef.current = null
+      setTranscriptNodes(nodesRef.current)
+    }, NODES_THROTTLE_MS)
+  }, [])
+  useEffect(
+    () => () => {
+      if (nodesThrottleRef.current !== null) window.clearTimeout(nodesThrottleRef.current)
+    },
+    [],
+  )
   // 全会话用户消息锚点(轮次轴刻度,来自分页响应,不受窗口限制)。
   const [axisAnchors, setAxisAnchors] = useState<api.SessionAnchor[]>([])
   // 轮次轴跳转请求:点击未加载刻度时递增 nonce 触发视图翻页定位。
@@ -503,6 +567,7 @@ export default function SessionsPage({
     setPendingMessages([])
     sendingRef.current = false
     closeMention()
+    nodesRef.current = []
     setTranscriptNodes([])
     setAxisAnchors([])
     setAxisJump(null)
@@ -865,6 +930,12 @@ export default function SessionsPage({
   )
   const [permissionBusy, setPermissionBusy] = useState(false)
   const [fullAccessConfirm, setFullAccessConfirm] = useState(false)
+  // agent preset(组装):名册来自服务端;当前值优先取用户在新会话页的选择,
+  // 其次取会话摘要里记的组装(列表接口携带),最后落到部署默认值。
+  // 会话一旦产出内容就没有改选入口——选择器只长在新会话页那一行。
+  const [agentPresetCatalog, setAgentPresetCatalog] = useState<api.AgentPresetsView | null>(null)
+  const [agentPresetChoice, setAgentPresetChoice] = useState<string | null>(null)
+  const [agentPresetBusy, setAgentPresetBusy] = useState(false)
   const pendingFullAccessRef = useRef<PermissionMode | null>(null)
   const [approvalReq, setApprovalReq] = useState<ApprovalRequest | null>(null)
   const fileInputRef = useRef<HTMLInputElement | null>(null)
@@ -886,6 +957,55 @@ export default function SessionsPage({
   useEffect(() => {
     loadDefaultPermission()
   }, [loadDefaultPermission, catalogTick])
+
+  // preset 名册:挂载拉一次;服务端广播(复制/删除/用户改了 preset.yml)后重拉。
+  const refreshAgentPresets = useCallback(() => {
+    void api
+      .listAgentPresets()
+      .then(setAgentPresetCatalog)
+      .catch(() => {
+        /* 名册拉取失败不打断会话:选择器隐藏,发送与运行不受影响 */
+      })
+  }, [])
+
+  useEffect(() => {
+    refreshAgentPresets()
+    return api.subscribeEvents((type) => {
+      if (type === 'agent-presets-updated') refreshAgentPresets()
+      // 默认组装写在设置里:设置一变,名册里的"默认"徽标与兜底值同步。
+      if (type === 'settings-updated') refreshAgentPresets()
+    })
+  }, [refreshAgentPresets])
+
+  /** 新会话页显示与提交用的组装 id:本地选择 > 会话摘要 > 部署默认值。 */
+  const agentPresetId =
+    agentPresetChoice ?? activeSession?.agent_preset ?? agentPresetCatalog?.default ?? null
+
+  /**
+   * 切换当前会话的组装(只有还没产出内容的会话可切;服务端拒绝时原样报错)。
+   * 与权限同一套路数:会话已存在就直接写进它的日志(刷新后仍在),还没建会话
+   * 就先记本地,首条消息发出时随会话创建一起应用。
+   */
+  const changeAgentPreset = useCallback(
+    (id: string) => {
+      setAgentPresetChoice(id)
+      if (!activeId) return
+      setAgentPresetBusy(true)
+      void api
+        .setSessionAgentPreset(activeId, id)
+        .catch((error) => {
+          setAgentPresetChoice(null)
+          notify('err', error instanceof Error ? error.message : String(error))
+        })
+        .finally(() => setAgentPresetBusy(false))
+    },
+    [activeId, notify],
+  )
+
+  // 换会话时本地选择归零:重新跟随那个会话自己记录的组装。
+  useEffect(() => {
+    setAgentPresetChoice(null)
+  }, [activeId])
 
   /** 切换当前会话权限(活动会话直接写后端;无活动会话先记本地,首次发送时带上)。 */
   const applyPermission = useCallback(
@@ -1266,7 +1386,7 @@ export default function SessionsPage({
 
   const handleRewind = useCallback(async (seq: number) => {
     if (!activeId || rewindBusy) return
-    const node = transcriptNodes.find(
+    const node = nodesRef.current.find(
       (n): n is Extract<TranscriptNode, { kind: 'user' }> =>
         n.kind === 'user' && n.anchor === seq,
     )
@@ -1322,6 +1442,69 @@ export default function SessionsPage({
     // 引用动作来自轨迹视图:切回对话视图,在输入框上方补写问题后发送。
     setView('chat')
     notify('ok', t('trajQuoted'))
+  }, [])
+
+  /* ---- 传给 SessionView 的回调:引用必须稳定 ----
+   * 这些回调一路透传到 transcript 的 NodeView(memo 化)。若在 JSX 里写内联
+   * 箭头,每次页面渲染都是新引用,浅比较必然失败 —— 所有历史行都会跟着
+   * 重渲染,memo 形同虚设。 */
+
+  const handleNodesChange = useCallback(
+    (nodes: TranscriptNode[]) => {
+      applyNodes(nodes)
+      follow()
+    },
+    [applyNodes, follow],
+  )
+
+  const handleJumpSettled = useCallback(() => setAxisJump(null), [])
+
+  const handleRewindClick = useCallback(
+    (seq: number) => {
+      void handleRewind(seq)
+    },
+    [handleRewind],
+  )
+
+  const handleForkClick = useCallback(
+    (seq: number) => {
+      void handleFork(seq)
+    },
+    [handleFork],
+  )
+
+  const handleLoopContinue = useCallback(() => {
+    // 死循环保护提示行的「继续」:程序化发送继续消息。
+    void postMessageRef.current('继续', { clearInput: false })
+  }, [])
+
+  const handleAskAnswer = useCallback(
+    (requestId: string, answers: AskAnswer[]) => {
+      if (!activeId) return
+      api
+        .answerAsk(activeId, requestId, answers)
+        .catch((error) => notify('err', error instanceof Error ? error.message : String(error)))
+    },
+    [activeId, notify],
+  )
+
+  const handleAskCancel = useCallback(
+    (requestId: string) => {
+      if (!activeId) return
+      api
+        .cancelAsk(activeId, requestId)
+        .catch((error) => notify('err', error instanceof Error ? error.message : String(error)))
+    },
+    [activeId, notify],
+  )
+
+  const handleGoalTouch = useCallback(() => {
+    if (activeId) refreshGoal(activeId)
+  }, [activeId, refreshGoal])
+
+  const handleNotFound = useCallback(() => {
+    // 会话已被删除(其他窗口/流 404):清空视图。
+    setActiveId(null, null)
   }, [])
 
   /* ---- 导出会话:从后端拉全量 events 后回放文件 ---- */
@@ -1443,10 +1626,17 @@ export default function SessionsPage({
   const [context, setContext] = useState<api.ContextBreakdownResponse | null>(null)
 
   const refreshContextBreakdown = () => {
-    if (!activeId) return
-    api.contextBreakdown(activeId).then(setContext).catch(() => {
-      /* 服务端取不到不报错,面板仍显示旧值 */
-    })
+    // 后台标签页不做无谓轮询;服务端取不到不报错,面板仍显示旧值。
+    if (!activeId || document.hidden) return
+    api
+      .contextBreakdown(activeId)
+      .then((next) => {
+        // 数值未变就沿用旧对象:否则每次轮询都换引用,整页白重渲染一次。
+        setContext((previous) => (sameBreakdown(previous, next) ? previous : next))
+      })
+      .catch(() => {
+        /* 服务端取不到不报错,面板仍显示旧值 */
+      })
   }
 
   useEffect(() => {
@@ -1560,6 +1750,10 @@ export default function SessionsPage({
       markStarted(id)
       if (wasHero && permission !== 'auto-edit') {
         await api.setSessionPermission(id, permission)
+      }
+      // 欢迎页选过组装而那时还没有会话:现在补上,与权限同一处应用。
+      if (wasHero && agentPresetChoice) {
+        await api.setSessionAgentPreset(id, agentPresetChoice)
       }
       // 斜杠命令裁定(单一发送咽喉:手动发送/队列自动发送/立即发送共用);
       // 命令优先于技能(对齐 dsh matchEnter 的行认领)。
@@ -1888,6 +2082,15 @@ export default function SessionsPage({
         </span>
         <IconChevron size={11} />
       </button>
+      {agentPresetCatalog && agentPresetId && (
+        <AgentPresetSelector
+          value={agentPresetId}
+          presets={agentPresetCatalog.presets}
+          defaultId={agentPresetCatalog.default}
+          disabled={inert || agentPresetBusy}
+          onChange={changeAgentPreset}
+        />
+      )}
       {wsMenuOpen && (
         <>
           <div className="menu-backdrop" onClick={() => setWsMenuOpen(false)} />
@@ -2387,44 +2590,19 @@ export default function SessionsPage({
                 pendingMessages={pendingMessages}
                 compacting={compactingAt}
                 onTodosChange={setTodos}
-                onGoalTouch={() => {
-                  if (activeId) refreshGoal(activeId)
-                }}
+                onGoalTouch={handleGoalTouch}
                 onPendingSettled={settlePending}
-                onNotFound={() => {
-                  // 会话已被删除(其他窗口/流 404):清空视图。
-                  setActiveId(null, null)
-                }}
-                onNodesChange={(nodes) => {
-                  setTranscriptNodes(nodes)
-                  follow()
-                }}
+                onNotFound={handleNotFound}
+                onNodesChange={handleNodesChange}
                 onAnchorsChange={setAxisAnchors}
                 jumpRequest={axisJump}
-                onJumpSettled={() => setAxisJump(null)}
-                onRewind={(seq) => void handleRewind(seq)}
-                onFork={(seq) => void handleFork(seq)}
+                onJumpSettled={handleJumpSettled}
+                onRewind={handleRewindClick}
+                onFork={handleForkClick}
                 onQuote={handleQuote}
-                onLoopContinue={() => {
-                  // 死循环保护提示行的「继续」:程序化发送继续消息。
-                  void postMessage('继续', { clearInput: false })
-                }}
-                onAskAnswer={(requestId, answers) => {
-                  if (!activeId) return
-                  api
-                    .answerAsk(activeId, requestId, answers)
-                    .catch((error) =>
-                      notify('err', error instanceof Error ? error.message : String(error)),
-                    )
-                }}
-                onAskCancel={(requestId) => {
-                  if (!activeId) return
-                  api
-                    .cancelAsk(activeId, requestId)
-                    .catch((error) =>
-                      notify('err', error instanceof Error ? error.message : String(error)),
-                    )
-                }}
+                onLoopContinue={handleLoopContinue}
+                onAskAnswer={handleAskAnswer}
+                onAskCancel={handleAskCancel}
               />
             </ErrorBoundary>
           ) : (

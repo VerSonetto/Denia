@@ -1,4 +1,6 @@
 import type {
+  AgentPresetRow,
+  AgentPresetsView,
   AskAnswer,
   CredentialInfo,
   DiscoveredModel,
@@ -15,6 +17,8 @@ import type {
   WorkspaceRecord,
   WireProtocol,
 } from './types'
+
+export type { AgentPresetRow, AgentPresetsView } from './types'
 
 export class ApiError extends Error {
   constructor(
@@ -501,10 +505,49 @@ export function listSessions(): Promise<{ sessions: SessionSummary[] }> {
 export function createSession(options: {
   workspaceId?: string
   cwd?: string
+  /** 会话运行的 agent preset;缺省用设置里的默认值。 */
+  agentPreset?: string
 }): Promise<{ session: SessionSummary & { cwd: string } }> {
   return http('/api/sessions', {
     method: 'POST',
     body: JSON.stringify(options),
+  })
+}
+
+/* ---- agent presets ---- */
+
+export function listAgentPresets(): Promise<AgentPresetsView> {
+  return http('/api/agent-presets')
+}
+
+export function getAgentPreset(
+  id: string,
+): Promise<{ preset: AgentPresetRow; text: string }> {
+  return http(`/api/agent-presets/${encodeURIComponent(id)}`)
+}
+
+export function copyAgentPreset(body: {
+  from: string
+  id: string
+  name?: string
+}): Promise<{ preset: AgentPresetRow }> {
+  return http('/api/agent-presets', {
+    method: 'POST',
+    body: JSON.stringify(body),
+  })
+}
+
+export function deleteAgentPreset(id: string): Promise<unknown> {
+  return http(`/api/agent-presets/${encodeURIComponent(id)}`, { method: 'DELETE' })
+}
+
+export function setSessionAgentPreset(
+  id: string,
+  preset: string,
+): Promise<{ preset: string }> {
+  return http(`/api/sessions/${encodeURIComponent(id)}/agent-preset`, {
+    method: 'PUT',
+    body: JSON.stringify({ preset }),
   })
 }
 

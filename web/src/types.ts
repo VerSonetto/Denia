@@ -259,6 +259,8 @@ export type SessionEnvelope =
       todos: TodoItem[]
     }
   | { seq: number; time: number; type: 'permission-mode'; mode: PermissionMode }
+  /** 会话运行用的 agent preset(决定工具面与 persona);仅空白会话可改选。 */
+  | { seq: number; time: number; type: 'agent-preset'; preset: string }
   | {
       seq: number
       time: number
@@ -422,6 +424,32 @@ export interface SessionSummary {
   cwd_alive?: boolean
   /** 分支血缘:父会话 id;侧栏据此把子会话嵌套在源会话之下。 */
   parent_session?: string
+  /** 会话运行的 agent preset(id);创建时写入,缺省表示后端未提供。 */
+  agent_preset?: string
+}
+
+/** agent preset 名册里的一行(随附或用户自定义)。 */
+export interface AgentPresetRow {
+  id: string
+  trust: 'shipped' | 'user'
+  name: string
+  description: string
+  /** 工具白名单;缺省表示出厂全量工具集。 */
+  tools?: string[]
+  hasPersona: boolean
+  /** 用户根目录下的 preset 才可删除、可被对照。 */
+  writable: boolean
+  path?: string
+  /** 损坏原因;有值时该行无法用于会话。 */
+  broken?: string
+}
+
+export interface AgentPresetsView {
+  /** 新建会话未显式指定时使用的默认 preset id。 */
+  default: string
+  /** 用户 preset 根目录(展示与"用编辑器打开"用)。 */
+  root: string
+  presets: AgentPresetRow[]
 }
 
 export interface WorkspaceEntry {

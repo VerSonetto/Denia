@@ -402,6 +402,9 @@ export async function ensureSession(ws: WorkspaceRecord | null): Promise<string 
     cwd: session.cwd,
     sandbox: session.sandbox,
     cwd_alive: true,
+    // 组装在创建时就写进会话日志;带上它,新会话页不必等下一次列表刷新
+    // 才知道这个会话跑的是什么(否则会短暂显示部署默认值)。
+    agent_preset: session.agent_preset,
   }
   addSessionLocal(summary, ws.id)
   // 本页面为发送首条消息而创建的会话:同样登记,发送失败留下空白时可被清理。

@@ -156,6 +156,20 @@ export function SessionView({
   // rAF 批处理:流式帧入队,每帧最多一次渲染。
   const queueRef = useRef<SessionEnvelope[]>([])
   const rafRef = useRef<number | undefined>(undefined)
+  /**
+   * 事件累加器:整份历史 + 已到达的增量。就地 push,不每帧重建数组 ——
+   * 长会话里 `[...previous, ...batch]` 是 O(总事件数) 的复制,而流式帧
+   * 每秒几十条,这些复制不产出任何 UI。只有真正需要 events state 时
+   * (轨迹视图 / todo / 用户消息)才切一份快照交给 React。
+   */
+  const accRef = useRef<SessionEnvelope[]>([])
+
+  /** 把累加器当前内容作为新引用交给 events state(仅在需要时调用)。 */
+  const publishEvents = useCallback(() => {
+    const next = accRef.current.slice()
+    eventsRef.current = next
+    setEvents(next)
+  }, [])
 
   useEffect(() => {
     nodesChangeRef.current?.(nodes)
@@ -171,15 +185,14 @@ export function SessionView({
       const batch = queueRef.current
       queueRef.current = []
       if (batch.length === 0) return
-      const previous = eventsRef.current
-      const next = previous.length > 0 ? [...previous, ...batch] : batch
-      eventsRef.current = next
+      // 就地累加,不复制整份历史(见 accRef 注释)。
+      accRef.current.push(...batch)
       // events state 只服务于轨迹视图与 todo 台账;纯输出帧(全部是
       // assistant-chunk)不触发 setEvents,省掉一帧一次的全量数组拷贝。
       const needsEvents =
         viewRef.current === 'trajectory' ||
         batch.some((env) => env.type === 'todo-write' || env.type === 'user-message')
-      if (needsEvents) setEvents(next)
+      if (needsEvents) publishEvents()
       setNodes((previous) => applyEnvelopes(previous, batch))
     }
     const settlePending = (events: SessionEnvelope[]) => {
@@ -193,6 +206,7 @@ export function SessionView({
       onSnapshot: (header, snapshot, meta) => {
         queueRef.current = []
         const pageInfo = meta ?? { total: snapshot.length, hasMoreBefore: false, anchors: [] }
+        accRef.current = snapshot
         eventsRef.current = snapshot
         setEvents(snapshot)
         setPageMeta(pageInfo)
@@ -208,7 +222,7 @@ export function SessionView({
         settlePending([envelope])
         queueRef.current.push(envelope)
         if (envelope.type === 'todo-write' || envelope.type === 'user-message') {
-          publishTodos([...eventsRef.current, ...queueRef.current])
+          publishTodos([...accRef.current, ...queueRef.current])
         }
         // 压缩成功:摘要落盘事件到达 →"正在压缩"标记到此为止(摘要行会
         // 由 fold 就地渲染出来)。刷新后走的是冷启动 snapshot 分支。
@@ -230,6 +244,7 @@ export function SessionView({
       if (rafRef.current !== undefined) window.cancelAnimationFrame(rafRef.current)
       rafRef.current = undefined
       queueRef.current = []
+      accRef.current = []
       setEvents([])
     }
     // 仅依赖 id:监听回调经 ref 透传,避免每次渲染重挂流。
@@ -250,15 +265,15 @@ export function SessionView({
 
   /** 向上翻页:把更早的完整轮次组 prepend 到当前事件流并重建 fold。 */
   const loadOlder = useCallback(async (): Promise<boolean> => {
-    const current = eventsRef.current
+    const current = accRef.current
     const oldest = current[0]?.seq
     if (!oldest || loadingOlder || !pageMetaRef.current.hasMoreBefore) return false
     setLoadingOlder(true)
     try {
       const page = await api.getSessionPage(id, { before: oldest, limit: OLDER_PAGE_LIMIT })
-      const merged = [...page.events, ...eventsRef.current]
-      eventsRef.current = merged
-      setEvents(merged)
+      const merged = [...page.events, ...accRef.current]
+      accRef.current = merged
+      publishEvents()
       setNodes(foldEvents(merged))
       setPageMeta({ total: page.total, hasMoreBefore: page.hasMoreBefore, anchors: page.anchors ?? [] })
       publishTodos(merged)
@@ -269,7 +284,7 @@ export function SessionView({
     } finally {
       setLoadingOlder(false)
     }
-  }, [id, loadingOlder, publishTodos])
+  }, [id, loadingOlder, publishTodos, publishEvents])
 
   // 轮次轴跳转:锚点在窗口内直接定位;不在则向上翻页直至覆盖(或到头放弃)。
   useEffect(() => {
@@ -277,12 +292,12 @@ export function SessionView({
     let cancelled = false
     void (async () => {
       const { seq } = jumpRequest
-      while (!cancelled && !eventsRef.current.some((envelope) => envelope.seq === seq)) {
-        const oldest = eventsRef.current[0]?.seq
+      while (!cancelled && !accRef.current.some((envelope) => envelope.seq === seq)) {
+        const oldest = accRef.current[0]?.seq
         const progressed = await loadOlder()
         if (cancelled) return
         // 到头仍未见目标(异常请求)或翻页无进展:放弃并恢复轴的可点击态。
-        if (!progressed || eventsRef.current[0]?.seq === oldest) {
+        if (!progressed || accRef.current[0]?.seq === oldest) {
           jumpSettledRef.current?.()
           return
         }

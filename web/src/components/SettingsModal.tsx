@@ -6,6 +6,7 @@ import * as api from '../api'
 import { t } from '../i18n'
 import type { Notify } from '../App'
 import {
+  IconAgentPreset,
   IconChevron,
   IconClose,
   IconGear,
@@ -15,12 +16,14 @@ import {
   IconTool,
 } from './icons'
 import { LlmPanel } from './llm/LlmPanel'
+import { AgentPresetSettings } from './settings/AgentPresetSettings'
 import { normalizePermissionMode, type PermissionMode } from '../types'
 import { PERMISSION_LEVELS, storePermission } from './PermissionSelector'
 
 type SettingsTab =
   | 'runtime'
   | 'general'
+  | 'presets'
   | 'prompts'
   | 'models'
   | 'mcp'
@@ -31,6 +34,7 @@ const CONSOLE_NS = 'console'
 
 const TABS: SettingsTab[] = [
   'general',
+  'presets',
   'prompts',
   'models',
   'mcp',
@@ -61,6 +65,8 @@ function tabIcon(tab: SettingsTab, size = 16) {
       return <IconGear size={size} />
     case 'general':
       return <IconStack size={size} />
+    case 'presets':
+      return <IconAgentPreset size={size} />
     case 'prompts':
       return <IconPrompt size={size} />
     case 'models':
@@ -80,6 +86,8 @@ function tabLabel(tab: SettingsTab): string {
       return t('runtimeSettings')
     case 'general':
       return t('settingsTabGeneral')
+    case 'presets':
+      return t('settingsTabPresets')
     case 'prompts':
       return t('settingsTabPrompts')
     case 'models':
@@ -99,6 +107,8 @@ function tabNavDesc(tab: SettingsTab): string {
       return t('runtimeSettingsHint')
     case 'general':
       return t('settingsTabGeneralDesc')
+    case 'presets':
+      return t('settingsTabPresetsDesc')
     case 'prompts':
       return t('settingsTabPromptsDesc')
     case 'models':
@@ -118,6 +128,8 @@ function paneTitle(tab: SettingsTab): string {
       return t('runtimeSettings')
     case 'general':
       return t('settingsPaneGeneralTitle')
+    case 'presets':
+      return t('settingsPanePresetsTitle')
     case 'prompts':
       return t('settingsPanePromptsTitle')
     case 'models':
@@ -137,6 +149,8 @@ function paneDesc(tab: SettingsTab): string {
       return t('runtimeSettingsHint')
     case 'general':
       return t('settingsPaneGeneralDesc')
+    case 'presets':
+      return t('settingsPanePresetsDesc')
     case 'prompts':
       return t('settingsPanePromptsDesc')
     case 'models':
@@ -603,6 +617,7 @@ export function SettingsModal({ notify, onClose }: { notify: Notify; onClose: ()
                   </div>
                 )}
 
+                {tab === 'presets' && <AgentPresetSettings notify={notify} />}
                 {tab === 'models' && <LlmPanel notify={notify} />}
 
                 {tab === 'mcp' && <McpSettings notify={notify} />}
