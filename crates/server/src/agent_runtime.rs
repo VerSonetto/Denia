@@ -1057,6 +1057,9 @@ impl Runtime {
         let parent_id = owner.to_string();
         let desc = descriptor.clone();
         let permission = parent.session.permission_mode();
+        // 子代理加入父代理的组装(抄 dsh:subagent 与创建它的 agent 看到同一
+        // 份工具面与 persona),因此 preset 随血缘继承,而不是悄悄用部署默认值。
+        let parent_preset = parent.session.agent_preset();
         // fork 只取闭合轮次，不复制正在产生的 tool-call 半截历史。
         let source = if name == "fork_agent" {
             let e = parent.session.events();
@@ -1086,6 +1089,11 @@ impl Runtime {
                 child
                     .set_permission_mode(permission)
                     .map_err(|e| e.to_string())?;
+                if let Some(preset) = &parent_preset {
+                    child
+                        .set_agent_preset(preset)
+                        .map_err(|e| e.to_string())?;
+                }
                 child.flush().map_err(|e| e.to_string())?;
                 Ok(child.id().to_string())
             })();

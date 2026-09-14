@@ -1,6 +1,7 @@
 //! axum HTTP API + SSE push + console hosting. Binary: `denia`.
 
 mod agent_runtime;
+mod agent_presets;
 mod api;
 mod error;
 mod file_history;

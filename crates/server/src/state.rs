@@ -245,6 +245,8 @@ pub struct AppState {
     pub driver: Arc<SessionDriver>,
     pub workspaces: Arc<crate::workspace::WorkspaceRegistry>,
     pub system_prompt: Arc<crate::system_prompt_store::SystemPromptState>,
+    /// agent preset 名册:随附组装 + 用户自定义组装(会话按它组装工具面)。
+    pub agent_presets: Arc<crate::agent_presets::PresetStore>,
     pub file_history: Arc<crate::file_history::FileHistoryStore>,
     /// 内嵌浏览器中枢(工具与 REST API 共用)。
     pub browser: Arc<denia_browser::BrowserManager>,
@@ -286,6 +288,9 @@ pub enum ServerEvent {
     },
     /// 自定义系统提示词文件变更后广播(前端可选订阅)。
     SystemPromptChanged,
+    /// agent preset 名册变化(用户复制/删除,或在编辑器里改了 preset.yml);
+    /// 前端据此刷新选择器与设置页。
+    AgentPresetsUpdated,
     /// MCP 服务器配置或连接状态发生变化;前端据此刷新 MCP 面板。
     McpUpdated,
     /// 手动压缩已结束但**没有**摘要产出:无可压缩区间(`nothing-to-compact`)
@@ -835,6 +840,9 @@ pub async fn build_state(
         home,
         Some(browser_hub.clone()),
     ));
+    // agent preset 名册:随附集合 + 用户目录。driver 每个 step 装配时读它,
+    // 因此文件热刷新后新 step 即生效。
+    let agent_presets = crate::agent_presets::PresetStore::load(home, settings.clone());
     let file_history = Arc::new(crate::file_history::FileHistoryStore::new(home));
     let runtime = crate::agent_runtime::Runtime::new(
         home,
@@ -862,6 +870,7 @@ pub async fn build_state(
             .with_approval(approval)
             .with_ask(ask)
             .with_runtime(runtime.clone())
+            .with_presets(agent_presets.clone())
             .with_compaction(compaction_settings_from(&console))
             .with_microcompact(microcompact_settings_from(&console))
             .with_parallel(denia_agent_loop::ParallelSettings {
@@ -892,6 +901,7 @@ pub async fn build_state(
         openai.clone(),
     );
     system_prompt.spawn_watcher(events.clone());
+    agent_presets.spawn_watcher(events.clone());
 
     let state = AppState {
         runtime,
@@ -908,6 +918,7 @@ pub async fn build_state(
         driver,
         workspaces,
         system_prompt,
+        agent_presets,
         file_history,
         browser,
         terminals,
@@ -961,6 +972,16 @@ fn register_namespaces(settings: &SettingsStore) -> Result<(), Box<dyn std::erro
         json!({}),
     )?;
     settings.register(
+        crate::agent_presets::SETTINGS_NS,
+        NamespaceSpec {
+            defaults: json!({ "default": denia_core::preset::DEFAULT_PRESET_ID }),
+            validate: validate_agent_presets,
+            secrets: &[],
+            applies: Applies::Live,
+        },
+        json!({}),
+    )?;
+    settings.register(
         crate::mcp_settings::MCP_NS,
         NamespaceSpec {
             defaults: crate::mcp_settings::defaults(),
@@ -975,6 +996,24 @@ fn register_namespaces(settings: &SettingsStore) -> Result<(), Box<dyn std::erro
         json!({}),
     )?;
     Ok(())
+}
+
+/// `agent-presets` 命名空间校验:默认 preset 必须是合法 id。
+///
+/// 指向不存在的 preset 不在这里拒绝——名册随用户复制/删除而变,写入时
+/// 无法预知;解析默认值时按名册校验并回退随附默认值(见
+/// [`crate::agent_presets::PresetStore::default_id`])。
+fn validate_agent_presets(value: Value) -> Result<Value, String> {
+    let Some(default) = value.get("default") else {
+        return Err("缺少 default(新建会话的默认 preset id)".to_string());
+    };
+    let Some(id) = default.as_str() else {
+        return Err("default 必须是 preset id 字符串".to_string());
+    };
+    if !denia_core::preset::is_valid_preset_id(id) {
+        return Err(format!("default 不是合法的 preset id:{id}"));
+    }
+    Ok(value)
 }
 
 fn sync_openai_routes(

@@ -47,6 +47,10 @@ pub fn router() -> Router<Arc<AppState>> {
             axum::routing::put(set_session_permission),
         )
         .route(
+            "/api/sessions/{id}/agent-preset",
+            axum::routing::put(set_session_agent_preset),
+        )
+        .route(
             "/api/sessions/{id}/approvals/{request_id}",
             post(answer_approval),
         )
@@ -71,7 +75,16 @@ pub fn router() -> Router<Arc<AppState>> {
 
 async fn list_sessions(State(state): State<Arc<AppState>>) -> Result<impl IntoResponse, ApiError> {
     // 内存索引:O(会话数) stat 校验,零全文读取。
-    let sessions = state.sessions.list().map_err(ApiError::from_session)?;
+    // 目录遍历 + 逐会话 stat 是阻塞 IO,丢进 blocking 池,不占 tokio worker
+    // (与同文件的 get_session_events 一致)。
+    let sessions = tokio::task::spawn_blocking(move || state.sessions.list())
+        .await
+        .map_err(|error| ApiError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "sessions/list-join",
+            &error.to_string(),
+        ))?
+        .map_err(ApiError::from_session)?;
     Ok(Json(json!({ "sessions": sessions })))
 }
 
@@ -84,6 +97,10 @@ struct CreateBody {
     /// 直接指定目录;不挂任何工作区(落"未分组")。
     #[serde(default)]
     cwd: Option<String>,
+    /// 会话运行的 agent preset(决定工具面与 persona);缺省用设置里的
+    /// 部署默认值。非法 id 与未知 preset 都拒绝(不静默落到默认值)。
+    #[serde(default)]
+    agent_preset: Option<String>,
 }
 
 async fn create_session(
@@ -93,12 +110,28 @@ async fn create_session(
     let body = body.map(|Json(body)| body).unwrap_or(CreateBody {
         workspace_id: None,
         cwd: None,
+        agent_preset: None,
     });
     if body.workspace_id.is_some() && body.cwd.is_some() {
         return Err(ApiError::bad_request(
             "gateway/bad-request",
             "workspaceId and cwd are mutually exclusive",
         ));
+    }
+    // 会话运行的组装必须在创建时就定下来并写进日志:preset 决定模型看到的
+    // 工具 schema 与 persona,恢复会话时必须还原同一份组装。未指定则取
+    // 设置里的部署默认值(与 dsh 一致:header 记录生效值,不记"未指定")。
+    let preset_id = match body
+        .agent_preset
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+    {
+        Some(id) => id.to_string(),
+        None => state.agent_presets.default_id(),
+    };
+    if state.agent_presets.resolve(&preset_id).is_none() {
+        return Err(unknown_agent_preset(&preset_id));
     }
     let workspace = match &body.workspace_id {
         Some(id) => Some(state.workspaces.get(id).ok_or_else(|| {
@@ -138,6 +171,9 @@ async fn create_session(
     session
         .set_permission_mode(crate::state::console_default_permission_mode(&state.settings))
         .map_err(ApiError::from_session)?;
+    session
+        .set_agent_preset(&preset_id)
+        .map_err(ApiError::from_session)?;
     if let Some(ws) = &workspace {
         // 会话头 cwd == 工作区路径(构造保证);账本 prepend。attach 失败
         // (工作区刚被删)时回滚会话,不留孤儿记录。
@@ -156,6 +192,8 @@ async fn create_session(
         "excerpt": null,
         "cwd": session.header().cwd,
         "sandbox": session.header().sandbox,
+        // 与 SessionSummary 的其他字段同为 snake_case:前端直接把它当摘要行用。
+        "agent_preset": preset_id,
     });
     let _ = state.events.send(ServerEvent::SessionsUpdated);
     Ok((StatusCode::CREATED, Json(json!({ "session": summary }))))
@@ -495,6 +533,11 @@ async fn prompt_session(
         let _guard = RunningGuard::new(live.clone(), events_for_guard);
         let emit: Arc<dyn Fn(&SessionEnvelope) + Send + Sync> =
             Arc::new(move |envelope: &SessionEnvelope| {
+                // 无人订阅时不克隆:流式期间每秒几十条 chunk,每条都克隆一份
+                // 只为了喂给一个空的广播队列,纯属浪费。
+                if followers_for_turn.receiver_count() == 0 {
+                    return;
+                }
                 let _ = followers_for_turn.send(envelope.clone());
             });
         let _reason = driver
@@ -605,6 +648,63 @@ async fn set_session_permission(
     // 广播给 SSE 跟随者:控制台权限档位实时同步(不依赖快照重放)。
     let _ = live.followers.send(envelope);
     Ok(Json(json!({ "mode": mode.as_str() })))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AgentPresetBody {
+    preset: String,
+}
+
+/// 切换当前会话的 agent preset。
+///
+/// 只有尚未产出内容的会话可以换组装:换掉工具面会让此前记录的、在该组装
+/// 下产生的工具调用无工具可执行,因此一旦有过用户消息就一律拒绝
+/// (`agent-preset/locked`)。切换本身记入日志,恢复/分支照它重建。
+async fn set_session_agent_preset(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(body): Json<AgentPresetBody>,
+) -> Result<impl IntoResponse, ApiError> {
+    let preset_id = body.preset.trim().to_string();
+    if state.agent_presets.resolve(&preset_id).is_none() {
+        return Err(unknown_agent_preset(&preset_id));
+    }
+    let live = state
+        .live
+        .get_or_load(&state.sessions, &id)
+        .map_err(ApiError::from_session)?;
+    if session_has_output(&live.session) {
+        return Err(ApiError::new(
+            StatusCode::CONFLICT,
+            "agent-preset/locked",
+            "会话已经产出内容,不能再更换 preset(工具面变了会留下无法执行的工具调用)"
+                .to_string(),
+        ));
+    }
+    let envelope = live
+        .session
+        .set_agent_preset(&preset_id)
+        .map_err(ApiError::from_session)?;
+    let _ = live.followers.send(envelope);
+    Ok(Json(json!({ "preset": preset_id })))
+}
+
+/// 会话是否已经产出内容:有用户消息即已产出——注入消息只发生在轮次之内,
+/// 所以这一条同时覆盖了"跑过工具调用但没有真实用户消息"的不可能情形。
+fn session_has_output(session: &denia_session::Session) -> bool {
+    session.with_events(|events| {
+        events
+            .iter()
+            .any(|envelope| matches!(envelope.event, SessionEvent::UserMessage { .. }))
+    })
+}
+
+fn unknown_agent_preset(id: &str) -> ApiError {
+    ApiError::bad_request(
+        "agent-preset/unknown",
+        format!("未知的 preset:'{id}'(可用 preset 见 /api/agent-presets)"),
+    )
 }
 
 #[derive(Debug, Deserialize)]
@@ -833,6 +933,16 @@ async fn fork_session(
             ));
         }
     }
+    // 分支继承源会话运行的组装:种子回放本已带上 agent-preset 事件,
+    // 但锚点在它之前(极端情况)时补写一条,保证子会话不会悄悄换组装。
+    let parent_preset = live.session.agent_preset();
+    if let Some(preset) = parent_preset
+        && child.agent_preset().as_deref() != Some(preset.as_str())
+    {
+        child
+            .set_agent_preset(&preset)
+            .map_err(ApiError::from_session)?;
+    }
     let summary = json!({
         "id": child.id(),
         "created_at": child.header().created_at,
@@ -840,6 +950,7 @@ async fn fork_session(
         "cwd": child.header().cwd,
         "sandbox": child.header().sandbox,
         "parent_session": child.header().parent_session,
+        "agent_preset": child.agent_preset(),
     });
     let _ = state.events.send(ServerEvent::SessionsUpdated);
     Ok((StatusCode::CREATED, Json(json!({ "session": summary }))))
@@ -1125,4 +1236,57 @@ async fn follow_session(
             Ok(Event::default().data(serde_json::to_string(&envelope).unwrap_or_default()))
         });
     Ok(Sse::new(stream).keep_alive(KeepAlive::new().interval(std::time::Duration::from_secs(15))))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_session() -> (denia_session::SessionStore, std::path::PathBuf) {
+        let root = std::env::temp_dir().join(format!("denia-api-session-{}", uuid::Uuid::new_v4()));
+        let cwd = root.join("work");
+        std::fs::create_dir_all(&cwd).unwrap();
+        (denia_session::SessionStore::open(&root).unwrap(), root)
+    }
+
+    /// 组装锁定口径:注入消息只发生在轮次之内,因此"有用户消息"既是
+    /// 充分条件也是必要条件;新会话在发出第一条消息前一直可以改选。
+    #[test]
+    fn blank_session_switches_until_it_produces_output() {
+        let (store, root) = temp_session();
+        let session = store.create(&root, true).unwrap();
+
+        session.set_agent_preset("minimal").unwrap();
+        assert!(!session_has_output(&session), "改选组装本身不算产出内容");
+
+        session
+            .append(denia_core::session::SessionEvent::UserMessage {
+                text: "开始".to_string(),
+                injected: false,
+                channel: None,
+                images: Vec::new(),
+            })
+            .unwrap();
+        assert!(session_has_output(&session), "有用户消息即已产出内容");
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// 注入消息只应在轮次内出现;作为防线,单独一条注入消息同样算产出,
+    /// 不能让一个已经跑过工具的会话绕过锁定。
+    #[test]
+    fn injected_message_also_locks_the_composition() {
+        let (store, root) = temp_session();
+        let session = store.create(&root, true).unwrap();
+        session
+            .append(denia_core::session::SessionEvent::UserMessage {
+                text: "工作区指令".to_string(),
+                injected: true,
+                channel: Some("workspace-instructions".to_string()),
+                images: Vec::new(),
+            })
+            .unwrap();
+        assert!(session_has_output(&session));
+        std::fs::remove_dir_all(&root).unwrap();
+    }
 }
