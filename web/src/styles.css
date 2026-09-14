@@ -1940,17 +1940,123 @@ button {
 }
 
 /* 用量:状态行的量级注脚。紧凑计数(6.4m / 168.8k)与底部状态栏同一套
-   语言,精确值悬停可见。容器窄到一行放不下时,它折到下一行并允许自身
-   收缩换行,而不是撑出容器。 */
-.turn-usage {
+   语言,点开是明细卡片(见 .turn-usage-card)。容器窄到一行放不下时,它
+   折到下一行并允许自身收缩换行,而不是撑出容器。 */
+.turn-usage-anchor {
+  position: relative;
+  display: inline-flex;
   flex: 0 1 auto;
   min-width: 0;
-  color: var(--label-caption);
+}
+
+/* 触发件就是原来那行文字:继承 .turn-chrome 的字号/颜色,只把死 tooltip
+   换成可点开。去掉 button 原生外观,免得在状态行里多出一个灰块。 */
+.turn-usage {
+  appearance: none;
+  -webkit-appearance: none;
+  display: inline;
+  min-width: 0;
+  padding: 0;
+  border: none;
+  background: none;
+  font: inherit;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: color var(--ease);
+}
+
+.turn-usage:hover,
+.turn-usage:focus-visible {
+  color: var(--label-secondary);
+}
+
+.turn-usage:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 2px var(--border-l3);
+  border-radius: 3px;
 }
 
 .turn-usage::before {
   content: '·';
   margin-right: 6px;
+}
+
+/* 明细卡片:portal 到 body 后用 fixed 定位,落点由 JS 按视口钳制算出
+   (左/上由行内 style 给)。锚点内绝对定位行不通 —— 会话行带
+   `content-visibility: auto`,其 paint containment 会把浮层整块裁掉。 */
+.turn-usage-card {
+  position: fixed;
+  z-index: 60;
+  min-width: 208px;
+  padding: 9px 11px;
+  background: var(--bg-layer-2);
+  border: 1px solid var(--border-l2);
+  border-radius: var(--r-md);
+  box-shadow: var(--shadow-float);
+  cursor: default;
+  animation: turn-usage-in 0.16s var(--ease);
+}
+
+@keyframes turn-usage-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.turn-usage-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  padding-bottom: 7px;
+  margin-bottom: 7px;
+  border-bottom: 1px solid var(--border-l1);
+  font-size: 12px;
+  color: var(--label-secondary);
+}
+
+.turn-usage-total {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--label-primary);
+}
+
+.turn-usage-rows {
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.turn-usage-rows div {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 16px;
+  font-size: 12px;
+}
+
+.turn-usage-rows dt {
+  color: var(--label-tertiary);
+}
+
+.turn-usage-rows dd {
+  margin: 0;
+  color: var(--label-secondary);
+}
+
+/* 推理注脚:输出行内的弱化补充,不单独占一行(它本就是输出的一部分)。 */
+.turn-usage-note {
+  margin-left: 5px;
+  color: var(--label-caption);
+  font-size: 11px;
 }
 
 /* 收尾轮次的文件产物行:label + 文件名 chip 列。chip 只显示文件名短名,完整

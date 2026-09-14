@@ -27,7 +27,7 @@ import {
 import { DiffCard, DiffStat } from './DiffCard'
 import { TodoCard } from './TodoCard'
 import { BashCard } from './BashCard'
-import { formatTokens } from '../stats'
+import { TurnUsageCard } from './TurnUsageCard'
 import { openInAppOpen } from '../api'
 import type { AskAnswer, UserMessageImage } from '../types'
 import { UserMessageBubble } from './UserMessageImages'
@@ -1028,14 +1028,9 @@ function TurnChrome({
         {usage && (
           // 用量与状态同处一行:状态说"这轮怎么结束的",用量是它的量级注脚。
           // 拆成两行会让两者读作并列的两条信息,而它们本是同一件事。
-          // 紧凑计数与底部状态栏同一套语言,精确值挂在悬停提示里。
-          <span
-            className="turn-usage"
-            title={`${t('inputTokens')} ${usage.inputTokens} · ${t('outputTokens')} ${usage.outputTokens}`}
-          >
-            {t('inputTokens')} {formatTokens(usage.inputTokens)} ·{' '}
-            {t('outputTokens')} {formatTokens(usage.outputTokens)}
-          </span>
+          // 紧凑计数与底部状态栏同一套语言;点开是明细卡片(缓存读/命中率/推理),
+          // 先前这里是个死 tooltip —— 有精确值却看不全。
+          <TurnUsageCard usage={usage} />
         )}
       </div>
       {node.produced !== undefined && node.produced.length > 0 && (
