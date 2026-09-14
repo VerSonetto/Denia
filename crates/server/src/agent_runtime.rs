@@ -36,11 +36,8 @@ pub struct RuntimeConfig {
     pub workspace_instructions_max_source_bytes: u64,
     /// 技能目录里单条描述的最大字符数（对齐 dsh catalogDescriptionMaxLength）。
     pub skill_catalog_description_max_chars: usize,
-    /// 项目记忆总闸:关闭后注入与后台提取同时停(读写两端同步)。
+    /// 项目记忆总闸:关闭后注入与写入同时停(读写两端同步)。
     pub memory_enabled: bool,
-    /// 项目记忆后台提取闸:关闭后不再调度提取子代理;主代理仍可读注入
-    /// 与手工写记忆目录。
-    pub memory_extraction_enabled: bool,
     /// MEMORY.md 索引注入的字节预算(超限 UTF-8 边界截断并附告警)。
     pub project_memory_max_bytes: u64,
 }
@@ -60,7 +57,6 @@ impl Default for RuntimeConfig {
             workspace_instructions_max_source_bytes: 1_048_576,
             skill_catalog_description_max_chars: 500,
             memory_enabled: true,
-            memory_extraction_enabled: true,
             project_memory_max_bytes: 25_600,
         }
     }
@@ -152,8 +148,6 @@ struct Inner {
     reserved: Mutex<HashSet<String>>,
     /// goal 轮连续失败计数(会话级内存护栏;成功轮清零,blocked 后移除)。
     goal_failures: Mutex<HashMap<String, u32>>,
-    /// 在跑的记忆提取任务(父会话 id 集合):调度去重 + 关停 drain 的依据。
-    extraction_inflight: Mutex<HashSet<String>>,
     registry: Arc<denia_llm::LlmRegistry>,
     workspaces: Arc<crate::workspace::WorkspaceRegistry>,
     pub jobs: Arc<Jobs>,
@@ -216,7 +210,6 @@ impl Runtime {
                 admission: tokio::sync::Mutex::new(()),
                 reserved: Mutex::new(HashSet::new()),
                 goal_failures: Mutex::new(HashMap::new()),
-                extraction_inflight: Mutex::new(HashSet::new()),
                 registry,
                 workspaces,
                 jobs: Jobs::new(),
@@ -780,17 +773,6 @@ impl Runtime {
         // goal 续跑检查:active 目标在会话空闲时自动开新轮(子代理无 goal,
         // 内部自检跳过;与 inbox 唤醒靠 running CAS 互斥)。
         self.continue_goal(id);
-        // 项目记忆:主会话轮次闭合后调度后台提取(门限与闸门在任务内自检;
-        // 子代理与中止轮不参与)。
-        if !aborted
-            && self
-                .inner
-                .live
-                .get(id)
-                .is_none_or(|live| live.session.header().subagent.is_none())
-        {
-            self.schedule_memory_extraction(id);
-        }
         let runtime = self.clone();
         let id = id.to_string();
         tokio::spawn(async move {
@@ -1188,256 +1170,6 @@ impl Runtime {
         tokio::task::spawn_blocking(move || crate::skills::load(&skills, &name, user))
             .await
             .map_err(|e| e.to_string())?
-    }
-
-    /// 调度一次记忆提取(后台任务):门限自检 → 建提取子代理 → 等收尾。
-    /// 同一会话的重复调度由 inflight 集合去重;进程关停由
-    /// [`Runtime::drain_extractions`] 等待。
-    fn schedule_memory_extraction(&self, id: &str) {
-        let runtime = self.clone();
-        let id = id.to_string();
-        tokio::spawn(async move {
-            let guard = ExtractionGuard {
-                runtime: runtime.clone(),
-                id: id.clone(),
-            };
-            if let Err(error) = runtime.run_memory_extraction(&id).await {
-                tracing::warn!(session = %id, %error, "记忆提取失败");
-            }
-            drop(guard);
-        });
-    }
-
-    /// 记忆提取主流程:全部不满足门限的路径都静默返回(Ok)——提取是
-    /// best-effort 的 harness 行为,任何失败都不该打扰用户会话。
-    async fn run_memory_extraction(&self, parent_id: &str) -> Result<(), String> {
-        let config = self.config();
-        if !config.memory_enabled || !config.memory_extraction_enabled {
-            return Ok(());
-        }
-        // 去重:同会话已有提取在跑时跳过(下一轮再评估)。
-        if !self
-            .inner
-            .extraction_inflight
-            .lock()
-            .unwrap()
-            .insert(parent_id.to_string())
-        {
-            return Ok(());
-        }
-        let live = self.live(parent_id).await?;
-        // 门限 1:最后一轮必须正常收尾(错误/死循环/中止轮不提取)。
-        let events = live.session.events();
-        let last_reason = events.iter().rev().find_map(|e| match &e.event {
-            SessionEvent::TurnEnd { reason, .. } => Some(reason.clone()),
-            _ => None,
-        });
-        if !matches!(
-            last_reason,
-            Some(denia_core::session::TurnEndReason::Completed)
-        ) {
-            return Ok(());
-        }
-        let cwd = PathBuf::from(live.session.header().cwd.clone());
-        let memory_root = crate::project_memory::memory_root(&self.inner.home, &cwd);
-        // 门限 2:有可提取素材、主代理本轮没直接写过记忆目录、用户散文
-        // ≥3 词(问候与单字指令不触发)。
-        let Some(digest) = crate::project_memory::last_turn_digest(&events, &cwd, &memory_root)
-        else {
-            return Ok(());
-        };
-        if digest.wrote_memory || crate::project_memory::prose_word_count(&digest.user_text) < 3 {
-            return Ok(());
-        }
-        // 模型选择:内存表优先,日志请求头兜底(与 resume_pending 同款)。
-        let selection = self
-            .inner
-            .selections
-            .lock()
-            .unwrap()
-            .get(parent_id)
-            .cloned()
-            .or_else(|| {
-                events.iter().rev().find_map(|e| {
-                    if let SessionEvent::RequestHeader {
-                        header: snapshot, ..
-                    } = &e.event
-                    {
-                        Some(ModelSelection {
-                            provider: snapshot.config.provider.clone(),
-                            model: snapshot.config.model.clone(),
-                            reasoning_effort: snapshot.config.reasoning_effort.clone(),
-                        })
-                    } else {
-                        None
-                    }
-                })
-            });
-        let Some(selection) = selection else {
-            return Ok(());
-        };
-        let permission = live.session.permission_mode();
-        let descriptor = SubagentDescriptor {
-            label: "记忆提取".to_string(),
-            depth: 1,
-            mode: "memory".to_string(),
-            selection: selection.clone(),
-            persona: None,
-            // 提取子代理的写能力只在权限层收敛到记忆目录(见 exec 派发处的
-            // MemoryWrite 分类与子代理写拒绝),白名单负责给足读写工具。
-            allowed_tools: Some(vec![
-                "read_file".into(),
-                "ls".into(),
-                "glob".into(),
-                "grep".into(),
-                "write_file".into(),
-                "edit".into(),
-            ]),
-        };
-        let sessions = self.inner.sessions.clone();
-        let parent = parent_id.to_string();
-        let desc = descriptor.clone();
-        let cwd_for_child = cwd.clone();
-        // 沙箱关:记忆目录在工作区外,confined 会在路径解析层直接拒绝;
-        // 写越界的收敛交给权限层(exec 派发处),读类工具不受限。
-        let sandbox = false;
-        let child_id = tokio::task::spawn_blocking(move || {
-            let child = sessions
-                .create_subagent(&cwd_for_child, sandbox, &parent, desc)
-                .map_err(|e| e.to_string())?;
-            let result: Result<String, String> = (|| {
-                child
-                    .set_permission_mode(permission)
-                    .map_err(|e| e.to_string())?;
-                child.flush().map_err(|e| e.to_string())?;
-                Ok(child.id().to_string())
-            })();
-            if result.is_err() {
-                let _ = sessions.delete(child.id());
-            }
-            result
-        })
-        .await
-        .map_err(|e| e.to_string())??;
-        for workspace in self.inner.workspaces.list() {
-            if workspace.session_ids.iter().any(|s| s == parent_id)
-                && !self.inner.workspaces.attach(&workspace.id, &child_id)
-            {
-                self.rollback_child(&child_id).await;
-                return Err("父工作区已删除，记忆提取子代理创建已回滚".into());
-            }
-        }
-        self.inner.children.lock().unwrap().insert(
-            child_id.clone(),
-            Child {
-                id: child_id.clone(),
-                parent_id: parent_id.into(),
-                descriptor,
-            },
-        );
-        self.inner
-            .selections
-            .lock()
-            .unwrap()
-            .insert(child_id.clone(), selection);
-        let prompt_budget = (config.output_bytes / 2) as usize;
-        let prompt = {
-            // manifest 是阻塞 fs 扫描;提取子代理的提示词需要它注入
-            // "已有记忆文件"清单(先查再写,防重复)。
-            let manifest_root = memory_root.clone();
-            let manifest = tokio::task::spawn_blocking(move || {
-                crate::project_memory::scan_manifest(&manifest_root)
-                    .files
-                    .into_iter()
-                    .map(|file| file.name)
-                    .collect::<Vec<_>>()
-            })
-            .await
-            .map_err(|e| e.to_string())?;
-            crate::project_memory::render_extraction_prompt(
-                &memory_root,
-                &digest,
-                prompt_budget,
-                &manifest,
-            )
-        };
-        if let Err(error) = self
-            .enqueue(
-                &child_id,
-                uuid::Uuid::new_v4().to_string(),
-                prompt,
-                "memory-extraction".into(),
-            )
-            .await
-        {
-            self.rollback_child(&child_id).await;
-            return Err(error);
-        }
-        tracing::debug!(parent = parent_id, child = %child_id, "记忆提取子代理已启动");
-        // 等收尾:至多一个 turn(启动异常兜底 10 分钟);轮数超过 5 强制
-        // 中断(提取器的轮次上限,防跑飞烧 token)。
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(600);
-        let mut saw_turn = false;
-        loop {
-            if tokio::time::Instant::now() >= deadline {
-                if let Some(token) = self
-                    .inner
-                    .live
-                    .get(&child_id)
-                    .and_then(|live| live.cancel.lock().unwrap().clone())
-                {
-                    token.cancel();
-                }
-                break;
-            }
-            if let Some(live) = self.inner.live.get(&child_id) {
-                let turns = live.session.next_turn_number();
-                if turns >= 1 {
-                    saw_turn = true;
-                }
-                if turns > 5
-                    && let Some(token) = live.cancel.lock().unwrap().clone()
-                {
-                    token.cancel();
-                }
-            }
-            if saw_turn && !self.is_active(&child_id) {
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-        }
-        self.inner.children.lock().unwrap().remove(&child_id);
-        self.inner.selections.lock().unwrap().remove(&child_id);
-        Ok(())
-    }
-
-    /// 进程关停:等待在跑的记忆提取任务收尾(60s 上限)。
-    pub async fn drain_extractions(&self, timeout: std::time::Duration) {
-        let deadline = std::time::Instant::now() + timeout;
-        while !self.inner.extraction_inflight.lock().unwrap().is_empty() {
-            if std::time::Instant::now() >= deadline {
-                let remaining = self.inner.extraction_inflight.lock().unwrap().len();
-                tracing::warn!(remaining, "记忆提取未在时限内完成，放弃等待");
-                return;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-        }
-    }
-}
-
-/// RAII:提取任务结束时从 inflight 集合摘除(panic 路径同样生效)。
-struct ExtractionGuard {
-    runtime: Runtime,
-    id: String,
-}
-impl Drop for ExtractionGuard {
-    fn drop(&mut self) {
-        self.runtime
-            .inner
-            .extraction_inflight
-            .lock()
-            .unwrap()
-            .remove(&self.id);
     }
 }
 
@@ -2324,7 +2056,7 @@ mod tests {
                 .settings
                 .update(
                     "runtime",
-                    json!({"projectMemoryMaxBytes":25600,"memoryEnabled":false,"memoryExtractionEnabled":true}),
+                    json!({"projectMemoryMaxBytes":25600,"memoryEnabled":false}),
                     None
                 )
                 .is_ok()

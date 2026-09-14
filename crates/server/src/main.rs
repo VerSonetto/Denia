@@ -90,19 +90,11 @@ fn main() {
         let listener = tokio::net::TcpListener::bind(addr)
             .await
             .unwrap_or_else(|error| panic!("bind {addr}: {error}"));
-        // 优雅停机:ctrl_c 后停止接收新请求,等待在跑的记忆提取子代理
-        // 收尾(60s 上限),然后退出。
+        // 优雅停机:ctrl_c 后停止接收新请求,等待在跑的后台任务收尾,然后退出。
         axum::serve(listener, router)
-            .with_graceful_shutdown({
-                let state = state.clone();
-                async move {
-                    let _ = tokio::signal::ctrl_c().await;
-                    tracing::info!("shutdown signal received; draining memory extraction tasks");
-                    state
-                        .runtime
-                        .drain_extractions(std::time::Duration::from_secs(60))
-                        .await;
-                }
+            .with_graceful_shutdown(async move {
+                let _ = tokio::signal::ctrl_c().await;
+                tracing::info!("shutdown signal received");
             })
             .await
             .expect("server runs");
