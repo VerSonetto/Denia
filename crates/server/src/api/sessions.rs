@@ -25,7 +25,6 @@ use denia_core::config::ModelSelection;
 use denia_core::session::{
     ApprovalOutcome, PermissionMode, PlanReviewDecision, SessionEnvelope, SessionEvent,
 };
-use denia_session::Session;
 use futures::StreamExt;
 use serde::Deserialize;
 use serde_json::json;
@@ -206,85 +205,68 @@ async fn get_session(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let live = state
-        .live
-        .get_or_load(&state.sessions, &id)
+    // 全量快照直接流自磁盘(日志本身就是 JSONL):不打开会话、不驻留
+    // 事件,导出/重快照不再把长会话拉进内存。header 先行校验 404。
+    let header = state
+        .sessions
+        .read_log_header(&id)
         .map_err(ApiError::from_session)?;
-    let session = live.session.clone();
+    let header_json = serde_json::to_vec(&header).map_err(|e| {
+        ApiError::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "session/serialize",
+            e.to_string(),
+        )
+    })?;
+    let sessions = state.sessions.clone();
     Ok((
         [(header::CONTENT_TYPE, "application/json")],
-        snapshot_response_body(session),
+        snapshot_response_body(header_json, sessions, id),
     ))
 }
 
-/// 全量快照的流式响应体:分批克隆事件、逐批序列化,峰值内存只有
-/// “会话驻留 + 一个小缓冲”,不再构建完整的 serde_json DOM,也不为读
-/// 路径克隆全量日志(大会话旧实现三者相加可达 GB 级瞬时分配)。
-fn snapshot_response_body(session: Arc<Session>) -> Body {
-    /// 每批从日志锁内克隆的事件数;批越小锁持有越短。
-    const SNAPSHOT_BATCH: usize = 256;
+/// 全量快照的流式响应体:逐行读日志、逐条校验序列化,峰值内存只有
+/// 一个小缓冲;不再构建 serde_json DOM,也不驻留任何事件。
+fn snapshot_response_body(
+    header_json: Vec<u8>,
+    sessions: Arc<denia_session::SessionStore>,
+    id: String,
+) -> Body {
     /// 缓冲达到该字节数即向响应流推送一块,后续块靠 channel 容量背压。
     const FLUSH_BYTES: usize = 64 * 1024;
 
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<axum::body::Bytes, std::io::Error>>(8);
     std::thread::spawn(move || {
-        // 序列化只可能因底层数据损坏失败;失败即截断连接,与流中途出错
-        // 的语义一致,不产出伪造的截断 JSON。
-        let failed = |tx: &tokio::sync::mpsc::Sender<Result<axum::body::Bytes, std::io::Error>>| {
-            let _ = tx.blocking_send(Err(std::io::Error::other("snapshot serialization failed")));
-        };
         let mut out: Vec<u8> = Vec::with_capacity(FLUSH_BYTES * 2);
-        macro_rules! flush {
-            ($tx:expr) => {
-                if out.len() >= FLUSH_BYTES {
-                    let chunk = std::mem::take(&mut out);
-                    if $tx
-                        .blocking_send(Ok(axum::body::Bytes::from(chunk)))
-                        .is_err()
-                    {
-                        return; // 客户端断开,停止生产。
-                    }
-                }
-            };
-        }
-        let header_json = match serde_json::to_vec(session.header()) {
-            Ok(bytes) => bytes,
-            Err(_) => {
-                failed(&tx);
-                return;
-            }
-        };
         out.extend_from_slice(b"{\"header\":");
         out.extend_from_slice(&header_json);
         out.extend_from_slice(b",\"events\":[");
-        flush!(tx);
-        let mut from = 0usize;
         let mut first = true;
-        loop {
-            let (_total, batch) = session.snapshot_batch(from, SNAPSHOT_BATCH);
-            if batch.is_empty() {
-                break;
+        let result = sessions.for_each_event(&id, |envelope| {
+            let event_json = serde_json::to_vec(&envelope)
+                .map_err(|e| std::io::Error::other(e.to_string()))?;
+            if !first {
+                out.push(b',');
             }
-            let batch_len = batch.len();
-            for envelope in batch {
-                let event_json = match serde_json::to_vec(&envelope) {
-                    Ok(bytes) => bytes,
-                    Err(_) => {
-                        failed(&tx);
-                        return;
-                    }
-                };
-                if !first {
-                    out.push(b',');
-                }
-                first = false;
-                out.extend_from_slice(&event_json);
-                flush!(tx);
+            first = false;
+            out.extend_from_slice(&event_json);
+            if out.len() >= FLUSH_BYTES {
+                let chunk = std::mem::take(&mut out);
+                tx.blocking_send(Ok(axum::body::Bytes::from(chunk)))
+                    .map_err(|_| std::io::Error::other("snapshot stream closed"))?;
             }
-            from += batch_len;
+            Ok(())
+        });
+        match result {
+            Ok(()) => {
+                out.extend_from_slice(b"]}");
+                let _ = tx.blocking_send(Ok(axum::body::Bytes::from(out)));
+            }
+            // 文件中途读失败:按连接错误截断,不产出伪造的截断 JSON。
+            Err(_) => {
+                let _ = tx.blocking_send(Err(std::io::Error::other("snapshot read failed")));
+            }
         }
-        out.extend_from_slice(b"]}");
-        let _ = tx.blocking_send(Ok(axum::body::Bytes::from(out)));
         // tx drop:关闭通道,响应体结束。
     });
     Body::from_stream(tokio_stream::wrappers::ReceiverStream::new(rx))
@@ -429,6 +411,9 @@ async fn prompt_session(
     let live = state
         .live
         .get_or_load(&state.sessions, &id)
+        .map_err(ApiError::from_session)?;
+    live.session
+        .ensure_hot()
         .map_err(ApiError::from_session)?;
     if live.session.header().subagent.is_some() {
         return Err(ApiError::bad_request(
@@ -721,6 +706,9 @@ async fn set_session_permission(
         .live
         .get_or_load(&state.sessions, &id)
         .map_err(ApiError::from_session)?;
+    live.session
+        .ensure_hot()
+        .map_err(ApiError::from_session)?;
     let envelope = live
         .session
         .set_permission_mode(mode)
@@ -753,6 +741,9 @@ async fn set_session_agent_preset(
     let live = state
         .live
         .get_or_load(&state.sessions, &id)
+        .map_err(ApiError::from_session)?;
+    live.session
+        .ensure_hot()
         .map_err(ApiError::from_session)?;
     if session_has_output(&live.session) {
         return Err(ApiError::new(
@@ -978,6 +969,9 @@ async fn fork_session(
         .live
         .get_or_load(&state.sessions, &id)
         .map_err(ApiError::from_session)?;
+    live.session
+        .ensure_hot()
+        .map_err(ApiError::from_session)?;
     if live.running.load(Ordering::SeqCst) {
         return Err(ApiError::new(
             StatusCode::CONFLICT,
@@ -1045,23 +1039,42 @@ async fn list_checkpoints(
         .live
         .get_or_load(&state.sessions, &id)
         .map_err(ApiError::from_session)?;
-    let checkpoints: Vec<serde_json::Value> = live
-        .session
-        .events()
-        .iter()
-        .filter_map(|envelope| match &envelope.event {
-            SessionEvent::UserMessage {
-                text,
-                injected: false,
-                ..
-            } => Some(json!({
-                "seq": envelope.seq,
-                "time": envelope.time,
-                "text": text,
-            })),
-            _ => None,
-        })
-        .collect();
+    // 冷会话事件不驻留:走磁盘流式扫描,不为列 checkpoint 整载会话。
+    let checkpoints: Vec<serde_json::Value> = if live.session.is_hot() {
+        live.session
+            .with_events(|events| {
+                events
+                    .iter()
+                    .filter_map(|envelope| match &envelope.event {
+                        SessionEvent::UserMessage {
+                            text,
+                            injected: false,
+                            ..
+                        } => Some(json!({
+                            "seq": envelope.seq,
+                            "time": envelope.time,
+                            "text": text,
+                        })),
+                        _ => None,
+                    })
+                    .collect()
+            })
+    } else {
+        state
+            .sessions
+            .read_checkpoints(&id)
+            .map_err(ApiError::from_session)?
+            .iter()
+            .map(|envelope| match &envelope.event {
+                SessionEvent::UserMessage { text, .. } => json!({
+                    "seq": envelope.seq,
+                    "time": envelope.time,
+                    "text": text,
+                }),
+                _ => unreachable!("read_checkpoints 只产出用户消息"),
+            })
+            .collect()
+    };
     Ok(Json(json!({ "checkpoints": checkpoints })))
 }
 
@@ -1098,6 +1111,9 @@ async fn rewind_session(
     let live = state
         .live
         .get_or_load(&state.sessions, &id)
+        .map_err(ApiError::from_session)?;
+    live.session
+        .ensure_hot()
         .map_err(ApiError::from_session)?;
     if live.running.load(Ordering::SeqCst) {
         return Err(ApiError::new(
@@ -1184,6 +1200,9 @@ async fn compact_session(
     let live = state
         .live
         .get_or_load(&state.sessions, &id)
+        .map_err(ApiError::from_session)?;
+    live.session
+        .ensure_hot()
         .map_err(ApiError::from_session)?;
     if live
         .running

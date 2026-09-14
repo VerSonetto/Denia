@@ -307,8 +307,6 @@ pub struct LiveSession {
     pub running: AtomicBool,
     /// 最近一次被访问(挂载/发消息/follow)的 epoch ms;空闲淘汰依据。
     pub last_touch: AtomicU64,
-    /// 驻留内存预算的代理量:加载时的日志文件字节数(见 [`Session::log_bytes`])。
-    resident_bytes: u64,
     pub cancel: std::sync::Mutex<Option<CancellationToken>>,
     /// 等待用户决策的审批请求(request_id → oneshot)。计划审批的决策
     /// 可携带执行档位/模型/补充建议(PlanReviewDecision)。
@@ -385,11 +383,12 @@ impl LiveSessions {
                 .store(now_millis(), std::sync::atomic::Ordering::Relaxed);
             return Ok(live.clone());
         }
-        let session = store.load(id)?;
+        // 浏览/打开一律冷加载:聚合投影保留,事件不驻留;写路径由
+        // `ensure_hot` 按需升级。驻留内存因此只来自真正参与会话的热会话。
+        let session = store.open_cold(id)?;
         let session = Arc::new(session);
         store.track_session(&session);
         let live = Arc::new(LiveSession {
-            resident_bytes: session.log_bytes(),
             session,
             followers: broadcast::channel(1024).0,
             running: AtomicBool::new(false),
@@ -411,13 +410,23 @@ impl LiveSessions {
             && Arc::strong_count(live) == 1
     }
 
+    /// 驻留内存预算的代理量:热会话取日志文件字节数
+    /// (见 [`Session::log_bytes`]),冷会话不驻留事件记 0。
+    fn resident_bytes_of(live: &LiveSession) -> u64 {
+        if live.session.is_hot() {
+            live.session.log_bytes()
+        } else {
+            0
+        }
+    }
+
     /// 在已持锁的 map 上执行容量裁剪:会话数超过 `max_resident` **或**
-    /// 日志字节总量超过 `max_resident_bytes` 时,按 last_touch 从旧到新
-    /// 淘汰“非运行、无订阅者”的会话。运行中的会话绝不卸载。
+    /// 热会话的日志字节总量超过 `max_resident_bytes` 时,按 last_touch
+    /// 从旧到新淘汰“非运行、无订阅者”的会话。运行中的会话绝不卸载。
     fn trim_capacity_locked(&self, map: &mut HashMap<String, Arc<LiveSession>>) {
         let max = self.max_resident;
         let max_bytes = self.max_resident_bytes;
-        let mut resident_bytes: u64 = map.values().map(|live| live.resident_bytes).sum();
+        let mut resident_bytes: u64 = map.values().map(|live| Self::resident_bytes_of(live)).sum();
         if map.len() <= max && resident_bytes <= max_bytes {
             return;
         }
@@ -441,7 +450,7 @@ impl LiveSessions {
                 // 双检:可能在收集候选后被其他路径挂上订阅/转运行。
                 if Self::evictable(live) {
                     let live = map.remove(&id).expect("checked above");
-                    resident_bytes = resident_bytes.saturating_sub(live.resident_bytes);
+                    resident_bytes = resident_bytes.saturating_sub(Self::resident_bytes_of(&live));
                     count -= 1;
                 }
             }
@@ -1141,16 +1150,31 @@ mod tests {
         let store = SessionStore::open(&root).unwrap();
         let first = store.create(&cwd, true).unwrap();
         let second = store.create(&cwd, true).unwrap();
-        // 预算 0:任何驻留字节都超限,逼出 LRU 淘汰路径。
+        // 预算 0:任何热会话都超限,逼出 LRU 淘汰路径(冷会话不占预算)。
         let live = LiveSessions::new(8, 0);
         // 持有期间即使超预算也不得淘汰(外部引用即“可能正在用”)。
         let handle = live.get_or_load(&store, first.id()).unwrap();
+        handle.session.ensure_hot().unwrap();
         assert!(live.get(first.id()).is_some());
         drop(handle);
-        // 第二次加载触发裁剪:idle 且无引用的 first 被卸载,新会话保留。
+        // 第二次加载触发裁剪:idle 且无引用的热会话被卸载,新会话保留。
         live.get_or_load(&store, second.id()).unwrap();
         assert!(live.get(first.id()).is_none());
         assert!(live.get(second.id()).is_some());
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn cold_sessions_do_not_count_toward_byte_budget() {
+        let root = temp_root();
+        let cwd = root.join("work");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let store = SessionStore::open(&root).unwrap();
+        let first = store.create(&cwd, true).unwrap();
+        // 预算 0 + 全部冷会话:谁都不占预算,谁也不该被裁掉。
+        let live = LiveSessions::new(8, 0);
+        live.get_or_load(&store, first.id()).unwrap();
+        assert!(live.get(first.id()).is_some(), "冷会话不驻留事件,不触发预算裁剪");
         std::fs::remove_dir_all(&root).unwrap();
     }
 

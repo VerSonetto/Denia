@@ -1433,8 +1433,16 @@ async fn request_header_and_context_are_logged() {
         })
         .expect("assistant-message must exist");
     assert_eq!(seqs.len(), 5);
-    // 引用的 seq 都是 chunk 事件(顺带验证方向正确)。
-    let chunk_seqs = events
+    // 引用的 seq 都是磁盘日志里的 chunk 事件。内存事件表不驻留已闭合
+    // 轮次的 chunk,这里按文件核对方向。
+    let disk: Vec<SessionEnvelope> = {
+        let text = std::fs::read_to_string(session.file()).unwrap();
+        text.lines()
+            .skip(1)
+            .filter_map(|line| serde_json::from_str(line).ok())
+            .collect()
+    };
+    let chunk_seqs = disk
         .iter()
         .filter(|envelope| matches!(envelope.event, SessionEvent::AssistantChunk { .. }))
         .map(|envelope| envelope.seq)

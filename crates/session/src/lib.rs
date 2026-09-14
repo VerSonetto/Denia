@@ -105,6 +105,11 @@ struct SessionInner {
     offsets: Vec<u64>,
     /// session.jsonl 首行(header)结束后的字节偏移。
     base_offset: u64,
+    /// 下一次 append 的文件字节偏移(含 transient 行)。
+    ///
+    /// `offsets` 只登记驻留事件的行尾偏移,transient(chunk)事件不登记,
+    /// 因此文件游标必须单独维护;回退截断后同步回退到截断点。
+    next_offset: u64,
     /// 最新 turn 号(append 时维护),next_turn_number O(1)。
     last_turn: u32,
     /// 最近一次落日志的系统提示词;should_log_system_prompt 的 O(1) 依据。
@@ -138,6 +143,16 @@ struct SessionInner {
     /// 某次旧派生时的长度恰好相同,那时长度键会误判为"命中",把回退掉的
     /// 内容当成仍然存在。单调递增的版本号没有这个歧义。
     log_revision: u64,
+    /// 冷态:事件 Vec 不驻留(仅浏览路径的打开方式)。
+    ///
+    /// 冷会话只保留聚合投影(meter/goal/权限/preset/标题/last_turn 等小
+    /// 状态),事件需要时要么走磁盘流式回放([`Session::events_after`]),
+    /// 要么 [`Session::ensure_hot`] 升级为全量驻留。所有**写路径**
+    /// (append/回退/压缩/分支)必须先 ensure_hot,保证 `seq == index+1`
+    /// 的既有不变式只在热态成立。
+    cold: bool,
+    /// 日志中最大的事件 seq(冷热态都维护);冷态快速判断回放区间用。
+    last_seq: u64,
 }
 
 /// One live session: header, in-memory log, and its append handle. The log is
@@ -199,6 +214,7 @@ impl Session {
                     writer,
                     offsets: Vec::new(),
                     base_offset,
+                    next_offset: base_offset,
                     last_turn: 0,
                     last_system_prompt: None,
                     meter: ContextMeter::new(),
@@ -210,6 +226,8 @@ impl Session {
                     derived_surface: None,
                     derived_revision: 0,
                     log_revision: 0,
+                    cold: false,
+                    last_seq: 0,
                 }),
             });
         }
@@ -220,6 +238,38 @@ impl Session {
     /// 流式逐行读取:不把整个日志读成 String(数百 MB 大会话会多出一份
     /// 等体量的瞬时拷贝),峰值内存 = 解析后的事件 + 一个行缓冲。
     pub fn load(file: &Path) -> Result<Session, SessionError> {
+        let (header, inner) = Self::parse_file(file, true)?;
+        let session = Session {
+            header,
+            file: file.to_path_buf(),
+            inner: Mutex::new(inner),
+        };
+        session.close_orphaned_turn()?;
+        session.refresh_meter_from_log()?;
+        Ok(session)
+    }
+
+    /// 冷打开(仅浏览路径):同样完整解析一遍日志 —— meter/goal/权限/
+    /// preset/标题等聚合投影照常保留 —— 但事件与 offsets **不驻留**。
+    ///
+    /// 内存从 O(全部事件) 降到 O(聚合);代价是失去事件 Vec,事件需求
+    /// 由 [`Session::events_after`] 的磁盘回放或 [`Session::ensure_hot`]
+    /// 升级满足。孤儿轮闭合是写盘修复,延迟到 ensure_hot(任何写路径都
+    /// 必先升级,修复因此总在首次写入前落地)。
+    pub fn open_cold(file: &Path) -> Result<Session, SessionError> {
+        let (header, inner) = Self::parse_file(file, false)?;
+        Ok(Session {
+            header,
+            file: file.to_path_buf(),
+            inner: Mutex::new(inner),
+        })
+    }
+
+    /// 流式解析日志:retain=true 全量驻留(热),false 只留聚合(冷)。
+    fn parse_file(
+        file: &Path,
+        retain: bool,
+    ) -> Result<(SessionHeader, SessionInner), SessionError> {
         let mut reader = BufReader::new(File::open(file)?);
         let mut raw = String::new();
 
@@ -250,6 +300,8 @@ impl Session {
         let mut goal: Option<GoalState> = None;
         let mut title: Option<String> = None;
         let mut meter = ContextMeter::new();
+        let mut pending_turn: Vec<SessionEnvelope> = Vec::new();
+        let mut last_seq = 0u64;
         loop {
             raw.clear();
             let read = reader.read_line(&mut raw)?;
@@ -263,7 +315,11 @@ impl Session {
             }
             match serde_json::from_str::<SessionEnvelope>(line) {
                 Ok(envelope) => {
-                    offsets.push(consumed + read as u64);
+                    let transient = is_transient_event(&envelope.event);
+                    if retain && !transient {
+                        offsets.push(consumed + read as u64);
+                    }
+                    last_seq = last_seq.max(envelope.seq);
                     match &envelope.event {
                         SessionEvent::TurnStart { turn } => last_turn = last_turn.max(*turn),
                         SessionEvent::SystemPrompt { text, .. } => {
@@ -274,11 +330,25 @@ impl Session {
                         SessionEvent::SessionTitle { title: t } => title = Some(t.clone()),
                         _ => {}
                     }
+                    // meter/goal 的聚合折叠冷热一致;chunk 不进任何折叠
+                    // (token-meter 与派生面都不读它),只有驻留是可选项。
+                    if matches!(envelope.event, SessionEvent::TurnStart { .. }) {
+                        pending_turn.clear();
+                    }
+                    if !transient {
+                        pending_turn.push(envelope.clone());
+                    }
+                    if matches!(envelope.event, SessionEvent::TurnEnd { .. }) {
+                        let slice: Vec<SessionEnvelope> = pending_turn.drain(..).collect();
+                        meter.fold_turn(&slice);
+                    }
                     meter.apply_one(&envelope);
                     if let SessionEvent::Goal { op } = &envelope.event {
                         goal = apply_goal_op(goal, op, envelope.time, meter.turn_usage().total());
                     }
-                    events.push(envelope)
+                    if retain && !transient {
+                        events.push(envelope)
+                    }
                 }
                 Err(_) => {
                     if line.trim_end().ends_with('}') {
@@ -299,31 +369,31 @@ impl Session {
             let file_handle = OpenOptions::new().write(true).open(file)?;
             file_handle.set_len(torn as u64)?;
         }
-
-        let session = Session {
-            header,
-            file: file.to_path_buf(),
-            inner: Mutex::new(SessionInner {
-                events,
-                writer: open_append_writer(file)?,
-                offsets,
-                base_offset: consumed_base as u64,
-                last_turn,
-                last_system_prompt,
-                meter,
-                pending_turn: Vec::new(),
-                permission_mode,
-                agent_preset,
-                goal,
-                title,
-                derived_surface: None,
-                derived_revision: 0,
-                log_revision: 0,
-            }),
+        if !retain {
+            // 冷态不驻留事件;turn 缓冲同样只服务热态的 meter 精确折叠。
+            pending_turn.clear();
+        }
+        let inner = SessionInner {
+            events,
+            writer: open_append_writer(file)?,
+            offsets,
+            base_offset: consumed_base,
+            next_offset: consumed,
+            last_turn,
+            last_system_prompt,
+            meter,
+            pending_turn,
+            permission_mode,
+            agent_preset,
+            goal,
+            title,
+            derived_surface: None,
+            derived_revision: 0,
+            log_revision: 0,
+            cold: !retain,
+            last_seq,
         };
-        session.close_orphaned_turn()?;
-        session.refresh_meter_from_log()?;
-        Ok(session)
+        Ok((header, inner))
     }
 
     pub fn id(&self) -> &str {
@@ -346,16 +416,77 @@ impl Session {
 
     /// Envelopes with `seq > after`, in order. SSE replay 专用:不克隆全量,
     /// 只收集增量区间。
+    ///
+    /// 内存事件表不驻留已闭合轮次的 chunk(seq 有空洞),因此热路径按
+    /// **seq** 定位而不是下标;游标落在被清扫区间内时,回放只含非 chunk
+    /// 事件——闭环轮次的历史重建本就只依赖结算消息,前端断档自愈兜底。
+    /// 冷态游标在尾部直接零回放(零 IO),落后才走磁盘流式扫描。
     pub fn events_after(&self, after: u64) -> Vec<SessionEnvelope> {
-        let inner = self
+        {
+            let inner = self
+                .inner
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            if !inner.cold {
+                let idx = inner
+                    .events
+                    .partition_point(|envelope| envelope.seq <= after);
+                return inner.events[idx..].to_vec();
+            }
+            if after >= inner.last_seq {
+                return Vec::new();
+            }
+        }
+        self.read_events_after_disk(after)
+    }
+
+    /// 冷态磁盘回放:流式扫描日志,收集 `seq > after` 的事件。
+    fn read_events_after_disk(&self, after: u64) -> Vec<SessionEnvelope> {
+        let Ok(file) = File::open(&self.file) else {
+            return Vec::new();
+        };
+        let mut reader = BufReader::new(file);
+        let mut header = None;
+        let mut line = String::new();
+        let mut line_no = 0usize;
+        let mut out = Vec::new();
+        while let Ok(Some(envelope)) =
+            next_log_event(&mut reader, &mut header, &mut line, &mut line_no)
+        {
+            if envelope.seq > after {
+                out.push(envelope);
+            }
+        }
+        out
+    }
+
+    /// 是否处于热态(事件全量驻留)。
+    pub fn is_hot(&self) -> bool {
+        !self
+            .inner
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .cold
+    }
+
+    /// 升级为热态(事件全量驻留):所有写路径(append/回退/压缩/分支)
+    /// 前的强制步骤。幂等;首次升级执行完整的 load 修复(孤儿轮闭合 +
+    /// meter 重算),保证修复总在首次写入前落地。
+    pub fn ensure_hot(&self) -> Result<(), SessionError> {
+        if self.is_hot() {
+            return Ok(());
+        }
+        let hot = Session::load(&self.file)?;
+        let mut inner = self
             .inner
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
-        let events = &inner.events;
-        if after >= events.len() as u64 {
-            return Vec::new();
-        }
-        events[after as usize..].to_vec()
+        let mut hot_inner = hot
+            .inner
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        std::mem::swap(&mut *inner, &mut *hot_inner);
+        Ok(())
     }
 
     /// 在日志锁内只读地跑一段闭包,不克隆日志。
@@ -377,22 +508,6 @@ impl Session {
     /// 全部事件;内存实际占用约为该值的 1.5~2.5 倍(结构体 + 分配器开销)。
     pub fn log_bytes(&self) -> u64 {
         std::fs::metadata(&self.file).map(|m| m.len()).unwrap_or(0)
-    }
-
-    /// 从事件下标 `from` 起克隆至多 `max` 条,返回 (当前日志长度, 批次)。
-    ///
-    /// 供流式导出/快照分批拉取:既不克隆全量日志,也不长时间持锁阻塞
-    /// 运行中的 turn。日志 append-only、下标稳定;rewind 物理截断后旧
-    /// `from` 可能越界,此时返回空批次,调用方以返回的长度判断终止。
-    pub fn snapshot_batch(&self, from: usize, max: usize) -> (usize, Vec<SessionEnvelope>) {
-        let inner = self
-            .inner
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
-        let len = inner.events.len();
-        let start = from.min(len);
-        let end = (start + max).min(len);
-        (len, inner.events[start..end].to_vec())
     }
 
     pub fn file(&self) -> &Path {
@@ -429,15 +544,21 @@ impl Session {
         event: SessionEvent,
         time: u64,
     ) -> Result<SessionEnvelope, SessionError> {
+        // 写路径强制热态:冷会话的事件 Vec 为空,seq 分配与派生面都会错。
+        self.ensure_hot()?;
         let mut inner = self
             .inner
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
+        // last_seq 兜底:极旧日志存在 seq 跳变/乱序(历史回退遗留),
+        // 事件数可能小于最大 seq,只按 len+1 分配会撞号。
+        let seq = inner.last_seq.max(inner.events.len() as u64) + 1;
         let envelope = SessionEnvelope {
-            seq: inner.events.len() as u64 + 1,
+            seq,
             time,
             event,
         };
+        inner.last_seq = seq;
         // 维护 last_turn / last_system_prompt 的 O(1) 投影。
         match &envelope.event {
             SessionEvent::TurnStart { turn } => {
@@ -461,10 +582,14 @@ impl Session {
         // 1) 每个事件都贡献 message/system 启发式 fold(apply_one 内部按角色累计)。
         // 2) `TurnStart` 重置本轮 envelope 缓冲;`TurnEnd` 闭合时把整段
         //    喂给 `meter.fold_turn`,成功则并入精确 usage 与 anchor。
+        // chunk(transient)不进缓冲:token-meter 与派生面都不读它。
+        let transient = is_transient_event(&envelope.event);
         if matches!(&envelope.event, SessionEvent::TurnStart { .. }) {
             inner.pending_turn.clear();
         }
-        inner.pending_turn.push(envelope.clone());
+        if !transient {
+            inner.pending_turn.push(envelope.clone());
+        }
         if matches!(&envelope.event, SessionEvent::TurnEnd { .. }) {
             let slice: Vec<SessionEnvelope> = inner.pending_turn.drain(..).collect();
             inner.meter.fold_turn(&slice);
@@ -479,10 +604,11 @@ impl Session {
 
         let line = serde_json::to_string(&envelope)?;
         writeln!(inner.writer, "{line}")?;
-        let next_offset =
-            inner.offsets.last().copied().unwrap_or(inner.base_offset) + line.len() as u64 + 1;
-        inner.offsets.push(next_offset);
-        // 落盘策略:步骤边界/工具结果/todo 快照/权限切换立即 flush(耐久性
+        let next_offset = inner.next_offset + line.len() as u64 + 1;
+        inner.next_offset = next_offset;
+        if !transient {
+            inner.offsets.push(next_offset);
+        }        // 落盘策略:步骤边界/工具结果/todo 快照/权限切换立即 flush(耐久性
         // 边界——权限档位是安全语义,必须立即可被磁盘读者看到),流式 chunk
         // 只进 buffer,超 16KB 自动落盘(高频帧零系统调用)。
         match &envelope.event {
@@ -503,7 +629,12 @@ impl Session {
                 }
             }
         }
+        // chunk 驻留到轮次闭合:打开轮次的实时回放需要它(刷新页面恢复
+        // 流式视图);turn-end 落盘即清扫,闭环轮次只留结算消息。
         inner.events.push(envelope.clone());
+        if matches!(&envelope.event, SessionEvent::TurnEnd { .. }) {
+            inner.events.retain(|item| !is_transient_event(&item.event));
+        }
         // 日志变了:派生面缓存失效,版本号自增(回退截断也走这里)。
         inner.derived_surface = None;
         inner.log_revision += 1;
@@ -526,15 +657,23 @@ impl Session {
     ///
     /// 这是破坏性操作:目标 seq 之后的事件从磁盘移除,不可恢复。
     pub fn rewind(&self, to_seq: u64) -> Result<RewindOutcome, SessionError> {
+        // 破坏性写路径强制热态:截断依赖完整事件与 offsets 对齐。
+        self.ensure_hot()?;
         let mut inner = self
             .inner
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
-        if to_seq == 0 || to_seq as usize > inner.events.len() {
+        // seq 定位:事件表不驻留 chunk(seq 有空洞),下标 != seq-1。
+        if to_seq == 0 {
             return Err(SessionError::NotARewindPoint(to_seq));
         }
-        let target_idx = to_seq as usize - 1;
-        let target = &inner.events[target_idx];
+        let target_idx = inner
+            .events
+            .partition_point(|envelope| envelope.seq < to_seq);
+        let target = match inner.events.get(target_idx) {
+            Some(envelope) if envelope.seq == to_seq => envelope,
+            _ => return Err(SessionError::NotARewindPoint(to_seq)),
+        };
         let to_message = match &target.event {
             SessionEvent::UserMessage {
                 text,
@@ -563,6 +702,7 @@ impl Session {
         // 内存与派生状态回退。
         inner.events.truncate(target_idx);
         inner.offsets.truncate(target_idx);
+        inner.next_offset = truncate_offset;
         // 派生面缓存随截断作废(版本号自增,即使截断后长度恰好等于某个
         // 旧缓存时的长度,也不会误命中)。
         inner.derived_surface = None;
@@ -605,6 +745,7 @@ impl Session {
             }
         }
         inner.events = kept;
+        inner.last_seq = inner.events.last().map(|envelope| envelope.seq).unwrap_or(0);
 
         // 回退审计:独立于 session.jsonl 追加,物理截断不会抹掉这段记录。
         let rewind_file = self.file.with_file_name("rewinds.jsonl");
@@ -1032,6 +1173,17 @@ fn anchor_preview(text: &str) -> String {
     format!("{cut}…")
 }
 
+/// 临时流事件(chunk):高频、体量大、只服务实时流式回放。
+///
+/// 内存事件表**不驻留已闭合轮次的 chunk** —— 派生面(token-meter 与
+/// `derive_surface`)只折叠 user/assistant/tool-result,闭环轮次的历史
+/// 重建只依赖结算的 `assistant-message`(与分页端点的展示粒度同口径),
+/// chunk 只在“当前打开的轮次”里驻留,`turn-end` 落盘时清扫。日志文件
+/// 仍完整记录每一条(append-only 不变)。
+fn is_transient_event(event: &SessionEvent) -> bool {
+    matches!(event, SessionEvent::AssistantChunk { .. })
+}
+
 /// 逐行读下一条可解析的日志事件:首个非空行产出会话头(存入 `header`,
 /// 不作为事件返回),空行跳过,损坏行跳过(torn-tail 容忍),文件读尽返回
 /// `None`。分页的两遍扫描共用,保证对同一文件产出一致的事件序列。
@@ -1040,8 +1192,7 @@ fn next_log_event(
     header: &mut Option<SessionHeader>,
     line: &mut String,
     line_no: &mut usize,
-) -> Result<Option<SessionEnvelope>, SessionError> {
-    loop {
+) -> Result<Option<SessionEnvelope>, SessionError> {    loop {
         line.clear();
         let read = reader.read_line(line)?;
         if read == 0 {
@@ -1254,6 +1405,84 @@ impl SessionStore {
             },
         );
         Ok(session)
+    }
+
+    /// 冷打开会话(仅浏览路径):聚合投影保留,事件不驻留内存。
+    ///
+    /// 与 [`Self::load`] 的差异只在事件驻留;索引账本同样刷新。
+    pub fn open_cold(&self, id: &str) -> Result<Session, SessionError> {
+        let file = self.file_for(id)?;
+        if !file.exists() {
+            return Err(SessionError::NotFound(id.to_string()));
+        }
+        let session = Session::open_cold(&file)?;
+        let meta = meta_of(&session);
+        self.index.lock().unwrap_or_else(|p| p.into_inner()).insert(
+            meta.id.clone(),
+            IndexEntry {
+                meta,
+                stamp: file_stamp(session.file()).unwrap_or(FileStamp {
+                    size: 0,
+                    mtime_ms: 0,
+                }),
+                indexed_at: now_millis(),
+            },
+        );
+        Ok(session)
+    }
+
+    /// 只读日志 header(第一行),不解析事件。
+    pub fn read_log_header(&self, id: &str) -> Result<SessionHeader, SessionError> {
+        let file = self.file_for(id)?;
+        let mut reader = BufReader::new(File::open(&file)?);
+        let mut line = String::new();
+        let read = reader.read_line(&mut line)?;
+        if read == 0 {
+            return Err(SessionError::Corrupt("empty session log".into()));
+        }
+        serde_json::from_str(line.trim_end_matches(['\n', '\r']))
+            .map_err(|e| SessionError::Corrupt(format!("bad header: {e}")))
+    }
+
+    /// 流式遍历日志中的合法事件(跳过退役类型行,遇 torn tail 截止),
+    /// 不驻留任何事件。闭包返回 `Err(io::Error)` 即中止(如响应流断开)。
+    pub fn for_each_event(
+        &self,
+        id: &str,
+        mut f: impl FnMut(SessionEnvelope) -> Result<(), std::io::Error>,
+    ) -> Result<(), SessionError> {
+        let file = self.file_for(id)?;
+        if !file.exists() {
+            return Err(SessionError::NotFound(id.to_string()));
+        }
+        let mut reader = BufReader::new(File::open(&file)?);
+        let mut header = None;
+        let mut line = String::new();
+        let mut line_no = 0usize;
+        while let Some(envelope) =
+            next_log_event(&mut reader, &mut header, &mut line, &mut line_no)?
+        {
+            f(envelope)?;
+        }
+        Ok(())
+    }
+
+    /// 冷路径 checkpoints:流式扫日志收集全部非注入用户消息。
+    pub fn read_checkpoints(&self, id: &str) -> Result<Vec<SessionEnvelope>, SessionError> {
+        let mut out: Vec<SessionEnvelope> = Vec::new();
+        self.for_each_event(id, |envelope| {
+            if matches!(
+                &envelope.event,
+                SessionEvent::UserMessage {
+                    injected: false,
+                    ..
+                }
+            ) {
+                out.push(envelope);
+            }
+            Ok(())
+        })?;
+        Ok(out)
     }
 
     /// 直接按文件流式读取一个「展示粒度」事件窗口,不构造/驻留完整 `Session`。
@@ -2587,6 +2816,333 @@ mod tests {
             .find(|s| s.id == child_id)
             .unwrap();
         assert_eq!(summary.parent_session.as_deref(), Some(source_id.as_str()));
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /* ---- 冷/热两层:浏览路径不驻留事件 ---- */
+
+    fn write_sample_log(dir: &Path, cwd: &Path) {
+        let session = Session::create(dir, "s".to_string(), cwd, true, None).unwrap();
+        session.set_agent_preset("minimal").unwrap();
+        session.set_permission_mode(PermissionMode::Full).unwrap();
+        session.append(SessionEvent::TurnStart { turn: 1 }).unwrap();
+        session
+            .append(SessionEvent::UserMessage {
+                text: "你好".into(),
+                injected: false,
+                images: Vec::new(),
+                channel: None,
+            })
+            .unwrap();
+        session
+            .append(SessionEvent::AssistantMessage {
+                turn: 1,
+                step: 1,
+                blocks: vec![ContentBlock::Text {
+                    text: "回复".into(),
+                }],
+                usage: Some(denia_core::stream::TokenUsage {
+                    input_tokens: 10,
+                    output_tokens: 5,
+                    cache_read_tokens: None,
+                    reasoning_tokens: None,
+                }),
+                interrupted: false,
+                source_event_seqs: Vec::new(),
+            })
+            .unwrap();
+        session
+            .append(SessionEvent::TurnEnd {
+                turn: 1,
+                reason: TurnEndReason::Completed,
+            })
+            .unwrap();
+        drop(session);
+    }
+
+    #[test]
+    fn cold_open_keeps_aggregates_without_events() {
+        let root = temp_root();
+        let dir = root.join("s");
+        let cwd = root.join("work");
+        std::fs::create_dir_all(&cwd).unwrap();
+        write_sample_log(&dir, &cwd);
+
+        let cold = Session::open_cold(&dir.join("session.jsonl")).unwrap();
+        assert!(!cold.is_hot(), "冷打开不驻留事件");
+        assert!(cold.events().is_empty());
+        assert_eq!(cold.agent_preset().as_deref(), Some("minimal"), "聚合照常折叠");
+        assert_eq!(cold.permission_mode(), PermissionMode::Full);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn cold_aggregates_match_hot() {
+        let root = temp_root();
+        let dir = root.join("s");
+        let cwd = root.join("work");
+        std::fs::create_dir_all(&cwd).unwrap();
+        write_sample_log(&dir, &cwd);
+
+        let hot = Session::load(&dir.join("session.jsonl")).unwrap();
+        let cold = Session::open_cold(&dir.join("session.jsonl")).unwrap();
+        assert_eq!(
+            format!("{:?}", hot.context_breakdown()),
+            format!("{:?}", cold.context_breakdown()),
+            "meter 聚合冷热一致"
+        );
+        assert_eq!(
+            format!("{:?}", hot.turn_token_usage()),
+            format!("{:?}", cold.turn_token_usage()),
+            "轮次 usage 冷热一致"
+        );
+        assert_eq!(hot.next_turn_number(), cold.next_turn_number());
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn cold_events_after_replays_from_disk() {
+        let root = temp_root();
+        let dir = root.join("s");
+        let cwd = root.join("work");
+        std::fs::create_dir_all(&cwd).unwrap();
+        write_sample_log(&dir, &cwd);
+
+        let cold = Session::open_cold(&dir.join("session.jsonl")).unwrap();
+        assert!(cold.events_after(6).is_empty(), "游标在尾部:零回放零 IO");
+        let replay = cold.events_after(1);
+        assert_eq!(replay.len(), 5, "游标落后:从磁盘回放 seq>1 的事件");
+        assert_eq!(replay[0].seq, 2);
+        assert_eq!(replay[4].seq, 6);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn ensure_hot_promotes_and_append_continues_seq() {
+        let root = temp_root();
+        let dir = root.join("s");
+        let cwd = root.join("work");
+        std::fs::create_dir_all(&cwd).unwrap();
+        write_sample_log(&dir, &cwd);
+
+        let cold = Session::open_cold(&dir.join("session.jsonl")).unwrap();
+        cold.ensure_hot().unwrap();
+        assert!(cold.is_hot(), "升级后事件驻留");
+        assert_eq!(cold.events().len(), 6);
+        let envelope = cold
+            .append(SessionEvent::UserMessage {
+                text: "继续".into(),
+                injected: false,
+                images: Vec::new(),
+                channel: None,
+            })
+            .unwrap();
+        assert_eq!(envelope.seq, 7, "升级后 append 接续日志 seq");
+        // 升级会补跑 load 修复与 meter 重算:聚合仍与磁盘一致。
+        assert_eq!(cold.next_turn_number(), 2);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn orphan_turn_repair_deferred_to_ensure_hot() {
+        let root = temp_root();
+        let dir = root.join("s");
+        let cwd = root.join("work");
+        std::fs::create_dir_all(&cwd).unwrap();
+        {
+            let session = Session::create(&dir, "s".to_string(), &cwd, true, None).unwrap();
+            session.append(SessionEvent::TurnStart { turn: 1 }).unwrap();
+            session
+                .append(SessionEvent::UserMessage {
+                    text: "孤儿轮".into(),
+                    injected: false,
+                    images: Vec::new(),
+                    channel: None,
+                })
+                .unwrap();
+            // 无 turn-end:崩溃遗留的孤儿轮
+            drop(session);
+        }
+
+        let cold = Session::open_cold(&dir.join("session.jsonl")).unwrap();
+        assert_eq!(
+            cold.events_after(0).len(),
+            2,
+            "冷打开不写盘修复:孤儿轮保持原样"
+        );
+        cold.ensure_hot().unwrap();
+        assert!(
+            cold.events()
+                .iter()
+                .any(|envelope| matches!(envelope.event, SessionEvent::TurnEnd { .. })),
+            "升级时补合成 turn-end"
+        );
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn rewind_on_cold_promotes_first() {
+        let root = temp_root();
+        let dir = root.join("s");
+        let cwd = root.join("work");
+        std::fs::create_dir_all(&cwd).unwrap();
+        write_sample_log(&dir, &cwd);
+
+        let cold = Session::open_cold(&dir.join("session.jsonl")).unwrap();
+        let outcome = cold.rewind(4).unwrap();
+        assert_eq!(outcome.removed_events, 3);
+        assert!(cold.is_hot(), "破坏性写路径自动升级");
+        assert_eq!(cold.events().len(), 3);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn transient_chunks_live_only_for_the_open_turn() {
+        let root = temp_root();
+        let cwd = root.join("work");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let store = SessionStore::open(&root).unwrap();
+        let session = store.create(&cwd, true).unwrap();
+        let id = session.id().to_string();
+        let chunk = SessionEvent::AssistantChunk {
+            turn: 1,
+            step: 1,
+            chunk: denia_core::stream::StreamChunk::TextDelta {
+                index: 0,
+                text: "x".into(),
+            },
+        };
+
+        // 轮次进行中:chunk 驻留(实时回放义务)。
+        session.append(SessionEvent::TurnStart { turn: 1 }).unwrap();
+        session.append(chunk.clone()).unwrap();
+        session.append(chunk.clone()).unwrap();
+        assert_eq!(session.events().len(), 3, "打开轮次的 chunk 驻留");
+        assert!(session
+            .events_after(1)
+            .iter()
+            .any(|envelope| matches!(envelope.event, SessionEvent::AssistantChunk { .. })));
+
+        // 闭合:chunk 清扫出内存,磁盘仍完整记录(append-only 不变)。
+        session
+            .append(SessionEvent::AssistantMessage {
+                turn: 1,
+                step: 1,
+                blocks: Vec::new(),
+                usage: None,
+                interrupted: false,
+                source_event_seqs: Vec::new(),
+            })
+            .unwrap();
+        session
+            .append(SessionEvent::TurnEnd {
+                turn: 1,
+                reason: TurnEndReason::Completed,
+            })
+            .unwrap();
+        assert_eq!(
+            session.events().len(),
+            3,
+            "闭环后只剩 start/message/end,chunk 清扫"
+        );
+        let mut disk_events = 0;
+        store
+            .for_each_event(&id, |_| {
+                disk_events += 1;
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(disk_events, 5, "日志文件逐条完整");
+
+        // 游标落在被清扫的 chunk seq 上:按 seq 回放到后续非 chunk 事件。
+        let replay = session.events_after(2);
+        assert_eq!(replay[0].seq, 4);
+
+        // 清扫后的空洞不影响 seq 接续。
+        let envelope = session
+            .append(SessionEvent::UserMessage {
+                text: "下一轮".into(),
+                injected: false,
+                images: Vec::new(),
+                channel: None,
+            })
+            .unwrap();
+        assert_eq!(envelope.seq, 6);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn rewind_locates_by_seq_despite_chunk_holes() {
+        let root = temp_root();
+        let cwd = root.join("work");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let store = SessionStore::open(&root).unwrap();
+        let session = store.create(&cwd, true).unwrap();
+        let id = session.id().to_string();
+        let chunk = || SessionEvent::AssistantChunk {
+            turn: 1,
+            step: 1,
+            chunk: denia_core::stream::StreamChunk::TextDelta {
+                index: 0,
+                text: "x".into(),
+            },
+        };
+        // 轮次 1:start(1) chunk(2) message(3) end(4);下一轮用户消息(5) + chunk(6)。
+        session.append(SessionEvent::TurnStart { turn: 1 }).unwrap();
+        session.append(chunk()).unwrap();
+        session
+            .append(SessionEvent::AssistantMessage {
+                turn: 1,
+                step: 1,
+                blocks: Vec::new(),
+                usage: None,
+                interrupted: false,
+                source_event_seqs: Vec::new(),
+            })
+            .unwrap();
+        session
+            .append(SessionEvent::TurnEnd {
+                turn: 1,
+                reason: TurnEndReason::Completed,
+            })
+            .unwrap();
+        session
+            .append(SessionEvent::UserMessage {
+                text: "第二问".into(),
+                injected: false,
+                images: Vec::new(),
+                channel: None,
+            })
+            .unwrap();
+        session.append(chunk()).unwrap();
+        assert_eq!(session.events().len(), 5, "事件表 seq 有空洞(2 缺席)");
+
+        // 回退到 seq 5(用户消息)之前:chunk 空洞下按 seq 定位。
+        let outcome = session.rewind(5).unwrap();
+        assert_eq!(outcome.to_message.as_deref(), Some("第二问"));
+        assert_eq!(outcome.removed_events, 2, "移除用户消息与其后 chunk");
+        assert_eq!(session.events().len(), 3);
+        assert_eq!(session.events().last().unwrap().seq, 4);
+
+        // 磁盘同步截断:截断点之前的 chunk 行保留(append-only 历史),
+        // 之后的用户消息与 chunk 行随尾部一并移除。
+        let mut disk_events = 0;
+        store
+            .for_each_event(&id, |_| {
+                disk_events += 1;
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(disk_events, 4);
+        let envelope = session
+            .append(SessionEvent::UserMessage {
+                text: "重来".into(),
+                injected: false,
+                images: Vec::new(),
+                channel: None,
+            })
+            .unwrap();
+        assert_eq!(envelope.seq, 5);
         std::fs::remove_dir_all(&root).unwrap();
     }
 }

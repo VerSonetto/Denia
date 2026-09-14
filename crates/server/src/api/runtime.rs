@@ -30,10 +30,15 @@ async fn ensure(state: &AppState, id: &str) -> Result<Arc<crate::state::LiveSess
     let live = state.live.clone();
     let sessions = state.sessions.clone();
     let id = id.to_string();
-    tokio::task::spawn_blocking(move || live.get_or_load(&sessions, &id))
+    let live = tokio::task::spawn_blocking(move || live.get_or_load(&sessions, &id))
         .await
         .map_err(|e| error(e.to_string()))?
-        .map_err(ApiError::from_session)
+        .map_err(ApiError::from_session)?;
+    // runtime 操作(派生代理/收发指令)是参与路径:事件必须驻留。
+    live.session
+        .ensure_hot()
+        .map_err(ApiError::from_session)?;
+    Ok(live)
 }
 async fn agents(
     State(state): State<Arc<AppState>>,
