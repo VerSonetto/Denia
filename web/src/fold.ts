@@ -114,6 +114,26 @@ export type TranscriptNode =
       seq: number
     }
 
+/**
+ * 把一步的用量并入轮次总量。
+ *
+ * 冷启动与增量两条折叠路径**必须共用这一个函数**:先前各写一份累加,
+ * 增量那份漏了 cacheRead/reasoning,同一轮对话"实时跑完"与"刷新后"
+ * 会读出两组不同的数。input/output 恒存在,cache/推理无数据时不出现
+ * (0 与"提供方没报"是两回事,不拿 0 冒充)。
+ */
+function mergeUsage(total: TokenUsage | null, usage?: TokenUsage): TokenUsage | null {
+  if (!usage) return total
+  const cacheRead = (total?.cacheReadTokens ?? 0) + (usage.cacheReadTokens ?? 0)
+  const reasoning = (total?.reasoningTokens ?? 0) + (usage.reasoningTokens ?? 0)
+  return {
+    inputTokens: (total?.inputTokens ?? 0) + usage.inputTokens,
+    outputTokens: (total?.outputTokens ?? 0) + usage.outputTokens,
+    cacheReadTokens: cacheRead > 0 ? cacheRead : undefined,
+    reasoningTokens: reasoning > 0 ? reasoning : undefined,
+  }
+}
+
 function toUiBlock(block: ContentBlock): UiBlock {
   switch (block.type) {
     case 'text':
@@ -205,15 +225,7 @@ export function foldEvents(events: SessionEnvelope[]): TranscriptNode[] {
   let lastTodos: TodoSnapshotItem[] | undefined
 
   const addUsage = (usage?: TokenUsage) => {
-    if (!usage) return
-    turnUsage = {
-      inputTokens: (turnUsage?.inputTokens ?? 0) + usage.inputTokens,
-      outputTokens: (turnUsage?.outputTokens ?? 0) + usage.outputTokens,
-      cacheReadTokens:
-        (turnUsage?.cacheReadTokens ?? 0) + (usage.cacheReadTokens ?? 0) || undefined,
-      reasoningTokens:
-        (turnUsage?.reasoningTokens ?? 0) + (usage.reasoningTokens ?? 0) || undefined,
-    }
+    turnUsage = mergeUsage(turnUsage, usage)
   }
 
   const closeOpen = () => {
@@ -747,15 +759,13 @@ function applyEnvelopeStep(
       ]
     }
     case 'turn-end': {
-      let input = 0
-      let output = 0
+      // 与冷启动路径共用 mergeUsage:反向扫本轮 assistant 步,四字段全累加。
+      // 先前这里只加 input/output,缓存读与推理实时恒为 0、刷新后才有值。
+      let usage: TokenUsage | null = null
       for (let i = nodes.length - 1; i >= 0; i--) {
         const node = nodes[i]
         if (node.kind === 'turn-end') break
-        if (node.kind === 'assistant' && node.usage) {
-          input += node.usage.inputTokens
-          output += node.usage.outputTokens
-        }
+        if (node.kind === 'assistant') usage = mergeUsage(usage, node.usage)
       }
       return [
         ...nodes,
@@ -764,10 +774,7 @@ function applyEnvelopeStep(
           turn: event.turn,
           time: event.time,
           reason: event.reason,
-          usage:
-            input || output
-              ? { inputTokens: input, outputTokens: output }
-              : undefined,
+          usage: usage ?? undefined,
         },
       ]
     }

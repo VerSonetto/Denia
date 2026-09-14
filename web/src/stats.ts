@@ -14,7 +14,7 @@ export interface SessionStats {
   toolCalls: number
   /** 各轮墙钟时长之和(turn-start → turn-end),毫秒。 */
   turnMs: number
-  /** 累计输入 token(含缓存读)。 */
+  /** 累计未缓存输入 token(与缓存读互斥,见 core `TokenUsage`)。 */
   inputTokens: number
   /** 累计输出 token。 */
   outputTokens: number
@@ -115,9 +115,23 @@ export function formatTokens(count: number): string {
   return `${(count / 1_000_000).toFixed(1)}m`
 }
 
-/** 缓存命中率:两位小数百分比;无输入返回 null。 */
-export function cacheHitPercent(stats: SessionStats): string | null {
-  if (stats.inputTokens <= 0) return null
-  const percent = (stats.cacheReadTokens / stats.inputTokens) * 100
+/**
+ * 缓存命中率:缓存读 /(未缓存输入 + 缓存读)。
+ *
+ * 分母必须是**计费输入总量**:core 的 `TokenUsage` 里 `cache_read_tokens`
+ * 与 `input_tokens` 互斥(见 crates/core/src/stream.rs,真实日志也印证:
+ * 12429 未缓存 + 9088 缓存)。先前用 `cacheRead / inputTokens` 把分母算成
+ * 了未缓存部分,命中率被系统性高估(该例真值 42%,旧式算出 73%)。
+ * 无任何计费输入返回 null。
+ */
+export function cacheHitPercent(inputTokens: number, cacheReadTokens: number): string | null {
+  const billed = inputTokens + cacheReadTokens
+  if (billed <= 0) return null
+  const percent = (cacheReadTokens / billed) * 100
   return Math.min(100, percent).toFixed(2)
+}
+
+/** 计费输入总量 = 未缓存输入 + 缓存读。 */
+export function billedInputTokens(inputTokens: number, cacheReadTokens: number): number {
+  return inputTokens + cacheReadTokens
 }

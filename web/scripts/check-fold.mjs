@@ -102,5 +102,53 @@ const injection = (seq, text) => ({ seq, time: seq * 100, type: 'agent-delivery'
 const inj = mod.foldEvents([injection(1, '工作区指令:基线 A'), injection(2, '工作区指令:基线 A')])
 check('context-injection 不去重', inj.filter((n) => n.kind === 'context-injection').length, 2)
 
+/* 9) turn-end 用量:冷启动与增量两条路径必须一致。
+      增量路径曾经只累加 input/output,把缓存读与推理丢了 —— 表现为
+      "刷新后能看到缓存命中,实时流跑完却看不到",本轮用量卡片会照出这个洞。 */
+const usageEvents = [
+  { seq: 1, time: 1000, type: 'turn-start', turn: 1 },
+  {
+    seq: 2,
+    time: 1100,
+    type: 'assistant-message',
+    turn: 1,
+    step: 1,
+    blocks: [{ type: 'text', text: 'hi' }],
+    usage: { inputTokens: 100, outputTokens: 20, cacheReadTokens: 900, reasoningTokens: 7 },
+  },
+  { seq: 3, time: 2000, type: 'turn-end', turn: 1, reason: { kind: 'completed' } },
+]
+const coldUsage = mod.foldEvents(usageEvents).find((n) => n.kind === 'turn-end').usage
+check('冷启动:缓存读进 turn-end', coldUsage.cacheReadTokens, 900)
+check('冷启动:推理进 turn-end', coldUsage.reasoningTokens, 7)
+
+const incrUsage = mod
+  .applyEnvelopes(mod.foldEvents([usageEvents[0]]), usageEvents.slice(1))
+  .find((n) => n.kind === 'turn-end').usage
+check('增量:缓存读进 turn-end', incrUsage.cacheReadTokens, 900)
+check('增量:推理进 turn-end', incrUsage.reasoningTokens, 7)
+check('两条路径的 turn-end 用量逐字一致', incrUsage, coldUsage)
+
+/* 10) 缓存命中率分母回归:core 里 cacheRead 与 inputTokens 互斥,
+       分母必须是两者之和。旧式 cacheRead/inputTokens 会系统性高估
+       (真实日志 12429 未缓存 + 9088 缓存:真值 42.2%,旧式算出 73.1%)。 */
+const statsFile = join(dir, 'stats.mjs')
+await build({
+  entryPoints: [fileURLToPath(new URL('../src/stats.ts', import.meta.url))],
+  outfile: statsFile,
+  bundle: true,
+  format: 'esm',
+  platform: 'node',
+  target: 'node20',
+  logLevel: 'silent',
+})
+const stats = await import(pathToFileURL(statsFile).href)
+
+check('计费输入 = 未缓存 + 缓存读', stats.billedInputTokens(12429, 9088), 21517)
+check('缓存命中率以计费输入为分母', stats.cacheHitPercent(12429, 9088), '42.24')
+check('全命中为 100%', stats.cacheHitPercent(0, 500), '100.00')
+check('无缓存为 0%', stats.cacheHitPercent(500, 0), '0.00')
+check('无计费输入返回 null', stats.cacheHitPercent(0, 0), null)
+
 console.log(failed === 0 ? '\nALL PASS' : `\n${failed} FAILED`)
 process.exit(failed === 0 ? 0 : 1)

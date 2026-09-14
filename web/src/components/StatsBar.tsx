@@ -54,9 +54,9 @@ export const StatsBar = memo(function StatsBar({ nodes }: { nodes: TranscriptNod
         />
       )}
       {(() => {
-        const cache = cacheHitPercent(stats)
+        const cache = cacheHitPercent(stats.inputTokens, stats.cacheReadTokens)
         if (cache === null) return null
-        return <CachePill percent={cache} cacheRead={stats.cacheReadTokens} input={stats.inputTokens} />
+        return <CachePill percent={cache} cacheRead={stats.cacheReadTokens} uncached={stats.inputTokens} />
       })()}
     </div>
   )
@@ -96,7 +96,16 @@ function TokenPill({
 }
 
 /** 缓存胶囊:点击弹出命中详情卡片(取代原 hover title)。 */
-function CachePill({ percent, cacheRead, input }: { percent: string; cacheRead: number; input: number }) {
+function CachePill({
+  percent,
+  cacheRead,
+  uncached,
+}: {
+  percent: string
+  cacheRead: number
+  /** 未缓存输入(core 里与缓存读互斥,直接就是计费输入的未命中部分)。 */
+  uncached: number
+}) {
   const [open, setOpen] = useState(false)
   const rootRef = useRef<HTMLSpanElement | null>(null)
 
@@ -116,7 +125,6 @@ function CachePill({ percent, cacheRead, input }: { percent: string; cacheRead: 
     }
   }, [open])
 
-  const uncached = Math.max(0, input - cacheRead)
   return (
     <span className="cache-anchor" ref={rootRef}>
       <button
@@ -142,10 +150,6 @@ function CachePill({ percent, cacheRead, input }: { percent: string; cacheRead: 
             <div>
               <dt>{t('statsCacheMiss')}</dt>
               <dd className="stats-mono">{formatTokens(uncached)}</dd>
-            </div>
-            <div>
-              <dt>{t('inputTokens')}</dt>
-              <dd className="stats-mono">{formatTokens(input)}</dd>
             </div>
           </dl>
         </div>
