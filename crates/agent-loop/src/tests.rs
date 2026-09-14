@@ -385,6 +385,89 @@ fn recording_driver(
     )
 }
 
+/// 会话日志里的 preset 落到本 step 的装配上:工具面与 persona 一起收窄,
+/// 而日志里的 id 从名册消失时回退到部署默认组装(不中断会话)。
+#[test]
+fn session_preset_narrows_the_step_assembly() {
+    struct FakeSource(Vec<denia_core::preset::AgentPreset>);
+
+    impl crate::preset::AgentPresetSource for FakeSource {
+        fn resolve(&self, id: &str) -> Option<denia_core::preset::AgentPreset> {
+            self.0.iter().find(|preset| preset.id == id).cloned()
+        }
+
+        fn default_id(&self) -> String {
+            "standard".to_string()
+        }
+    }
+
+    fn preset(id: &str, tools: Option<Vec<&str>>, persona: Option<&str>) -> denia_core::preset::AgentPreset {
+        denia_core::preset::AgentPreset {
+            id: id.to_string(),
+            name: id.to_string(),
+            description: String::new(),
+            trust: denia_core::preset::PresetTrust::Shipped,
+            tools: tools.map(|names| names.into_iter().map(str::to_string).collect()),
+            persona: persona.map(str::to_string),
+            path: None,
+        }
+    }
+
+    let (prompt, tools) = denia_tools::default_shipped();
+    let registry = Arc::new(LlmRegistry::new());
+    let full_driver = SessionDriver::new(
+        registry.clone(),
+        Arc::new(tools.clone()),
+        Arc::new(ArcSwap::from_pointee(prompt.clone())),
+    );
+    let source = Arc::new(FakeSource(vec![
+        preset("standard", None, None),
+        preset("minimal", Some(vec!["bash", "read_file"]), Some("你是极简助手。")),
+    ]));
+    let preset_driver = SessionDriver::new(
+        registry,
+        Arc::new(tools),
+        Arc::new(ArcSwap::from_pointee(prompt)),
+    )
+    .with_presets(source);
+
+    let assemble = |driver: &SessionDriver, preset_id: Option<&str>| {
+        let mut assembly = driver
+            .system_prompt
+            .load()
+            .assemble(&denia_system_prompt::AssembleContext {
+                cwd: Some("/tmp/ws".to_string()),
+                ..Default::default()
+            })
+            .unwrap();
+        crate::turn::apply_session_preset(driver, preset_id, &mut assembly);
+        (assembly.tools, assembly.sections)
+    };
+
+    // 无名册(无 preset 的部署):装配原样保留全量工具面。
+    let (tools, sections) = assemble(&full_driver, Some("minimal"));
+    assert!(tools.iter().any(|schema| schema.name == "write_file"));
+    assert!(sections.iter().any(|section| section.name == "tool:write"));
+
+    // minimal:只剩 bash 与 read_file,拿不到的工具的纪律段同进退。
+    let (tools, sections) = assemble(&preset_driver, Some("minimal"));
+    let names: Vec<&str> = tools.iter().map(|schema| schema.name.as_str()).collect();
+    assert_eq!(names, vec!["bash", "read_file"]);
+    assert!(sections.iter().all(|section| section.name != "tool:write"));
+    assert!(sections
+        .iter()
+        .any(|section| section.name == "deployment:persona"
+            && section.text.starts_with("你是极简助手。")));
+
+    // 会话未指定 preset:用部署默认(全量工具集)。
+    let (tools, _) = assemble(&preset_driver, None);
+    assert!(tools.iter().any(|schema| schema.name == "write_file"));
+
+    // 日志里的 id 已被删掉:回退默认组装,而不是让会话发不出请求。
+    let (tools, _) = assemble(&preset_driver, Some("gone"));
+    assert!(tools.iter().any(|schema| schema.name == "write_file"));
+}
+
 fn selection() -> ModelSelection {
     ModelSelection {
         provider: "mock".to_string(),

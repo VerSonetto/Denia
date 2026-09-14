@@ -474,14 +474,12 @@ async fn detect_gesture_skill(
 /// 提供方缓存前缀的第一段(in-history 追加的冻结基准)。
 /// None = 会话尚未发过任何请求,当前提示词即为基准。
 fn last_request_header_system(session: &Session) -> Option<String> {
-    session
-        .events()
-        .iter()
-        .rev()
-        .find_map(|envelope| match &envelope.event {
+    session.with_events(|events| {
+        events.iter().rev().find_map(|envelope| match &envelope.event {
             SessionEvent::RequestHeader { header, .. } => header.system.clone(),
             _ => None,
         })
+    })
 }
 
 /// 从系统提示更新注入消息中提取携带的提示词全文(与写入时的
@@ -525,6 +523,21 @@ pub(crate) fn section_tools(section: &str) -> Option<&'static [&'static str]> {
     })
 }
 
+/// 把会话选中的 agent preset 应用到本 step 的装配上。
+///
+/// 单独成函数是为了可测:装配管线其余部分依赖完整 `TurnState`,而这一步
+/// 只依赖 driver 的 preset 名册。名册缺失(无 preset 的部署)时装配维持
+/// 出厂全量组装。
+pub(crate) fn apply_session_preset(
+    driver: &SessionDriver,
+    session_preset: Option<&str>,
+    assembly: &mut PromptAssembly,
+) {
+    if let Some(preset) = driver.preset_for(session_preset) {
+        crate::preset::apply_preset(assembly, &preset);
+    }
+}
+
 /// 装配本 step 的系统提示与工具集。
 /// 系统提示热更新不丢能力(bash schema 回填实际注册表版本);
 /// 子代理 persona 覆盖 + 工具白名单过滤。
@@ -553,6 +566,11 @@ fn assemble_step(
             }
         }
     }
+    // 会话选中的 agent preset 先收窄(工具面 + persona),子代理的
+    // `allowed_tools`/角色提示词在其后继续收窄——继承即收窄,绝不放大。
+    // 放在能力 schema 追加之后:preset 说"不给 bash"就得对追加进来的
+    // 扩展工具同样生效。
+    apply_session_preset(driver, state.session.agent_preset().as_deref(), &mut assembly);
     if let Some(child) = &state.session.header().subagent {
         if let Some(persona) = &child.persona
             && let Some(section) = assembly
@@ -564,17 +582,11 @@ fn assemble_step(
                 format!("{persona}\n始终使用简体中文回复，除非用户明确要求其他语言。");
         }
         if let Some(allowed) = &child.allowed_tools {
-            assembly.tools.retain(|s| allowed.contains(&s.name));
             // 纪律段与工具同进退(AGENTS.md 的同步要求):子代理拿不到的工具,
             // 其纪律段不得注入——否则模型读到 bash/ask/write 的纪律却找不到
             // 对应工具,既浪费 token 又误导。段名到工具的映射见
             // `section_tools`;context:/harness: 段不受工具集影响。
-            assembly
-                .sections
-                .retain(|section| match section_tools(&section.name) {
-                    Some(tools) => tools.iter().any(|name| allowed.contains(&name.to_string())),
-                    None => true,
-                });
+            crate::preset::apply_tool_allowlist(&mut assembly, allowed);
         }
     }
     // 权限模式**不再**增删 schema 与纪律段(计划档保留写工具、执行档保留
@@ -615,17 +627,21 @@ fn assemble_step(
 impl TurnState {
     pub(crate) fn turn_step_next(&self) -> u32 {
         self.session
-            .events()
-            .iter()
-            .rev()
-            .take_while(|envelope| !matches!(envelope.event, SessionEvent::TurnStart { .. }))
-            .filter(|envelope| {
-                matches!(
-                    envelope.event,
-                    SessionEvent::StepStart { turn, .. } if turn == self.turn
-                )
+            .with_events(|events| {
+                events
+                    .iter()
+                    .rev()
+                    .take_while(|envelope| {
+                        !matches!(envelope.event, SessionEvent::TurnStart { .. })
+                    })
+                    .filter(|envelope| {
+                        matches!(
+                            envelope.event,
+                            SessionEvent::StepStart { turn, .. } if turn == self.turn
+                        )
+                    })
+                    .count() as u32
             })
-            .count() as u32
             + 1
     }
 }

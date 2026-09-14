@@ -24,6 +24,7 @@ mod exec;
 mod injections;
 mod loop_guard;
 pub mod microcompact;
+pub mod preset;
 mod request;
 mod rescue;
 mod runtime_context;
@@ -50,6 +51,7 @@ use tokio_util::sync::CancellationToken;
 pub use compact::{CompactOutcome, CompactionSettings};
 pub use injections::GOAL_CHANNEL;
 pub use loop_guard::LOOP_THRESHOLD;
+pub use preset::AgentPresetSource;
 
 /// 工具并行执行配置(学 codex `ToolCallRuntime` + dsh `maxParallelToolCalls`)。
 ///
@@ -119,6 +121,9 @@ pub struct SessionDriver {
     approval: Option<Arc<dyn ApprovalBridge>>,
     /// 提问通道(`ask` 工具用);`None` 时该工具按 unavailable 结算。
     ask: Option<Arc<dyn denia_tools::AskBridge>>,
+    /// agent preset 名册:按会话记录中的 preset 收窄工具面与 persona。
+    /// `None` 时所有会话都运行出厂全量组装(无 preset 的部署)。
+    presets: Option<Arc<dyn AgentPresetSource>>,
     /// 层叠上下文管理:LLM 总结压缩(学 dsh 压力驱动 + Claude Code compact)。
     compaction: CompactionSettings,
     /// 工具结果微压缩:摘要之前的廉价清理。
@@ -156,6 +161,7 @@ impl SessionDriver {
             file_history: None,
             approval: None,
             ask: None,
+            presets: None,
             compaction: CompactionSettings::default(),
             microcompact: microcompact::MicrocompactSettings::default(),
             compact_failures: AtomicU32::new(0),
@@ -236,6 +242,30 @@ impl SessionDriver {
         self
     }
 
+    /// 启用 agent preset 名册:会话按自己日志里的 preset 组装工具面与 persona。
+    pub fn with_presets(mut self, presets: Arc<dyn AgentPresetSource>) -> Self {
+        self.presets = Some(presets);
+        self
+    }
+
+    /// 解析某会话应当运行的组装。
+    ///
+    /// 会话未指定 preset 时用部署默认;日志里的 id 已从名册消失(用户删掉
+    /// 它、或文件损坏)时同样回退到默认组装——运行中的会话不该因为一个坏
+    /// 文件就连请求都发不出去,名册会把这个事实以 broken 行呈现给用户。
+    pub(crate) fn preset_for(
+        &self,
+        session_preset: Option<&str>,
+    ) -> Option<denia_core::preset::AgentPreset> {
+        let source = self.presets.as_ref()?;
+        let requested = session_preset
+            .map(str::to_string)
+            .unwrap_or_else(|| source.default_id());
+        source
+            .resolve(&requested)
+            .or_else(|| source.resolve(&source.default_id()))
+    }
+
     /// 当前工具注册表(读路径无锁,拿到的是一份自洽快照)。
     pub fn tools(&self) -> Arc<ToolRegistry> {
         Arc::clone(&self.tools.load())
@@ -294,20 +324,27 @@ impl SessionDriver {
         session: &Arc<Session>,
         cancel: CancellationToken,
     ) -> Result<Option<CompactOutcome>, LlmFailure> {
-        let header = session
-            .events()
-            .iter()
-            .rev()
-            .find_map(|item| match &item.event {
+        let (header, turn) = session.with_events(|events| {
+            let header = events.iter().rev().find_map(|item| match &item.event {
                 SessionEvent::RequestHeader { header, .. } => Some(header.clone()),
                 _ => None,
-            })
-            .ok_or_else(|| {
-                LlmFailure::new(
-                    codes::UNKNOWN,
-                    "session has no request header to restore".to_string(),
-                )
-            })?;
+            });
+            let turn = events
+                .iter()
+                .rev()
+                .find_map(|item| match item.event {
+                    SessionEvent::TurnStart { turn } => Some(turn),
+                    _ => None,
+                })
+                .unwrap_or(0);
+            (header, turn)
+        });
+        let header = header.ok_or_else(|| {
+            LlmFailure::new(
+                codes::UNKNOWN,
+                "session has no request header to restore".to_string(),
+            )
+        })?;
         let selection = ModelSelection {
             provider: header.config.provider.clone(),
             model: header.config.model.clone(),
@@ -316,15 +353,6 @@ impl SessionDriver {
         let framed_system = header.system.clone().unwrap_or_default();
         // 压缩的是已发生的历史:事件归属于日志中最后一次出现的轮次,step 0
         // 表示轮次外的合成步骤(与自动压缩一样仅作元数据)。
-        let turn = session
-            .events()
-            .iter()
-            .rev()
-            .find_map(|item| match item.event {
-                SessionEvent::TurnStart { turn } => Some(turn),
-                _ => None,
-            })
-            .unwrap_or(0);
         self.compact_context(
             session,
             &selection,
@@ -413,12 +441,15 @@ impl SessionDriver {
     ///
     /// 压缩摘要已接管旧内容的记忆职责;清空后模型若需要文件内容会重新读取,
     /// 而不是依赖"读过"的标记去写一个自己已经看不到内容的文件。
+    ///
+    /// 整条移除而不是留空表:表按会话 id 累积,长期运行下"开过的每个会话"
+    /// 都会留下一个条目;清空时顺手删掉,让不再用的表能被回收。
     pub fn clear_read_state(&self, session_id: &str) {
-        let map = self
+        let mut map = self
             .read_states
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
-        if let Some(state) = map.get(session_id)
+        if let Some(state) = map.remove(session_id)
             && let Ok(mut state) = state.lock()
         {
             state.clear();
