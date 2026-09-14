@@ -233,6 +233,7 @@ const zh = {
 
   /* ---- agent preset(组装) ---- */
   agentPresetLabel: '组装模式',
+  sessionPresetHint: '本会话运行的组装模式(决定可用工具与角色);会话开始后不可更改。',
   agentPresetDefaultBadge: '默认',
   agentPresetBrokenReason: '损坏:{reason}',
   agentPresetsHint: '组装决定会话能用哪些工具、以什么角色工作。随附组装只读;自定义组装由复制创建,之后用你自己的编辑器改它的 preset.yml。',
@@ -1181,6 +1182,7 @@ const en: typeof zh = {
 
   /* ---- agent preset ---- */
   agentPresetLabel: 'Agent mode',
+  sessionPresetHint: 'The mode this session runs (tools and persona). It cannot be changed once the session starts.',
   agentPresetDefaultBadge: 'default',
   agentPresetBrokenReason: 'Broken: {reason}',
   agentPresetsHint: 'A mode decides which tools the session may use and how it works. Shipped modes are read-only; custom modes are created by copying one, then edited in preset.yml with your own editor.',

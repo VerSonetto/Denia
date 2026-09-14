@@ -27,6 +27,7 @@ import type { TranscriptNode } from '../fold'
 import type { TrajectoryQuote } from '../trajectory'
 import { SessionView } from '../components/SessionView'
 import { AgentPresetSelector } from '../components/AgentPresetSelector'
+import { SessionPresetLabel } from '../components/SessionPresetLabel'
 import { OpenInApp } from '../components/OpenInApp'
 import { ErrorBoundary } from '../components/ErrorBoundary'
 import { StatsBar } from '../components/StatsBar'
@@ -2471,9 +2472,19 @@ export default function SessionsPage({
     <div className="session-layout" data-phase={phase} ref={layoutRef}>
       {phase === 'active' && (
         <header className="session-header">
-          <h1 className="session-title">
-            {activeSession ? sessionDisplayTitle(activeSession) : t('blankSession')}
-          </h1>
+          {/* 标题块:标题与组装标签同处一块,标签紧贴标题文字。
+              这样头部动作区一个元素都不新增,标签也不会飘到最右。 */}
+          <div className="session-title-block">
+            <h1 className="session-title">
+              {activeSession ? sessionDisplayTitle(activeSession) : t('blankSession')}
+            </h1>
+            {activeSession && agentPresetId && (
+              <SessionPresetLabel
+                presetId={agentPresetId}
+                presets={agentPresetCatalog?.presets ?? []}
+              />
+            )}
+          </div>
           {activeSession?.cwd_alive === false && (
             <span className="badge err" title={t('deadCwdHint')}>
               {t('deadCwd')}

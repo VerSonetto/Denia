@@ -1020,8 +1020,18 @@ button {
   z-index: 2;
 }
 
-.session-title {
+/* 标题块:标题 + 组装标签同处一块。块本身接管原先标题的弹性宽度,
+   标题在块内继续吃剩余空间,组装标签 flex:none 因此永远可见 ——
+   标题再长也是标题先截断,标签不会跟着被挤掉。 */
+.session-title-block {
   flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.session-title {
   min-width: 0;
   margin: 0;
   font-size: 15px;
@@ -1031,6 +1041,41 @@ button {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+/* 组装模式标签(只读):会话跑在哪份组装下,属于会话身份,与标题同源。
+   刻意不加底色与边框(那是"死目录"这类异常徽标的形态)——正常身份应当安静,
+   读起来是「标题 · 组装模式」,而不是与标题并列的第二个方块。 */
+.session-preset {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 180px;
+  font-size: 11.5px;
+  line-height: 1.35;
+  color: var(--label-tertiary);
+  cursor: default;
+  user-select: none;
+}
+
+.session-preset > svg {
+  flex: none;
+  opacity: 0.7;
+}
+
+.session-preset-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 窄屏:头部动作区(视图切换 + 打开方式 + 侧栏 + 导出)已经把横向预算吃满,
+   组装标签让位给标题 —— 它是恒定信息,不急着在这一屏读到。 */
+@media (max-width: 900px) {
+  .session-preset {
+    display: none;
+  }
 }
 
 .session-crumbs {
