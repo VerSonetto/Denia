@@ -2084,7 +2084,8 @@ export default function SessionsPage({
         </span>
         <IconChevron size={11} />
       </button>
-      {agentPresetCatalog && agentPresetId && (
+      {/* 模式选择关闭时新会话固定用部署默认组装,选择器整个不渲染。 */}
+      {agentPresetCatalog && agentPresetCatalog.modeSelection && agentPresetId && (
         <AgentPresetSelector
           value={agentPresetId}
           presets={agentPresetCatalog.presets}

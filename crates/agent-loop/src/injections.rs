@@ -102,34 +102,42 @@ pub(crate) async fn refresh_background_injections(
     };
     let session = &state.session;
     let cwd = state.cwd();
+    // 会话组装的功能开关:装配层按它摘工具与纪律段,这里按它关掉纯通道。
+    // 两处读的是同一份声明,features 关闭的功能不会以任何形态泄漏给模型。
+    let preset_features = driver
+        .preset_features(session.agent_preset().as_deref());
 
     // ① 工作区指令(AGENTS.md):发现/预算/替换语义在 runtime 侧;
     // restore 的旧文本作为 previous 传入,由正文比较决定幂等与"取代"引导语。
-    match runtime
-        .workspace_instructions(&cwd, touched, baselines.workspace_baseline.as_deref())
-        .await
-    {
-        Ok(Some(text)) => {
-            if baselines.workspace_baseline.as_deref() != Some(&text) {
-                append(
-                    session,
-                    &state.emit,
-                    SessionEvent::UserMessage {
-                        text: text.clone(),
-                        injected: true,
-                        channel: Some("workspace-instructions".into()),
-                        images: Vec::new(),
-                    },
-                )?;
-                baselines.workspace_baseline = Some(text);
+    // 组装关闭 AGENTS.md 注入时整条通道跳过(对齐 dsh:不带 agent-instructions
+    // 行的组装完全不注入)。
+    if preset_features.agents_md {
+        match runtime
+            .workspace_instructions(&cwd, touched, baselines.workspace_baseline.as_deref())
+            .await
+        {
+            Ok(Some(text)) => {
+                if baselines.workspace_baseline.as_deref() != Some(&text) {
+                    append(
+                        session,
+                        &state.emit,
+                        SessionEvent::UserMessage {
+                            text: text.clone(),
+                            injected: true,
+                            channel: Some("workspace-instructions".into()),
+                            images: Vec::new(),
+                        },
+                    )?;
+                    baselines.workspace_baseline = Some(text);
+                }
             }
+            Ok(None) => {}
+            Err(error) => tracing::warn!(
+                session_id = session.id(),
+                error = %error,
+                "workspace instructions refresh failed"
+            ),
         }
-        Ok(None) => {}
-        Err(error) => tracing::warn!(
-            session_id = session.id(),
-            error = %error,
-            "workspace instructions refresh failed"
-        ),
     }
 
     // ② 能力上下文。
@@ -151,14 +159,15 @@ pub(crate) async fn refresh_background_injections(
         baselines.capability_context = Some(context);
     }
 
-    // ③ 技能目录:仅当 skill 工具对该会话可见(子代理白名单同装配过滤);
-    // 从未发布且为空则不发消息,整块替换语义同工作区指令。
-    let skill_tool_visible = session
-        .header()
-        .subagent
-        .as_ref()
-        .and_then(|s| s.allowed_tools.as_ref())
-        .is_none_or(|allowed| allowed.iter().any(|name| name == "skill"));
+    // ③ 技能目录:仅当组装开启技能且 skill 工具对该会话可见(子代理白名单
+    // 同装配过滤);从未发布且为空则不发消息,整块替换语义同工作区指令。
+    let skill_tool_visible = preset_features.skills
+        && session
+            .header()
+            .subagent
+            .as_ref()
+            .and_then(|s| s.allowed_tools.as_ref())
+            .is_none_or(|allowed| allowed.iter().any(|name| name == "skill"));
     if skill_tool_visible {
         match runtime.skill_catalog(session.id(), &cwd).await {
             Ok(entries) => {
@@ -187,10 +196,10 @@ pub(crate) async fn refresh_background_injections(
         }
     }
 
-    // ④ 项目记忆索引:仅主代理会话注入(子代理不烧这份 token,提取
-    // 子代理的素材由任务提示词自带);内容不变不重发,后台提取更新索引后
-    // 下一个 step 自动带出最新版。
-    let memory_visible = session.header().subagent.is_none();
+    // ④ 项目记忆索引:仅组装开启记忆的主代理会话注入(子代理不烧这份
+    // token,提取子代理的素材由任务提示词自带);内容不变不重发,后台提取
+    // 更新索引后下一个 step 自动带出最新版。
+    let memory_visible = preset_features.memory && session.header().subagent.is_none();
     if memory_visible {
         match runtime.project_memory_index(&cwd).await {
             Ok(Some(text)) => {
@@ -217,15 +226,16 @@ pub(crate) async fn refresh_background_injections(
         }
     }
 
-    // ⑤ 会话目标:状态块仅对 goal 工具可见的会话注入(子代理白名单同
-    // 装配过滤)。内容不变不重发——turn 运行中用户编辑目标(steering)或
-    // 状态转换后,下一 step 自动带出新状态;目标被清除后发一次终局通知。
-    let goal_tool_visible = session
-        .header()
-        .subagent
-        .as_ref()
-        .and_then(|s| s.allowed_tools.as_ref())
-        .is_none_or(|allowed| allowed.iter().any(|name| name == "get_goal"));
+    // ⑤ 会话目标:状态块仅对开启 goal 且 goal 工具可见的会话注入(子代理
+    // 白名单同装配过滤)。内容不变不重发——turn 运行中用户编辑目标(steering)
+    // 或状态转换后,下一 step 自动带出新状态;目标被清除后发一次终局通知。
+    let goal_tool_visible = preset_features.goal
+        && session
+            .header()
+            .subagent
+            .as_ref()
+            .and_then(|s| s.allowed_tools.as_ref())
+            .is_none_or(|allowed| allowed.iter().any(|name| name == "get_goal"));
     if goal_tool_visible {
         let goal_text = match session.goal() {
             Some(goal) => Some(render_goal_block(&goal, session.goal_tokens_used().unwrap_or(0))),

@@ -49,9 +49,9 @@ pub use prompt::{
     register_ask_prompt_section, register_capability_prompt_sections,
     register_code_style_section, register_communication_section,
     register_context_management_section, register_mcp_prompt_section,
-    register_memory_prompt_section, register_risk_honesty_section, register_shipped_prompt,
-    register_working_style_section, render_memory_section, shipped_with_persona,
-    shipped_with_persona_and_browser_and_ask,
+    register_memory_prompt_section, register_preset_prompt_section,
+    register_risk_honesty_section, register_shipped_prompt, register_working_style_section,
+    render_memory_section, shipped_with_persona, shipped_with_persona_and_browser_and_ask,
 };
 pub use shell_session::{Captured, PersistentShell, ShellHub};
 pub use todo::TodoWriteTool;
@@ -361,8 +361,9 @@ fn within(base: &Path, out: &Path) -> bool {
 
 /// 宽容参数解析:只取第一个 JSON 值,忽略尾部垃圾。
 /// 模型偶尔在参数后吐多余字符,硬失败会浪费一整步。
-/// 工具实现请优先用 [`support::parse_tool_args`](数值强转 + 路径别名)。
-pub(crate) fn parse_args_lenient<T: serde::de::DeserializeOwned>(raw: &str) -> Result<T, String> {
+/// 工具实现请优先用 [`support::parse_tool_args`](数值强转 + 路径别名);
+/// crate 外自定义工具(如 server 侧)也可直接用本函数保持同一口径。
+pub fn parse_args_lenient<T: serde::de::DeserializeOwned>(raw: &str) -> Result<T, String> {
     let mut iter = serde_json::Deserializer::from_str(raw.trim()).into_iter::<T>();
     match iter.next() {
         Some(Ok(value)) => Ok(value),

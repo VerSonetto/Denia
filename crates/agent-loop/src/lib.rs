@@ -253,7 +253,7 @@ impl SessionDriver {
     /// 会话未指定 preset 时用部署默认;日志里的 id 已从名册消失(用户删掉
     /// 它、或文件损坏)时同样回退到默认组装——运行中的会话不该因为一个坏
     /// 文件就连请求都发不出去,名册会把这个事实以 broken 行呈现给用户。
-    pub(crate) fn preset_for(
+    pub fn preset_for(
         &self,
         session_preset: Option<&str>,
     ) -> Option<denia_core::preset::AgentPreset> {
@@ -264,6 +264,18 @@ impl SessionDriver {
         source
             .resolve(&requested)
             .or_else(|| source.resolve(&source.default_id()))
+    }
+
+    /// 会话生效 preset 的功能开关(无名册部署 = 全开)。注入通道、压缩闸门
+    /// 与 goal 续跑等"装配之外"的联动统一从这里取开关,保证与工具面收窄
+    /// 读到的是同一份声明。
+    pub fn preset_features(
+        &self,
+        session_preset: Option<&str>,
+    ) -> denia_core::preset::PresetFeatures {
+        self.preset_for(session_preset)
+            .map(|preset| preset.features)
+            .unwrap_or_default()
     }
 
     /// 当前工具注册表(读路径无锁,拿到的是一份自洽快照)。
@@ -316,6 +328,7 @@ impl SessionDriver {
     /// 手动压缩(上下文面板按钮):从日志最近一次请求头部恢复请求形态
     /// (模型 / 系统提示 / 工具集),执行与自动路径完全相同的总结压缩。
     /// 绕过压力闸门 —— 用户主动触发,不要求压力 ≥ `compact_ratio`。
+    /// 会话组装关闭了压缩功能时拒绝(与自动闸门同一开关)。
     ///
     /// 调用方负责:运行位占用与 cancel 生命周期、提前拒绝无请求历史的
     /// 会话、以及 `CompactionSummary` 事件落盘与广播。
@@ -324,6 +337,15 @@ impl SessionDriver {
         session: &Arc<Session>,
         cancel: CancellationToken,
     ) -> Result<Option<CompactOutcome>, LlmFailure> {
+        if !self
+            .preset_features(session.agent_preset().as_deref())
+            .compaction
+        {
+            return Err(LlmFailure::new(
+                codes::UNKNOWN,
+                "本会话的 agent 组装未启用上下文压缩".to_string(),
+            ));
+        }
         let (header, turn) = session.with_events(|events| {
             let header = events.iter().rev().find_map(|item| match &item.event {
                 SessionEvent::RequestHeader { header, .. } => Some(header.clone()),

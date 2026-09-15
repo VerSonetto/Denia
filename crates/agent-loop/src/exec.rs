@@ -31,10 +31,17 @@ pub(crate) async fn execute_calls(
 ) -> Result<(), denia_core::error::LlmFailure> {
     let cwd = state.cwd();
     // 项目记忆目录一次解析(未启用为 None):写类分类与子代理写收敛共用。
+    // 组装关闭记忆功能时同样视为 None:没有 MEMORY.md 上下文的模型不该
+    // 享受记忆写放行,写类回到普通 WriteInside/WriteOutside 判定。
     let memory_root = driver
         .runtime
         .as_ref()
-        .and_then(|runtime| runtime.memory_root_for(&cwd));
+        .and_then(|runtime| runtime.memory_root_for(&cwd))
+        .filter(|_| {
+            driver
+                .preset_features(state.session.agent_preset().as_deref())
+                .memory
+        });
     let max_parallel = driver.parallel.max_parallel_tool_calls.max(1);
     let mut in_flight: futures::stream::FuturesOrdered<
         futures::future::BoxFuture<'static, (usize, ToolOutput)>,
@@ -262,6 +269,8 @@ fn decide_for(state: &TurnState, cwd: &Path, call: &ToolCallRef, memory_root: Op
 fn classify_call(cwd: &Path, call: &ToolCallRef, confined: bool, memory_root: Option<&Path>) -> ActionClass {
     match call.name.as_str() {
         "exit_plan" => ActionClass::PlanSubmit,
+        // 组装创作:落盘路径服务端固定,按独立类别判定(不走工作区内外)。
+        "create_preset" => ActionClass::PresetCreate,
         "write_file" | "edit" => match crate::workspace_instructions::touched_path(cwd, &call.arguments)
         {
             // 记忆目录内的 .md 写:独立类别(harness 行为,四档放行)。
@@ -339,7 +348,8 @@ fn dispatch_tool_call(
     // 沙箱会话按 tool:memory 纪律读写记忆会在工具路径解析层被拦(权限
     // 层早已放行,纪律段成为空头支票)。豁免口径与权限放行口径一致:
     // 写边界仍由 MemoryWrite 分类(敏感段拒绝、子代理仅限记忆目录)收敛。
-    // 在 Box::pin 之前计算:闭包是 'static,不能借用 driver。
+    // 在 Box::pin 之前计算:闭包是 'static,不能借用 driver。记忆豁免与
+    // 权限放行共用同一开关:组装关闭记忆时记忆目录视为不存在,不豁免。
     let confined = !state.permission_mode().is_full()
         && state.session.header().sandbox
         && !memory_anchored(
@@ -349,6 +359,11 @@ fn dispatch_tool_call(
                 .runtime
                 .as_ref()
                 .and_then(|runtime| runtime.memory_root_for(&cwd))
+                .filter(|_| {
+                    driver
+                        .preset_features(state.session.agent_preset().as_deref())
+                        .memory
+                })
                 .as_deref(),
         );
     Box::pin(async move {

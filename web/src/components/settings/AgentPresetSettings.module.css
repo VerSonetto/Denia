@@ -36,6 +36,32 @@
   word-break: break-all;
 }
 
+.toggleRow {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 550;
+  color: var(--label-primary);
+}
+
+.toggle input[type='checkbox'] {
+  width: 15px;
+  height: 15px;
+  accent-color: var(--accent, #4f7cff);
+}
+
+.toggleLabel {
+  user-select: none;
+}
+
 .empty {
   padding: 18px 14px;
   border-radius: 12px;
@@ -135,6 +161,36 @@
   font-size: 11px;
   color: var(--label-tertiary);
   word-break: break-word;
+}
+
+.featuresOff {
+  color: var(--label-secondary);
+  font-weight: 550;
+}
+
+.pathRow {
+  align-self: flex-start;
+  display: inline-flex;
+  max-width: 100%;
+  padding: 0;
+  border: none;
+  background: transparent;
+  cursor: copy;
+}
+
+.pathRow code {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  padding: 2px 6px;
+  border-radius: 6px;
+  background: var(--bg-layer-3);
+  color: var(--label-tertiary);
+  word-break: break-all;
+}
+
+.pathRow:hover code {
+  color: var(--label-secondary);
+  text-decoration: underline;
 }
 
 .actions {

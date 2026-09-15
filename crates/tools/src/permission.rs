@@ -28,6 +28,9 @@ pub enum ActionClass {
     BashWrite,
     /// 提交计划(exit_plan)。
     PlanSubmit,
+    /// 组装创作(create_preset):落盘到部署 preset 目录。写入路径由服务端
+    /// 固定,不受模型操纵,属会话任务的交付物(自动编辑档直接放行)。
+    PresetCreate,
 }
 
 /// 策略决策。
@@ -43,7 +46,7 @@ pub enum Decision {
 
 /// 策略矩阵:模式 × 类别 → 决策。
 pub fn decide(mode: PermissionMode, class: ActionClass) -> Decision {
-    use ActionClass::{BashWrite, MemoryWrite, PlanSubmit, Read, WriteInside, WriteOutside};
+    use ActionClass::{BashWrite, MemoryWrite, PlanSubmit, PresetCreate, Read, WriteInside, WriteOutside};
     use Decision::{Allow, Ask, Deny};
     use PermissionMode::{AutoEdit, Full, Plan, ReadOnly};
     match (mode, class) {
@@ -60,14 +63,22 @@ pub fn decide(mode: PermissionMode, class: ActionClass) -> Decision {
         // 完全访问档全部放行。
         (Full, _) => Allow,
         // 自动编辑:工作区内写与命令自动放行;越界写文件是唯一 Ask 点。
-        (AutoEdit, WriteInside | BashWrite) => Allow,
+        // 组装创作虽写在工作区外,但落盘路径由服务端固定(preset 根 + 合法
+        // id),且是用户明确要求的交付物,与区内写同档放行。
+        (AutoEdit, WriteInside | BashWrite | PresetCreate) => Allow,
         (AutoEdit, WriteOutside) => Ask,
         // 只读与计划:一切写类操作拒绝。
         (ReadOnly, WriteInside | WriteOutside | BashWrite) => Deny(
             "当前为只读模式,该操作会修改文件或产生写副作用,已被拒绝;请仅做阅读与分析,或请用户切换权限模式。".into(),
         ),
+        (ReadOnly, PresetCreate) => Deny(
+            "当前为只读模式,创建组装会写入文件,已被拒绝;请用户切换权限模式后再创建。".into(),
+        ),
         (Plan, WriteInside | WriteOutside | BashWrite) => Deny(
             "当前为计划模式,禁止一切写操作与有写副作用的命令;请完成调研后调用 exit_plan 提交计划,等待用户批准后再执行。".into(),
+        ),
+        (Plan, PresetCreate) => Deny(
+            "当前为计划模式,创建组装会写入文件,已被拒绝;请先退出计划模式再创建。".into(),
         ),
     }
 }

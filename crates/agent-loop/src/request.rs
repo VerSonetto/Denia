@@ -378,6 +378,13 @@ async fn run_microcompact_gate(driver: &SessionDriver, state: &TurnState, step: 
     if !settings.enabled {
         return;
     }
+    // 组装关闭压缩功能时,微压缩作为压缩的前置清理一并跳过。
+    if !driver
+        .preset_features(state.session.agent_preset().as_deref())
+        .compaction
+    {
+        return;
+    }
 
     let surface = state.session.derive_surface();
     if surface.is_empty() {
@@ -541,6 +548,14 @@ async fn run_compaction_gate(
     framed_system: &str,
     tools: &[ToolSchema],
 ) {
+    // 组装关闭压缩功能时整个自动闸门跳过(手动 /compact 由 compact_manually
+    // 按同一开关拒绝)。
+    if !driver
+        .preset_features(state.session.agent_preset().as_deref())
+        .compaction
+    {
+        return;
+    }
     let pressure = state.session.context_pressure();
     if !should_compact(&pressure, &driver.compaction)
         || driver.compact_failures.load(std::sync::atomic::Ordering::SeqCst)

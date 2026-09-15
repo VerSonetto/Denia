@@ -409,6 +409,8 @@ fn session_preset_narrows_the_step_assembly() {
             trust: denia_core::preset::PresetTrust::Shipped,
             tools: tools.map(|names| names.into_iter().map(str::to_string).collect()),
             persona: persona.map(str::to_string),
+            persona_complete: false,
+            features: denia_core::preset::PresetFeatures::default(),
             path: None,
         }
     }

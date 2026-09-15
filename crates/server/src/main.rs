@@ -10,6 +10,7 @@ mod mcp_runtime;
 mod mcp_settings;
 mod native_folder_picker;
 mod open_in_app;
+mod preset_tool;
 mod project_memory;
 mod session_title;
 mod skills;

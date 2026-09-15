@@ -866,13 +866,15 @@ pub async fn build_state(
     let browser_hub: denia_tools::BrowserHub = browser.clone();
     // 面板终端中枢:交互式 PTY,与 `bash` 工具的非交互进程互不影响。
     let terminals = denia_terminal::TerminalManager::new();
+    // agent preset 名册:随附集合 + 用户目录。driver 每个 step 装配时读它,
+    // 因此文件热刷新后新 step 即生效。先于系统提示词构建:create_preset 的
+    // schema 要在 system prompt 的 tools provider 里与纪律段同步挂载。
+    let agent_presets = crate::agent_presets::PresetStore::load(home, settings.clone());
     let system_prompt = Arc::new(crate::system_prompt_store::SystemPromptState::load(
         home,
         Some(browser_hub.clone()),
+        Some(crate::preset_tool::schema()),
     ));
-    // agent preset 名册:随附集合 + 用户目录。driver 每个 step 装配时读它,
-    // 因此文件热刷新后新 step 即生效。
-    let agent_presets = crate::agent_presets::PresetStore::load(home, settings.clone());
     let file_history = Arc::new(crate::file_history::FileHistoryStore::new(home));
     let runtime = crate::agent_runtime::Runtime::new(
         home,
@@ -891,6 +893,11 @@ pub async fn build_state(
     ));
     // `ask` 工具:控制台部署有应答通道,注册工具并挂桥。
     tools.register(Arc::new(denia_tools::AskTool::new()));
+    // `create_preset` 工具:创造模式(creator preset)的落盘入口,只在有
+    // preset 名册的部署注册;纪律段(tool:preset)在 build_prompt 同步注入。
+    tools.register(Arc::new(crate::preset_tool::CreatePresetTool::new(
+        agent_presets.clone(),
+    )));
     let approval = Arc::new(ServerApprovalBridge::new(live.clone()));
     let ask = Arc::new(ServerAskBridge::new(live.clone()));
     let console = console_settings(&settings);
@@ -909,6 +916,11 @@ pub async fn build_state(
     );
 
     runtime.attach(&driver);
+
+    // 工具名册注入 preset 名册:用户 preset 的 tools 白名单引用了部署没有
+    // 的工具时,名册把它标成 broken——白名单收窄取交集,不校验的话拼错的
+    // 工具名会被静默丢掉。MCP 工具动态进出,`mcp__` 前缀的引用不校验。
+    agent_presets.set_known_tools(crate::mcp_runtime::builtin_tool_names(&driver.tools()));
 
     // MCP:按 `mcp` 命名空间的配置连接外部服务器,并把它们的工具并入
     // 注册表与系统提示词。连接失败不阻断启动(单个服务器自己标 error)。
@@ -1004,7 +1016,10 @@ fn register_namespaces(settings: &SettingsStore) -> Result<(), Box<dyn std::erro
     settings.register(
         crate::agent_presets::SETTINGS_NS,
         NamespaceSpec {
-            defaults: json!({ "default": denia_core::preset::DEFAULT_PRESET_ID }),
+            defaults: json!({
+                "default": denia_core::preset::DEFAULT_PRESET_ID,
+                "modeSelectionEnabled": true,
+            }),
             validate: validate_agent_presets,
             secrets: &[],
             applies: Applies::Live,
@@ -1028,7 +1043,8 @@ fn register_namespaces(settings: &SettingsStore) -> Result<(), Box<dyn std::erro
     Ok(())
 }
 
-/// `agent-presets` 命名空间校验:默认 preset 必须是合法 id。
+/// `agent-presets` 命名空间校验:默认 preset 必须是合法 id,模式选择开关
+/// 必须是布尔。
 ///
 /// 指向不存在的 preset 不在这里拒绝——名册随用户复制/删除而变,写入时
 /// 无法预知;解析默认值时按名册校验并回退随附默认值(见
@@ -1042,6 +1058,11 @@ fn validate_agent_presets(value: Value) -> Result<Value, String> {
     };
     if !denia_core::preset::is_valid_preset_id(id) {
         return Err(format!("default 不是合法的 preset id:{id}"));
+    }
+    if let Some(mode_selection) = value.get("modeSelectionEnabled")
+        && mode_selection.as_bool().is_none()
+    {
+        return Err("modeSelectionEnabled 必须是布尔值".to_string());
     }
     Ok(value)
 }

@@ -235,6 +235,27 @@ pub fn register_ask_prompt_section(prompt: &mut SystemPrompt) -> Result<(), Stri
     Ok(())
 }
 
+/// 组装创作工具(create_preset)的纪律段。
+///
+/// 与 `create_preset` schema 严格同步:仅在注册了该工具的部署(控制台,
+/// 有 preset 名册)注入。纪律与 description 分工不重叠——description 写
+/// 参数机制与落盘行为,本段写"何时创建、怎么和 ask 配合收集、禁止什么、
+/// 创建后怎么收尾"的行为准则;角色与轮次结构由创造模式 preset 的 persona
+/// 承担。
+pub fn register_preset_prompt_section(prompt: &mut SystemPrompt) -> Result<(), String> {
+    prompt.section(PromptSection {
+        name: "tool:preset".to_string(),
+        order: SectionOrder::ToolPreset.value(),
+        text: PromptText::Static(
+            "create_preset 只用于一件事:用户要求创建新的 agent preset(组装)时,把确认好的组装落盘。一次会话聚焦一个 preset;不要用它修改或删除已有 preset(改名/微调请让用户直接编辑 preset.yml),不要用它绕道写工作区文件。\n创建前必须先收集、后确认:用 ask 分轮收集需求(第一轮问系统提示词形态;之后问工具面与功能开关),每个问题都给可点选选项,能多选的用 multiSelect,把用户打字压到最低;信息齐后先用 ask 展示组装摘要(名称、id、persona 要点、开启的工具与关闭的功能)拿到确认,再调用本工具。用户没有明确要求创建 preset 时,不要主动提议调用。\n参数语义与手写 preset.yml 一致:tools 省略 = 全量工具集;features 里省略的键 = 开启,只写要关闭的键;id 只允许小写字母、数字与连字符(它同时是目录名);name 与 description 用中文,description 一句话说清用途。\n创建成功后的收尾义务:告诉用户在设置的 Agent 预设页或新会话的选择器里即可看到并切换到它,微调可直接编辑 preset.yml(报告工具返回的目录路径)。创建失败(如 id 已被占用)时,把工具返回的可读原因转告用户并给出替代 id,不要静默换名重试。"
+                .to_string(),
+        ),
+        complete: false,
+        audience: SectionAudience::Model,
+    })?;
+    Ok(())
+}
+
 /// MCP 外部工具的使用纪律段。
 ///
 /// 与实际注册的工具严格同步:仅在有已连接 MCP 服务器、且确实注册了
@@ -1482,4 +1503,4 @@ mod capability_prompt_tests {
         let body = denia_system_prompt::render_prompt(&assembly);
         assert!(!body.contains("spawn_agent/fork_agent"));
     }
-}
+}

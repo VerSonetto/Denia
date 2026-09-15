@@ -1,13 +1,37 @@
 import { useCallback, useEffect, useState } from 'react'
 import * as api from '../../api'
 import { t } from '../../i18n'
+import type { TranslationKey } from '../../i18n'
 import { IconCheck, IconPlus, IconTrash } from '../icons'
+import type { PresetFeatures } from '../../types'
 import styles from './AgentPresetSettings.module.css'
 
 /** 默认 preset 所在的设置命名空间(与服务端 `agent_presets::SETTINGS_NS` 同名)。 */
 const NS = 'agent-presets'
 
 type Notify = (kind: 'ok' | 'err', text: string) => void
+
+/** 功能开关的展示顺序与短名(只列出关闭项)。 */
+const FEATURE_KEYS: { key: keyof PresetFeatures; labelKey: TranslationKey }[] = [
+  { key: 'agentsMd', labelKey: 'agentPresetFeatureAgentsMd' },
+  { key: 'memory', labelKey: 'agentPresetFeatureMemory' },
+  { key: 'compaction', labelKey: 'agentPresetFeatureCompaction' },
+  { key: 'goal', labelKey: 'agentPresetFeatureGoal' },
+  { key: 'skills', labelKey: 'agentPresetFeatureSkills' },
+  { key: 'subagents', labelKey: 'agentPresetFeatureSubagents' },
+  { key: 'jobs', labelKey: 'agentPresetFeatureJobs' },
+  { key: 'browser', labelKey: 'agentPresetFeatureBrowser' },
+  { key: 'ask', labelKey: 'agentPresetFeatureAsk' },
+  { key: 'planMode', labelKey: 'agentPresetFeaturePlanMode' },
+]
+
+/** 一个 preset 关闭的功能短名列表(服务端快照缺键时按开启处理)。 */
+function disabledFeatureLabels(features: PresetFeatures | undefined): string[] {
+  if (!features) return []
+  return FEATURE_KEYS.filter(({ key }) => features[key] === false).map(({ labelKey }) =>
+    t(labelKey),
+  )
+}
 
 /**
  * Agent 组装(preset)设置分区:名册、默认值、复制创作、删除与只读查看。
@@ -20,6 +44,7 @@ export function AgentPresetSettings({ notify }: { notify: Notify }) {
   const [roster, setRoster] = useState<api.AgentPresetsView | null>(null)
   const [revision, setRevision] = useState(0)
   const [defaultId, setDefaultId] = useState('')
+  const [modeSelection, setModeSelection] = useState<boolean | null>(null)
   const [busy, setBusy] = useState(false)
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null)
   const [copyFrom, setCopyFrom] = useState<api.AgentPresetRow | null>(null)
@@ -35,8 +60,11 @@ export function AgentPresetSettings({ notify }: { notify: Notify }) {
       if (section) {
         setRevision(section.revision)
         setDefaultId(typeof section.value.default === 'string' ? section.value.default : views.default)
+        const stored = section.value.modeSelectionEnabled
+        setModeSelection(typeof stored === 'boolean' ? stored : views.modeSelection)
       } else {
         setDefaultId(views.default)
+        setModeSelection(views.modeSelection)
       }
     } catch (error) {
       notify('err', error instanceof Error ? error.message : String(error))
@@ -64,6 +92,29 @@ export function AgentPresetSettings({ notify }: { notify: Notify }) {
       notify('err', error instanceof Error ? error.message : String(error))
     } finally {
       setBusy(false)
+    }
+  }
+
+  const toggleModeSelection = async (enabled: boolean) => {
+    setBusy(true)
+    try {
+      await api.updateNamespace(NS, { modeSelectionEnabled: enabled }, revision)
+      setModeSelection(enabled)
+      notify('ok', t('agentPresetsModeSelectionSaved'))
+      await load()
+    } catch (error) {
+      notify('err', error instanceof Error ? error.message : String(error))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const copyPath = async (path: string) => {
+    try {
+      await navigator.clipboard.writeText(path)
+      notify('ok', t('agentPresetsPathCopied'))
+    } catch {
+      notify('err', t('agentPresetsPathCopyFailed'))
     }
   }
 
@@ -123,6 +174,18 @@ export function AgentPresetSettings({ notify }: { notify: Notify }) {
   return (
     <div className={styles.wrap}>
       <p className={styles.hint}>{t('agentPresetsHint')}</p>
+      <div className={styles.toggleRow}>
+        <label className={styles.toggle}>
+          <input
+            type="checkbox"
+            checked={modeSelection ?? true}
+            disabled={busy || modeSelection === null}
+            onChange={(event) => void toggleModeSelection(event.target.checked)}
+          />
+          <span className={styles.toggleLabel}>{t('agentPresetsModeSelection')}</span>
+        </label>
+      </div>
+      <p className={styles.hint}>{t('agentPresetsModeSelectionHint')}</p>
       {roster && roster.root && (
         <div className={styles.root}>
           <span className={styles.rootLabel}>{t('agentPresetsRoot')}</span>
@@ -135,6 +198,7 @@ export function AgentPresetSettings({ notify }: { notify: Notify }) {
       <ul className={styles.list}>
         {presets.map((preset) => {
           const selected = preset.id === defaultId
+          const offFeatures = disabledFeatureLabels(preset.features)
           return (
             <li
               key={`${preset.trust}:${preset.id}`}
@@ -168,7 +232,24 @@ export function AgentPresetSettings({ notify }: { notify: Notify }) {
                   {preset.tools && preset.tools.length > 0 && (
                     <span className={styles.tools}>{preset.tools.join(' · ')}</span>
                   )}
+                  {offFeatures.length > 0 && (
+                    <span className={styles.featuresOff}>
+                      {t('agentPresetsFeaturesOff', {
+                        list: offFeatures.join(t('agentPresetsJoiner')),
+                      })}
+                    </span>
+                  )}
                 </div>
+                {preset.writable && preset.path && (
+                  <button
+                    type="button"
+                    className={styles.pathRow}
+                    title={t('agentPresetsPathCopy')}
+                    onClick={() => void copyPath(preset.path!)}
+                  >
+                    <code>{preset.path}</code>
+                  </button>
+                )}
               </div>
               <div className={styles.actions}>
                 {!preset.broken && !selected && (

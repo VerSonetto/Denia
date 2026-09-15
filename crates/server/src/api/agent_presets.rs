@@ -30,9 +30,12 @@ pub fn router() -> Router<Arc<AppState>> {
 }
 
 /// 名册快照:随附集合在前,用户集合在后;每一行都带健康状态。
+/// `modeSelection` 决定前端是否显示模式选择器(关闭时空白会话固定用
+/// 部署默认组装,用户保存的 default 一并失效)。
 async fn list_presets(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     Json(json!({
         "default": state.agent_presets.default_id(),
+        "modeSelection": state.agent_presets.mode_selection_enabled(),
         "root": state.agent_presets.root().display().to_string(),
         "presets": state.agent_presets.rows().as_ref(),
     }))

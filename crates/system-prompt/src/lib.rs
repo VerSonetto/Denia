@@ -60,6 +60,9 @@ pub enum SectionOrder {
     ToolBrowser,
     /// 提问工具(ask)的使用纪律段;仅在注册了 ask 工具时注入。
     ToolAsk,
+    /// 组装创作工具(create_preset)的纪律段;仅在注册了该工具的部署
+    /// (控制台)注入,配合创造模式 preset 使用。
+    ToolPreset,
     /// 会话目标工具(get_goal/update_goal)的纪律段;随 default_registry
     /// 注册,仅存在目标的会话在上下文注入里携带目标详情。
     ToolGoal,
@@ -110,6 +113,7 @@ impl SectionOrder {
             Self::ToolSkill => 1800,
             Self::ToolBrowser => 1900,
             Self::ToolAsk => 2000,
+            Self::ToolPreset => 2060,
             Self::ToolGoal => 1950,
             Self::ToolPlan => 2050,
             Self::ToolMcp => 2100,

@@ -237,6 +237,24 @@ const zh = {
   agentPresetDefaultBadge: '默认',
   agentPresetBrokenReason: '损坏:{reason}',
   agentPresetsHint: '组装决定会话能用哪些工具、以什么角色工作。随附组装只读;自定义组装由复制创建,之后用你自己的编辑器改它的 preset.yml。',
+  agentPresetsModeSelection: '允许切换组装模式',
+  agentPresetsModeSelectionHint: '关闭后,新会话不再显示模式选择器,固定使用随附的默认组装;设置里保存的默认组装一并失效。',
+  agentPresetsModeSelectionSaved: '已保存模式选择设置',
+  agentPresetsFeaturesOff: '关闭:{list}',
+  agentPresetsJoiner: '、',
+  agentPresetsPathCopy: '点击复制目录路径',
+  agentPresetsPathCopied: '目录路径已复制',
+  agentPresetsPathCopyFailed: '复制失败,请手动复制路径',
+  agentPresetFeatureAgentsMd: 'AGENTS.md 注入',
+  agentPresetFeatureMemory: '项目记忆',
+  agentPresetFeatureCompaction: '上下文压缩',
+  agentPresetFeatureGoal: '目标模式',
+  agentPresetFeatureSkills: '技能',
+  agentPresetFeatureSubagents: '子代理',
+  agentPresetFeatureJobs: '后台任务',
+  agentPresetFeatureBrowser: '浏览器',
+  agentPresetFeatureAsk: '提问',
+  agentPresetFeaturePlanMode: '计划模式',
   agentPresetsDefaultSaved: '已保存默认组装',
   agentPresetsToolsAll: '全量工具',
   agentPresetsToolsCount: '{n} 个工具',
@@ -1186,6 +1204,24 @@ const en: typeof zh = {
   agentPresetDefaultBadge: 'default',
   agentPresetBrokenReason: 'Broken: {reason}',
   agentPresetsHint: 'A mode decides which tools the session may use and how it works. Shipped modes are read-only; custom modes are created by copying one, then edited in preset.yml with your own editor.',
+  agentPresetsModeSelection: 'Allow mode selection',
+  agentPresetsModeSelectionHint: 'When off, new sessions hide the mode selector and always start with the shipped default; your saved default is ignored.',
+  agentPresetsModeSelectionSaved: 'Mode selection setting saved',
+  agentPresetsFeaturesOff: 'Off: {list}',
+  agentPresetsJoiner: ', ',
+  agentPresetsPathCopy: 'Click to copy the directory path',
+  agentPresetsPathCopied: 'Directory path copied',
+  agentPresetsPathCopyFailed: 'Copy failed; please copy the path manually',
+  agentPresetFeatureAgentsMd: 'AGENTS.md',
+  agentPresetFeatureMemory: 'Memory',
+  agentPresetFeatureCompaction: 'Compaction',
+  agentPresetFeatureGoal: 'Goals',
+  agentPresetFeatureSkills: 'Skills',
+  agentPresetFeatureSubagents: 'Subagents',
+  agentPresetFeatureJobs: 'Background jobs',
+  agentPresetFeatureBrowser: 'Browser',
+  agentPresetFeatureAsk: 'Ask',
+  agentPresetFeaturePlanMode: 'Plan mode',
   agentPresetsDefaultSaved: 'Default mode saved',
   agentPresetsToolsAll: 'All tools',
   agentPresetsToolsCount: '{n} tools',
@@ -1919,6 +1955,9 @@ export function setLocale(locale: string) {
 }
 
 /** Translates one key, interpolating `{name}` params. */
+/** i18n 键集合(zh 是键集源头,en 与它编译期对齐)。 */
+export type TranslationKey = keyof typeof zh
+
 export function t(key: keyof typeof zh, params?: Record<string, string | number>): string {
   let text = dictionaries[active][key]
   if (params) {

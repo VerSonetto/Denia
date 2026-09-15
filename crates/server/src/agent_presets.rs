@@ -14,13 +14,15 @@
 //! 损坏的 preset 不会被隐藏:它以带原因的 broken 行出现,让人看得见该修
 //! 什么;会话端解析不到时回退到部署默认组装,不会因为一个坏文件发不出请求。
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
 use arc_swap::ArcSwap;
 use denia_core::preset::{
-    builtin_presets, is_valid_preset_id, AgentPreset, PresetTrust, DEFAULT_PRESET_ID,
+    builtin_presets, is_valid_preset_id, AgentPreset, PresetFeatures, PresetSpec, PresetTrust,
+    DEFAULT_PRESET_ID,
 };
 use denia_settings::SettingsStore;
 use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher};
@@ -53,6 +55,8 @@ pub struct PresetRow {
     pub has_persona: bool,
     /// 可写行 = 用户根下的 preset,可删除、可被覆盖对照。
     pub writable: bool,
+    /// 功能开关快照(前端徽章展示);broken 行按默认全开展示。
+    pub features: PresetFeatures,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
     /// 损坏原因;有值时该行无法组装,也不会被会话选中。
@@ -71,6 +75,7 @@ impl PresetRow {
             tools: preset.tools.clone(),
             has_persona: preset.persona.is_some(),
             writable: preset.trust == PresetTrust::User,
+            features: preset.features,
             path: preset.path.clone(),
             broken: None,
         }
@@ -87,6 +92,7 @@ impl PresetRow {
             tools: None,
             has_persona: false,
             writable: trust == PresetTrust::User,
+            features: PresetFeatures::default(),
             path: path.map(|path| path.display().to_string()),
             broken: Some(reason.into()),
         }
@@ -94,9 +100,11 @@ impl PresetRow {
 }
 
 /// `preset.yml` 的磁盘格式。缺省字段都按"沿用更外层"解释:
-/// 没有 `tools` 就是全量工具集,没有 `persona` 就沿用部署 persona。
+/// 没有 `tools` 就是全量工具集,没有 `persona` 就沿用部署 persona,
+/// 没有 `features` 就是全功能开启。未知键直接拒绝(fail loud)——一个
+/// 拼写错的键默默不生效,比解析失败更难排查。
 #[derive(Debug, Default, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct PresetFile {
     #[serde(default)]
     name: Option<String>,
@@ -106,6 +114,10 @@ struct PresetFile {
     tools: Option<Vec<String>>,
     #[serde(default)]
     persona: Option<String>,
+    #[serde(default)]
+    persona_complete: bool,
+    #[serde(default)]
+    features: PresetFeatures,
 }
 
 /// Agent preset 名册:随附集合 + 用户根目录,文件变化热刷新。
@@ -113,6 +125,11 @@ pub struct PresetStore {
     root: PathBuf,
     rows: ArcSwap<Vec<PresetRow>>,
     settings: Arc<SettingsStore>,
+    /// 部署已注册的工具名(server 组装完注册表后注入;`None` = 尚未注入,
+    /// 工具名校验跳过)。名册用它把"引用了不存在工具"的 preset 标成
+    /// broken——白名单收窄是取交集,不校验的话拼错的工具名会被静默丢弃,
+    /// 名册显示健康行而实际工具面悄悄缺工具。
+    known_tools: ArcSwap<Option<Arc<BTreeSet<String>>>>,
 }
 
 impl PresetStore {
@@ -122,9 +139,18 @@ impl PresetStore {
             root: home.join(DIR_NAME),
             rows: ArcSwap::from_pointee(Vec::new()),
             settings,
+            known_tools: ArcSwap::from_pointee(None),
         });
         store.refresh();
         store
+    }
+
+    /// 注入部署已注册的工具名(MCP 动态工具不在此列,`mcp__` 前缀的引用
+    /// 不校验)。注入后名册立即按它重读磁盘。
+    pub fn set_known_tools(&self, names: impl IntoIterator<Item = String>) {
+        self.known_tools
+            .store(Arc::new(Some(Arc::new(names.into_iter().collect()))));
+        self.refresh();
     }
 
     /// 用户 preset 根目录;首次复制创作时按需创建。
@@ -142,10 +168,28 @@ impl PresetStore {
         rows.iter().find(|row| row.id == id)?.def.clone()
     }
 
+    /// 「允许切换 agent 模式」开关:设置里未写时默认开启。
+    pub fn mode_selection_enabled(&self) -> bool {
+        self.settings
+            .resolved(SETTINGS_NS)
+            .ok()
+            .and_then(|value| {
+                value
+                    .get("modeSelectionEnabled")
+                    .and_then(|value| value.as_bool())
+            })
+            .unwrap_or(true)
+    }
+
     /// 部署默认 preset id:读用户设置,校验它仍是一个健康行;否则回退
     /// 随附默认值。默认值在每次解析时读取,绝不缓存成快照——否则用户在
     /// 设置里改完默认,已存在的空白会话会与新会话各说各话。
+    /// 模式选择关闭时忽略用户保存的 default、回落部署默认(对齐 dsh
+    /// selectionPolicy:选择面被隐藏时,不该有用户无法看见的默认在治下)。
     pub fn default_id(&self) -> String {
+        if !self.mode_selection_enabled() {
+            return DEFAULT_PRESET_ID.to_string();
+        }
         let configured = self
             .settings
             .resolved(SETTINGS_NS)
@@ -164,6 +208,7 @@ impl PresetStore {
 
     /// 重读磁盘:随附集合在前(同名 id 由随附集合赢得),用户行按 id 排序。
     pub fn refresh(&self) {
+        let known_tools = self.known_tools.load_full();
         let mut rows: Vec<PresetRow> = builtin_presets()
             .iter()
             .map(PresetRow::healthy)
@@ -196,7 +241,7 @@ impl PresetStore {
                     ));
                     continue;
                 }
-                user_rows.push(read_user_row(id, &path));
+                user_rows.push(read_user_row(id, &path, known_tools.as_deref()));
             }
         }
         user_rows.sort_by(|a, b| a.id.cmp(&b.id));
@@ -272,6 +317,72 @@ impl PresetStore {
             .find(|row| row.id == id)
             .cloned()
             .ok_or_else(|| "复制后名册里找不到新 preset".to_string())
+    }
+
+    /// 创作落盘:按 `create_preset` 工具提交的规范直接写一份新 preset。
+    ///
+    /// 与复制创作的两道拒绝同构:id 非法或已被占用都拒绝;写盘失败清理
+    /// 半成品目录。features/tools 的校验口径与解析手写文件一致(工具名
+    /// 对照部署名册,`mcp__` 前缀豁免)。
+    pub fn author(&self, spec: &PresetSpec) -> Result<PresetRow, String> {
+        let id = spec.id.trim();
+        if !is_valid_preset_id(id) {
+            return Err(format!(
+                "非法的 preset id:{id}(只允许小写字母、数字与连字符,且以字母数字开头)"
+            ));
+        }
+        let name = spec.name.trim();
+        if name.is_empty() {
+            return Err("缺少显示名 name".to_string());
+        }
+        if let Some(tools) = &spec.tools {
+            if tools.is_empty() {
+                return Err("tools 不能是空列表(要全量工具集就省略该字段)".to_string());
+            }
+            if let Some(blank) = tools.iter().find(|name| name.trim().is_empty()) {
+                return Err(format!("tools 里有空工具名:{blank:?}"));
+            }
+            validate_tool_names(tools, self.known_tools.load_full().as_deref())?;
+        }
+        if self.rows().iter().any(|row| row.id == id) {
+            return Err(format!("preset id 已被占用:{id}"));
+        }
+        let target = self.root.join(id);
+        if target.exists() {
+            return Err(format!(
+                "目录已存在:{}(占着名字却不是名册里的 preset)",
+                target.display()
+            ));
+        }
+        if let Err(error) = std::fs::create_dir_all(&target) {
+            return Err(format!("创建 preset 目录失败:{error}"));
+        }
+        let preset = AgentPreset {
+            id: id.to_string(),
+            name: name.to_string(),
+            description: spec.description.trim().to_string(),
+            trust: PresetTrust::User,
+            tools: spec.tools.clone(),
+            persona: spec
+                .persona
+                .as_deref()
+                .map(str::trim_end)
+                .filter(|text| !text.trim().is_empty())
+                .map(str::to_string),
+            persona_complete: spec.persona_complete,
+            features: spec.features,
+            path: Some(target.display().to_string()),
+        };
+        if let Err(error) = std::fs::write(target.join(FILE_NAME), render_preset_file(&preset)) {
+            let _ = std::fs::remove_dir_all(&target);
+            return Err(format!("写入 preset.yml 失败:{error}"));
+        }
+        self.refresh();
+        self.rows()
+            .iter()
+            .find(|row| row.id == id)
+            .cloned()
+            .ok_or_else(|| "创建后名册里找不到新 preset".to_string())
     }
 
     /// 删除本地创作的 preset;随附 preset 拒绝删除。
@@ -359,7 +470,7 @@ impl denia_agent_loop::AgentPresetSource for PresetStore {
 }
 
 /// 读一个用户 preset 目录:合成定义或一条带原因的 broken 行。
-fn read_user_row(id: &str, dir: &Path) -> PresetRow {
+fn read_user_row(id: &str, dir: &Path, known_tools: Option<&BTreeSet<String>>) -> PresetRow {
     let file = dir.join(FILE_NAME);
     let text = match std::fs::read_to_string(&file) {
         Ok(text) => text,
@@ -372,7 +483,7 @@ fn read_user_row(id: &str, dir: &Path) -> PresetRow {
             )
         }
     };
-    match parse_preset(id, &text) {
+    match parse_preset(id, &text, known_tools) {
         Ok(mut preset) => {
             // 用户 preset 带上自己的目录:复制创作要连目录里的附带文件
             // (资产/参考材料)一起复制,只抄 preset.yml 会丢内容。
@@ -383,8 +494,31 @@ fn read_user_row(id: &str, dir: &Path) -> PresetRow {
     }
 }
 
+/// 校验 tools 白名单引用的工具名都真实存在(部署注册名册注入后生效)。
+/// `mcp__` 前缀豁免:MCP 工具随服务器配置动态进出,不属于部署静态名册。
+fn validate_tool_names(
+    tools: &[String],
+    known_tools: Option<&BTreeSet<String>>,
+) -> Result<(), String> {
+    let Some(known) = known_tools else {
+        return Ok(());
+    };
+    for name in tools {
+        let name = name.trim();
+        if name.starts_with("mcp__") || known.contains(name) {
+            continue;
+        }
+        return Err(format!("tools 引用了部署不存在的工具:{name}"));
+    }
+    Ok(())
+}
+
 /// 解析 `preset.yml`;`id` 来自目录名,文件里不写 id。
-fn parse_preset(id: &str, text: &str) -> Result<AgentPreset, String> {
+fn parse_preset(
+    id: &str,
+    text: &str,
+    known_tools: Option<&BTreeSet<String>>,
+) -> Result<AgentPreset, String> {
     let file: PresetFile =
         serde_yaml::from_str(text).map_err(|error| format!("{FILE_NAME} 解析失败:{error}"))?;
     if let Some(tools) = &file.tools {
@@ -394,6 +528,7 @@ fn parse_preset(id: &str, text: &str) -> Result<AgentPreset, String> {
         if let Some(blank) = tools.iter().find(|name| name.trim().is_empty()) {
             return Err(format!("tools 里有空工具名:{blank:?}"));
         }
+        validate_tool_names(tools, known_tools)?;
     }
     Ok(AgentPreset {
         id: id.to_string(),
@@ -412,11 +547,15 @@ fn parse_preset(id: &str, text: &str) -> Result<AgentPreset, String> {
             .persona
             .map(|text| text.trim_end().to_string())
             .filter(|text| !text.trim().is_empty()),
+        persona_complete: file.persona_complete,
+        features: file.features,
         path: None,
     })
 }
 
 /// 随附 preset 的等价组装文本(只读查看器渲染用)。
+///
+/// features 只渲染关闭的键:省略的键 = 开启,与解析语义一致,文件保持最小。
 fn render_preset_file(preset: &AgentPreset) -> String {
     let mut out = String::new();
     out.push_str(&format!("name: {}\n", yaml_scalar(&preset.name)));
@@ -436,6 +575,30 @@ fn render_preset_file(preset: &AgentPreset) -> String {
         out.push_str("persona: |\n");
         for line in persona.lines() {
             out.push_str(&format!("  {line}\n"));
+        }
+    }
+    if preset.persona_complete {
+        out.push_str("personaComplete: true\n");
+    }
+    if !preset.features.is_default() {
+        out.push_str("features:\n");
+        let features = &preset.features;
+        let flags = [
+            ("agentsMd", features.agents_md),
+            ("memory", features.memory),
+            ("compaction", features.compaction),
+            ("goal", features.goal),
+            ("skills", features.skills),
+            ("subagents", features.subagents),
+            ("jobs", features.jobs),
+            ("browser", features.browser),
+            ("ask", features.ask),
+            ("planMode", features.plan_mode),
+        ];
+        for (key, enabled) in flags {
+            if !enabled {
+                out.push_str(&format!("  {key}: false\n"));
+            }
         }
     }
     out
@@ -597,9 +760,12 @@ mod tests {
         let row = store.copy("minimal", "my-minimal", Some("我的极简")).unwrap();
         assert_eq!(row.name, "我的极简");
         assert!(row.writable);
-        assert_eq!(row.tools.as_ref().unwrap().len(), 2);
+        assert_eq!(row.tools.as_ref().unwrap().len(), 1);
         let preset = store.resolve("my-minimal").unwrap();
         assert_eq!(preset.trust, PresetTrust::User);
+        // 极简的形态随复制携带:persona 独占 + 功能全关。
+        assert!(preset.persona_complete);
+        assert_eq!(preset.features, PresetFeatures::all_off());
         // 已有 id 拒绝(不覆盖)。
         assert!(store.copy("minimal", "my-minimal", None).is_err());
         // 非法 id 拒绝。
@@ -688,9 +854,117 @@ mod tests {
         let store = open_store(&home);
         let shipped_text = store.describe_text("minimal").unwrap();
         assert!(shipped_text.contains("tools:"));
+        // 内置极简形态完整渲染:persona 独占 + 关闭的功能逐键列出。
+        assert!(shipped_text.contains("personaComplete: true"));
+        assert!(shipped_text.contains("agentsMd: false"));
+        assert!(shipped_text.contains("goal: false"));
         let user_text = store.describe_text("custom").unwrap();
         assert!(user_text.contains("自定义"));
         assert!(store.describe_text("nope").is_err());
+        std::fs::remove_dir_all(&home).unwrap();
+    }
+
+    #[test]
+    fn features_and_persona_complete_parse_from_disk() {
+        let home = temp_home();
+        write_user_preset(
+            &home,
+            "lean",
+            "name: 精简\ndescription: 关掉一部分\nfeatures:\n  agentsMd: false\n  goal: false\npersonaComplete: true\n",
+        );
+        let store = open_store(&home);
+        let preset = store.resolve("lean").expect("features 合法的行可解析");
+        assert!(preset.persona_complete);
+        assert!(!preset.features.agents_md);
+        assert!(!preset.features.goal);
+        assert!(preset.features.memory, "未声明的键保持默认开启");
+        let row = store
+            .rows()
+            .iter()
+            .find(|row| row.id == "lean")
+            .cloned()
+            .unwrap();
+        assert!(!row.features.agents_md);
+        std::fs::remove_dir_all(&home).unwrap();
+    }
+
+    #[test]
+    fn unknown_feature_key_or_tool_name_marks_the_row_broken() {
+        let home = temp_home();
+        write_user_preset(
+            &home,
+            "typo",
+            "features:\n  agentMd: false\n",
+        );
+        write_user_preset(
+            &home,
+            "ghost-tool",
+            "tools:\n  - bash\n  - not_a_real_tool\n",
+        );
+        write_user_preset(
+            &home,
+            "mcp-ok",
+            "tools:\n  - mcp__some__tool\n",
+        );
+        let store = open_store(&home);
+        // 未知 features 键:fail loud 成 broken 行,不静默忽略。
+        let typo = store
+            .rows()
+            .iter()
+            .find(|row| row.id == "typo")
+            .cloned()
+            .expect("未知键的行仍要出现");
+        assert!(typo.broken.is_some());
+        // 工具名册注入后,引用不存在工具的行 broken;mcp__ 前缀豁免。
+        store.set_known_tools(["bash".to_string(), "read_file".to_string()]);
+        let ghost = store
+            .rows()
+            .iter()
+            .find(|row| row.id == "ghost-tool")
+            .cloned()
+            .unwrap();
+        assert!(
+            ghost.broken.as_deref().is_some_and(|reason| reason.contains("not_a_real_tool")),
+            "broken 原因要点名工具:{:?}",
+            ghost.broken
+        );
+        let mcp_row = store
+            .rows()
+            .iter()
+            .find(|row| row.id == "mcp-ok")
+            .cloned()
+            .unwrap();
+        assert!(mcp_row.broken.is_none(), "mcp__ 工具不校验");
+        std::fs::remove_dir_all(&home).unwrap();
+    }
+
+    #[test]
+    fn mode_selection_off_falls_back_to_shipped_default() {
+        let home = temp_home();
+        write_user_preset(&home, "custom-default", "name: 自定义默认\n");
+        std::fs::write(
+            home.join("settings.yaml"),
+            "agent-presets:\n  default: custom-default\n  modeSelectionEnabled: false\n",
+        )
+        .unwrap();
+        let reloaded = open_store(&home);
+        assert!(
+            !reloaded.mode_selection_enabled(),
+            "设置写 false 时开关必须为 false"
+        );
+        assert_eq!(
+            reloaded.default_id(),
+            DEFAULT_PRESET_ID,
+            "模式选择关闭时忽略用户 default,部署默认治下"
+        );
+        // 开关重新打开后,保存的 default 恢复生效。
+        std::fs::write(
+            home.join("settings.yaml"),
+            "agent-presets:\n  default: custom-default\n  modeSelectionEnabled: true\n",
+        )
+        .unwrap();
+        let reloaded = open_store(&home);
+        assert_eq!(reloaded.default_id(), "custom-default");
         std::fs::remove_dir_all(&home).unwrap();
     }
 

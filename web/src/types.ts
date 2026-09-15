@@ -452,6 +452,23 @@ export interface SessionSummary {
   agent_preset?: string
 }
 
+/**
+ * agent preset 功能开关快照(与服务端 `PresetFeatures` 同名同义)。
+ * 关闭的功能连带摘除对应工具、纪律段、注入通道与运行时行为。
+ */
+export interface PresetFeatures {
+  agentsMd: boolean
+  memory: boolean
+  compaction: boolean
+  goal: boolean
+  skills: boolean
+  subagents: boolean
+  jobs: boolean
+  browser: boolean
+  ask: boolean
+  planMode: boolean
+}
+
 /** agent preset 名册里的一行(随附或用户自定义)。 */
 export interface AgentPresetRow {
   id: string
@@ -463,6 +480,8 @@ export interface AgentPresetRow {
   hasPersona: boolean
   /** 用户根目录下的 preset 才可删除、可被对照。 */
   writable: boolean
+  /** 功能开关快照(关闭项在卡片上列出)。 */
+  features: PresetFeatures
   path?: string
   /** 损坏原因;有值时该行无法用于会话。 */
   broken?: string
@@ -471,6 +490,8 @@ export interface AgentPresetRow {
 export interface AgentPresetsView {
   /** 新建会话未显式指定时使用的默认 preset id。 */
   default: string
+  /** 是否显示模式选择器;关闭时空白会话固定用部署默认组装。 */
+  modeSelection: boolean
   /** 用户 preset 根目录(展示与"用编辑器打开"用)。 */
   root: string
   presets: AgentPresetRow[]
