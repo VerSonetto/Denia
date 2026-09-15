@@ -11,6 +11,8 @@ pub struct ApiError {
     pub status: StatusCode,
     pub code: String,
     pub message: String,
+    /// 限流失败时告诉调用方等多久(`Retry-After`,秒)。
+    pub retry_after_seconds: Option<u64>,
 }
 
 impl ApiError {
@@ -19,7 +21,14 @@ impl ApiError {
             status,
             code: code.into(),
             message: message.into(),
+            retry_after_seconds: None,
         }
+    }
+
+    /// 附上 `Retry-After`(秒)。
+    pub fn with_retry_after(mut self, seconds: Option<u64>) -> Self {
+        self.retry_after_seconds = seconds;
+        self
     }
 
     pub fn bad_request(code: impl Into<String>, message: impl Into<String>) -> Self {
@@ -88,6 +97,12 @@ impl IntoResponse for ApiError {
                 "message": self.message,
             }
         });
-        (self.status, Json(body)).into_response()
+        let mut response = (self.status, Json(body)).into_response();
+        if let Some(seconds) = self.retry_after_seconds
+            && let Ok(value) = axum::http::HeaderValue::from_str(&seconds.to_string())
+        {
+            response.headers_mut().insert("retry-after", value);
+        }
+        response
     }
 }

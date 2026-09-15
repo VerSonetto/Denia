@@ -17,6 +17,7 @@ import type {
   WorkspaceRecord,
   WireProtocol,
 } from './types'
+import { subscribeServerEvents } from './serverEvents'
 
 export type { AgentPresetRow, AgentPresetsView } from './types'
 
@@ -607,7 +608,11 @@ export function getMemoryFile(id: string, file: string): Promise<MemoryFileView>
   )
 }
 
-export function pickerCapability(): Promise<{ kind: 'native' | 'browse' }> {
+export function pickerCapability(): Promise<{
+  kind: 'native' | 'browse'
+  /** 是否远程来客(手机/隧道)。主机控制台为 false。 */
+  remote?: boolean
+}> {
   return http('/api/fs/capability')
 }
 
@@ -1024,16 +1029,9 @@ export function followSession(
 
 /** Subscribes to server push events; returns the close handle. */
 export function subscribeEvents(onEvent: (type: string) => void): () => void {
-  const source = new EventSource('/api/events')
-  source.onmessage = (event) => {
-    try {
-      const parsed = JSON.parse(event.data) as { type?: string }
-      if (parsed.type) onEvent(parsed.type)
-    } catch {
-      /* ignore malformed frame */
-    }
-  }
-  return () => source.close()
+  // 走全局共享连接:每个 EventSource 都独占一条同源连接,浏览器上限只有
+  // 6 条,多开会让后续 fetch 永久排队(详见 serverEvents.ts)。
+  return subscribeServerEvents((type) => onEvent(type))
 }
 
 /** 会话目标(goal 模式)投影;服务端权威口径(减法记账的用量含在内)。 */

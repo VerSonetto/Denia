@@ -12,6 +12,7 @@ mod native_folder_picker;
 mod open_in_app;
 mod preset_tool;
 mod project_memory;
+mod remote;
 mod session_title;
 mod skills;
 mod state;
@@ -65,7 +66,8 @@ fn main() {
             .web
             .clone()
             .filter(|dir| dir.join("index.html").is_file());
-        let router = axum::Router::new()
+        // 业务 Router:两条 listener 共用同一份路由与 state。
+        let business = axum::Router::new()
             .merge(api::router())
             .with_state(state.clone())
             .fallback({
@@ -75,6 +77,19 @@ fn main() {
                     async move { web_assets::response_for(&uri, dir.as_deref()) }
                 }
             });
+        // 主 listener:只做来源标注(本机 UI 要看得到 PIN 与票据链接,而
+        // 以 `--host 0.0.0.0` 启动时局域网来客必须被标成 Lan 而不是本机)。
+        let router = business.clone().layer(axum::middleware::from_fn_with_state(
+            state.remote.clone(),
+            remote::guard::annotate,
+        ));
+        // 远程 listener:同一份业务路由,外面再套一层「远程门」。
+        state
+            .remote
+            .attach_router(business.layer(axum::middleware::from_fn_with_state(
+                state.remote.clone(),
+                remote::guard::gate,
+            )));
         match &web_dir {
             Some(dist) => tracing::info!(dist = %dist.display(), "serving console from directory"),
             None => tracing::info!("serving embedded console"),
@@ -93,13 +108,19 @@ fn main() {
             .await
             .unwrap_or_else(|error| panic!("bind {addr}: {error}"));
         // 优雅停机:ctrl_c 后停止接收新请求,等待在跑的后台任务收尾,然后退出。
-        axum::serve(listener, router)
-            .with_graceful_shutdown(async move {
-                let _ = tokio::signal::ctrl_c().await;
-                tracing::info!("shutdown signal received");
-            })
-            .await
-            .expect("server runs");
+        // 远程连接必须在退出前显式收尾(杀隧道、清票据与会话、关远程 listener)。
+        let shutdown_remote = state.remote.clone();
+        axum::serve(
+            listener,
+            router.into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .with_graceful_shutdown(async move {
+            let _ = tokio::signal::ctrl_c().await;
+            tracing::info!("shutdown signal received");
+            shutdown_remote.shutdown().await;
+        })
+        .await
+        .expect("server runs");
     });
 }
 

@@ -8,7 +8,7 @@ use std::time::{Duration, Instant, SystemTime};
 use axum::extract::{Query, State};
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
-use axum::{Json, Router};
+use axum::{Extension, Json, Router};
 use serde::Deserialize;
 use serde_json::json;
 
@@ -28,10 +28,19 @@ pub fn router() -> Router<Arc<AppState>> {
 }
 
 /// 目录选择器 seam 的能力决策(抄 dsh directory-picker-auto):
-/// 远程绑定/SSH → browse;win/mac → native;linux 有显示+zenity → native;
-/// 其余 → browse(到处能用)。消费端遇到未知 kind 的默认行为是隐藏入口。
-async fn capability(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+/// 远程绑定/SSH/远程连接来客 → browse;win/mac → native;linux 有显示+zenity
+/// → native;其余 → browse(到处能用)。消费端遇到未知 kind 的默认行为是隐藏入口。
+async fn capability(
+    State(state): State<Arc<AppState>>,
+    peer: Option<Extension<crate::remote::guard::RemotePeer>>,
+) -> impl IntoResponse {
+    // 远程来客必须走 browse:原生选择器会在这台机器上弹出窗口 ——
+    // 手机点"选目录"却在电脑屏幕上弹出对话框,是纯粹的错配。
+    let from_remote = peer
+        .map(|Extension(peer)| peer.via != crate::remote::Via::Local)
+        .unwrap_or(false);
     let kind = if state.bound_remote
+        || from_remote
         || std::env::var_os("SSH_CONNECTION").is_some()
         || std::env::var_os("SSH_TTY").is_some()
     {
@@ -50,7 +59,7 @@ async fn capability(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     } else {
         "browse"
     };
-    Json(json!({ "kind": kind }))
+    Json(json!({ "kind": kind, "remote": from_remote }))
 }
 
 fn which(tool: &str) -> bool {

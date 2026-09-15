@@ -247,6 +247,19 @@ export function IconClose(props: IconProps) {
   )
 }
 
+export function IconMenu(props: IconProps) {
+  return (
+    <Svg {...props} viewBox="0 0 20 20">
+      <path
+        d="M3.5 5.5h13M3.5 10h13M3.5 14.5h13"
+        stroke="currentColor"
+        strokeWidth="1.5"
+        strokeLinecap="round"
+      />
+    </Svg>
+  )
+}
+
 export function IconCopy(props: IconProps) {
   return (
     <Svg {...props} viewBox="0 0 18 18">

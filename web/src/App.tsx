@@ -2,6 +2,7 @@ import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } fro
 import type { CSSProperties } from 'react'
 import { setLocale, t } from './i18n'
 import { relativeTime } from './relativeTime'
+import { subscribeServerEvents, subscribeServerStatus } from './serverEvents'
 import SessionsPage from './pages/SessionsPage'
 import * as api from './api'
 import {
@@ -32,6 +33,7 @@ import {
   useWorkspaces,
 } from './appStore'
 import { useBrowserSidebar } from './hooks/useBrowserSidebar'
+import { useIsMobile } from './hooks/useIsMobile'
 import { useSidePaneController, useTerminalReconcile } from './hooks/useSidePane'
 import { SidePane } from './components/SidePane'
 import { TerminalHost } from './components/TerminalHost'
@@ -47,6 +49,7 @@ import {
   IconFolder,
   IconFolderPlus,
   IconGear,
+  IconMenu,
   IconPanelClose,
   IconPanelOpen,
   IconPlus,
@@ -55,6 +58,8 @@ import {
 } from './components/icons'
 import { DirPicker } from './components/DirPicker'
 import { ConfirmDialog } from './components/ConfirmDialog'
+import { RemoteGate, shouldShowGate } from './components/RemoteGate'
+import { RemoteBanner } from './components/RemoteBanner'
 
 // 设置/浏览器面板按需加载,减少首屏主包体积。
 const LazySettingsModal = lazy(() =>
@@ -256,6 +261,20 @@ export default function App() {
     window.setTimeout(() => setSidebarSearchOpen(true), SIDEBAR_TRANSITION_MS + 20)
   }, [])
 
+  /* ---- 手机端侧栏抽屉 ---- */
+
+  // 窄屏下侧栏不是"56px 控制栏",而是**覆盖式抽屉**:默认完全收起,让出
+  // 整屏给对话;由顶栏汉堡按钮唤出,点遮罩或选中会话后自动关闭。
+  // 这与桌面端的折叠语义不同(桌面端收起后仍留一条控制栏),所以单独用一个
+  // 状态,不去复用 sidebarCollapsed —— 否则手机用户的选择会被写进桌面偏好。
+  const isMobile = useIsMobile()
+  const [drawerOpen, setDrawerOpen] = useState(false)
+  // 切到桌面尺寸时抽屉状态必须清掉:否则从手机横屏切到平板宽度,抽屉会
+  // 以一个"没有遮罩、也不该存在"的浮层留在屏幕上。
+  useEffect(() => {
+    if (!isMobile) setDrawerOpen(false)
+  }, [isMobile])
+
   // Ctrl+B / Cmd+B 切换侧栏(VSCode 惯例)。
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
@@ -286,6 +305,18 @@ export default function App() {
   const [pickerOpen, setPickerOpen] = useState(false)
   const [, setPicking] = useState(false)
   const capabilityRef = useRef<'native' | 'browse'>('native')
+  // 扫码落地页判定必须**只求值一次**并锁存。
+  //
+  // 不能在渲染时现算:`RemoteGate` 兑换成功后会 `history.replaceState` 抹掉
+  // URL 里的票据(票据是一次性凭据,不该留在地址栏),那会触发 App 重渲染,
+  // 现算就会把 gate 判成 false —— 结果是 PIN 输入框还没显示就被卸载,页面
+  // 直接切到控制台,而会话 cookie 尚未下发,所有接口 401,用户看到的是
+  // "与服务器的连接断开"。锁存后 gate 生命周期由 RemoteGate 自己掌握。
+  const [gateActive] = useState(() => shouldShowGate())
+  // 本页是不是"主机自己的控制台"。远程来客(手机)在横幅上不该看到关闭
+  // 隧道这类主机侧动作;判定走 capability 的同一份来源(服务端按请求
+  // 来源给),不靠前端猜。
+  const [localClient, setLocalClient] = useState(true)
 
   const applyConsoleSettings = useCallback(() => {
     api
@@ -306,6 +337,9 @@ export default function App() {
       .pickerCapability()
       .then((cap) => {
         capabilityRef.current = cap.kind === 'browse' ? 'browse' : 'native'
+        // 远程连接状态下 browse 也用于远程来客;真正的来源判定读
+        // 远程状态的 `local` 字段(见 RemoteBanner 的订阅)。
+        setLocalClient(cap.kind !== 'browse' || !cap.remote)
       })
       .catch(() => {})
   }, [])
@@ -320,53 +354,54 @@ export default function App() {
   const sseWasLostRef = useRef(false)
 
   useEffect(() => {
-    const source = new EventSource('/api/events')
-    source.onopen = () => {
-      setConnLost(false)
-      // 仅首次连接与断线重连后重拉列表,避免 onopen 抖动造成无限刷新。
-      if (!sseOpenedRef.current) {
-        sseOpenedRef.current = true
-        void refreshList()
-      } else if (sseWasLostRef.current) {
-        sseWasLostRef.current = false
-        void refreshList()
+    // 全应用共用一条 `/api/events`(见 serverEvents.ts):每条 EventSource
+    // 都独占一个同源连接名额,浏览器上限 6 条,多开会让后续 fetch 永久排队。
+    const unsubscribe = subscribeServerEvents((type, payload) => {
+      const parsed = payload as {
+        type?: string
+        id?: string
+        running?: boolean
+        ids?: string[]
       }
-    }
-    source.onerror = () => {
-      sseWasLostRef.current = true
-      setConnLost(true)
-    }
-    source.onmessage = (event) => {
-      try {
-        const parsed = JSON.parse(event.data) as {
-          type?: string
-          id?: string
-          running?: boolean
-          ids?: string[]
-        }
-        if (parsed.type === 'sessions-updated') void refreshList()
-        else if (parsed.type === 'settings-updated') applyConsoleSettings()
-        else if (parsed.type === 'running-snapshot' && Array.isArray(parsed.ids)) {
-          const ids = parsed.ids.filter((id) => typeof id === 'string')
-          replaceRunningIds(ids)
-          // 刷新恢复的关键一步:sessionStorage 里的"正在压缩"标记要拿服务端
-          // 权威的 running 校对 —— 会话已不在运行集中,说明任务早已收尾
-          // (摘要事件会在快照重放里出现),标记必须清掉,否则会一直转圈。
-          pruneCompactingByRunning(Object.fromEntries(ids.map((id) => [id, true])))
-        } else if (parsed.type === 'running-changed' && parsed.id) {
-          setRunningStatus(parsed.id, parsed.running === true)
-          // 运行位转 false:无论压缩成功与否都收尾(失败另有广播,这里兜底)。
-          if (parsed.running !== true) clearCompacting(parsed.id)
-        } else if (parsed.type === 'compaction-failed' && parsed.id) {
-          // 压缩后台任务的失败/无物可压出口:清掉"正在压缩"标记。
-          // 成功不走这里 —— 成功有 append-only 的 compaction-summary 事件。
-          clearCompacting(parsed.id)
-        }
-      } catch {
-        /* ignore malformed frame */
+      if (type === 'sessions-updated') void refreshList()
+      else if (type === 'settings-updated') applyConsoleSettings()
+      else if (type === 'running-snapshot' && Array.isArray(parsed.ids)) {
+        const ids = parsed.ids.filter((id) => typeof id === 'string')
+        replaceRunningIds(ids)
+        // 刷新恢复的关键一步:sessionStorage 里的"正在压缩"标记要拿服务端
+        // 权威的 running 校对 —— 会话已不在运行集中,说明任务早已收尾
+        // (摘要事件会在快照重放里出现),标记必须清掉,否则会一直转圈。
+        pruneCompactingByRunning(Object.fromEntries(ids.map((id) => [id, true])))
+      } else if (type === 'running-changed' && parsed.id) {
+        setRunningStatus(parsed.id, parsed.running === true)
+        // 运行位转 false:无论压缩成功与否都收尾(失败另有广播,这里兜底)。
+        if (parsed.running !== true) clearCompacting(parsed.id)
+      } else if (type === 'compaction-failed' && parsed.id) {
+        // 压缩后台任务的失败/无物可压出口:清掉"正在压缩"标记。
+        // 成功不走这里 —— 成功有 append-only 的 compaction-summary 事件。
+        clearCompacting(parsed.id)
       }
+    })
+    const unsubscribeStatus = subscribeServerStatus((up) => {
+      if (up) {
+        setConnLost(false)
+        // 仅首次连接与断线重连后重拉列表,避免 onopen 抖动造成无限刷新。
+        if (!sseOpenedRef.current) {
+          sseOpenedRef.current = true
+          void refreshList()
+        } else if (sseWasLostRef.current) {
+          sseWasLostRef.current = false
+          void refreshList()
+        }
+      } else {
+        sseWasLostRef.current = true
+        setConnLost(true)
+      }
+    })
+    return () => {
+      unsubscribe()
+      unsubscribeStatus()
     }
-    return () => source.close()
   }, [applyConsoleSettings])
 
   // 首屏加载:一次全量列表(SSE onopen 也会触发,幂等)。
@@ -652,13 +687,52 @@ export default function App() {
     [runningIds, cleanupSessionPane],
   )
 
-  const openSession = useCallback((id: string, wsId?: string) => {
-    setActiveId(id, wsId ?? null)
-  }, [])
+  const openSession = useCallback(
+    (id: string, wsId?: string) => {
+      setActiveId(id, wsId ?? null)
+      // 手机上选中会话后自动收起抽屉 —— 否则用户点完还得再点一次遮罩
+      // 才能看到刚打开的对话。
+      setDrawerOpen(false)
+    },
+    [],
+  )
+
+  // 扫码落地页:URL 带票据时整页交给远程门,先兑换会话再进控制台。
+  if (gateActive) {
+    return <RemoteGate />
+  }
 
   return (
-    <div className="shell" data-collapsed={sidebarCollapsed || undefined}>
-      <aside className="sidebar">
+    <div
+      className="shell"
+      data-collapsed={sidebarCollapsed || undefined}
+      data-mobile={isMobile || undefined}
+      data-drawer={isMobile && drawerOpen ? 'open' : undefined}
+    >
+      {isMobile && drawerOpen && (
+        <div
+          className="drawer-scrim"
+          role="presentation"
+          onClick={() => setDrawerOpen(false)}
+        />
+      )}
+      {/* 抽屉里的任何点击都收起抽屉:手机上点"设置""新建会话"之后,如果
+          抽屉还盖在上面,用户会以为操作没生效(实测就是这样)。会话列表
+          项自身也会关闭,这里兜住其余入口,不用逐个改 onClick。 */}
+      <aside
+        className="sidebar"
+        aria-hidden={isMobile && !drawerOpen ? true : undefined}
+        onClick={
+          isMobile
+            ? (event) => {
+                // 折叠/展开等纯图标操作不关闭抽屉,避免点了箭头抽屉就消失。
+                const target = event.target as HTMLElement
+                if (target.closest('.sidebar-toggle, .rail-btn')) return
+                setDrawerOpen(false)
+              }
+            : undefined
+        }
+      >
         {wideMounted && (
           <div
             className={`sidebar-wide${wideFadeOut ? ' fade-out' : ''}${wideEnter ? ' wide-in' : ''}`}
@@ -799,6 +873,23 @@ export default function App() {
         )}
       </aside>
       <main className="main">
+        {/* 手机端顶栏:抽屉开关 + 品牌。桌面端由 CSS 隐藏 —— 桌面有常驻
+            侧栏,不需要这个入口。 */}
+        {isMobile && (
+          <div className="mobile-bar">
+            <button
+              type="button"
+              className="mobile-bar-btn"
+              aria-label={t('sidebarExpand')}
+              aria-expanded={drawerOpen}
+              onClick={() => setDrawerOpen((open) => !open)}
+            >
+              <IconMenu size={18} />
+            </button>
+            <span className="mobile-bar-title">Denia</span>
+          </div>
+        )}
+        <RemoteBanner local={localClient} />
         <div className="main-row">
           <div className="page-pane">
             <SessionsPage
@@ -831,6 +922,10 @@ export default function App() {
               }}
             />
           </div>
+          {/* 侧边面板在手机上不渲染:390px 宽放不下「对话 + 面板」两列,
+              面板会把自己挤成一条缝,还会把主列的输入区顶出屏幕。
+              手机用户要终端/文件,用抽屉里的入口或直接开新会话更实际。 */}
+          {!isMobile && (
           <SidePane
             sessionId={activeId}
             state={pane.state}
@@ -871,6 +966,7 @@ export default function App() {
               </Suspense>
             )}
           />
+          )}
         </div>
       </main>
       {settingsOpen && (

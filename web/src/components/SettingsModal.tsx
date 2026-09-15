@@ -1,15 +1,18 @@
 import { McpSettings } from './settings/McpSettings'
+import { RemoteAccessSettings } from './settings/RemoteAccessSettings'
 import { RuntimeSettings } from './settings/RuntimeSettings'
 import { MemorySettings } from './settings/MemorySettings'
 import { useCallback, useEffect, useState, type ReactNode } from 'react'
 import * as api from '../api'
 import { t } from '../i18n'
+import { subscribeServerEvents } from '../serverEvents'
 import type { Notify } from '../App'
 import {
   IconAgentPreset,
   IconChevron,
   IconClose,
   IconGear,
+  IconGlobe,
   IconPrompt,
   IconSliders,
   IconStack,
@@ -28,6 +31,7 @@ type SettingsTab =
   | 'models'
   | 'mcp'
   | 'memory'
+  | 'remote'
   | 'appearance'
 
 const CONSOLE_NS = 'console'
@@ -39,6 +43,7 @@ const TABS: SettingsTab[] = [
   'models',
   'mcp',
   'memory',
+  'remote',
   'runtime',
   'appearance',
 ]
@@ -75,6 +80,8 @@ function tabIcon(tab: SettingsTab, size = 16) {
       return <IconTool size={size} />
     case 'memory':
       return <IconStack size={size} />
+    case 'remote':
+      return <IconGlobe size={size} />
     case 'appearance':
       return <IconGear size={size} />
   }
@@ -96,6 +103,8 @@ function tabLabel(tab: SettingsTab): string {
       return t('mcpTab')
     case 'memory':
       return t('memoryTab')
+    case 'remote':
+      return t('remoteTab')
     case 'appearance':
       return t('settingsTabAppearance')
   }
@@ -117,6 +126,8 @@ function tabNavDesc(tab: SettingsTab): string {
       return t('mcpTabDesc')
     case 'memory':
       return t('memoryTabDesc')
+    case 'remote':
+      return t('remoteTabDesc')
     case 'appearance':
       return t('settingsTabAppearanceDesc')
   }
@@ -138,6 +149,8 @@ function paneTitle(tab: SettingsTab): string {
       return t('mcpPaneTitle')
     case 'memory':
       return t('memoryPaneTitle')
+    case 'remote':
+      return t('remotePaneTitle')
     case 'appearance':
       return t('catAppearance')
   }
@@ -159,6 +172,8 @@ function paneDesc(tab: SettingsTab): string {
       return t('mcpPaneDesc')
     case 'memory':
       return t('memoryPaneDesc')
+    case 'remote':
+      return t('remotePaneDesc')
     case 'appearance':
       return t('settingsAppearanceHint')
   }
@@ -326,16 +341,9 @@ export function SettingsModal({ notify, onClose }: { notify: Notify; onClose: ()
   }, [load])
 
   useEffect(() => {
-    const source = new EventSource('/api/events')
-    source.onmessage = (event) => {
-      try {
-        const payload = JSON.parse(event.data) as { type?: string }
-        if (payload.type === 'settings-updated') void load()
-      } catch {
-        /* ignore malformed frame */
-      }
-    }
-    return () => source.close()
+    return subscribeServerEvents((type) => {
+      if (type === 'settings-updated') void load()
+    })
   }, [load])
 
   // 弹窗期间锁定 body 滚动并补偿滚动条宽度:遮罩下不再出现滚动条抖动。
@@ -623,6 +631,8 @@ export function SettingsModal({ notify, onClose }: { notify: Notify; onClose: ()
                 {tab === 'mcp' && <McpSettings notify={notify} />}
 
                 {tab === 'memory' && <MemorySettings />}
+
+                {tab === 'remote' && <RemoteAccessSettings notify={notify} />}
 
                 {tab === 'appearance' && (
                   <section className="setm-section">

@@ -256,6 +256,8 @@ pub struct AppState {
     pub mcp: Arc<crate::mcp_runtime::McpRuntime>,
     /// 会话头部「用应用打开」:host 侧应用探测、图标与启动。
     pub open_in_app: Arc<crate::open_in_app::OpenInAppState>,
+    /// 远程连接中枢:局域网直连 + Cloudflare 临时隧道的统一入口。
+    pub remote: Arc<crate::remote::RemoteManager>,
     /// 绑定地址非回环 ⇒ 远程浏览器 ⇒ 目录选择器走 browse。
     pub bound_remote: bool,
 }
@@ -293,6 +295,9 @@ pub enum ServerEvent {
     AgentPresetsUpdated,
     /// MCP 服务器配置或连接状态发生变化;前端据此刷新 MCP 面板。
     McpUpdated,
+    /// 远程连接状态变化(开启/关闭局域网或隧道、会话增减);前端据此刷新
+    /// 远程面板与顶部警示条。
+    RemoteUpdated,
     /// 手动压缩已结束但**没有**摘要产出:无可压缩区间(`nothing-to-compact`)
     /// 或摘要调用失败(附可读原因)。压缩是后台任务(202),结果只能走广播;
     /// 成功路径不发这个 —— 成功有 append-only 的 compaction-summary 事件。
@@ -934,6 +939,17 @@ pub async fn build_state(
     ));
     mcp.apply().await;
 
+    // 远程连接中枢:先于 spawn_forwarders 构造 —— 配置变更转发要引用它。
+    // 启动时顺手清理上次异常退出留下的隧道进程与残留 pid 文件。
+    let remote = Arc::new(crate::remote::RemoteManager::new(
+        home.to_path_buf(),
+        settings.clone(),
+        events.clone(),
+    ));
+    remote.apply_settings();
+    remote.cleanup_stale_tunnel();
+    remote.spawn_sweeper();
+
     spawn_forwarders(
         settings_events.1,
         credentials_events.1,
@@ -941,6 +957,7 @@ pub async fn build_state(
         settings.clone(),
         registry.clone(),
         openai.clone(),
+        remote.clone(),
     );
     system_prompt.spawn_watcher(events.clone());
     agent_presets.spawn_watcher(events.clone());
@@ -966,6 +983,7 @@ pub async fn build_state(
         terminals,
         mcp,
         open_in_app: Arc::new(crate::open_in_app::OpenInAppState::new(bound_remote)),
+        remote,
         bound_remote,
     };
 
@@ -1021,6 +1039,16 @@ fn register_namespaces(settings: &SettingsStore) -> Result<(), Box<dyn std::erro
                 "modeSelectionEnabled": true,
             }),
             validate: validate_agent_presets,
+            secrets: &[],
+            applies: Applies::Live,
+        },
+        json!({}),
+    )?;
+    settings.register(
+        crate::remote::config::REMOTE_NS,
+        NamespaceSpec {
+            defaults: serde_json::to_value(crate::remote::config::RemoteSettings::default())?,
+            validate: crate::remote::config::validate_remote,
             secrets: &[],
             applies: Applies::Live,
         },
@@ -1087,6 +1115,7 @@ fn spawn_forwarders(
     settings: Arc<SettingsStore>,
     registry: Arc<LlmRegistry>,
     openai: Arc<OpenAiCompatAdapter>,
+    remote: Arc<crate::remote::RemoteManager>,
 ) {
     let credential_events = events.clone();
     tokio::spawn(async move {
@@ -1094,6 +1123,10 @@ fn spawn_forwarders(
             match settings_rx.recv().await {
                 Ok(SettingsEvent::DocumentUpdated { ns, .. }) => {
                     let _ = events.send(ServerEvent::SettingsUpdated);
+                    if ns == crate::remote::config::REMOTE_NS {
+                        remote.apply_settings();
+                        let _ = events.send(ServerEvent::RemoteUpdated);
+                    }
                     if ns == OPENAI_SETTINGS_NS {
                         let before = registry.list_providers().len();
                         sync_openai_routes(&registry, &settings, &openai);

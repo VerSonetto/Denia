@@ -561,3 +561,82 @@ export type BrowserEventFrame =
   | { type: 'navigated'; tabId: string; url: string; title: string }
   | { type: 'visual-mode-requested' }
   | { type: 'exited' }
+
+/* ---- 远程连接 ---- */
+
+/** 远程连接通道。 */
+export type RemoteChannel = 'lan' | 'tunnel'
+
+/** 一条可分享的访问链接及其二维码。 */
+export interface RemoteLink {
+  /** 不带票据的基址(直接访问会被远程门拦下)。 */
+  url: string
+  /** 带票据的完整链接 —— 扫码/分享用这一个。 */
+  ticketUrl: string
+  ticketExpiresAt: number
+  ticketSingleUse: boolean
+  requirePin: boolean
+  /** 仅本机请求可见:远程客户端拿不到 PIN。 */
+  pin: string | null
+  qrSvg: string
+  qrText: string
+  qrWidth: number
+  /** 行优先的模块矩阵(`true` = 深色),前端用它画 PNG。 */
+  qrModules: boolean[]
+}
+
+export interface RemoteCandidate {
+  interface: string
+  address: string
+  recommended: boolean
+}
+
+export interface RemoteLanStatus {
+  bind: string
+  port: number
+  candidates: RemoteCandidate[]
+  address: string
+  link: RemoteLink
+}
+
+export interface RemoteTunnelStatus {
+  url: string
+  host: string
+  pid: number
+  startedAt: number
+  link: RemoteLink
+}
+
+export interface RemoteSessionRecord {
+  id: string
+  via: RemoteChannel
+  peer: string
+  createdAt: number
+  lastSeenAt: number
+  expiresAt: number
+  idleDeadline: number
+}
+
+export interface RemoteSessionView {
+  total: number
+  lan: number
+  tunnel: number
+  items: RemoteSessionRecord[]
+}
+
+export interface RemoteStatus {
+  enabled: boolean
+  /** 请求是否来自本机控制台(决定关闭按钮等主机侧操作是否可见)。 */
+  local: boolean
+  lan: RemoteLanStatus | null
+  tunnel: RemoteTunnelStatus | null
+  sessions: RemoteSessionView
+  auditPath: string
+  /** 当前处于退避中的来源 IP 数。 */
+  blockedPeers: number
+}
+
+/** 票据兑换的结果:PIN 挑战或已建立会话。 */
+export type RemoteExchangeResult =
+  | { status: 'pin-required'; challenge: string; attempts: number }
+  | { status: 'ok'; via: RemoteChannel; maxAge: number }

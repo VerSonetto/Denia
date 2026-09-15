@@ -205,9 +205,243 @@ button {
   background: transparent;
 }
 
-/* ---------- shell: sidebar + center column (dsh AppFrame) ---------- */
+/* ---------- 远程连接:警示条与门页 ---------- */
 
-.shell {
+/* 顶部状态条:跨整个主列。隧道态用警示色,局域网态保持低调 ——
+ * 两者都是"机器当前可从别处访问"的信号,但风险等级不同。 */
+.rbanner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 16px;
+  border-bottom: 1px solid var(--border-l1);
+  background: var(--bg-layer-2);
+  font-size: 12.5px;
+  color: var(--label-secondary);
+}
+
+.rbanner.danger {
+  border-bottom-color: var(--danger-border);
+  background: var(--danger-soft);
+}
+
+.rbanner-dot {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--danger);
+  box-shadow: 0 0 0 3px var(--danger-soft);
+}
+
+.rbanner-dot.ok {
+  background: var(--success-fg);
+  box-shadow: none;
+}
+
+.rbanner-text {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+
+.rbanner-text strong {
+  font-weight: 600;
+  color: var(--label-primary);
+  white-space: nowrap;
+}
+
+.rbanner.danger .rbanner-text strong {
+  color: var(--danger);
+}
+
+.rbanner-sub {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--label-tertiary);
+}
+
+.rbanner-url {
+  margin-left: auto;
+  padding: 3px 8px;
+  border-radius: var(--r-xs);
+  background: var(--code-block);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--label-tertiary);
+  max-width: 260px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rbanner-meta {
+  flex: none;
+  font-size: 11.5px;
+  color: var(--label-caption);
+}
+
+.rbanner-btn {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 10px;
+  border: 1px solid var(--danger-border);
+  border-radius: var(--r-xs);
+  background: transparent;
+  color: var(--danger);
+  font-size: 12px;
+  font-weight: 550;
+  cursor: pointer;
+}
+
+.rbanner-btn.ghost {
+  border-color: var(--border-l2);
+  color: var(--label-secondary);
+}
+
+.rbanner-btn:hover:not(:disabled) {
+  background: var(--hover-fill);
+}
+
+.rbanner-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+@media (max-width: 820px) {
+  .rbanner {
+    flex-wrap: wrap;
+    gap: 6px 10px;
+    padding: 8px 12px;
+  }
+
+  .rbanner-sub {
+    display: none;
+  }
+
+  .rbanner-url {
+    margin-left: 0;
+    max-width: 100%;
+  }
+}
+
+/* 扫码落地页:整屏一屏,移动端优先(手机扫完直接看到)。 */
+.rgate {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 100vh;
+  padding: 24px;
+  background: var(--bg-base);
+}
+
+.rgate-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 14px;
+  width: 100%;
+  max-width: 380px;
+  padding: 32px 24px;
+  border: 1px solid var(--border-l1);
+  border-radius: var(--r-lg);
+  background: var(--bg-layer-1);
+  box-shadow: var(--shadow-lv2);
+  text-align: center;
+}
+
+.rgate-brand {
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 3px;
+  text-transform: uppercase;
+  color: var(--label-caption);
+}
+
+.rgate-card h1 {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--label-primary);
+}
+
+.rgate-hint {
+  margin: 0;
+  font-size: 12.5px;
+  line-height: 1.65;
+  color: var(--label-tertiary);
+}
+
+.rgate-error {
+  margin: 0;
+  font-size: 12.5px;
+  line-height: 1.65;
+  color: var(--error-fg);
+}
+
+.rgate-pin {
+  width: 100%;
+  padding: 12px;
+  border: 1px solid var(--border-l2);
+  border-radius: var(--r-sm);
+  background: var(--input-major);
+  color: var(--label-primary);
+  font-family: var(--font-mono);
+  font-size: 26px;
+  font-weight: 600;
+  letter-spacing: 12px;
+  text-align: center;
+  text-indent: 12px;
+}
+
+.rgate-pin:focus {
+  outline: none;
+  border-color: var(--accent-tint);
+}
+
+.rgate-btn {
+  width: 100%;
+  padding: 10px;
+  border: none;
+  border-radius: var(--r-sm);
+  background: var(--accent);
+  color: var(--accent-on);
+  font-size: 13.5px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.rgate-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.rgate-spinner {
+  width: 20px;
+  height: 20px;
+  border: 2px solid var(--border-l2);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: rgate-spin 720ms linear infinite;
+}
+
+@keyframes rgate-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .rgate-spinner {
+    animation-duration: 2s;
+  }
+}
+
+/* ---------- shell: sidebar + center column (dsh AppFrame) ---------- */.shell {
   display: grid;
   grid-template-columns: var(--sidebar-w) minmax(0, 1fr);
   height: 100%;
@@ -6552,10 +6786,26 @@ button.btn.form-action {
     grid-template-rows: auto minmax(0, 1fr);
   }
 
+  /* 横向标签栏里的项加起来(9 × 148px)远宽于屏幕,而 grid 项默认
+     `min-width: auto` 会被内容撑开 —— 结果 rail 变 1408px,把整个弹窗
+     顶出屏幕(表现为"设置内容被右侧裁掉")。必须显式允许收缩。 */
   .setm-rail {
+    min-width: 0;
+    max-width: 100%;
     border-right: none;
     border-bottom: 1px solid var(--border-l1);
     padding: 16px 12px 12px;
+  }
+
+  .setm-rail-nav {
+    min-width: 0;
+    max-width: 100%;
+  }
+
+  .setm-panel,
+  .setm-panel-body {
+    min-width: 0;
+    max-width: 100%;
   }
 
   .setm-rail-head {
@@ -7738,4 +7988,226 @@ button.btn.form-action {
   line-height: 1.6;
   white-space: pre-wrap;
   word-break: break-word;
+}
+
+/* ---------- 手机端(窄屏)布局 ----------
+ *
+ * 桌面端的 shell 是「常驻侧栏 + 主列」两栏 grid;手机上那会让侧栏吃掉
+ * 整屏(390px 宽时侧栏 280px,主列只剩 110px,输入框被压成一条竖线)。
+ * 所以窄屏改成:侧栏脱离文档流做覆盖式抽屉,主列占满整屏。
+ *
+ * 与桌面"折叠"语义的区别:桌面收起后仍留 56px 控制栏(常驻入口),
+ * 手机收起就是**完全不可见**,靠顶栏汉堡按钮唤出 —— 手机屏幕宽度
+ * 太贵,留一条 56px 的控制栏等于白扔 14% 的横向空间。
+ *
+ * 位置说明:这一整段必须留在 styles.css **末尾**。桌面规则里的
+ * `.shell[data-collapsed]{grid-template-columns:56px …}` 特异性与
+ * `.shell` 相同但出现更晚,放在前面会被它覆盖(实测:主列仍是 110px)。
+ */
+.mobile-bar {
+  display: none;
+}
+
+.drawer-scrim {
+  display: none;
+}
+
+@media (max-width: 820px) {
+  /* 单列:侧栏不再占格子,由下面的 fixed 抽屉接管。 */
+  .shell,
+  .shell[data-collapsed] {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .shell[data-mobile] .sidebar {
+    position: fixed;
+    top: 0;
+    bottom: 0;
+    left: 0;
+    /* 抽屉宽度留出右侧一条,让用户看到"后面还有内容"、可点遮罩关闭。 */
+    width: min(86vw, 320px);
+    z-index: 60;
+    /* iOS 安全区:刘海屏横屏时左内边距不能压到圆角下。 */
+    padding-left: max(10px, env(safe-area-inset-left));
+    padding-bottom: max(10px, env(safe-area-inset-bottom));
+    box-shadow: var(--shadow-float);
+    transform: translateX(-100%);
+    transition: transform 220ms var(--ease);
+    will-change: transform;
+  }
+
+  .shell[data-mobile][data-drawer='open'] .sidebar {
+    transform: translateX(0);
+  }
+
+  /* 抽屉关闭时移出视口,不该还能被 Tab 聚焦到。 */
+  .shell[data-mobile]:not([data-drawer='open']) .sidebar {
+    visibility: hidden;
+  }
+
+  .shell[data-mobile][data-drawer='open'] .drawer-scrim {
+    display: block;
+    position: fixed;
+    inset: 0;
+    z-index: 55;
+    background: rgba(0, 0, 0, 0.5);
+    /* 遮罩本身不滚动,滚动手势交给抽屉内的列表。 */
+    touch-action: none;
+  }
+
+  /* 顶栏:抽屉开关 + 品牌。高度与触控目标都按手机来(≥44px 易点)。 */
+  .mobile-bar {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex: none;
+    height: 48px;
+    padding: 0 8px;
+    padding-top: env(safe-area-inset-top);
+    border-bottom: 1px solid var(--border-l1);
+    background: var(--sidebar-fill);
+  }
+
+  .mobile-bar-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 40px;
+    height: 40px;
+    border: none;
+    border-radius: var(--r-sm);
+    background: transparent;
+    color: var(--label-secondary);
+    cursor: pointer;
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  .mobile-bar-btn:active {
+    background: var(--active-fill);
+    color: var(--label-primary);
+  }
+
+  .mobile-bar-title {
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--label-primary);
+  }
+
+  /* 抽屉里不需要"收起侧栏"按钮(手机端靠遮罩/选中会话关闭)。 */
+  .shell[data-mobile] .sidebar-toggle {
+    display: none;
+  }
+
+  /* 主列占满,并让滚动容器吃掉 iOS 的橡皮筋,避免整页跟着弹。 */
+  .main {
+    min-width: 0;
+    min-height: 0;
+    overscroll-behavior: contain;
+  }
+
+  .main-row {
+    min-width: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .shell[data-mobile] .sidebar {
+    transition: none;
+  }
+}
+
+/* ---------- 手机端:输入区与内容适配 ---------- */
+
+@media (max-width: 820px) {
+  /* 输入卡片底部的控件行:窄屏下排不下就**换行分组**,而不是横向溢出。
+     `.prompt-bar` 本身已有 flex-wrap,但子元素仍按桌面宽度撑开,所以这里
+     逐个收窄。 */
+  .prompt-bar {
+    gap: 6px;
+    padding: 2px 6px 6px;
+  }
+
+  .composer-modes {
+    gap: 4px;
+    min-width: 0;
+    /* 允许收缩到 0 并参与换行:桌面用的 `flex: 1 1 auto` 会让这一组
+       独占整行宽度(实测 336px),把 `.composer-right` 顶到屏幕外。 */
+    flex: 1 1 0;
+    overflow: hidden;
+  }
+
+  /* 模型名很长(如 oc/muse-spark-1.3-contributor-free),窄屏必须允许它
+     缩到可用宽度内并被省略号截断 —— 桌面用的 min(320px,70vw) 在 390px
+     屏上仍有 273px,把右侧控件顶出屏幕。
+     wrapper(`.model-menu-anchor`)必须一起收:`min-width: 0` 缺了它,
+     它作为 flex 项会被内容撑开,里层 chip 设 max-width 也没用。 */
+  .model-menu-anchor {
+    min-width: 0;
+    flex: 0 1 auto;
+  }
+
+  .model-chip {
+    display: flex;
+    flex: 0 1 auto;
+    width: auto;
+    max-width: 100%;
+    min-width: 0;
+    font-size: 12.5px;
+    padding: 0 2px 0 6px;
+  }
+
+  .model-chip-label {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .composer-right {
+    gap: 6px;
+    flex: 0 0 auto;
+  }
+
+  /* 触控目标放大到 ≥40px:桌面 28px 的按钮在手指下太难点中。
+     用 min-height 而不是 height,避免压坏内部图标的基线对齐。 */
+  .composer-right .icon-btn,
+  .composer-modes .icon-btn,
+  .composer-upload-btn.icon-btn {
+    min-width: 40px;
+    min-height: 40px;
+  }
+
+  /* 代码块与表格:窄屏下横向滚动,不撑破气泡。 */
+  .markdown pre,
+  .md-code-block pre {
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .markdown table {
+    display: block;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+    max-width: 100%;
+  }
+
+  /* 长 URL / 长单词在窄屏会顶破容器,允许在任意位置断行。 */
+  .markdown a,
+  .markdown code {
+    word-break: break-word;
+  }
+}
+
+/* iOS Safari 在聚焦字号 <16px 的输入框时会自动放大页面,之后不会缩回 ——
+ * 手机上表现为"点一下输入框,整个页面就变大了"。把输入类元素的字号钉在
+ * 16px 可以阻止这个缩放(桌面端不受影响,规则只作用于窄屏)。 */
+@media (max-width: 820px) {
+  .prompt-editor,
+  .rgate-pin,
+  input[type='text'],
+  input[type='search'],
+  textarea,
+  select {
+    font-size: 16px;
+  }
 }

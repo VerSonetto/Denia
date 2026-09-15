@@ -37,6 +37,9 @@ mime_guess = { workspace = true }
 rfd = { workspace = true }
 uuid = { workspace = true }
 base64 = { workspace = true }
+rand = { workspace = true }
+qrcode = { workspace = true }
+if-addrs = { workspace = true }
 sha2 = "0.10"
 async-trait = { workspace = true }
 thiserror = { workspace = true }
@@ -45,6 +48,10 @@ tracing-subscriber = { workspace = true }
 arc-swap = { workspace = true }
 notify = "6"
 portable-pty = "0.9.0"
+
+[dev-dependencies]
+# HTTP 层测试用 `Router::oneshot` 直发请求(与 agent_runtime 的测试同路数)。
+tower = { version = "0.5", features = ["util"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = [

@@ -73,3 +73,7 @@ base64 = "0.22"
 uuid = { version = "1", features = ["v4"] }
 rand = "0.8"
 arc-swap = "1"
+# 远程连接:二维码编码(只启用 svg 渲染路径,默认 features 会拖进 image 全家桶)
+# 与局域网网卡探测(Windows 下需 GetAdaptersAddresses,手写成本远高于一个轻依赖)。
+qrcode = { version = "0.14", default-features = false, features = ["svg"] }
+if-addrs = "0.15"
