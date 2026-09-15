@@ -6,9 +6,11 @@ import { useCallback, useEffect, useState, type ReactNode } from 'react'
 import * as api from '../api'
 import { t } from '../i18n'
 import { subscribeServerEvents } from '../serverEvents'
+import { useIsMobile } from '../hooks/useIsMobile'
 import type { Notify } from '../App'
 import {
   IconAgentPreset,
+  IconArrowLeft,
   IconChevron,
   IconClose,
   IconGear,
@@ -289,6 +291,10 @@ export function SettingsModal({ notify, onClose }: { notify: Notify; onClose: ()
   const [tab, setTab] = useState<SettingsTab>('general')
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
+  // 窄屏:标签栏与面板是两屏,先选分类再进面板(横向滚动条里塞 9 个
+  // 148px 的标签,手机上既看不全也点不准)。
+  const isMobile = useIsMobile()
+  const [mobilePaneOpen, setMobilePaneOpen] = useState(false)
 
   const [theme, setTheme] = useState('system')
   const [locale, setLocaleState] = useState('zh')
@@ -481,6 +487,8 @@ export function SettingsModal({ notify, onClose }: { notify: Notify; onClose: ()
         role="dialog"
         aria-modal="true"
         aria-label={t('settingsModalTitle')}
+        data-mobile={isMobile || undefined}
+        data-pane={isMobile && mobilePaneOpen ? 'open' : undefined}
       >
         <aside className="setm-rail">
           <div className="setm-rail-head">
@@ -488,6 +496,18 @@ export function SettingsModal({ notify, onClose }: { notify: Notify; onClose: ()
             <h2>{t('settingsModalTitle')}</h2>
             <p>{t('settingsModalSubtitle')}</p>
           </div>
+          {/* 窄屏分类列表这一屏没有面板头部,关闭按钮必须单独给一个 ——
+              否则用户进来后找不到出口(只能靠 Esc,手机上不可用)。 */}
+          {isMobile && (
+            <button
+              type="button"
+              className="setm-rail-close"
+              onClick={onClose}
+              aria-label={t('close')}
+            >
+              <IconClose size={18} />
+            </button>
+          )}
 
           <nav className="setm-rail-nav" aria-label={t('settingsModalTitle')}>
             {TABS.map((item) => (
@@ -496,13 +516,22 @@ export function SettingsModal({ notify, onClose }: { notify: Notify; onClose: ()
                 type="button"
                 className={`setm-nav-item${tab === item ? ' active' : ''}`}
                 aria-current={tab === item ? 'page' : undefined}
-                onClick={() => setTab(item)}
+                onClick={() => {
+                  setTab(item)
+                  // 窄屏:选中分类即进入该面板。
+                  if (isMobile) setMobilePaneOpen(true)
+                }}
               >
                 <span className="setm-nav-icon">{tabIcon(item)}</span>
                 <span className="setm-nav-copy">
                   <span className="setm-nav-label">{tabLabel(item)}</span>
                   <span className="setm-nav-desc">{tabNavDesc(item)}</span>
                 </span>
+                {isMobile && (
+                  <span className="setm-nav-chev" aria-hidden="true">
+                    <IconChevron size={14} />
+                  </span>
+                )}
               </button>
             ))}
           </nav>
@@ -511,6 +540,16 @@ export function SettingsModal({ notify, onClose }: { notify: Notify; onClose: ()
 
         <main className="setm-panel">
           <header className="setm-panel-head">
+            {isMobile && (
+              <button
+                type="button"
+                className="setm-panel-back"
+                onClick={() => setMobilePaneOpen(false)}
+                aria-label={t('settingsBackToTabs')}
+              >
+                <IconArrowLeft size={18} />
+              </button>
+            )}
             <div>
               <h3>{paneTitle(tab)}</h3>
               <p>{paneDesc(tab)}</p>

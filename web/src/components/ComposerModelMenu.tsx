@@ -8,13 +8,14 @@ import {
 } from 'react'
 import { formatContextWindow, resolveSessionReasoningEffort } from '../modelCatalog'
 import { t } from '../i18n'
+import { useIsMobile } from '../hooks/useIsMobile'
 import type {
   CatalogModel,
   ModelCatalog,
   ModelProviderGroup,
   ModelSelection,
 } from '../types'
-import { IconCheck, IconChevron, IconChevronDown, IconSearch, IconThink } from './icons'
+import { IconArrowLeft, IconCheck, IconChevron, IconChevronDown, IconSearch, IconThink } from './icons'
 
 /** 二级菜单宽度 + 间距,与 styles.css 的 .model-menu-sub 保持一致(翻转探测用)。 */
 const SUB_MENU_WIDTH = 304
@@ -58,6 +59,9 @@ export function ComposerModelMenu({
   const [kbModel, setKbModel] = useState(0)
   // 搜索词:非空时一级列表变为命中的模型平铺列表。
   const [query, setQuery] = useState('')
+  // 窄屏:两列级联(一级 232px + 间距 + 二级 304px ≈ 542px)在 390px 屏上
+  // 必然溢出,改成底部抽屉 + 逐级钻取(供应商 → 模型,带返回)。
+  const isMobile = useIsMobile()
 
   const rootRef = useRef<HTMLDivElement | null>(null)
   const chipRef = useRef<HTMLButtonElement | null>(null)
@@ -131,8 +135,9 @@ export function ComposerModelMenu({
   }, [query])
 
   // 打开时:翻转探测 + 一级列宽度写入 CSS 变量 + 聚焦搜索框(可直接打字)。
+  // 窄屏走底部抽屉(宽度由 CSS 给足),翻转探测与 --menu-w 都不适用。
   useLayoutEffect(() => {
-    if (!open) return
+    if (!open || isMobile) return
     const menu = menuRef.current
     if (!menu) return
     const rect = menu.getBoundingClientRect()
@@ -144,7 +149,7 @@ export function ComposerModelMenu({
     // 一级列实测宽写入 CSS 变量:二级的 left 依一级右缘(--menu-w)定位,翻转侧用 100%(chip 左缘)。
     anchor?.style.setProperty('--menu-w', `${Math.round(rect.width)}px`)
     searchRef.current?.focus()
-  }, [open])
+  }, [open, isMobile])
 
   // 键盘高亮条目跟随滚动(级联模型与搜索平铺共用 data-kb 标记)。
   useEffect(() => {
@@ -336,7 +341,9 @@ export function ComposerModelMenu({
       {open && (
         <>
           <div className="menu-backdrop" onClick={closeMenu} />
-          {/* 一级:搜索框 + (供应商列表 | 搜索命中平铺) */}
+          {/* 一级:搜索框 + (供应商列表 | 搜索命中平铺)。
+              窄屏钻取进二级后收起一级,避免两列叠在一起。 */}
+          {(!isMobile || !focusedProvider) && (
           <div className="model-menu" role="menu" aria-label={t('modelProvidersLabel')} ref={menuRef}>
             <div className="model-menu-search">
               <IconSearch size={13} />
@@ -396,7 +403,10 @@ export function ComposerModelMenu({
             ) : (
               <>
                 <div className="model-menu-heading">{t('modelProvidersLabel')}</div>
-                <div className="model-menu-scroll" onMouseLeave={scheduleSubClose}>
+                <div
+                  className="model-menu-scroll"
+                  onMouseLeave={isMobile ? undefined : scheduleSubClose}
+                >
                   {catalog.groups.map((g, index) => {
                     const hasCurrent = selection.provider === g.id
                     const expanded = focusedProvider === g.id
@@ -411,10 +421,14 @@ export function ComposerModelMenu({
                         className={`model-menu-provider${hasCurrent ? ' active' : ''}${
                           expanded ? ' expanded' : ''
                         }${kbHere ? ' kb' : ''}`}
-                        onMouseEnter={() => {
-                          setKbMode('providers')
-                          hoverProvider(g.id)
-                        }}
+                        onMouseEnter={
+                          isMobile
+                            ? undefined
+                            : () => {
+                                setKbMode('providers')
+                                hoverProvider(g.id)
+                              }
+                        }
                         onClick={(event) => clickProvider(event, g.id, g.models.length > 0)}
                       >
                         <span className="glyph" aria-hidden="true">
@@ -436,18 +450,40 @@ export function ComposerModelMenu({
               </>
             )}
           </div>
-          {/* 二级:该供应商的模型 + 思考强度(搜索态隐藏) */}
+          )}
+          {/* 二级:该供应商的模型 + 思考强度(搜索态隐藏)。
+              窄屏下这一列就是当前唯一一屏,带返回回到供应商列表。 */}
           {!searching && subGroup && subGroup.models.length > 0 && (
             <div
               className={`model-menu-sub${flip ? ' flip' : ''}`}
               role="menu"
               aria-label={subGroup.name}
-              onMouseEnter={() => {
-                cancelSubClose()
-                setKbMode('providers')
-              }}
-              onMouseLeave={scheduleSubClose}
+              onMouseEnter={
+                isMobile
+                  ? undefined
+                  : () => {
+                      cancelSubClose()
+                      setKbMode('providers')
+                    }
+              }
+              // 窄屏是钻取式的独立一屏,没有"鼠标移出"这回事 ——
+              // 挂了 onMouseLeave 会在触屏点按后误触发收起。
+              onMouseLeave={isMobile ? undefined : scheduleSubClose}
             >
+              {isMobile ? (
+                <button
+                  type="button"
+                  className="model-menu-back"
+                  onClick={() => {
+                    clearTimers()
+                    setFocusedProvider(null)
+                    setKbMode('providers')
+                  }}
+                >
+                  <IconArrowLeft size={14} />
+                  <span>{t('modelProvidersLabel')}</span>
+                </button>
+              ) : null}
               <div className="model-menu-heading">{subGroup.name}</div>
               <div className="model-menu-scroll">
                 {subGroup.models.map((m, index) => {
