@@ -15,7 +15,7 @@
 
 ## 技能
 
-发现顺序由高到低：项目 `.denia/skills`、项目 `.dsh/skills`、项目 `.agents/skills`、自定义目录、denia 数据目录 `skills`、用户 `.agents/skills`，最后是内置 bundled 技能。项目根取最近的 `.git` 祖先，找不到则取会话目录。内置 `skill-creator` 用于创建或更新高质量 skill；同名项目或用户技能可以覆盖它。
+发现顺序由高到低：项目 `.denia/skills`、项目 `.dsh/skills`、项目 `.agents/skills`、自定义目录、denia 数据目录 `skills`、用户 `.agents/skills`，最后是内置 bundled 技能。项目根取最近的 `.git` 祖先，找不到则取会话目录。内置 `skill-creator` 用于创建或更新高质量 skill，内置 `denia-guide` 是 denia 自身配置指南（用户请 AI 帮忙配 denia——加提供商/模型、配密钥、建 preset、接 MCP——时加载）；同名项目或用户技能可以覆盖它们。
 
 兼容 `<name>/SKILL.md` 与 `<name>.md`。名称使用小写 kebab-case；YAML frontmatter 支持 `name`、`description`、`disable-model-invocation`、`user-invocable`。同名技能由更高优先级目录覆盖。元数据错误明确返回错误。
 

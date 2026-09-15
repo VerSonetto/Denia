@@ -122,17 +122,31 @@ fn parse_from_str(raw: &str, path: &Path, source: &str) -> Result<(Skill, String
     ))
 }
 
-fn builtin_skills() -> Vec<Skill> {
-    let path = PathBuf::from("<denia-bundled>/skill-creator/SKILL.md");
-    // 元数据与正文同源自 SKILL.md frontmatter，硬编码描述会与正文文案漂移。
-    let (mut skill, body) = parse_from_str(
+/// 内置技能清单:(目录名, SKILL.md 全文)。新增内置技能时在这里加一行,
+/// 并把 SKILL.md 放进 `builtin_skills/<目录>/SKILL.md`。
+const BUILTIN_SKILLS: &[(&str, &str)] = &[
+    (
+        "skill-creator",
         include_str!("builtin_skills/skill-creator/SKILL.md"),
-        &path,
-        "bundled",
-    )
-    .expect("内置技能 skill-creator 必须可解析");
-    skill.builtin_body = Some(body);
-    vec![skill]
+    ),
+    (
+        "denia-guide",
+        include_str!("builtin_skills/denia-guide/SKILL.md"),
+    ),
+];
+
+fn builtin_skills() -> Vec<Skill> {
+    BUILTIN_SKILLS
+        .iter()
+        .map(|(dir, markdown)| {
+            let path = PathBuf::from(format!("<denia-bundled>/{dir}/SKILL.md"));
+            // 元数据与正文同源自 SKILL.md frontmatter，硬编码描述会与正文文案漂移。
+            let (mut skill, body) = parse_from_str(markdown, &path, "bundled")
+                .unwrap_or_else(|error| panic!("内置技能 {dir} 必须可解析:{error}"));
+            skill.builtin_body = Some(body);
+            skill
+        })
+        .collect()
 }
 
 /// 按字符数截断描述（技能目录用；对齐 dsh catalogDescriptionMaxLength 语义）。
@@ -267,14 +281,38 @@ mod tests {
         .unwrap();
         std::fs::write(home.join("skills/review.md"), "用户版本").unwrap();
         let skills = discover(&home, &cwd).unwrap();
-        let bundled = skills.iter().find(|s| s.name == "skill-creator").unwrap();
-        assert_eq!(bundled.source, "bundled");
+        let bundled: Vec<&Skill> = skills
+            .iter()
+            .filter(|s| s.source == "bundled")
+            .collect();
+        assert_eq!(bundled.len(), 2);
         assert!(
             load(&skills, "skill-creator", false).unwrap()["body"]
                 .as_str()
                 .unwrap()
                 .contains("Denia 技能创建器")
         );
+        let guide = bundled.iter().find(|s| s.name == "denia-guide").unwrap();
+        assert!(guide.path.to_string_lossy().contains("denia-guide"));
+        assert!(
+            load(&skills, "denia-guide", false).unwrap()["body"]
+                .as_str()
+                .unwrap()
+                .contains("llm-openai")
+        );
+        // 同名项目技能覆盖内置 denia-guide。
+        std::fs::create_dir_all(cwd.join(".denia/skills/denia-guide")).unwrap();
+        std::fs::write(
+            cwd.join(".denia/skills/denia-guide/SKILL.md"),
+            "---\nname: denia-guide\ndescription: 项目版指南\n---\n项目版正文",
+        )
+        .unwrap();
+        let overridden = discover(&home, &cwd).unwrap();
+        let guide = overridden
+            .iter()
+            .find(|s| s.name == "denia-guide")
+            .unwrap();
+        assert_eq!(guide.source, "project-denia");
         let skill = skills.iter().find(|s| s.name == "review").unwrap();
         assert_eq!(skill.source, "project-denia");
         assert!(load(&skills, "review", false).is_err());
