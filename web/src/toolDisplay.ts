@@ -410,16 +410,20 @@ export interface EditDiff {
   skipped: number
 }
 
+/**
+ * 一次文件编辑的 diff 组:edit 的多处编辑(edits 数组)每项一帧 hunk,
+ * write_file / 单处 edit 只有一帧。同组共享目标文件。
+ */
+export interface EditDiffs {
+  path: string
+  diffs: EditDiff[]
+}
+
 /** 头部与折叠区各保留的上下文行数。 */
 const CONTEXT = 3
 /** 超过这个行数就折叠中间(工具行里不该挂一整屏 diff)。 */
 const MAX_LINES = 40
 
-/**
- * edit 工具的行级 diff:从参数里取出 path/old_string/new_string,交给
- * [`diffLines`]。参数解析失败(流式半截 JSON)时退化为字段抢救;
- * 取不到 old/new 返回 null,调用方走原来的"文件名 + 结果"展示。
- */
 /**
  * write_file 的行级 diff:整文件覆盖写成的一次性"全量 diff"。
  *
@@ -445,20 +449,40 @@ export function writeDiff(
 }
 
 /**
- * edit 工具的行级 diff:从参数里取出 path/old_string/new_string,交给
- * [`diffLines`]。参数解析失败(流式半截 JSON)时退化为字段抢救;
- * 取不到 old/new 返回 null,调用方走原来的"文件名 + 结果"展示。
+ * edit 工具的行级 diff:从参数里取出编辑内容,交给 [`diffLines`]。
+ *
+ * 多处编辑(edits 数组)每项一帧 hunk,行号锚点按顺序取自工具结果;
+ * 单处编辑(old_string/new_string)一帧。参数解析失败(流式半截 JSON)
+ * 时退化为字段抢救(仅单处形式);取不到编辑内容返回 null,调用方走
+ * 原来的"文件名 + 结果"展示。
  */
-export function editDiff(name: string, args: string, startLine?: number): EditDiff | null {
+export function editDiff(name: string, args: string, startLines?: number[]): EditDiffs | null {
   if (name !== 'edit') return null
   const parsed = parseArgsObject(args)
   const path = (parsed && readString(parsed, 'path')) ?? extractStringField(args, 'path') ?? ''
+  if (!path) return null
+  // 锚点与编辑一一对应;结果缺失(流式中)时退化为 1,不影响展示。
+  const anchor = (index: number): number => startLines?.[index] ?? 1
+  const edits = parsed && Array.isArray(parsed['edits']) ? parsed['edits'] : null
+  if (edits) {
+    const diffs: EditDiff[] = []
+    for (const raw of edits as unknown[]) {
+      if (raw === null || typeof raw !== 'object') return null
+      const item = raw as Record<string, unknown>
+      const oldString = typeof item['old_string'] === 'string' ? item['old_string'] : undefined
+      const newString = typeof item['new_string'] === 'string' ? item['new_string'] : undefined
+      if (oldString === undefined || newString === undefined) return null
+      diffs.push(diffLines(path, oldString, newString, anchor(diffs.length)))
+    }
+    if (diffs.length === 0) return null
+    return { path: shortPath(path), diffs }
+  }
   const oldString =
     (parsed && readString(parsed, 'old_string')) ?? extractStringField(args, 'old_string')
   const newString =
     (parsed && readString(parsed, 'new_string')) ?? extractStringField(args, 'new_string')
-  if (!path || oldString === undefined || newString === undefined) return null
-  return diffLines(path, oldString, newString, startLine ?? 1)
+  if (oldString === undefined || newString === undefined) return null
+  return { path: shortPath(path), diffs: [diffLines(path, oldString, newString, anchor(0))] }
 }
 
 /**

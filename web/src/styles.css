@@ -3854,6 +3854,14 @@ button {
 
 /* ---- edit 的行级 diff(工具行展开后的正文) ---- */
 
+/* 多处编辑的 hunk 组:同一次调用的多张 diff 卡纵向堆叠,
+   路径只在组外展示一次,卡片之间留一条缝区分编辑点。 */
+.diff-group {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
 .diff-card {
   background: var(--code-block);
   border: 1px solid var(--border-l1);

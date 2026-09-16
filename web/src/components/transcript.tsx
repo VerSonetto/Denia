@@ -22,7 +22,7 @@ import {
   cleanBashCommand,
   bashOutputParts,
   parseArgsObject,
-  type EditDiff,
+  type EditDiffs,
 } from '../toolDisplay'
 import { DiffCard, DiffStat } from './DiffCard'
 import { TodoCard } from './TodoCard'
@@ -640,13 +640,16 @@ function firstLine(text: string, max = 90): string {
 /**
  * 工具行的 diff:文件类工具(edit / write_file)才有。
  *
- * - edit:old_string → new_string,起点行号从工具结果里抠出;
+ * - edit:多处编辑每项一帧 hunk,行号锚点从工具结果里逐个抠出;
  * - write_file:整文件覆盖写,新内容即结果(旧内容不来自参数,详见
  *   [`writeDiff`]),缺省按"纯新增"展示。
  */
-function toolDiff(name: string, args: string, result?: string): EditDiff | null {
-  if (name === 'edit') return editDiff(name, args, editStartLine(result))
-  if (name === 'write_file') return writeDiff(name, args)
+function toolDiff(name: string, args: string, result?: string): EditDiffs | null {
+  if (name === 'edit') return editDiff(name, args, editStartLines(result))
+  if (name === 'write_file') {
+    const diff = writeDiff(name, args)
+    return diff ? { path: diff.path, diffs: [diff] } : null
+  }
   return null
 }
 
@@ -685,15 +688,18 @@ function bashExitCode(content?: string): number | undefined {
   return Number.isFinite(code) ? code : undefined
 }
 
-/** 从工具结果里抠出起始行号(形如"…首次替换发生在第 42 行")。
- * 拿不到就返回 1:diff 退化为相对行号,不影响展示。
+/** 从工具结果里抠出各行号锚点(形如"#1 第 42 行、#2 第 57 行"或单处
+ * 形式的"…首次替换发生在第 42 行"),按出现顺序返回;与 edits 数组
+ * 一一对应。拿不到就返回空数组:diff 退化为相对行号,不影响展示。
  */
-function editStartLine(content?: string): number | undefined {
-  if (!content) return undefined
-  const match = content.match(/第\s*(\d+)\s*行/)
-  if (!match) return undefined
-  const line = Number(match[1])
-  return Number.isFinite(line) && line > 0 ? line : undefined
+function editStartLines(content?: string): number[] {
+  if (!content) return []
+  const out: number[] = []
+  for (const match of content.matchAll(/第\s*(\d+)\s*行/g)) {
+    const line = Number(match[1])
+    if (Number.isFinite(line) && line > 0) out.push(line)
+  }
+  return out
 }
 
 /** skill load 的 SKILL.md 正文随工具结果 JSON 返回;展开时按 markdown 渲染
@@ -826,14 +832,28 @@ function ToolRow({
         >
           {summary}
         </span>
-        {diff && !node.result?.isError && <DiffStat diff={diff} compact />}
+        {diff && !node.result?.isError && (
+          <DiffStat
+            compact
+            added={diff.diffs.reduce((sum, d) => sum + d.added, 0)}
+            removed={diff.diffs.reduce((sum, d) => sum + d.removed, 0)}
+          />
+        )}
         {exitCode !== undefined && <ExitBadge code={exitCode} />}
       </button>
       {open && (
         <div className="disc-body">
           {todos && <TodoCard snapshot={todos} />}
           {diff ? (
-            <DiffCard diff={diff} />
+            diff.diffs.length === 1 ? (
+              <DiffCard diff={diff.diffs[0]} />
+            ) : (
+              <div className="diff-group">
+                {diff.diffs.map((item, index) => (
+                  <DiffCard key={index} diff={item} hidePath />
+                ))}
+              </div>
+            )
           ) : commandBody !== null ? (
             // bash:命令 + 输出走"引用"形态(无底色卡片,靠竖线分组)。
             <BashCard

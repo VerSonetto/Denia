@@ -116,7 +116,7 @@ pub fn register_shipped_prompt(
         name: "tool:edit".to_string(),
         order: SectionOrder::ToolEdit.value(),
         text: PromptText::Static(
-            "精确小改动用 edit 工具(必须精确出现一次的字符串替换);大段改动用 write_file。改完用 read_file 或 grep 验证结果。"
+            "精确小改动用 edit 工具(必须精确出现一次的字符串替换);同一文件的多处小改动合并进一次 edit 调用的 edits 数组(按顺序应用,任一处失败则整次不写入),不要拆成多次调用;大段改动用 write_file。改完用 read_file 或 grep 验证结果。"
                 .to_string(),
         ),
         complete: false,

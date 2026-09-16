@@ -823,6 +823,9 @@ export type TranscriptRow =
 /**
  * 变更类工具调用参数里的目标文件路径;非变更调用、参数不完整或路径为空
  * 返回 null。只有 write_file 与 edit 是第一方文件变更工具。
+ *
+ * edit 的两种形式都认:单处(old_string/new_string 成对且不同)与
+ * 多处(edits 数组每项都是合法且非 no-op 的编辑)。
  */
 function mutationPath(name: string, args: string): string | null {
   if (name !== 'write_file' && name !== 'edit') return null
@@ -831,6 +834,23 @@ function mutationPath(name: string, args: string): string | null {
   const path = typeof parsed.path === 'string' && parsed.path.trim().length > 0 ? parsed.path : null
   if (path === null) return null
   if (name === 'write_file') return typeof parsed.content === 'string' ? path : null
+  const edits = parsed.edits
+  if (Array.isArray(edits)) {
+    return edits.length > 0 &&
+      edits.every((raw) => {
+        if (raw === null || typeof raw !== 'object') return false
+        const item = raw as Record<string, unknown>
+        return (
+          typeof item.old_string === 'string' &&
+          item.old_string.length > 0 &&
+          typeof item.new_string === 'string' &&
+          item.old_string !== item.new_string &&
+          (item.replace_all === undefined || typeof item.replace_all === 'boolean')
+        )
+      })
+      ? path
+      : null
+  }
   const oldString = parsed.old_string
   return typeof oldString === 'string' &&
     oldString.length > 0 &&
