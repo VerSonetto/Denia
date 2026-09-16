@@ -11,7 +11,7 @@ import { asRecord, namespaceOf } from './providerSettings'
 import { ProvidersPanel } from './ProvidersPanel'
 import { ModelsPanel } from './ModelsPanel'
 import { ChatProbe } from './ChatProbe'
-import { ProviderDrawer } from './ProviderDrawer'
+import { ProviderModal } from './ProviderModal'
 import { IconActivity, IconKey, IconStack } from '../icons'
 import type { ProviderRoute } from './types'
 import type { Notify } from '../../App'
@@ -33,7 +33,7 @@ export function LlmPanel({ notify }: { notify: Notify }) {
   const [catalog, setCatalog] = useState<ModelCatalog | null>(null)
   const [catalogError, setCatalogError] = useState<string | null>(null)
   const [sub, setSub] = useState<SubPage>('providers')
-  const [drawer, setDrawer] = useState<{ route: string | null } | null>(null)
+  const [modal, setModal] = useState<{ route: string | null } | null>(null)
   const [probeSeed, setProbeSeed] = useState<string | undefined>(undefined)
 
   const settingsView = settings ? namespaceOf(settings, OPENAI_NS) : undefined
@@ -87,8 +87,8 @@ export function LlmPanel({ notify }: { notify: Notify }) {
     setSub('probe')
   }, [])
 
-  const editProvider = useCallback((route: string) => setDrawer({ route }), [])
-  const addProvider = useCallback(() => setDrawer({ route: null }), [])
+  const editProvider = useCallback((route: string) => setModal({ route }), [])
+  const addProvider = useCallback(() => setModal({ route: null }), [])
 
   const navItems: { id: SubPage; label: string; desc: string; icon: ReactNode; count?: number }[] = [
     {
@@ -163,19 +163,19 @@ export function LlmPanel({ notify }: { notify: Notify }) {
         )}
       </div>
 
-      {drawer && settings && (
-        <ProviderDrawer
-          route={drawer.route}
+      {modal && settings && (
+        <ProviderModal
+          route={modal.route}
           initial={
-            drawer.route
-              ? (routes.find((entry) => entry.route === drawer.route)?.profile ?? null)
+            modal.route
+              ? (routes.find((entry) => entry.route === modal.route)?.profile ?? null)
               : null
           }
           revision={settingsView?.revision ?? 0}
           providers={asRecord(settingsView?.value?.providers)}
           credentials={credentials}
           notify={notify}
-          onClose={() => setDrawer(null)}
+          onClose={() => setModal(null)}
           onSaved={reloadAll}
         />
       )}

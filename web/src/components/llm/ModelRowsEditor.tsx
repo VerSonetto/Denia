@@ -1,5 +1,5 @@
 /**
- * 提供方抽屉里的模型行编辑器:ID/名称/上下文窗口/识图/思考/强度档位。
+ * 提供方弹窗里的模型行编辑器:ID/名称/上下文窗口/识图/思考/强度档位。
  * 行数少(个位数量级),直接受控渲染;批量目录展示走 ModelsPanel 的窗口化列表。
  */
 
@@ -126,7 +126,7 @@ export function ModelRowsEditor({
 
       <div className={styles.rows}>
         {models.length === 0 && (
-          <p className={styles.empty}>{t('llm.models.emptyDrawer')}</p>
+          <p className={styles.empty}>{t('llm.models.emptyEditor')}</p>
         )}
         {models.map((entry, index) => (
           <div key={index} className={styles.row}>

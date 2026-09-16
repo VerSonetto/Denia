@@ -1,8 +1,8 @@
 /**
- * 提供方编辑抽屉:
+ * 提供方编辑弹窗(居中模态):
  * - 新增走两步:网关 → 密钥(+模型);步骤间做就地校验(fail loud)。
  * - 编辑平铺三段,路由 ID 锁死。
- * Esc 关抽屉(拦截冒泡,不连设置弹窗一起关);Cmd/Ctrl+Enter 提交。
+ * Esc 关弹窗(拦截冒泡,不连设置弹窗一起关);Cmd/Ctrl+Enter 提交。
  */
 
 import { useCallback, useEffect, useRef, useState } from 'react'
@@ -18,7 +18,7 @@ import { Badge, Button, ChipRadio, Field, NumberInput, TextInput } from './atoms
 import { ModelRowsEditor } from './ModelRowsEditor'
 import type { Notify } from '../../App'
 import type { CredentialInfo, OpenAiProfile, WireProtocol } from '../../types'
-import styles from './ProviderDrawer.module.css'
+import styles from './ProviderModal.module.css'
 
 const OPENAI_NS = 'llm-openai'
 
@@ -41,7 +41,7 @@ interface FormErrors {
   headers?: string
 }
 
-export function ProviderDrawer({
+export function ProviderModal({
   route,
   initial,
   revision,
@@ -81,7 +81,7 @@ export function ProviderDrawer({
   const [errors, setErrors] = useState<FormErrors>({})
   const [busy, setBusy] = useState(false)
   const keyValueRef = useRef<HTMLInputElement | null>(null)
-  const drawerRef = useRef<HTMLDivElement | null>(null)
+  const panelRef = useRef<HTMLDivElement | null>(null)
 
   // 密钥引用不暴露给用户:编辑沿用已存引用(不丢已配密钥),新增按路由派生。
   const effectiveKeyRef = initial?.apiKeyEnv ?? (routeId.trim() ? deriveKeyRef(routeId.trim()) : '')
@@ -245,7 +245,7 @@ export function ProviderDrawer({
     setStep(1)
   }
 
-  /* ---- 键盘:Esc 关抽屉(preventDefault 阻断弹窗同关);Cmd/Ctrl+Enter 推进/提交 ---- */
+  /* ---- 键盘:Esc 关弹窗(preventDefault 阻断设置弹窗同关);Cmd/Ctrl+Enter 推进/提交 ---- */
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -290,21 +290,21 @@ export function ProviderDrawer({
     <div className={styles.overlay}>
       <div className={styles.backdrop} onClick={onClose} aria-hidden="true" />
       <div
-        ref={drawerRef}
-        className={styles.drawer}
+        ref={panelRef}
+        className={styles.panel}
         role="dialog"
         aria-modal="true"
-        aria-label={isNew ? t('llm.drawer.new') : t('llm.drawer.edit')}
+        aria-label={isNew ? t('llm.modal.new') : t('llm.modal.edit')}
       >
         <header className={styles.head}>
-          <h3>{isNew ? t('llm.drawer.new') : t('llm.drawer.edit')}</h3>
+          <h3>{isNew ? t('llm.modal.new') : t('llm.modal.edit')}</h3>
           <button type="button" className={styles.close} onClick={onClose} aria-label={t('close')}>
             ✕
           </button>
         </header>
 
         {isNew && (
-          <nav className={styles.steps} aria-label={t('llm.drawer.new')}>
+          <nav className={styles.steps} aria-label={t('llm.modal.new')}>
             {stepItems.map((item) => (
               <button
                 key={item.id}
@@ -414,7 +414,7 @@ export function ProviderDrawer({
               {isNew && step === 1 && (
                 <div className={styles.footRow}>
                   <Button variant="primary" onClick={goNext}>
-                    {t('llm.drawer.next')}
+                    {t('llm.modal.next')}
                   </Button>
                 </div>
               )}
@@ -473,7 +473,7 @@ export function ProviderDrawer({
               </section>
               {isNew && step === 2 && (
                 <div className={styles.footRow}>
-                  <Button onClick={goBack}>{t('llm.drawer.back')}</Button>
+                  <Button onClick={goBack}>{t('llm.modal.back')}</Button>
                 </div>
               )}
             </>

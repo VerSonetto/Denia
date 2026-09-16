@@ -1,45 +1,52 @@
-/* 提供方抽屉:设置弹窗之上的右侧滑出层;宽 <768 时占满整屏。 */
+/* 提供方编辑弹窗:设置弹窗之上的居中模态层;宽 <768 时占满整屏。 */
 
 .overlay {
   position: fixed;
   inset: 0;
   z-index: 70;
   display: flex;
-  justify-content: flex-end;
+  align-items: center;
+  justify-content: center;
+  padding: 28px 20px;
 }
 
 .backdrop {
   position: absolute;
   inset: 0;
   background: rgba(0, 0, 0, 0.32);
+  backdrop-filter: blur(2px);
 }
 
-.drawer {
+.panel {
   position: relative;
   z-index: 1;
-  width: min(600px, 100vw);
-  height: 100%;
+  width: min(640px, 100%);
+  /* 面板永远不超出可视区:超出交给 .body 自己滚,而不是把顶部顶出屏幕
+     (flex 居中 + 超高内容会从上下两端一起溢出,顶部就再也够不到了)。 */
+  max-height: 100%;
   display: flex;
   flex-direction: column;
   background: var(--bg-layer-1);
-  border-left: 1px solid var(--border-l2);
+  border: 1px solid var(--border-l2);
+  border-radius: 18px;
+  overflow: hidden;
   box-shadow: var(--shadow-float);
-  animation: drawer-in 0.2s var(--ease);
+  animation: panel-in 0.18s var(--ease);
 }
 
-@keyframes drawer-in {
+@keyframes panel-in {
   from {
-    transform: translateX(24px);
+    transform: translateY(8px) scale(0.99);
     opacity: 0;
   }
   to {
-    transform: translateX(0);
+    transform: none;
     opacity: 1;
   }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .drawer {
+  .panel {
     animation: none;
   }
 }
@@ -332,9 +339,16 @@
 }
 
 @media (max-width: 767px) {
-  .drawer {
-    width: 100vw;
-    border-left: none;
+  .overlay {
+    padding: 0;
+  }
+
+  .panel {
+    width: 100%;
+    height: 100%;
+    max-height: none;
+    border: none;
+    border-radius: 0;
   }
 
   .gridTwo {

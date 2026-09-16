@@ -1,6 +1,6 @@
 /**
  * 供应商子页:网关卡片列表 + 空态插画 + 删除确认。
- * 卡片是 memo 叶子;编辑抽屉由 LlmPanel 统一挂载,这里只发触发。
+ * 卡片是 memo 叶子;编辑弹窗由 LlmPanel 统一挂载,这里只发触发。
  */
 
 import { memo, useState } from 'react'
