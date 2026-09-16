@@ -94,6 +94,10 @@ async fn delete_workspace(
             Err(error) => return Err(ApiError::from_session(error)),
         }
         state.live.remove(session_id);
+        // 按会话累积的辅助内存态一并回收:文件历史快照链与读取状态表。
+        // 不回收的话它们只增不减,长期运行下每个用过的会话都留一份。
+        state.file_history.forget(session_id);
+        state.driver.clear_read_state(session_id);
         // 会话附件目录一并回收(粘贴图片每次落盘一张,不清即只增不减)。
         if let Err(error) = crate::api::uploads::remove_session_uploads(&state.home, session_id) {
             tracing::warn!(session_id = %session_id, error = %error, "会话附件目录清理失败");

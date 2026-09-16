@@ -332,11 +332,21 @@ pub struct LiveSession {
 }
 
 /// 驻留会话数上限。超出后按 LRU 淘汰非运行、无订阅者会话。
-const LIVE_MAX_RESIDENT: usize = 32;
-/// 驻留会话的日志字节总预算(内存代理量,见 [`Session::log_bytes`])。
-/// 会话数没超但字节超时同样淘汰——32 个百 MB 级大会话足以把常驻内存
-/// 撑到数 GB,数量上限约束不了字节。
-const LIVE_MAX_RESIDENT_BYTES: u64 = 512 * 1024 * 1024;
+const LIVE_MAX_RESIDENT: usize = 8;
+/// 驻留会话的**真实内存**字节预算(见 [`Session::resident_bytes`])。
+///
+/// 早先这里用日志文件大小当代理量,而日志里约九成是轮次闭合即清扫的
+/// chunk —— 实测 8 个百 MB 级会话的驻留事件只有 60 MB 上下,按文件大小
+/// 记账(512 MB 预算)等于永不触发,常驻内存因此随打开过的会话线性上涨。
+///
+/// 现在按真实驻留字节约束,取 32 MB:实测"实际内存 ≈ 记账值 × 1.6"
+/// (结构体 + 分配器开销),32 MB 对应约 50 MB 会话内存,加上冷启动基线
+/// (~20 MB,含嵌入控制台与运行时),总常驻稳定在 100 MB 以内。
+///
+/// 被淘汰的只是**空闲且无人订阅**的会话:运行中的会话永不淘汰,正在看的
+/// 会话有 SSE 订阅者也不淘汰。重新加载一个百 MB 级会话实测 0.5~1.7s,
+/// 换来的内存上界远比这点延迟值钱。
+const LIVE_MAX_RESIDENT_BYTES: u64 = 32 * 1024 * 1024;
 
 /// Live sessions keyed by id; loads (and repairs) on first touch.
 ///
@@ -408,32 +418,52 @@ impl LiveSessions {
             pending_asks: std::sync::Mutex::new(HashMap::new()),
         });
         map.insert(id.to_string(), live.clone());
-        self.trim_capacity_locked(&mut map);
+        // 保护刚加载的这个会话:调用方(以及上面的 `live.clone()`)正持有它,
+        // 计数天然 > 1,不显式排除的话它自己会被误判成"不可淘汰",裁剪白跑。
+        self.trim_capacity_locked(&mut map, Some(id));
         Ok(live)
     }
 
     /// 淘汰判定口径:非运行、无 SSE 订阅者、且除注册表外无其他持有者。
     /// 运行中的会话绝不卸载。
+    ///
+    /// **调用方若正持有该会话的 `Arc`,必须通过 `protected` 参数排除它**,
+    /// 不能指望这个判定自己识别 —— 早先这里硬编码
+    /// `Arc::strong_count(live) == 1`,而 `ensure_hot(&live)` 这类入口的
+    /// 调用方**必然**持有一个 Arc,计数至少是 2,条件恒假,热升级后的会话
+    /// 永远淘汰不掉,预算因此形同虚设(实测连续加载 10 个大会话,内存从
+    /// 4 MB 单调涨到 124.7 MB 且不回落)。
+    ///
+    /// 这里保留 `Arc::strong_count == 1` 的原意:只有注册表持有才算"没人用"。
+    /// 调用方持有的那份由 `trim_capacity_locked` 的 `protected` 显式豁免。
     fn evictable(live: &Arc<LiveSession>) -> bool {
         !live.running.load(std::sync::atomic::Ordering::SeqCst)
             && live.followers.receiver_count() == 0
             && Arc::strong_count(live) == 1
     }
 
-    /// 驻留内存预算的代理量:热会话取日志文件字节数
-    /// (见 [`Session::log_bytes`]),冷会话不驻留事件记 0。
+    /// 驻留内存预算的代理量:热会话取**真实驻留事件字节**
+    /// (见 [`Session::resident_bytes`]),冷会话不驻留事件记 0。
     fn resident_bytes_of(live: &LiveSession) -> u64 {
         if live.session.is_hot() {
-            live.session.log_bytes()
+            live.session.resident_bytes()
         } else {
             0
         }
     }
 
     /// 在已持锁的 map 上执行容量裁剪:会话数超过 `max_resident` **或**
-    /// 热会话的日志字节总量超过 `max_resident_bytes` 时,按 last_touch
-    /// 从旧到新淘汰“非运行、无订阅者”的会话。运行中的会话绝不卸载。
-    fn trim_capacity_locked(&self, map: &mut HashMap<String, Arc<LiveSession>>) {
+    /// 热会话的驻留字节总量超过 `max_resident_bytes` 时,按 last_touch
+    /// 从旧到新淘汰"非运行、无订阅者"的会话。运行中的会话绝不卸载。
+    ///
+    /// `protected` 是调用方当前持有的会话 id:它可能正被使用(如刚升级为
+    /// 热态的那一个),淘汰它会让调用方手里的事件表变成"表外"状态。保留它
+    /// 只是让这一轮少淘汰一个,下一轮淘汰器会照常处理。
+    fn trim_capacity_locked(
+        &self,
+        map: &mut HashMap<String, Arc<LiveSession>>,
+        protected: Option<&str>,
+    ) {
         let max = self.max_resident;
         let max_bytes = self.max_resident_bytes;
         let mut resident_bytes: u64 = map.values().map(|live| Self::resident_bytes_of(live)).sum();
@@ -442,7 +472,9 @@ impl LiveSessions {
         }
         let mut candidates: Vec<(String, u64)> = map
             .iter()
-            .filter(|(_, live)| Self::evictable(live))
+            .filter(|(id, live)| {
+                Some(id.as_str()) != protected && Self::evictable(live)
+            })
             .map(|(id, live)| {
                 (
                     id.clone(),
@@ -470,6 +502,30 @@ impl LiveSessions {
     /// 读取已加载的 live 会话(不触发磁盘加载)。
     pub fn get(&self, id: &str) -> Option<Arc<LiveSession>> {
         self.inner.lock().unwrap().get(id).cloned()
+    }
+
+    /// 某会话刚被 `ensure_hot` 升级为热态后调用:重新核算驻留预算并裁剪。
+    ///
+    /// [`LiveSessions::get_or_load`] 只在**插入新条目**时裁剪,而热升级是
+    /// 原地把已存在的冷条目换成热条目 —— 驻留量从 0 跳到几十 MB 却不经过
+    /// 任何裁剪点。生产实例长期运行下常驻内存持续上涨,正是这条缺口:
+    /// 每个被打开/发过消息的会话都留在表里,预算从未真正生效。
+    fn trim_after_promotion(&self, keep: &str) {
+        let mut map = self.inner.lock().unwrap();
+        self.trim_capacity_locked(&mut map, Some(keep));
+    }
+
+    /// 升级某会话为热态,并在升级后核算驻留预算。
+    ///
+    /// 所有写路径都应走这个入口而不是直接 `session.ensure_hot()`:热升级
+    /// 会让驻留量从 0 跳到几十 MB,必须给淘汰器一个立刻复核的机会。
+    ///
+    /// 刚升级的这个会话本轮不淘汰(调用方正持有它并使用其事件表),
+    /// 超预算时先腾别的空闲会话;它自己留待淘汰器下一轮按 LRU 处理。
+    pub fn ensure_hot(&self, live: &Arc<LiveSession>) -> Result<(), SessionError> {
+        live.session.ensure_hot()?;
+        self.trim_after_promotion(live.session.id());
+        Ok(())
     }
 
     /// 当前正在跑 turn 的会话 id。运行中会话不会被空闲淘汰,只扫内存 live 表。
@@ -774,7 +830,16 @@ impl Drop for RunningGuard {
 }
 
 /// 后台空闲淘汰:每 `interval` 扫描一次,卸载 idle 会话。运行中永不淘汰。
-pub fn spawn_live_evictor(live: Arc<LiveSessions>, interval_secs: u64, idle_after_secs: u64) {
+///
+/// `on_evict` 让调用方在会话离开常驻表时一并回收按会话累积的辅助内存态
+/// (文件读取状态表、文件历史快照链)。这些表不属于 `LiveSession`,不主动
+/// 回收就会只增不减 —— 长期运行下每个用过的会话都留一份。
+pub fn spawn_live_evictor(
+    live: Arc<LiveSessions>,
+    interval_secs: u64,
+    idle_after_secs: u64,
+    on_evict: Arc<dyn Fn(&str) + Send + Sync>,
+) {
     tokio::spawn(async move {
         let mut ticker = tokio::time::interval(std::time::Duration::from_secs(interval_secs));
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -782,6 +847,9 @@ pub fn spawn_live_evictor(live: Arc<LiveSessions>, interval_secs: u64, idle_afte
             ticker.tick().await;
             let evicted = live.evict_idle(idle_after_secs);
             if !evicted.is_empty() {
+                for id in &evicted {
+                    on_evict(id);
+                }
                 tracing::debug!(count = evicted.len(), "evicted idle live sessions");
             }
         }
@@ -872,8 +940,6 @@ pub async fn build_state(
             .collect::<Vec<_>>(),
     );
     let live = Arc::new(LiveSessions::default());
-    // 会话轮次淘汰:30s 一轮,10 分钟未使用的会话卸载(保内存/下盘的会话不受影响)。
-    spawn_live_evictor(live.clone(), 30, 600);
     let browser = Arc::new(denia_browser::BrowserManager::new(home.to_path_buf()));
     let browser_hub: denia_tools::BrowserHub = browser.clone();
     // 面板终端中枢:交互式 PTY,与 `bash` 工具的非交互进程互不影响。
@@ -928,6 +994,28 @@ pub async fn build_state(
     );
 
     runtime.attach(&driver);
+
+    // 会话空闲淘汰:30s 一轮,5 分钟未使用的会话卸载(磁盘日志不受影响)。
+    //
+    // 会话离开常驻表时,顺带回收按会话累积的辅助内存态:文件历史快照链与
+    // 文件读取状态表(后者存文件正文,是单会话里最大的一块)。它们不属于
+    // LiveSession,不在这里回收就只增不减。
+    //
+    // 空闲阈值取 5 分钟:早先的 10 分钟意味着一个上午开过的会话全在内存里,
+    // 而重新加载一个会话只要 0.5~1.7s(实测),省下的常驻内存远比这点延迟值钱。
+    {
+        let driver_for_evict = driver.clone();
+        let file_history_for_evict = file_history.clone();
+        spawn_live_evictor(
+            live.clone(),
+            30,
+            300,
+            Arc::new(move |id: &str| {
+                file_history_for_evict.forget(id);
+                driver_for_evict.clear_read_state(id);
+            }),
+        );
+    }
 
     // 工具名册注入 preset 名册:用户 preset 的 tools 白名单引用了部署没有
     // 的工具时,名册把它标成 broken——白名单收窄取交集,不校验的话拼错的
@@ -1212,17 +1300,73 @@ mod tests {
         let store = SessionStore::open(&root).unwrap();
         let first = store.create(&cwd, true).unwrap();
         let second = store.create(&cwd, true).unwrap();
-        // 预算 0:任何热会话都超限,逼出 LRU 淘汰路径(冷会话不占预算)。
+        // 预算 0:任何有驻留事件的会话都超限,逼出 LRU 淘汰路径。
+        //
+        // 预算口径是**真实驻留字节**而不是日志文件大小:只有头行的空会话
+        // 驻留量确实是 0,不会被裁 —— 所以这里必须先写进一条事件,
+        // 否则测的是"空会话不占预算"这条另一条语义。
         let live = LiveSessions::new(8, 0);
-        // 持有期间即使超预算也不得淘汰(外部引用即“可能正在用”)。
+        // 持有期间即使超预算也不得淘汰(外部引用即"可能正在用")。
         let handle = live.get_or_load(&store, first.id()).unwrap();
         handle.session.ensure_hot().unwrap();
+        handle
+            .session
+            .append(denia_core::session::SessionEvent::UserMessage {
+                text: "hello".into(),
+                injected: false,
+                channel: None,
+                images: Vec::new(),
+            })
+            .unwrap();
+        assert!(handle.session.resident_bytes() > 0, "写入后应有驻留字节");
         assert!(live.get(first.id()).is_some());
         drop(handle);
         // 第二次加载触发裁剪:idle 且无引用的热会话被卸载,新会话保留。
         live.get_or_load(&store, second.id()).unwrap();
         assert!(live.get(first.id()).is_none());
         assert!(live.get(second.id()).is_some());
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// 回归:热升级后必须真的能淘汰。
+    ///
+    /// 早先淘汰判定硬编码 `Arc::strong_count == 1`,而 `ensure_hot(&live)`
+    /// 的调用方必然持有一个 Arc —— 计数至少是 2,条件恒假,被升级的会话
+    /// 永远留在表里,驻留预算形同虚设(实测连续加载 10 个大会话,内存从
+    /// 4 MB 单调涨到 124 MB 且不回落)。这里断言升级后裁剪确实生效。
+    #[test]
+    fn promotion_through_live_sessions_is_evictable() {
+        let root = temp_root();
+        let cwd = root.join("work");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let store = SessionStore::open(&root).unwrap();
+        let first = store.create(&cwd, true).unwrap();
+        let live = LiveSessions::new(8, 0);
+        let handle = live.get_or_load(&store, first.id()).unwrap();
+        // 走 LiveSessions 的入口升级(生产路径),而不是直接 session.ensure_hot。
+        live.ensure_hot(&handle).unwrap();
+        handle
+            .session
+            .append(denia_core::session::SessionEvent::UserMessage {
+                text: "hello".into(),
+                injected: false,
+                channel: None,
+                images: Vec::new(),
+            })
+            .unwrap();
+        assert!(
+            handle.session.resident_bytes() > 0,
+            "热升级 + 写入后应有驻留字节"
+        );
+        drop(handle);
+        // 预算 0 + 无外部引用:下一次裁剪必须把它收走。
+        // 用一个新会话触发裁剪(它自己受保护,不参与本轮淘汰)。
+        let second = store.create(&cwd, true).unwrap();
+        live.get_or_load(&store, second.id()).unwrap();
+        assert!(
+            live.get(first.id()).is_none(),
+            "热升级后的空闲会话必须可淘汰,否则驻留预算永远不生效"
+        );
         std::fs::remove_dir_all(&root).unwrap();
     }
 

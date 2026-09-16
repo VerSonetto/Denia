@@ -35,8 +35,11 @@ async fn ensure(state: &AppState, id: &str) -> Result<Arc<crate::state::LiveSess
         .map_err(|e| error(e.to_string()))?
         .map_err(ApiError::from_session)?;
     // runtime 操作(派生代理/收发指令)是参与路径:事件必须驻留。
-    live.session
-        .ensure_hot()
+    // 走 LiveSessions 的入口而非直接 session.ensure_hot:热升级会让驻留量
+    // 从 0 跳到几十 MB,必须立刻复核预算(见 `LiveSessions::ensure_hot`)。
+    state
+        .live
+        .ensure_hot(&live)
         .map_err(ApiError::from_session)?;
     Ok(live)
 }

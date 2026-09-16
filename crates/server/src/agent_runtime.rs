@@ -337,16 +337,23 @@ impl Runtime {
     async fn live(&self, id: &str) -> Result<Arc<crate::state::LiveSession>, String> {
         let inner = self.inner.clone();
         let id = id.to_string();
-        let live = tokio::task::spawn_blocking(move || {
-            inner
-                .live
-                .get_or_load(&inner.sessions, &id)
-                .map_err(|e| e.to_string())
+        let live = tokio::task::spawn_blocking({
+            let inner = inner.clone();
+            move || {
+                inner
+                    .live
+                    .get_or_load(&inner.sessions, &id)
+                    .map_err(|e| e.to_string())
+            }
         })
         .await
         .map_err(|e| e.to_string())??;
         // 运行时参与路径(派生子代理/投递指令/收件箱同步)需要事件驻留。
-        live.session.ensure_hot().map_err(|e| e.to_string())?;
+        // 走 LiveSessions 的入口:热升级后立刻复核驻留预算。
+        inner
+            .live
+            .ensure_hot(&live)
+            .map_err(|e| e.to_string())?;
         Ok(live)
     }
     fn sync_inbox(inbox: &mut Inbox, session: &denia_session::Session) {

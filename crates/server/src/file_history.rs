@@ -169,6 +169,18 @@ impl FileHistoryStore {
         self.get_or_create(session_id, cwd)
     }
 
+    /// 丢弃某会话的内存态(会话被删除时调用)。
+    ///
+    /// 表按会话 id 累积且此前没有回收点:长期运行下"用过的每个会话"都会
+    /// 留下一份快照链(实测单会话可达上百 KB 的 snapshots),常驻内存只增
+    /// 不减。磁盘上的备份与快照文件不动 —— 删除会话的目录回收由调用方负责。
+    pub fn forget(&self, session_id: &str) {
+        self.sessions
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .remove(session_id);
+    }
+
     /// 用户消息落库后调用:开启一个新快照。
     pub async fn snapshot(
         &self,

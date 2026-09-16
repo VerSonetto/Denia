@@ -417,8 +417,9 @@ async fn prompt_session(
         .live
         .get_or_load(&state.sessions, &id)
         .map_err(ApiError::from_session)?;
-    live.session
-        .ensure_hot()
+    state
+        .live
+        .ensure_hot(&live)
         .map_err(ApiError::from_session)?;
     if live.session.header().subagent.is_some() {
         return Err(ApiError::bad_request(
@@ -760,8 +761,9 @@ async fn set_session_permission(
         .live
         .get_or_load(&state.sessions, &id)
         .map_err(ApiError::from_session)?;
-    live.session
-        .ensure_hot()
+    state
+        .live
+        .ensure_hot(&live)
         .map_err(ApiError::from_session)?;
     let envelope = live
         .session
@@ -796,8 +798,9 @@ async fn set_session_agent_preset(
         .live
         .get_or_load(&state.sessions, &id)
         .map_err(ApiError::from_session)?;
-    live.session
-        .ensure_hot()
+    state
+        .live
+        .ensure_hot(&live)
         .map_err(ApiError::from_session)?;
     if session_has_output(&live.session) {
         return Err(ApiError::new(
@@ -1023,8 +1026,9 @@ async fn fork_session(
         .live
         .get_or_load(&state.sessions, &id)
         .map_err(ApiError::from_session)?;
-    live.session
-        .ensure_hot()
+    state
+        .live
+        .ensure_hot(&live)
         .map_err(ApiError::from_session)?;
     if live.running.load(Ordering::SeqCst) {
         return Err(ApiError::new(
@@ -1166,8 +1170,9 @@ async fn rewind_session(
         .live
         .get_or_load(&state.sessions, &id)
         .map_err(ApiError::from_session)?;
-    live.session
-        .ensure_hot()
+    state
+        .live
+        .ensure_hot(&live)
         .map_err(ApiError::from_session)?;
     if live.running.load(Ordering::SeqCst) {
         return Err(ApiError::new(
@@ -1255,8 +1260,9 @@ async fn compact_session(
         .live
         .get_or_load(&state.sessions, &id)
         .map_err(ApiError::from_session)?;
-    live.session
-        .ensure_hot()
+    state
+        .live
+        .ensure_hot(&live)
         .map_err(ApiError::from_session)?;
     if live
         .running

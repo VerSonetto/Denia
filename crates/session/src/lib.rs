@@ -153,6 +153,14 @@ struct SessionInner {
     cold: bool,
     /// 日志中最大的事件 seq(冷热态都维护);冷态快速判断回放区间用。
     last_seq: u64,
+    /// 驻留事件的内存字节估算(逐行累计 append 写入的字节数)。
+    ///
+    /// 与 [`Session::log_bytes`](磁盘文件大小)是两回事:轮次闭合时 chunk
+    /// 即被清扫,该值随之回落。驻留预算必须用它 —— 日志里八九成是已清扫的
+    /// chunk,拿文件大小当代理量会把成本高估近十倍,预算形同虚设。
+    resident_bytes: u64,
+    /// 其中属于 transient(chunk)的部分;`turn-end` 清扫时按此扣减。
+    transient_bytes: u64,
 }
 
 /// One live session: header, in-memory log, and its append handle. The log is
@@ -228,6 +236,8 @@ impl Session {
                     log_revision: 0,
                     cold: false,
                     last_seq: 0,
+                    resident_bytes: 0,
+                    transient_bytes: 0,
                 }),
             });
         }
@@ -302,6 +312,9 @@ impl Session {
         let mut meter = ContextMeter::new();
         let mut pending_turn: Vec<SessionEnvelope> = Vec::new();
         let mut last_seq = 0u64;
+        // 驻留事件的内存近似:逐行累计(chunk 只在打开的轮次里驻留,
+        // 加载时日志里的旧 chunk 一律不进内存,故此处只记非 chunk 行)。
+        let mut resident_bytes = 0u64;
         loop {
             raw.clear();
             let read = reader.read_line(&mut raw)?;
@@ -347,7 +360,8 @@ impl Session {
                         goal = apply_goal_op(goal, op, envelope.time, meter.turn_usage().total());
                     }
                     if retain && !transient {
-                        events.push(envelope)
+                        events.push(envelope);
+                        resident_bytes += read as u64;
                     }
                 }
                 Err(_) => {
@@ -392,6 +406,9 @@ impl Session {
             log_revision: 0,
             cold: !retain,
             last_seq,
+            // 热态的事件内存近似 = 驻留各行的字节之和(与 append 同口径)。
+            resident_bytes,
+            transient_bytes: 0,
         };
         Ok((header, inner))
     }
@@ -506,8 +523,23 @@ impl Session {
     ///
     /// 用磁盘日志体积作驻留内存的代理量做预算控制,避免为记账而遍历
     /// 全部事件;内存实际占用约为该值的 1.5~2.5 倍(结构体 + 分配器开销)。
+    ///
+    /// **注意**:这个值含已闭合轮次的 chunk(它们落盘后即从内存清扫),
+    /// 与真实驻留量能差近十倍。做内存预算请用 [`Session::resident_bytes`]。
     pub fn log_bytes(&self) -> u64 {
         std::fs::metadata(&self.file).map(|m| m.len()).unwrap_or(0)
+    }
+
+    /// 驻留事件的内存字节估算(O(1))。
+    ///
+    /// 逐行累计 append 写入的字节数,`turn-end` 清扫 chunk 时同步扣减,
+    /// 因此只反映"此刻真占着内存的事件"。冷会话恒为 0。
+    /// 内存实际占用约为该值的 1.5~2.5 倍(结构体 + 分配器开销)。
+    pub fn resident_bytes(&self) -> u64 {
+        self.inner
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .resident_bytes
     }
 
     pub fn file(&self) -> &Path {
@@ -631,9 +663,17 @@ impl Session {
         }
         // chunk 驻留到轮次闭合:打开轮次的实时回放需要它(刷新页面恢复
         // 流式视图);turn-end 落盘即清扫,闭环轮次只留结算消息。
+        let line_bytes = line.len() as u64 + 1;
         inner.events.push(envelope.clone());
+        inner.resident_bytes += line_bytes;
+        if transient {
+            inner.transient_bytes += line_bytes;
+        }
         if matches!(&envelope.event, SessionEvent::TurnEnd { .. }) {
             inner.events.retain(|item| !is_transient_event(&item.event));
+            // 清扫的正是本轮的 chunk,按记账扣减(饱和,防历史回退遗留的偏差)。
+            inner.resident_bytes = inner.resident_bytes.saturating_sub(inner.transient_bytes);
+            inner.transient_bytes = 0;
         }
         // 日志变了:派生面缓存失效,版本号自增(回退截断也走这里)。
         inner.derived_surface = None;
@@ -703,6 +743,20 @@ impl Session {
         inner.events.truncate(target_idx);
         inner.offsets.truncate(target_idx);
         inner.next_offset = truncate_offset;
+        // 驻留字节随截断重算:offsets 只登记非 chunk 事件的行尾偏移,
+        // 差值即这些事件在内存里的近似体积。chunk 在轮次闭合时已清扫,
+        // 被截断的区间里也不含驻留的 chunk,因此这里不需要 transient 账。
+        inner.resident_bytes = if target_idx == 0 {
+            0
+        } else {
+            inner
+                .offsets
+                .get(target_idx - 1)
+                .copied()
+                .unwrap_or(0)
+                .saturating_sub(inner.base_offset)
+        };
+        inner.transient_bytes = 0;
         // 派生面缓存随截断作废(版本号自增,即使截断后长度恰好等于某个
         // 旧缓存时的长度,也不会误命中)。
         inner.derived_surface = None;
