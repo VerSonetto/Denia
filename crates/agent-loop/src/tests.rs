@@ -1750,6 +1750,183 @@ async fn feedback_injection_carries_channel() {
     assert!(has_feedback_channel, "feedback injection must carry channel");
 }
 
+fn png_image(n: usize) -> Vec<denia_core::message::ImageData> {
+    (0..n)
+        .map(|i| denia_core::message::ImageData {
+            mime: "image/png".into(),
+            data: format!("AAAA{i}"),
+            path: None,
+        })
+        .collect()
+}
+
+/// 带落盘路径的图片(粘贴图的实际形状)。
+fn png_image_paths(paths: &[&str]) -> Vec<denia_core::message::ImageData> {
+    paths
+        .iter()
+        .map(|p| denia_core::message::ImageData {
+            mime: "image/png".into(),
+            data: "AAAA".into(),
+            path: Some((*p).to_string()),
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn pasted_images_get_text_notice_before_real_message() {
+    // 图片只挂在真实消息的 images 上,模型侧没有对应文本;下游一旦丢弃,
+    // 表现就是"模型不知道有图"。要求:与 file-notice 同构的显式留痕,
+    // 且排在真实用户消息之前(模型先知道有图,再看到提问)。
+    let (driver, _registry) = driver(vec![MockScript::Chunks(text_script("ok"))]);
+    let session = temp_session();
+    driver
+        .run_turn(
+            &session,
+            &selection(),
+            "看得见这图片吗",
+            png_image(2),
+            Vec::new(),
+            Vec::new(),
+            true,
+            CancellationToken::new(),
+            noop_emit(),
+        )
+        .await;
+    let mut notice_seq = None;
+    let mut real: Option<(u64, usize)> = None;
+    for envelope in session.events() {
+        if let SessionEvent::UserMessage {
+            text,
+            injected,
+            channel,
+            images,
+        } = &envelope.event
+        {
+            if *injected && channel.as_deref() == Some("image-notice") {
+                notice_seq = Some(envelope.seq);
+                assert!(
+                    text.contains("2 张图片") && text.contains("PNG×2"),
+                    "通知要给出张数与类型: {text}"
+                );
+                assert!(
+                    text.contains("未收到图片"),
+                    "要指示模型在收不到时明说: {text}"
+                );
+                assert!(images.is_empty(), "通知本身不携带图片");
+            }
+            if !injected {
+                real = Some((envelope.seq, images.len()));
+            }
+        }
+    }
+    let notice = notice_seq.expect("必须有 image-notice 注入");
+    let (real_seq, real_images) = real.expect("真实用户消息必须落库");
+    assert_eq!(real_images, 2, "图片仍随真实消息发送");
+    assert!(notice < real_seq, "通知必须先于真实消息");
+}
+
+#[tokio::test]
+async fn images_without_prompt_text_still_reach_history() {
+    // 只发图不打字:prompt 为空时图片不得整条丢失。
+    let (driver, _registry) = driver(vec![MockScript::Chunks(text_script("ok"))]);
+    let session = temp_session();
+    driver
+        .run_turn(
+            &session,
+            &selection(),
+            "",
+            png_image(1),
+            Vec::new(),
+            Vec::new(),
+            true,
+            CancellationToken::new(),
+            noop_emit(),
+        )
+        .await;
+    let carried = session
+        .events()
+        .iter()
+        .filter(|e| matches!(&e.event, SessionEvent::UserMessage { injected: false, images, .. } if images.len() == 1))
+        .count();
+    assert_eq!(carried, 1, "空文本+一张图仍须落库为真实用户消息");
+    // 且派生历史里图片在场(wire 层据此发 image_url)。
+    let with_images = session
+        .derive_messages()
+        .iter()
+        .filter(|m| !m.images.is_empty())
+        .count();
+    assert_eq!(with_images, 1, "derive_messages 必须带上图片");
+}
+
+#[test]
+fn image_paths_list_renders_only_present_paths() {
+    // 路径是粘贴图落盘后才有;没有路径时不能留下空行或"路径如下"这种废话。
+    assert_eq!(crate::turn::image_paths_list(&png_image(2)), "");
+    let with = png_image_paths(&["C:\\h\\uploads\\s\\pasted-1.png", "C:\\h\\uploads\\s\\pasted-2.png"]);
+    let rendered = crate::turn::image_paths_list(&with);
+    assert!(rendered.contains("pasted-1.png"), "{rendered}");
+    assert!(rendered.contains("pasted-2.png"), "{rendered}");
+    assert_eq!(rendered.matches("\n- ").count(), 2, "每条路径一行");
+}
+
+#[tokio::test]
+async fn image_notice_names_persisted_paths() {
+    // 内联 data URL 被转换层丢弃时,模型要靠通知里的路径 read_file 自救。
+    let (driver, _registry) = driver(vec![MockScript::Chunks(text_script("ok"))]);
+    let session = temp_session();
+    driver
+        .run_turn(
+            &session,
+            &selection(),
+            "看得见这图片吗",
+            png_image_paths(&["C:\\denia\\uploads\\s1\\pasted-1.png"]),
+            Vec::new(),
+            Vec::new(),
+            true,
+            CancellationToken::new(),
+            noop_emit(),
+        )
+        .await;
+    let notice = session
+        .events()
+        .iter()
+        .find_map(|e| match &e.event {
+            SessionEvent::UserMessage {
+                injected: true,
+                channel: Some(channel),
+                text,
+                ..
+            } if channel == "image-notice" => Some(text.clone()),
+            _ => None,
+        })
+        .expect("image-notice 注入必须存在");
+    assert!(
+        notice.contains("pasted-1.png"),
+        "通知要写出落盘路径: {notice}"
+    );
+    assert!(notice.contains("read_file"), "要给出自救指令: {notice}");
+}
+
+#[test]
+fn image_kind_summary_groups_by_mime_in_first_seen_order() {
+    let image = |mime: &str| denia_core::message::ImageData {
+        mime: mime.into(),
+        data: "AAAA".into(),
+        path: None,
+    };
+    let images = vec![
+        image("image/png"),
+        image("image/jpeg"),
+        image("image/png"),
+        image("image/svg+xml"),
+    ];
+    assert_eq!(
+        crate::turn::image_kind_summary(&images),
+        "PNG×2、JPEG、SVG+XML"
+    );
+    assert_eq!(crate::turn::image_kind_summary(&[]), "");
+}
+
 /* ---- 权限策略引擎(四档 × Allow/Ask/Deny)集成测试 ---- */
 
 /// 多工具调用脚本:一次 step 返回若干调用。

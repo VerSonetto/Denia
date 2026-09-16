@@ -31,6 +31,12 @@ pub struct ImageData {
     pub mime: String,
     /// Base64-encoded image bytes (raw, no data-URL prefix).
     pub data: String,
+    /// 落盘后的绝对路径(用户粘贴的图会写进 uploads 目录)。
+    ///
+    /// 与 `data` 互为备份:内联 data URL 是首选视觉通道,路径让模型在收不到
+    /// 图片时仍能用 `read_file` 自己取回内容。不参与 wire 编码。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
 }
 
 /// One wire-adjacent chat message.

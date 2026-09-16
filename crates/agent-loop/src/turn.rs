@@ -361,7 +361,7 @@ pub(crate) async fn run_turn_inner(
     }
 }
 
-/// turn 开始前的输入注入:上传文件通知 → 轨迹引用 → 真实用户消息
+/// turn 开始前的输入注入:上传文件通知 → 轨迹引用 → 图片通知 → 真实用户消息
 /// (文件快照) → turn-start。顺序即模型看到的顺序。
 async fn prepare_turn_input(
     driver: &SessionDriver,
@@ -412,7 +412,35 @@ async fn prepare_turn_input(
             },
         )?;
     }
-    if !prompt.is_empty() {
+    if !images.is_empty() {
+        // 图片通知:与 file-notice 同构的显式留痕。图片只挂在下一条真实用户
+        // 消息的 images 字段上,模型侧没有对应文本;一旦下游(协议转换层、
+        // provider)把图片 part 丢弃,上下文里就只剩用户那句纯文本提问,表现为
+        // "模型不知道有图"且日志里看不出丢过。这条注入让"有几张图"成为文本事实。
+        let kinds = image_kind_summary(&images);
+        // 图片通知:内联 data URL 是首选视觉通道,但转换层/提供方一旦丢弃图片
+        // part,模型上下文里就只剩那句纯文本提问。把落盘路径写成文本事实,
+        // 模型就有 read_file 这条自救路径;都拿不到时才要求它明说,不许猜。
+        let lines = image_paths_list(&images);
+        append(
+            &state.session,
+            &state.emit,
+            SessionEvent::UserMessage {
+                text: format!(
+                    "[harness] 用户上传了 {} 张图片({}),已作为图片附在紧随其后的用户消息中。\
+                     {lines}\n若你在该消息里看不到图片内容,请用 read_file 读取上述路径;仍取不到\
+                     再告知用户\"未收到图片\",不要猜测其内容。",
+                    images.len(),
+                    kinds
+                ),
+                injected: true,
+                channel: Some("image-notice".into()),
+                images: Vec::new(),
+            },
+        )?;
+    }
+    // 只发图不打字时 prompt 为空,但图片仍必须随消息落库(否则整条丢失)。
+    if !prompt.is_empty() || !images.is_empty() {
         let user_envelope = append(
             &state.session,
             &state.emit,
@@ -443,6 +471,62 @@ async fn prepare_turn_input(
         SessionEvent::TurnStart { turn: state.turn },
     )?;
     Ok(())
+}
+
+/// 图片落盘路径清单(`\n- <path>` 形式);一张都没路径时返回空串。
+pub(crate) fn image_paths_list(images: &[denia_core::message::ImageData]) -> String {
+    let paths = images
+        .iter()
+        .filter_map(|image| image.path.as_deref())
+        .map(|path| format!("- {path}"))
+        .collect::<Vec<_>>();
+    if paths.is_empty() {
+        return String::new();
+    }
+    format!("\n已同时保存到本地,路径如下:\n{}\n", paths.join("\n"))
+}
+
+/// 单张图的类型标签:常见 MIME 用惯用名,其余取 `image/` 后缀大写。
+fn image_kind_label(mime: &str) -> String {
+    match mime {
+        "image/png" => "PNG".to_string(),
+        "image/jpeg" => "JPEG".to_string(),
+        "image/gif" => "GIF".to_string(),
+        "image/webp" => "WEBP".to_string(),
+        "image/bmp" => "BMP".to_string(),
+        other => other
+            .strip_prefix("image/")
+            .unwrap_or(other)
+            .to_uppercase(),
+    }
+}
+
+/// 图片类型摘要(按 MIME 归类、保持首现顺序):`PNG×2、JPEG`。
+pub(crate) fn image_kind_summary(images: &[denia_core::message::ImageData]) -> String {
+    let mut labels: Vec<String> = Vec::new();
+    let mut counts: Vec<usize> = Vec::new();
+    for image in images {
+        let label = image_kind_label(&image.mime);
+        match labels.iter().position(|existing| *existing == label) {
+            Some(index) => counts[index] += 1,
+            None => {
+                labels.push(label);
+                counts.push(1);
+            }
+        }
+    }
+    labels
+        .iter()
+        .zip(counts)
+        .map(|(label, count)| {
+            if count > 1 {
+                format!("{label}×{count}")
+            } else {
+                label.clone()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("、")
 }
 
 /// 用户手势:真实用户消息(injected=false,注入文本无法伪造)首行

@@ -520,6 +520,7 @@ mod tests {
                 images: vec![denia_core::message::ImageData {
                     mime: "image/png".into(),
                     data: "AAAA".into(),
+                    path: None,
                 }],
                 channel: None,
             },

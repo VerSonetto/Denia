@@ -877,6 +877,7 @@ mod wire_tests {
                 vec![ImageData {
                     mime: "image/png".to_string(),
                     data: "QUJD".to_string(),
+                    path: None,
                 }],
             )],
             system: None,

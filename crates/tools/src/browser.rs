@@ -179,6 +179,7 @@ fn render_outcome(outcome: CommandOutcome, ctx: &ToolContext, screenshot: bool) 
                             images: vec![ImageData {
                                 mime: image.mime_type.clone(),
                                 data: image.base64.clone(),
+                                path: None,
                             }],
                             channel: None,
                         });

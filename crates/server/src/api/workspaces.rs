@@ -94,6 +94,10 @@ async fn delete_workspace(
             Err(error) => return Err(ApiError::from_session(error)),
         }
         state.live.remove(session_id);
+        // 会话附件目录一并回收(粘贴图片每次落盘一张,不清即只增不减)。
+        if let Err(error) = crate::api::uploads::remove_session_uploads(&state.home, session_id) {
+            tracing::warn!(session_id = %session_id, error = %error, "会话附件目录清理失败");
+        }
     }
 
     // 3) 移除注册表记录本身。

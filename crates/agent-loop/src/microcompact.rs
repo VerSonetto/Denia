@@ -428,6 +428,7 @@ mod tests {
         surface[1].message.images = vec![denia_core::message::ImageData {
             mime: "image/png".into(),
             data: "AAAA".into(),
+            path: None,
         }];
         let cfg = MicrocompactSettings {
             keep_recent_groups: 1,

@@ -275,6 +275,8 @@ impl Tool for ReadFileTool {
                 let image = denia_core::message::ImageData {
                     mime: mime.to_string(),
                     data: b64,
+                    // 这条本来就是从文件读出来的,路径回填后模型无需再猜。
+                    path: Some(path.to_string_lossy().into_owned()),
                 };
                 // 注入视觉输入(下一条模型请求即可见),与 dsh read-image 的语义一致。
                 if let Some(sink) = &ctx.emit_event {

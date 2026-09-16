@@ -1187,6 +1187,7 @@ mod tests {
                     images: vec![crate::message::ImageData {
                         mime: "image/png".into(),
                         data: "AAAA".into(),
+                        path: None,
                     }],
                     channel: None,
                 },
