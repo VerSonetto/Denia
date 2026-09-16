@@ -7,6 +7,7 @@
  */
 
 import { useCallback, useEffect, useState } from 'react'
+import * as api from '../../api'
 import * as remote from '../../remoteApi'
 import { t } from '../../i18n'
 import { subscribeServerEvents } from '../../serverEvents'
@@ -14,7 +15,14 @@ import { IconCheck, IconCopy, IconGlobe, IconTrash } from '../icons'
 import type { RemoteLink, RemoteStatus } from '../../types'
 import styles from './RemoteAccessSettings.module.css'
 
+/** 远程命名空间:隧道传输协议要从这里读写(`/api/settings/remote`)。 */
+const REMOTE_NS = 'remote'
+type TunnelProtocol = 'quic' | 'http2'
+
 type Notify = (kind: 'ok' | 'err', text: string) => void
+
+/** 二维码位图的物理边长(像素)。显示尺寸由 CSS 控制,这里只保证够清晰。 */
+const QR_PX = 504
 
 /** 剩余有效期的人读文本。 */
 function expiresText(at: number, now: number): string {
@@ -24,8 +32,11 @@ function expiresText(at: number, now: number): string {
   return t('remoteTicketLeftMinutes', { m: Math.round(seconds / 60) })
 }
 
-/** 二维码:优先内联 SVG(矢量、缩放不糊);PNG 走 Canvas 供长按保存。 */
-function QrCode({ link, size = 220 }: { link: RemoteLink; size?: number }) {
+/** 二维码:PNG 走 Canvas(手机端"长按保存到相册"要真图),内联 SVG 兜底。
+ *
+ * 尺寸完全交给 CSS(`.qr` 的 clamp)——这里不写内联宽高:内联样式优先级高于
+ * 样式表,一写就把"按容器收缩"锁死,长 URL 随之被挤成溢出。 */
+function QrCode({ link }: { link: RemoteLink }) {
   const [pngUrl, setPngUrl] = useState<string | null>(null)
 
   useEffect(() => {
@@ -33,11 +44,11 @@ function QrCode({ link, size = 220 }: { link: RemoteLink; size?: number }) {
       setPngUrl(null)
       return
     }
-    // 模块矩阵 → Canvas → dataURL。手机端"长按图片保存到相册"需要真图,
-    // 内联 SVG 在某些移动浏览器上长按不出保存菜单。
+    // 模块矩阵 → Canvas → dataURL。分辨率按模块数放大到 ~500px 物理像素:
+    // 显示宽度由 CSS 决定,手机屏幕上 220px 的图被拉伸就会糊到扫不出来。
     const quiet = 4
     const total = link.qrWidth + quiet * 2
-    const scale = Math.max(2, Math.round(size / total))
+    const scale = Math.max(2, Math.round(QR_PX / total))
     const canvas = document.createElement('canvas')
     canvas.width = total * scale
     canvas.height = total * scale
@@ -58,16 +69,23 @@ function QrCode({ link, size = 220 }: { link: RemoteLink; size?: number }) {
       }
     }
     setPngUrl(canvas.toDataURL('image/png'))
-  }, [link.qrModules, link.qrWidth, size])
+  }, [link.qrModules, link.qrWidth])
 
   if (pngUrl) {
-    return <img className={styles.qr} src={pngUrl} alt={t('remoteQrAlt')} width={size} height={size} />
+    return (
+      <img
+        className={styles.qr}
+        src={pngUrl}
+        alt={t('remoteQrAlt')}
+        width={QR_PX}
+        height={QR_PX}
+      />
+    )
   }
   if (link.qrSvg) {
     return (
       <span
         className={styles.qr}
-        style={{ width: size, height: size }}
         // 二维码来自本机后端、由固定模板生成,不含外部输入拼接的标签。
         dangerouslySetInnerHTML={{ __html: link.qrSvg }}
       />
@@ -81,6 +99,9 @@ export function RemoteAccessSettings({ notify }: { notify: Notify }) {
   const [busy, setBusy] = useState(false)
   const [copied, setCopied] = useState(false)
   const [now, setNow] = useState(() => Date.now())
+  // 隧道传输协议:存在 remote 命名空间里(cloudflared --protocol)。
+  const [protocol, setProtocol] = useState<TunnelProtocol>('quic')
+  const [revision, setRevision] = useState(0)
 
   const load = useCallback(async () => {
     try {
@@ -93,6 +114,43 @@ export function RemoteAccessSettings({ notify }: { notify: Notify }) {
   useEffect(() => {
     void load()
   }, [load])
+
+  // 读一次配置命名空间:协议是持久配置,不随 remote-updated 变,单独取。
+  useEffect(() => {
+    let disposed = false
+    void api
+      .getSettings()
+      .then((describe) => {
+        const ns = describe.namespaces.find((item) => item.ns === REMOTE_NS)
+        if (!ns || disposed) return
+        const tunnel = (ns.value as { tunnel?: Record<string, unknown> })?.tunnel
+        const stored = tunnel?.['transportProtocol']
+        setRevision(ns.revision)
+        setProtocol(stored === 'http2' ? 'http2' : 'quic')
+      })
+      .catch(() => {
+        /* 读不到配置时保持默认值展示,不弹错:这条只影响一个可选档位 */
+      })
+    return () => {
+      disposed = true
+    }
+  }, [])
+
+  /** 写协议。改动对**下一条**隧道生效(运行中的 cloudflared 不会中途换协议)。 */
+  const saveProtocol = async (next: TunnelProtocol) => {
+    const previous = protocol
+    setProtocol(next)
+    try {
+      await api.updateNamespace(REMOTE_NS, { tunnel: { transportProtocol: next } }, revision)
+      const ns = (await api.getSettings()).namespaces.find((item) => item.ns === REMOTE_NS)
+      if (ns) setRevision(ns.revision)
+      notify('ok', t('remoteProtocolSaved'))
+    } catch (error) {
+      setProtocol(previous)
+      notify('err', error instanceof Error ? error.message : String(error))
+    }
+  }
+
 
   useEffect(() => {
     return subscribeServerEvents((type) => {
@@ -234,6 +292,24 @@ export function RemoteAccessSettings({ notify }: { notify: Notify }) {
               <span>{t('remoteTunnelWarningBody')}</span>
             </div>
           )}
+
+          {/* 传输协议:对下一条隧道生效(运行中的 cloudflared 不会中途换协议),
+              所以开启前后都能改,但要在文案里说清生效时机。 */}
+          <label className={styles.field}>
+            <span className={styles.fieldLabel}>{t('remoteProtocolLabel')}</span>
+            <select
+              className={styles.select}
+              value={protocol}
+              disabled={busy}
+              onChange={(event) =>
+                void saveProtocol(event.target.value === 'http2' ? 'http2' : 'quic')
+              }
+            >
+              <option value="quic">{t('remoteProtocolQuic')}</option>
+              <option value="http2">{t('remoteProtocolHttp2')}</option>
+            </select>
+            <span className={styles.meta}>{t('remoteProtocolHint')}</span>
+          </label>
 
           <div className={styles.actions}>
             {tunnel ? (

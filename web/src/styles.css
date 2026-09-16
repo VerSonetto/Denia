@@ -335,7 +335,10 @@ button {
   align-items: center;
   justify-content: center;
   min-height: 100vh;
-  padding: 24px;
+  min-height: 100dvh;
+  /* 刘海屏与安全区:扫码页往往整屏用,上下留出 env 内边距避免按钮被盖 */
+  padding: max(24px, env(safe-area-inset-top)) max(24px, env(safe-area-inset-right))
+    max(24px, env(safe-area-inset-bottom)) max(24px, env(safe-area-inset-left));
   background: var(--bg-base);
 }
 
@@ -8487,5 +8490,31 @@ button.btn.form-action {
   .model-menu,
   .model-menu-sub {
     animation: none;
+  }
+}
+
+/* ---------- 手机端:点按响应 ----------
+ *
+ * 两个白扣的延迟与观感:
+ * 1. 移动浏览器在可缩放的页面上要等 ~300ms 双击缩放窗口才肯发 click,
+ *    手机上表现为"点下去半秒才有反应"。交互控件本身不需要双击缩放,
+ *    touch-action: manipulation 就把这 300ms 去掉。
+ * 2. WebKit 点按时会糊一层灰蓝色高亮块,在本项目的暗色卡片上像渲染坏了。
+ *
+ * 规则放文件末尾:桌面端有同特异性的控件样式,靠前会被层叠顺序盖掉。
+ * 不给整个 body 设 touch-action —— 聊天区要能双指缩放看大图与长代码。
+ */
+@media (max-width: 820px) {
+  button,
+  a,
+  select,
+  input,
+  [role='button'],
+  [role='tab'],
+  .setm-nav-item,
+  .setm-tile,
+  .setm-btn {
+    touch-action: manipulation;
+    -webkit-tap-highlight-color: transparent;
   }
 }

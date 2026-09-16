@@ -2,7 +2,16 @@
 <html lang="zh-CN">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!-- viewport-fit=cover:不开的话 env(safe-area-inset-*) 恒为 0,刘海屏的
+         顶部与底部手势条会直接压在返回按钮、输入栏上(这些位置大量用了
+         max(…,env(safe-area-inset-*)) 的内边距)。 -->
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, viewport-fit=cover"
+    />
+    <meta name="color-scheme" content="dark light" />
+    <meta name="theme-color" content="#0d0d0d" media="(prefers-color-scheme: dark)" />
+    <meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)" />
     <title>Denia</title>
     <script>
       // 自愈:浏览器会话恢复/bfcache 拿出旧 index.html 时,旧 hash 资产在

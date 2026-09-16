@@ -1021,6 +1021,11 @@ const zh = {
   remoteAllDisconnected: '已关闭连接并吊销全部会话',
   remoteAuditHint: '审计日志：{path}',
   remoteBlockedPeers: '{n} 个来源处于限流退避中',
+  remoteProtocolLabel: '隧道传输协议',
+  remoteProtocolQuic: 'QUIC（默认，移动网络更快）',
+  remoteProtocolHttp2: 'HTTP/2（TCP，应对封 UDP 的网络）',
+  remoteProtocolHint: '对下一条隧道生效；连不上或明显变慢时换一档再开。',
+  remoteProtocolSaved: '传输协议已保存',
 
   /* ---- 远程连接:横幅与门页 ---- */
   remoteTunnelOn: '公网隧道已开启',
@@ -2057,6 +2062,11 @@ const en: typeof zh = {
   remoteAllDisconnected: 'Disconnected and revoked all sessions',
   remoteAuditHint: 'Audit log: {path}',
   remoteBlockedPeers: '{n} source(s) backing off after failures',
+  remoteProtocolLabel: 'Tunnel transport',
+  remoteProtocolQuic: 'QUIC (default, faster on mobile networks)',
+  remoteProtocolHttp2: 'HTTP/2 (TCP, for networks that block UDP)',
+  remoteProtocolHint: 'Applies to the next tunnel; switch it and reopen if the link is slow or unreachable.',
+  remoteProtocolSaved: 'Transport protocol saved',
 
   /* ---- Remote access: banner and gate ---- */
   remoteTunnelOn: 'Public tunnel is open',
