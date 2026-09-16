@@ -13,14 +13,16 @@
 use denia_core::session::PermissionMode;
 
 /// 一次工具调用的操作类别(派发前判定)。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ActionClass {
     /// 读类:读文件/搜索/浏览器/无写副作用的命令。
     Read,
     /// 文件写,落点在工作区内。
     WriteInside,
-    /// 文件写,落点在工作区外(自动编辑档唯一的 Ask 点)。
+    /// 文件写,落点在工作区外(自动编辑档的 Ask 点之一)。
     WriteOutside,
+    /// 文件删除(删除不可逆,即使落点在工作区内也要审批)。
+    Delete,
     /// 文件写,落点在项目记忆目录内的 `.md` 文件(记忆是 harness 行为,
     /// 不是用户任务写:后台提取与手工沉淀在四档下都不打断)。
     MemoryWrite,
@@ -45,8 +47,14 @@ pub enum Decision {
 }
 
 /// 策略矩阵:模式 × 类别 → 决策。
+///
+/// - 完全访问字如其名:除计划提交(工具语义限定计划档)外全部放行;
+/// - 自动编辑:工作区内文件写自动放行;三类操作必须过用户审批——
+///   工作区外写、文件删除(删除不可逆,区内也拦)、bash 增删改文件;
+/// - 只读:写类全拒;
+/// - 计划:调研 + exit_plan 审批,其余写类全拒。
 pub fn decide(mode: PermissionMode, class: ActionClass) -> Decision {
-    use ActionClass::{BashWrite, MemoryWrite, PlanSubmit, PresetCreate, Read, WriteInside, WriteOutside};
+    use ActionClass::{BashWrite, Delete, MemoryWrite, PlanSubmit, PresetCreate, Read, WriteInside, WriteOutside};
     use Decision::{Allow, Ask, Deny};
     use PermissionMode::{AutoEdit, Full, Plan, ReadOnly};
     match (mode, class) {
@@ -62,25 +70,35 @@ pub fn decide(mode: PermissionMode, class: ActionClass) -> Decision {
         (_, MemoryWrite) => Allow,
         // 完全访问档全部放行。
         (Full, _) => Allow,
-        // 自动编辑:工作区内写与命令自动放行;越界写文件是唯一 Ask 点。
-        // 组装创作虽写在工作区外,但落盘路径由服务端固定(preset 根 + 合法
-        // id),且是用户明确要求的交付物,与区内写同档放行。
-        (AutoEdit, WriteInside | BashWrite | PresetCreate) => Allow,
-        (AutoEdit, WriteOutside) => Ask,
+        // 自动编辑:区内文件写与组装创作自动放行。组装创作虽写在工作区外,
+        // 但落盘路径由服务端固定(preset 根 + 合法 id),且是用户明确要求的
+        // 交付物,与区内写同档放行。区外写/删除/bash 写三类走审批,用户
+        // 可选"放行本次"或"本窗口放行"(会话内同类不再询问,由派发处
+        // 查会话放行表短路成 Allow)。
+        (AutoEdit, WriteInside | PresetCreate) => Allow,
+        (AutoEdit, WriteOutside | BashWrite | Delete) => Ask,
         // 只读与计划:一切写类操作拒绝。
-        (ReadOnly, WriteInside | WriteOutside | BashWrite) => Deny(
+        (ReadOnly, WriteInside | WriteOutside | BashWrite | Delete) => Deny(
             "当前为只读模式,该操作会修改文件或产生写副作用,已被拒绝;请仅做阅读与分析,或请用户切换权限模式。".into(),
         ),
         (ReadOnly, PresetCreate) => Deny(
             "当前为只读模式,创建组装会写入文件,已被拒绝;请用户切换权限模式后再创建。".into(),
         ),
-        (Plan, WriteInside | WriteOutside | BashWrite) => Deny(
+        (Plan, WriteInside | WriteOutside | BashWrite | Delete) => Deny(
             "当前为计划模式,禁止一切写操作与有写副作用的命令;请完成调研后调用 exit_plan 提交计划,等待用户批准后再执行。".into(),
         ),
         (Plan, PresetCreate) => Deny(
             "当前为计划模式,创建组装会写入文件,已被拒绝;请先退出计划模式再创建。".into(),
         ),
     }
+}
+
+/// 沙箱(confined)生效的档位:只读与计划的调研隔离——区外读写一律在
+/// 工具层拒绝。自动编辑与完全访问不沙箱:前者工作区外写由策略引擎转
+/// 用户审批(Ask),后者全部放行;对这两档再开沙箱,区外写会在路径解析
+/// 处被硬拦,审批卡永远弹不出来,策略引擎形同虚设。
+pub fn sandbox_applies(mode: PermissionMode) -> bool {
+    matches!(mode, PermissionMode::ReadOnly | PermissionMode::Plan)
 }
 
 /// 记忆写敏感段:git 钩子、依赖树、其他 agent harness 的配置/技能目录。
@@ -137,6 +155,48 @@ pub fn bash_may_write(command: &str) -> bool {
     markers.iter().any(|marker| lower.contains(marker))
 }
 
+/// 判断一条命令是否调用了指定名字的程序(词级匹配)。
+///
+/// 按 shell 分隔符(空白/管道/分号/逻辑与/括号)切 token,每个 token 取
+/// 文件名部分(剥引号与路径前缀)后 ASCII 小写精确比较——`rm`、`/bin/rm`、
+/// `sudo rm`、`xargs rm` 都命中,而 `confirm` 不再被 "rm " 的子串匹配误伤。
+fn bash_invokes(command: &str, names: &[&str]) -> bool {
+    command
+        .split(|c: char| c.is_whitespace() || matches!(c, '|' | ';' | '&' | '(' | ')'))
+        .any(|token| {
+            let name = token
+                .trim_matches(|c| c == '"' || c == '\'')
+                .rsplit(['/', '\\'])
+                .next()
+                .unwrap_or(token)
+                .to_ascii_lowercase();
+            names.contains(&name.as_str())
+        })
+}
+
+/// 启发式判断一条 bash 命令是否是文件删除操作(删除不可逆,单独归类:
+/// 自动编辑档下即使落点在工作区内也要过用户审批)。
+///
+/// 覆盖 Unix(rm/rmdir/unlink/shred)、Windows cmd(del/erase/rd)与
+/// PowerShell(Remove-Item;`rm` 是其别名同样命中),以及 find 的
+/// `-delete` 谓词。词级精确匹配,不做子串猜测。
+pub fn bash_may_delete(command: &str) -> bool {
+    bash_invokes(
+        command,
+        &[
+            "rm",
+            "rmdir",
+            "unlink",
+            "shred",
+            "del",
+            "erase",
+            "rd",
+            "remove-item",
+            "-delete",
+        ],
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -158,16 +218,18 @@ mod tests {
             // 记忆写是 harness 行为,四档一律放行(敏感段在派发处拒)。
             assert_eq!(decide(mode, MemoryWrite), Decision::Allow);
         }
-        // 完全访问档全放行。
-        for class in [Read, WriteInside, WriteOutside, BashWrite] {
+        // 完全访问档全放行(字如其名)。
+        for class in [Read, WriteInside, WriteOutside, BashWrite, Delete] {
             assert_eq!(decide(Full, class), Decision::Allow);
         }
-        // 自动编辑:区内写与命令放行,越界写 Ask。
+        // 自动编辑:区内文件写与组装创作放行;区外写/删除/bash 写三类审批。
         assert_eq!(decide(AutoEdit, WriteInside), Decision::Allow);
-        assert_eq!(decide(AutoEdit, BashWrite), Decision::Allow);
-        assert_eq!(decide(AutoEdit, WriteOutside), Decision::Ask);
+        assert_eq!(decide(AutoEdit, PresetCreate), Decision::Allow);
+        for class in [WriteOutside, BashWrite, Delete] {
+            assert_eq!(decide(AutoEdit, class), Decision::Ask, "{class:?} 应走审批");
+        }
         // 只读与计划:写类全拒。
-        for class in [WriteInside, WriteOutside, BashWrite] {
+        for class in [WriteInside, WriteOutside, BashWrite, Delete] {
             assert!(matches!(decide(ReadOnly, class), Decision::Deny(_)));
             assert!(matches!(decide(Plan, class), Decision::Deny(_)));
         }
@@ -211,5 +273,27 @@ mod tests {
         assert!(bash_may_write("ls | tee list.txt"));
         assert!(!bash_may_write("ls -la"));
         assert!(!bash_may_write("git status"));
+    }
+
+    #[test]
+    fn detects_deletions_word_wise() {
+        // Unix 家族。
+        assert!(bash_may_delete("rm -rf node_modules"));
+        assert!(bash_may_delete("rmdir build"));
+        assert!(bash_may_delete("/usr/bin/unlink f.txt"));
+        assert!(bash_may_delete("find . -name '*.tmp' -delete"));
+        // Windows cmd 与 PowerShell。
+        assert!(bash_may_delete("del /q cache\\*.log"));
+        assert!(bash_may_delete("Remove-Item -Recurse dist"));
+        assert!(bash_may_delete("echo hi | Remove-Item"));
+        // 管道另一端的删除命令同样命中。
+        assert!(bash_may_delete("git ls-files | xargs rm"));
+        // 词级匹配不吃子串误报:confirm/chdir 不算 rm/del。
+        assert!(!bash_may_delete("confirm deployment"));
+        assert!(!bash_may_delete("chdir build && ls"));
+        assert!(!bash_may_delete("git remote prune origin"));
+        // 写但不删。
+        assert!(!bash_may_delete("echo hi > out.txt"));
+        assert!(!bash_may_delete("mv a.txt b.txt"));
     }
 }

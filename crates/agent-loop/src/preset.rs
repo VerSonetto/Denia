@@ -50,6 +50,11 @@ pub(crate) fn apply_tool_allowlist(assembly: &mut PromptAssembly, allowed: &[Str
     retain_tools(assembly, |name| allowed.iter().any(|a| a == name));
 }
 
+/// 工具黑名单收窄:只读权限档摘除 bash 与写文件工具时用。
+pub(crate) fn apply_tool_blocklist(assembly: &mut PromptAssembly, blocked: &[&str]) {
+    retain_tools(assembly, |name| !blocked.contains(&name));
+}
+
 /// 把一份 preset 应用到本 step 的装配:persona 覆盖/独占,再 features 与
 /// tools 白名单两级收窄。
 ///

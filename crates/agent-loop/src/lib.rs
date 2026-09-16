@@ -145,6 +145,10 @@ pub struct SessionDriver {
     read_states: std::sync::Mutex<
         std::collections::HashMap<String, denia_tools::read_state::SharedReadState>,
     >,
+    /// 会话级审批放行表(按会话 × 操作类别):自动编辑档下用户对某类
+    /// 审批(bash 写/删除/区外写)选"本窗口放行"后,同类操作在本会话
+    /// 内直接放行不再询问。运行时内存态,不落盘,进程重启后自然失效。
+    ask_grants: std::sync::Mutex<std::collections::HashMap<String, std::collections::HashSet<denia_tools::permission::ActionClass>>>,
 }
 
 impl SessionDriver {
@@ -170,6 +174,7 @@ impl SessionDriver {
             parallel: ParallelSettings::default(),
             loop_guards: std::sync::Mutex::new(std::collections::HashMap::new()),
             read_states: std::sync::Mutex::new(std::collections::HashMap::new()),
+            ask_grants: std::sync::Mutex::new(std::collections::HashMap::new()),
         }
     }
 
@@ -476,6 +481,33 @@ impl SessionDriver {
         {
             state.clear();
         }
+    }
+
+    /// 会话是否已放行某类审批操作(自动编辑档"本窗口放行"的查询口)。
+    pub fn ask_granted(&self, session_id: &str, class: denia_tools::permission::ActionClass) -> bool {
+        self.ask_grants
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .get(session_id)
+            .is_some_and(|set| set.contains(&class))
+    }
+
+    /// 记录一次"本窗口放行":该会话内同类审批操作不再询问。
+    pub fn grant_ask_class(&self, session_id: &str, class: denia_tools::permission::ActionClass) {
+        self.ask_grants
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .entry(session_id.to_string())
+            .or_default()
+            .insert(class);
+    }
+
+    /// 清空某会话的审批放行表(会话删除时调用,防止句柄泄漏式累积)。
+    pub fn clear_ask_grants(&self, session_id: &str) {
+        self.ask_grants
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .remove(session_id);
     }
 }
 

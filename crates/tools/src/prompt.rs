@@ -32,10 +32,10 @@ pub fn register_shipped_prompt(
         text: PromptText::Dynamic(Arc::new(|context| {
             let mode = context.permission_mode.as_deref().unwrap_or("auto-edit");
             match mode {
-                "read-only" => "当前权限模式:只读。一切会修改文件或产生写副作用的操作(写文件、编辑、有写副作用的命令)都会被直接拒绝;请只做阅读、检索与分析。".to_string(),
+                "read-only" => "当前权限模式:只读。只开放 ls、read_file、glob、grep 等只读类工具,bash 与写文件工具不可用;请只做阅读、检索与分析,或请用户切换权限模式。".to_string(),
                 "plan" => "当前权限模式:计划。禁止一切写操作与有写副作用的命令;先完成调研,再用 exit_plan 工具提交完整计划,等待用户审批。计划被批准后会话自动切换到执行模式,届时直接开始执行;被拒绝且用户附带了补充建议时,按建议修订后重新提交。".to_string(),
                 "full" => "当前权限模式:完全访问。所有操作自动放行、无需审批,文件写入可以离开工作区;破坏性操作仍要先说明再执行。".to_string(),
-                _ => "当前权限模式:自动编辑。工作区内的文件编辑与命令执行自动放行;写工作区之外的文件会弹出用户审批,等用户放行后继续。".to_string(),
+                _ => "当前权限模式:自动编辑。工作区内的文件编辑(write_file/edit)自动放行;三类操作会先弹用户审批再执行:写工作区之外的文件、删除文件(rm/del 等,删除不可逆)、用 bash 增删改写文件。审批被拒时改用工作区内的方案。".to_string(),
             }
         })),
     })?;

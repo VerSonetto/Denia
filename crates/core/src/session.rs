@@ -100,9 +100,10 @@ pub enum AbortCause {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum PermissionMode {
-    /// 只读:一切写类操作(文件写、有写副作用的命令)被策略拒绝。
+    /// 只读:工具面只留只读类(bash/写文件工具不开放),写类操作被策略拒绝。
     ReadOnly,
-    /// 自动编辑:工作区内文件编辑与命令自动放行,越界写文件走审批。
+    /// 自动编辑:工作区内文件编辑自动放行;区外写/文件删除/bash 增删改
+    /// 文件走审批(可放行本次或本窗口放行)。
     #[serde(alias = "workspace-write")]
     AutoEdit,
     /// 计划:只读执行面 + `exit_plan` 提交计划等用户审批。
@@ -116,6 +117,11 @@ impl PermissionMode {
     /// 是否完全访问档(权限最高,无审批、路径不受限)。
     pub fn is_full(self) -> bool {
         matches!(self, Self::Full)
+    }
+
+    /// 是否只读档(工具面与写类操作全部收窄)。
+    pub fn is_read_only(self) -> bool {
+        matches!(self, Self::ReadOnly)
     }
 
     pub fn as_str(self) -> &'static str {
@@ -162,6 +168,9 @@ impl ApprovalPolicy {
 #[serde(rename_all = "kebab-case")]
 pub enum ApprovalOutcome {
     AllowedOnce,
+    /// 本窗口放行:本次执行,且当前会话内同类别操作不再询问
+    /// (会话运行时状态,不落盘,进程重启后自然失效)。
+    AllowedSession,
     Rejected,
     Cancelled,
     Unavailable,

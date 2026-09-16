@@ -58,7 +58,7 @@ pub(crate) async fn execute_calls(
                 next += 1;
                 continue;
             }
-            match decide_for(state, &cwd, call, memory_root.as_deref()) {
+            match decide_for(driver, state, &cwd, call, memory_root.as_deref()) {
                 Decision::Allow => {
                     append_call(state, step, call)?;
                     let index = next;
@@ -234,9 +234,23 @@ fn reject_before_dispatch(
 /// `memory_root` 是本会话工作区对应的项目记忆目录(None = 记忆未启用):
 /// 命中的 `.md` 写分类为 MemoryWrite(四档放行,敏感段拒绝);子代理的
 /// 其余写一律拒绝(提取子代理不能被诱导写记忆目录之外,子代理也不弹审批)。
-fn decide_for(state: &TurnState, cwd: &Path, call: &ToolCallRef, memory_root: Option<&Path>) -> Decision {
+fn decide_for(
+    driver: &SessionDriver,
+    state: &TurnState,
+    cwd: &Path,
+    call: &ToolCallRef,
+    memory_root: Option<&Path>,
+) -> Decision {
     let mode = state.permission_mode();
-    let confined = !mode.is_full() && state.session.header().sandbox;
+    // 只读档 bash 完全不开放(schema 已收窄,这里兜底幻觉调用/绕过面):
+    // 读命令也不放行,与工具面口径一致。
+    if mode.is_read_only() && matches!(call.name.as_str(), "bash" | "job_start") {
+        return Decision::Deny(
+            "当前为只读模式,bash 命令不可用;请改用 ls/glob/grep/read_file 做阅读与检索,或请用户切换权限模式。".into(),
+        );
+    }
+    let confined =
+        denia_tools::permission::sandbox_applies(mode) && state.session.header().sandbox;
     let class = classify_call(cwd, call, confined, memory_root);
     let is_memory_write = class == ActionClass::MemoryWrite;
     if is_memory_write {
@@ -258,6 +272,14 @@ fn decide_for(state: &TurnState, cwd: &Path, call: &ToolCallRef, memory_root: Op
         return Decision::Deny(
             "子代理的文件写仅限记忆目录内的 .md 文件(记忆提取);其余写操作留在父代理。".into(),
         );
+    }
+    // 自动编辑档的"本窗口放行":用户批准过某类操作(区外写/删除/bash 写)
+    // 后,本会话内同类操作直接放行,不再弹审批。
+    if mode == PermissionMode::AutoEdit
+        && matches!(class, ActionClass::WriteOutside | ActionClass::BashWrite | ActionClass::Delete)
+        && driver.ask_granted(state.session.id(), class)
+    {
+        return Decision::Allow;
     }
     denia_tools::permission::decide(mode, class)
 }
@@ -295,7 +317,11 @@ fn classify_call(cwd: &Path, call: &ToolCallRef, confined: bool, memory_root: Op
                         .map(str::to_string)
                 })
                 .unwrap_or_default();
-            if denia_tools::permission::bash_may_write(&command) {
+            // 删除优先于一般写:rm 类命令同时命中两个启发式,删除有独立的
+            // 审批语义(自动编辑档区内也拦),归类取更严的一档。
+            if denia_tools::permission::bash_may_delete(&command) {
+                ActionClass::Delete
+            } else if denia_tools::permission::bash_may_write(&command) {
                 ActionClass::BashWrite
             } else {
                 ActionClass::Read
@@ -350,7 +376,9 @@ fn dispatch_tool_call(
     // 写边界仍由 MemoryWrite 分类(敏感段拒绝、子代理仅限记忆目录)收敛。
     // 在 Box::pin 之前计算:闭包是 'static,不能借用 driver。记忆豁免与
     // 权限放行共用同一开关:组装关闭记忆时记忆目录视为不存在,不豁免。
-    let confined = !state.permission_mode().is_full()
+    // 沙箱只在只读/计划档生效(见 permission::sandbox_applies):自动编辑
+    // 档的区外写要走审批而不是在路径解析处被硬拦。
+    let confined = denia_tools::permission::sandbox_applies(state.permission_mode())
         && state.session.header().sandbox
         && !memory_anchored(
             &cwd,
@@ -437,10 +465,18 @@ async fn dispatch_asked_tool_call(
         });
     };
     let request_id = uuid::Uuid::new_v4().to_string();
+    // 审批理由按操作类别定制:模型知道为什么被拦,用户知道在批什么。
+    let mode = state.permission_mode();
+    let confined = !mode.is_full() && state.session.header().sandbox;
+    let class = classify_call(cwd, call, confined, None);
     let reason = if is_plan {
         "计划审批:批准后会话自动切换执行档位并继续执行".to_string()
     } else {
-        "该操作要写工作区之外的路径,需要用户确认".to_string()
+        match class {
+            ActionClass::Delete => "该操作要删除文件(删除不可逆),需要用户确认".to_string(),
+            ActionClass::BashWrite => "该命令会增删改写文件,需要用户确认".to_string(),
+            _ => "该操作要写工作区之外的路径,需要用户确认".to_string(),
+        }
     };
     if let Err(error) = append(
         &state.session,
@@ -475,6 +511,12 @@ async fn dispatch_asked_tool_call(
             } else {
                 dispatch_tool_call(driver, state, cwd, call).await
             }
+        }
+        ApprovalOutcome::AllowedSession => {
+            // 本窗口放行:记入会话放行表,本会话内同类操作不再询问;
+            // 本次调用照常执行。
+            driver.grant_ask_class(state.session.id(), class);
+            dispatch_tool_call(driver, state, cwd, call).await
         }
         ApprovalOutcome::Rejected => {
             if is_plan {

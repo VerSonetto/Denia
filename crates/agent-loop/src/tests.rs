@@ -2191,23 +2191,10 @@ async fn auto_edit_allows_inside_write_and_fails_closed_outside_without_bridge()
         ],
         |tools| *tools = denia_tools::default_registry(),
     );
-    // 非沙箱会话(sandbox=false):越界写在工具层放行,由策略引擎 Ask 兜底;
-    // 沙箱会话的越界写在工具层就被 resolve_within 拒绝,走不到审批。
-    let dir = std::env::temp_dir().join(format!(
-        "denia-loop-{}",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
-    let session = Arc::new(Session::create(
-        &dir,
-        uuid::Uuid::new_v4().to_string(),
-        &dir,
-        false,
-        None,
-    )
-    .unwrap());
+    // 沙箱会话(temp_session,sandbox=true):自动编辑档不沙箱,区外写不被
+    // 路径解析硬拦,而是由策略引擎 Ask 转审批;无桥时 fail-closed。沙箱
+    // 只在只读/计划档生效(见 permission::sandbox_applies)。
+    let session = temp_session();
     run_simple_turn(&driver, &session, "write").await;
 
     let results = result_texts(&session);
@@ -2219,6 +2206,42 @@ async fn auto_edit_allows_inside_write_and_fails_closed_outside_without_bridge()
         std::path::Path::new(&session.header().cwd).join("a.txt").exists(),
         "inside write must land"
     );
+    assert!(!outside.exists(), "outside write must not land");
+    let _ = std::fs::remove_file(&outside);
+}
+
+#[tokio::test]
+async fn sandbox_still_confines_readonly_and_plan_outside_writes() {
+    // 只读/计划档沙箱照旧:区外写不弹审批,策略引擎先行拒绝(Read 类的
+    // 区外访问则由工具层 resolve_within 兜底)。
+    let outside = std::env::temp_dir().join(format!(
+        "denia-ro-outside-{}.txt",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let outside_raw = outside.to_string_lossy().replace('\\', "/");
+    let (driver, _registry) = driver_with_tools(
+        vec![
+            MockScript::Chunks(tool_calls_script(&[(
+                "call_out",
+                "write_file",
+                &format!(r#"{{"path":"{outside_raw}","content":"y"}}"#),
+            )])),
+            MockScript::Chunks(text_script("done")),
+        ],
+        |tools| *tools = denia_tools::default_registry(),
+    );
+    let session = temp_session();
+    session.set_permission_mode(PermissionMode::ReadOnly).unwrap();
+    run_simple_turn(&driver, &session, "write").await;
+
+    let results = result_texts(&session);
+    assert_eq!(results.len(), 1);
+    assert!(results[0].0, "outside write must be denied in read-only");
+    // 策略引擎先行拒绝(比工具层沙箱更早),文案点名只读模式。
+    assert!(results[0].1.contains("只读模式"), "{}", results[0].1);
     assert!(!outside.exists(), "outside write must not land");
     let _ = std::fs::remove_file(&outside);
 }
@@ -2324,4 +2347,136 @@ async fn exit_plan_with_empty_plan_never_reaches_approval() {
     assert!(results[0].1.contains("计划提交参数无效"), "{}", results[0].1);
     // 档位未被切换:审批桥根本没被调用。
     assert_eq!(session.permission_mode(), PermissionMode::Plan);
+}
+
+#[tokio::test]
+async fn auto_edit_asks_for_bash_writes_and_deletions() {
+    // 自动编辑档新口径:bash 增删改写与文件删除都要过用户审批(删除即使
+    // 落点在工作区内也不例外);审批被拒时按错误结果回给模型。
+    let (driver, _registry) = driver_with_tools(
+        vec![
+            MockScript::Chunks(tool_calls_script(&[
+                ("call_m", "bash", r#"{"command":"mkdir denia-ask-x"}"#),
+                ("call_r", "bash", r#"{"command":"rm denia-ask-x"}"#),
+            ])),
+            MockScript::Chunks(text_script("done")),
+        ],
+        |tools| *tools = denia_tools::default_registry(),
+    );
+    let driver = driver.with_approval(Arc::new(StubApprovalBridge {
+        decision: Mutex::new(plan_decision(ApprovalOutcome::Rejected, None, None)),
+    }));
+    let session = temp_session(); // 默认 auto-edit
+    run_simple_turn(&driver, &session, "run commands").await;
+
+    let results = result_texts(&session);
+    assert_eq!(results.len(), 2);
+    assert!(results[0].0, "bash write must ask; rejection is an error result");
+    assert!(results[1].0, "deletion must ask too");
+    // 审批卡理由按类别点题:删除的理由说"删除",bash 写的理由说"增删改写"。
+    let reasons: Vec<String> = session
+        .events()
+        .iter()
+        .filter_map(|envelope| match &envelope.event {
+            SessionEvent::ApprovalAsked { reason, .. } => reason.clone(),
+            _ => None,
+        })
+        .collect();
+    assert!(reasons.iter().any(|r| r.contains("删除")), "{reasons:?}");
+    assert!(reasons.iter().any(|r| r.contains("增删改写")), "{reasons:?}");
+}
+
+#[tokio::test]
+async fn allowed_session_grant_skips_later_asks_across_turns() {
+    // "本窗口放行":首次 bash 写审批选放行本会话后,同类调用在本会话内
+    // 直接放行(审批桥只被询问一次),且跨 turn 仍然生效。
+    struct CountingBridge {
+        calls: Mutex<usize>,
+    }
+    #[async_trait]
+    impl crate::ApprovalBridge for CountingBridge {
+        async fn request(&self, _: &str, _: &str, _: CancellationToken) -> PlanReviewDecision {
+            *self.calls.lock().unwrap() += 1;
+            PlanReviewDecision {
+                outcome: ApprovalOutcome::AllowedSession,
+                execute_mode: None,
+                selection: None,
+                vision_supported: None,
+                feedback: None,
+            }
+        }
+    }
+    let bridge = Arc::new(CountingBridge {
+        calls: Mutex::new(0),
+    });
+    let (driver, _registry) = driver_with_tools(
+        vec![
+            MockScript::Chunks(tool_calls_script(&[(
+                "call_1",
+                "bash",
+                r#"{"command":"mkdir denia-grant-a"}"#,
+            )])),
+            MockScript::Chunks(text_script("first done")),
+            MockScript::Chunks(tool_calls_script(&[(
+                "call_2",
+                "bash",
+                r#"{"command":"mkdir denia-grant-b"}"#,
+            )])),
+            MockScript::Chunks(text_script("second done")),
+        ],
+        |tools| *tools = denia_tools::default_registry(),
+    );
+    let driver = driver.with_approval(bridge.clone());
+    let session = temp_session();
+    run_simple_turn(&driver, &session, "first turn").await;
+    run_simple_turn(&driver, &session, "second turn").await;
+
+    assert_eq!(*bridge.calls.lock().unwrap(), 1, "asked exactly once");
+    let results = result_texts(&session);
+    let ok_results: Vec<&(bool, String)> = results.iter().filter(|(is_error, _)| !*is_error).collect();
+    assert_eq!(ok_results.len(), 2, "both mkdir calls ran, got {results:?}");
+    // 放行有事件可回放。
+    assert!(session.events().iter().any(|envelope| matches!(
+        &envelope.event,
+        SessionEvent::ApprovalDecided {
+            outcome: ApprovalOutcome::AllowedSession,
+            ..
+        }
+    )));
+    assert_eq!(driver.ask_granted(session.id(), denia_tools::permission::ActionClass::BashWrite), true);
+    // 其他类别不受牵连:删除与区外写仍要审批。
+    assert_eq!(driver.ask_granted(session.id(), denia_tools::permission::ActionClass::Delete), false);
+}
+
+#[tokio::test]
+async fn read_only_hides_bash_and_write_tools() {
+    // 只读档工具面收窄:bash/write_file/edit 不下发(用户口径:只开放
+    // ls/read_file/glob/grep 等只读类);幻觉调用 bash 由执行层兜底拒绝,
+    // 连读命令也不放行。
+    let (driver, _registry) = driver_with_tools(
+        vec![
+            MockScript::Chunks(tool_calls_script(&[(
+                "call_b",
+                "bash",
+                r#"{"command":"ls"}"#,
+            )])),
+            MockScript::Chunks(text_script("done")),
+        ],
+        |tools| *tools = denia_tools::default_registry(),
+    );
+    let session = temp_session();
+    session.set_permission_mode(PermissionMode::ReadOnly).unwrap();
+    run_simple_turn(&driver, &session, "read only").await;
+
+    let names = last_header_tool_names(&session);
+    assert!(!names.iter().any(|n| n == "bash"), "{names:?}");
+    assert!(!names.iter().any(|n| n == "write_file"), "{names:?}");
+    assert!(!names.iter().any(|n| n == "edit"), "{names:?}");
+    assert!(names.iter().any(|n| n == "ls"), "{names:?}");
+    assert!(names.iter().any(|n| n == "glob"), "{names:?}");
+    assert!(names.iter().any(|n| n == "grep"), "{names:?}");
+    assert!(names.iter().any(|n| n == "read_file"), "{names:?}");
+    let results = result_texts(&session);
+    assert!(results[0].0, "hallucinated bash call must be denied");
+    assert!(results[0].1.contains("bash 命令不可用"), "{}", results[0].1);
 }

@@ -674,11 +674,21 @@ fn assemble_step(
             crate::preset::apply_tool_allowlist(&mut assembly, allowed);
         }
     }
-    // 权限模式**不再**增删 schema 与纪律段(计划档保留写工具、执行档保留
-    // exit_plan):工具面与系统提示跨模式字节稳定,plan↔执行互切零缓存
-    // 代价。越权由权限引擎在执行时拒绝(decide 矩阵:计划档拒绝一切写、
-    // 非计划档拒绝 PlanSubmit),模型拿 isError 自纠正;当前模式语义由
-    // `harness:permission` 运行时快照承担(变化走注入追加,不碰前缀)。
+    // 只读档工具面收窄:bash 与写文件工具不开放(只留 ls/read_file/glob/grep
+    // 等只读类),纪律段同步摘除。执行层 decide 矩阵仍兜底幻觉调用。子代理
+    // 不在此列:其工具面由 allowed_tools 白名单收窄,且记忆提取子代理的写
+    // 落点限定记忆目录(MemoryWrite 类放行),收掉写工具会弄断记忆沉淀。
+    // 执行档(auto-edit/plan/full)之间维持跨模式字节稳定,不按模式增删。
+    if state.session.permission_mode().is_read_only() && state.session.header().subagent.is_none()
+    {
+        crate::preset::apply_tool_blocklist(&mut assembly, &["bash", "write_file", "edit"]);
+    }
+    // 执行档(auto-edit/plan/full)之间**不**增删 schema 与纪律段(计划档
+    // 保留写工具、执行档保留 exit_plan):工具面与系统提示跨模式字节稳定,
+    // plan↔执行互切零缓存代价。越权由权限引擎在执行时拒绝(decide 矩阵:
+    // 计划档拒绝一切写、非计划档拒绝 PlanSubmit),模型拿 isError 自纠正;
+    // 当前模式语义由 `harness:permission` 运行时快照承担(变化走注入追加,
+    // 不碰前缀)。只读档是例外:bash 与写文件工具在上方直接收窄,不给模型。
     // 项目记忆:段随记忆启用与否进退(runtime.memory_root_for 与权限层、
     // 注入通道同源);启用时替换为带真实路径的完整段,模型在任何 step 都
     // 能直接看到记忆目录。同会话 cwd 不可变 → 路径恒定 → 段文本字节稳定,

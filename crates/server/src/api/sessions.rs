@@ -339,6 +339,8 @@ async fn delete_session(
         .map_err(|e| ApiError::bad_request("runtime/active-child", e))?;
     state.sessions.delete(&id).map_err(ApiError::from_session)?;
     state.live.remove(&id);
+    // 审批放行表随会话一起回收,句柄不残留。
+    state.driver.clear_ask_grants(&id);
     // 附件目录随会话一起回收:粘贴图片每次落盘一张,不清就是只增不减的占用。
     if let Err(error) = crate::api::uploads::remove_session_uploads(&state.home, &id) {
         tracing::warn!(session_id = %id, error = %error, "会话附件目录清理失败");
@@ -838,7 +840,7 @@ fn unknown_agent_preset(id: &str) -> ApiError {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ApprovalAnswerBody {
-    /// `allow-once` | `reject`
+    /// `allow-once` | `allow-session` | `reject`
     decision: String,
     /// 计划批准时的执行档位(仅 auto-edit / full);普通审批忽略。
     #[serde(default)]
@@ -851,8 +853,9 @@ struct ApprovalAnswerBody {
     feedback: Option<String>,
 }
 
-/// 应答一次挂起的审批:普通审批(越界写)只有二值决策;计划审批
-/// (exit_plan)的批准可携带执行档位与模型,拒绝可携带补充建议。
+/// 应答一次挂起的审批:普通审批(区外写/删除/bash 写)三值决策——拒绝、
+/// 放行本次、本窗口放行(会话内同类不再询问);计划审批(exit_plan)的
+/// 批准可携带执行档位与模型,拒绝可携带补充建议。
 async fn answer_approval(
     State(state): State<Arc<AppState>>,
     Path((id, request_id)): Path<(String, String)>,
@@ -860,11 +863,12 @@ async fn answer_approval(
 ) -> Result<impl IntoResponse, ApiError> {
     let outcome = match body.decision.as_str() {
         "allow-once" => ApprovalOutcome::AllowedOnce,
+        "allow-session" => ApprovalOutcome::AllowedSession,
         "reject" => ApprovalOutcome::Rejected,
         _ => {
             return Err(ApiError::bad_request(
                 "approval/bad-decision",
-                "decision must be 'allow-once' or 'reject'",
+                "decision must be 'allow-once', 'allow-session' or 'reject'",
             ));
         }
     };
