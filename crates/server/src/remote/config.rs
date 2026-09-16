@@ -98,6 +98,15 @@ pub struct TunnelSettings {
     /// 是否要求请求经 HTTPS 到达。**恒为 true**(校验层拒绝改成 false):
     /// 公网明文回源等于把会话 cookie 交给链路上的任何人。
     pub require_https: bool,
+    /// cloudflared 到 Cloudflare 边缘的传输协议(cloudflared `--protocol`)。
+    ///
+    /// - `""`(自动)/`quic`:走 QUIC(HTTP/3 over UDP)。默认档位,握手 RTT 更少、
+    ///   丢包恢复更快,蜂窝网络上通常明显优于 TCP。
+    /// - `http2`:回退到 TCP 上的 HTTP/2。部分运营商与办公网对 UDP 限速或直接
+    ///   封锁,此时 QUIC 会退化得很难看,这个档位是逃生舱。
+    ///
+    /// 只做"能连上但更慢"这一类的取舍,不影响安全边界(隧道本身仍是 HTTPS 回源)。
+    pub transport_protocol: String,
 }
 
 impl Default for TunnelSettings {
@@ -109,6 +118,8 @@ impl Default for TunnelSettings {
             session_absolute_timeout_seconds: 21600,
             require_pin: true,
             require_https: true,
+            // 留空 = 不传 --protocol,cloudflared 自己默认就是 quic。
+            transport_protocol: String::new(),
         }
     }
 }
@@ -162,6 +173,19 @@ impl Default for AuditSettings {
     }
 }
 
+/// 隧道传输协议的允许值。空串 = 不传 `--protocol`,用 cloudflared 自己的默认。
+///
+/// 只列这两个:`quic`(UDP/HTTP3,移动网络上握手更少、丢包恢复更好)与
+/// `http2`(TCP 兜底,应对运营商封 UDP)。写成闭集而不是自由文本,是因为
+/// cloudflared **对非法取值静默回退到默认值** —— 自由文本会让人以为配好了,
+/// 实际跑的是默认档,这种"看起来生效其实没生效"必须挡在写入层。
+pub const TUNNEL_PROTOCOLS: [&str; 2] = ["quic", "http2"];
+
+fn transport_protocol_valid(protocol: &str) -> bool {
+    let trimmed = protocol.trim();
+    trimmed.is_empty() || TUNNEL_PROTOCOLS.contains(&trimmed)
+}
+
 /// 写入层校验:类型往返 + 安全上限。
 ///
 /// 拒绝而不是夹紧——用户填了 3600 秒的隧道 ticket TTL,应当看到"太长了",
@@ -200,6 +224,14 @@ pub fn validate_remote(value: Value) -> Result<Value, String> {
         return Err(
             "tunnel.requireHttps 不能关闭:公网明文回源会把会话 cookie 暴露给链路中间人".to_string(),
         );
+    }
+
+    if !transport_protocol_valid(&t.transport_protocol) {
+        return Err(format!(
+            "tunnel.transportProtocol 只能是 {} 之一(留空 = 用 cloudflared 默认);得到 '{}'",
+            TUNNEL_PROTOCOLS.join(" / "),
+            t.transport_protocol
+        ));
     }
 
     let l = &parsed.lan;

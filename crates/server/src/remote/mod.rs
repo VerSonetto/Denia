@@ -750,7 +750,12 @@ impl RemoteManager {
 
         let info = self
             .tunnel
-            .start(&settings.tunnel.cloudflared_path, &origin, &self.pid_file())
+            .start(
+                &settings.tunnel.cloudflared_path,
+                &origin,
+                Some(settings.tunnel.transport_protocol.as_str()),
+                &self.pid_file(),
+            )
             .await
             .inspect_err(|error| {
                 self.audit(
@@ -1199,10 +1204,9 @@ impl RemoteManager {
         {
             return true;
         }
-        if net::candidates()
-            .iter()
-            .any(|candidate| candidate.address.to_string() == host)
-        {
+        // 逐请求的网卡枚举走缓存:这是阻塞 syscall,不该出现在每个请求的
+        // 关键路径上(手机上就是白加的一截延迟)。
+        if net::cached_addresses().iter().any(|address| address == &host) {
             return true;
         }
         let settings = self.config();
@@ -1334,6 +1338,14 @@ impl RemoteManager {
         let shutdown = cancel.clone();
         let task = tokio::spawn(async move {
             let service = router.into_make_service_with_connect_info::<SocketAddr>();
+            // 远程连接上挂的是手机与公网隧道:小帧 + 高 RTT 是 Nagle 与延迟
+            // ACK 互相咬得最狠的组合,逐连接关掉 Nagle(与主 listener 同一处理)。
+            use axum::serve::ListenerExt;
+            let listener = listener.tap_io(|stream| {
+                if let Err(error) = stream.set_nodelay(true) {
+                    tracing::debug!(%error, "could not set TCP_NODELAY on remote connection");
+                }
+            });
             let served = axum::serve(listener, service).with_graceful_shutdown(async move {
                 shutdown.cancelled().await;
             });

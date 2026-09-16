@@ -19,6 +19,10 @@ use tokio::sync::Mutex;
 /// 网络慢的余量,再长就该让用户看到失败而不是一直转圈。
 const URL_WAIT_TIMEOUT: Duration = Duration::from_secs(30);
 
+/// cloudflared 退出时的在途请求宽限期。见 `start` 里的说明:SSE 长连接会被
+/// 算进"在途",用默认的 30s 会让每次关隧道都空等半分钟。
+const GRACE_PERIOD: &str = "3s";
+
 /// 隧道对外信息。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TunnelInfo {
@@ -57,12 +61,17 @@ impl TunnelManager {
 
     /// 起一条快速隧道,回源到 `origin`(形如 `http://127.0.0.1:3602`)。
     ///
+    /// `transport_protocol` 是 cloudflared 到边缘的传输协议(`quic`/`http2`),
+    /// None 或空串走 cloudflared 自己的默认。手机经蜂窝网络访问时这个选择直接
+    /// 反映成操作延迟,所以要做成可配。
+    ///
     /// 失败路径必须干净:起不来、等不到 URL、超时,都要把已 spawn 的子进程
     /// 杀掉再返回错误,不留孤儿。
     pub async fn start(
         &self,
         cloudflared: &str,
         origin: &str,
+        transport_protocol: Option<&str>,
         pid_file: &Path,
     ) -> Result<TunnelInfo, String> {
         let mut guard = self.running.lock().await;
@@ -79,6 +88,22 @@ impl TunnelManager {
             .arg("--no-autoupdate")
             .arg("--loglevel")
             .arg("info")
+            // 退出宽限期:默认 30 秒,而"在途请求"把控制台的 `/api/events`
+            // 这类 SSE 长连接也算进去 —— 于是每次关隧道都要空等半分钟,
+            // 表现为"点了关闭没反应"。票据与会话在服务端已先行吊销,链路
+            // 上没有鉴权就进不来,留 3 秒给真正在传的小响应足够。
+            .arg("--grace-period")
+            .arg(GRACE_PERIOD);
+        // 传输协议:quic(cloudflared 默认)在移动网络上握手 RTT 更少、丢包恢复
+        // 更好;部分运营商与办公网封 UDP,给用户一个退回 http2 的档位。
+        // 留空不传这个参数,用 cloudflared 自己的默认。
+        //
+        // 回源连接池(--proxy-keepalive-*)不动:默认已是 100 条 / 90 秒,
+        // 显式写小只会减少复用、多付建连 RTT —— 与想要的效果相反。
+        if let Some(protocol) = transport_protocol.filter(|value| !value.trim().is_empty()) {
+            command.arg("--protocol").arg(protocol.trim());
+        }
+        command
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::piped())

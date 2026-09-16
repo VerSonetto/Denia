@@ -5,6 +5,8 @@
 //! 用户对着一个连不通的二维码发呆。多网卡时全部列出,由用户选。
 
 use std::net::Ipv4Addr;
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 /// 一块可用于局域网访问的网卡地址。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -47,6 +49,49 @@ pub fn candidates() -> Vec<LanCandidate> {
     // 推荐项在前,其次按地址数值排序(同一网卡每次枚举顺序稳定)。
     out.sort_by_key(|c| (!c.recommended, u32::from(c.address), c.interface.clone()));
     out
+}
+
+/// 缓存窗口:同一窗口内重复问"本机有哪些地址"不再走 syscall。
+const CACHE_TTL: Duration = Duration::from_secs(5);
+
+static CACHE: Mutex<Option<CachedIfAddrs>> = Mutex::new(None);
+
+struct CachedIfAddrs {
+    at: Instant,
+    /// 只留 Host 校验需要的东西:地址字符串集合。
+    addresses: Vec<String>,
+}
+
+/// `candidates()` 的缓存版,专给"每个请求都要问一次"的路径用
+/// (远程门的 Host 白名单校验)。
+///
+/// 枚举网卡是一次阻塞系统调用(Windows 上 `GetAdaptersAddresses`,Linux 上
+/// 读 netlink),放在 async 中间件里逐请求付,等于给手机上每一次点击都加
+/// 一截主机侧开销 —— 而且它还是项目规范里明确要求 `spawn_blocking` 的那类
+/// 调用。网卡列表在秒级尺度上不会变,5 秒窗口足够:拔网线、切 Wi-Fi 这种
+/// 变化的代价最多是"新地址 5 秒内还没进白名单",而那时用户本来就连不通。
+///
+/// 需要即时结果的调用方(开局域网监听、切换地址)仍用 `candidates()`。
+pub fn cached_addresses() -> Vec<String> {
+    let mut guard = CACHE.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(cached) = guard.as_ref().filter(|cached| cached.at.elapsed() < CACHE_TTL) {
+        return cached.addresses.clone();
+    }
+    let addresses: Vec<String> = candidates()
+        .into_iter()
+        .map(|candidate| candidate.address.to_string())
+        .collect();
+    *guard = Some(CachedIfAddrs {
+        at: Instant::now(),
+        addresses: addresses.clone(),
+    });
+    addresses
+}
+
+/// 测试/网卡变化后主动失效缓存。
+pub fn invalidate_cache() {
+    let mut guard = CACHE.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    *guard = None;
 }
 
 /// 私有网段判定(RFC 1918 + CGNAT):这些地址才可能真的在同一局域网里。
