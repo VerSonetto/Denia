@@ -239,6 +239,11 @@ pub struct AppState {
     pub credentials: Arc<CredentialStore>,
     pub registry: Arc<LlmRegistry>,
     pub events: broadcast::Sender<ServerEvent>,
+    /// `events` 的可轮询副本(带序号环缓冲),供 `/api/events/poll` 用。
+    ///
+    /// 存在的原因是实测发现 SSE 经 cloudflared 隧道**完全不透传帧**,而长轮询
+    /// 能穿透 —— 手机经隧道时推送只能走轮询。见 `crate::event_pulse`。
+    pub pulse: Arc<crate::event_pulse::EventPulse>,
     pub http: reqwest::Client,
     pub sessions: Arc<SessionStore>,
     pub live: Arc<LiveSessions>,
@@ -815,6 +820,8 @@ pub async fn build_state(
     bound_remote: bool,
 ) -> Result<AppState, Box<dyn std::error::Error>> {
     let events = broadcast::channel::<ServerEvent>(64).0;
+    // 环由这一个订阅者喂:22 个既有发送点不必改签名。
+    let pulse = crate::event_pulse::EventPulse::spawn(events.clone());
 
     let settings_events = broadcast::channel::<SettingsEvent>(64);
     let credentials_events = broadcast::channel::<CredentialEvent>(64);
@@ -969,6 +976,7 @@ pub async fn build_state(
         credentials,
         registry,
         events,
+        pulse,
         http: reqwest::Client::builder()
             .connect_timeout(std::time::Duration::from_secs(30))
             .build()?,

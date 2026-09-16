@@ -62,6 +62,7 @@ pub fn router() -> Router<Arc<AppState>> {
         )
         .route("/api/sessions/{id}/fork", post(fork_session))
         .route("/api/sessions/{id}/follow", get(follow_session))
+        .route("/api/sessions/{id}/follow/poll", get(follow_poll))
         .route(
             "/api/sessions/{id}/context-breakdown",
             get(context_breakdown),
@@ -338,6 +339,10 @@ async fn delete_session(
         .map_err(|e| ApiError::bad_request("runtime/active-child", e))?;
     state.sessions.delete(&id).map_err(ApiError::from_session)?;
     state.live.remove(&id);
+    // 附件目录随会话一起回收:粘贴图片每次落盘一张,不清就是只增不减的占用。
+    if let Err(error) = crate::api::uploads::remove_session_uploads(&state.home, &id) {
+        tracing::warn!(session_id = %id, error = %error, "会话附件目录清理失败");
+    }
     // 全局账本去引用:工作区列表里不残留已删会话。
     state.workspaces.detach_session(&id);
     let _ = state.events.send(ServerEvent::SessionsUpdated);
@@ -515,12 +520,61 @@ async fn prompt_session(
             upload_files.push(path.to_string_lossy().to_string());
         }
     }
+    // 粘贴图片落盘:与上传文件同一目录、同一套消毒规则。内联 data URL 仍是
+    // 首选视觉通道,落盘只是给模型留一条 read_file 可走的备份 —— 协议转换层
+    // 或提供方把图片 part 丢掉时,有路径才可能自救。失败一律降级为无路径:
+    // 图仍照发,不因备份写不出而拒收整条消息。
+    let persisted: Vec<Option<String>> = if body.images.is_empty() {
+        Vec::new()
+    } else {
+        let home = state.home.clone();
+        let sid = id.clone();
+        let uploads = body
+            .images
+            .iter()
+            .enumerate()
+            .map(|(index, image)| {
+                (
+                    index,
+                    crate::api::uploads::pasted_image_name(
+                        image.name.as_deref(),
+                        &image.mime,
+                        index,
+                    ),
+                    image.data.clone(),
+                    image.mime.clone(),
+                )
+            })
+            .collect::<Vec<_>>();
+        tokio::task::spawn_blocking(move || {
+            let engine = &base64::engine::general_purpose::STANDARD;
+            let mut slots: Vec<Option<String>> = vec![None; uploads.len()];
+            for (index, name, data, mime) in uploads {
+                let Ok(bytes) = base64::Engine::decode(engine, data.as_bytes()) else {
+                    tracing::warn!(target: "denia::uploads", "粘贴图片 base64 解码失败,跳过落盘: {name}");
+                    continue;
+                };
+                match crate::api::uploads::write_upload(&home, sid.as_str(), &name, &bytes) {
+                    Ok((_, path)) => slots[index] = Some(path.to_string_lossy().into_owned()),
+                    Err(error) => tracing::warn!(
+                        target: "denia::uploads",
+                        "粘贴图片落盘失败({mime}): {error}"
+                    ),
+                }
+            }
+            slots
+        })
+        .await
+        .unwrap_or_default()
+    };
     let images: Vec<denia_core::message::ImageData> = body
         .images
         .into_iter()
-        .map(|image| denia_core::message::ImageData {
+        .enumerate()
+        .map(|(index, image)| denia_core::message::ImageData {
             mime: image.mime,
             data: image.data,
+            path: persisted.get(index).cloned().flatten(),
         })
         .collect();
     // 轨迹引用:非空校验 + 体积上限(fail loud,不静默丢弃)。
@@ -1334,7 +1388,87 @@ async fn follow_session(
         .map(|envelope| {
             Ok(Event::default().data(serde_json::to_string(&envelope).unwrap_or_default()))
         });
-    Ok(Sse::new(stream).keep_alive(KeepAlive::new().interval(std::time::Duration::from_secs(15))))
+    Ok(Sse::new(stream).keep_alive(
+        KeepAlive::new()
+            // 与 `/api/events` 同一组值:心跳是**带 data 的帧**,让前端能区分
+            // "链路活着只是没事件"与"链路已死"(见 `api::events::HEARTBEAT_FRAME`)。
+            .interval(std::time::Duration::from_secs(
+                super::events::HEARTBEAT_INTERVAL_SECS,
+            ))
+            .event(Event::default().data(super::events::HEARTBEAT_FRAME)),
+    ))
+}
+
+#[derive(Debug, Deserialize)]
+struct FollowPollQuery {
+    #[serde(default)]
+    after: u64,
+    /// 本次最多挂起多少秒。
+    wait: Option<u64>,
+}
+
+/// 长轮询版的 follow:隧道上 SSE 不透传时的兜底(见 `api::events::events_poll`
+/// 与 scripts/probe-*.mjs 的实测)。
+///
+/// 与 SSE 版的区别不只是"攒够一次性返回":这里**只读已落盘的日志尾部**
+/// (`events_after`),广播仅用作唤醒信号。日志是权威源 —— append 先落盘、
+/// 后 broadcast(见 `state.rs`),所以按 `after` 读尾部既不会漏也不会重,
+/// 不必自己缓冲事件,也不受 broadcast 容量与 Lagged 影响。
+///
+/// 同样先订阅再读尾部:反过来会在"读完"与"开始等"之间留窗口,期间落盘的
+/// 事件没人叫醒本次请求,手机上就是"卡住不动"。
+async fn follow_poll(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Query(query): Query<FollowPollQuery>,
+) -> Result<impl IntoResponse, ApiError> {
+    const WAIT_MAX: std::time::Duration = std::time::Duration::from_secs(30);
+    const WAIT_DEFAULT: std::time::Duration = std::time::Duration::from_secs(25);
+
+    let live = state
+        .live
+        .get_or_load(&state.sessions, &id)
+        .map_err(ApiError::from_session)?;
+    state.live.touch(&id);
+    let wait = query
+        .wait
+        .map(|secs| std::time::Duration::from_secs(secs.min(WAIT_MAX.as_secs())))
+        .unwrap_or(WAIT_DEFAULT);
+    let mut wake = live.followers.subscribe();
+    let deadline = tokio::time::Instant::now() + wait;
+
+    loop {
+        let envelopes: Vec<SessionEnvelope> = live.session.events_after(query.after);
+        if !envelopes.is_empty() {
+            return Ok(json_response(envelopes, query.after));
+        }
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            // 挂到超时:回空增量。客户端立刻发起下一轮即可,没有重连开销。
+            return Ok(json_response(Vec::new(), query.after));
+        }
+        // 唤醒信号的内容一律丢弃 —— 数据以日志尾部为准。Lagged 也无妨:
+        // 下一轮循环仍会读到全部已落盘事件,不依赖缓冲区。
+        let _ = tokio::time::timeout(remaining, wake.recv()).await;
+    }
+}
+
+/// 日志被外部改写(回退物理截断 → seq 重新编号)时,`after` 可能落在尾部之后,
+/// 于是本端点会一直回空增量。服务端不做截断检测(那要求读全量日志),交给
+/// 客户端数空轮并重取快照 —— 与 SSE 版"lagged 即关流、客户端重快照"同一语义。
+fn json_response(envelopes: Vec<SessionEnvelope>, after: u64) -> axum::response::Response {
+    let next_seq = envelopes.last().map(|envelope| envelope.seq).unwrap_or(after);
+    // Cache-Control: no-store —— 响应带 cookie 且内容是"此刻的日志尾部",
+    // 任何中间层(含 Cloudflare 边缘)缓存它都会让后来的请求拿到陈旧增量。
+    (
+        StatusCode::OK,
+        [
+            (header::CONTENT_TYPE, "application/json"),
+            (header::CACHE_CONTROL, "no-store"),
+        ],
+        Json(json!({ "envelopes": envelopes, "seq": next_seq })),
+    )
+        .into_response()
 }
 
 #[cfg(test)]

@@ -18,6 +18,7 @@ import type {
   WireProtocol,
 } from './types'
 import { subscribeServerEvents } from './serverEvents'
+import { noteSseFrame } from './pushChannel'
 
 export type { AgentPresetRow, AgentPresetsView } from './types'
 
@@ -1015,7 +1016,15 @@ export function followSession(
       }
       await parseSseBody(
         response,
-        (payload) => onEnvelope(payload as SessionEnvelope),
+        (payload) => {
+          // 这是 SSE 帧:它是"SSE 通"的唯一凭据,降级判定只认这个(长轮询通
+          // 不算,否则会在两条传输之间来回挨卡)。
+          noteSseFrame()
+          // 心跳帧不是会话事件:它没有 seq,交给引擎会被判成断档而触发重快照,
+          // 于是每 15 秒白拉一次全量尾部。
+          if ((payload as { type?: string } | null)?.type === 'hb') return
+          onEnvelope(payload as SessionEnvelope)
+        },
         controller.signal,
       )
     } catch {

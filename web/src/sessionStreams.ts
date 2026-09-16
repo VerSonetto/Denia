@@ -1,6 +1,8 @@
 import * as api from './api'
 import type { SessionAnchor } from './api'
 import type { SessionEnvelope, SessionHeader } from './types'
+import { isPushDead, setPushDead } from './pushChannel'
+import { POLL_HOLD_SEC, pollSessionFollow } from './pushTransport'
 
 /**
  * 会话事件流引擎(每会话一个状态机)。
@@ -25,6 +27,17 @@ import type { SessionEnvelope, SessionHeader } from './types'
  * 流断(transport error / lag / 无帧超时)自动退避重连
  * (300ms → 1s → 3s → 10s 封顶);重连成功即以快照校正;
  * 会话被删(404)则停止重连并通知视图卸载。
+ *
+ * ## 经隧道时改用长轮询
+ *
+ * 实测(2026-09-16,scripts/probe-*.mjs):SSE 经 cloudflared 隧道时**一帧都不
+ * 透传**(响应头 200 拿得到,之后什么都不来;首帧垫 2KB/16KB、心跳提到 1s 皆无效),
+ * 而同一条隧道挂 45 秒的普通响应完好穿透。不处理的话,这里每条流都靠 32 秒
+ * 无帧看门狗超时 → 重连 → 重拉快照,用户看到的就是"内容每 ~32 秒跳一次"。
+ *
+ * 所以链路上判定 SSE 不通(见 `pushChannel.ts`)后,本引擎改用
+ * `/api/sessions/:id/follow/poll` 长轮询:服务端挂到有事件才返回,感知延迟
+ * 从 ~32 秒降到一次请求往返。
  */
 
 export interface SessionPageMeta {
@@ -197,28 +210,20 @@ function scheduleRetry(id: string, state: StreamState) {
   }, delay)
 }
 
+/** 后台不挂长请求(挂死的会被浏览器/代理悄悄回收),按这个间隔快轮。 */
+const FOLLOW_POLL_IDLE_MS = 15_000
+
+/** follow 的两种传输按链路健康度择路:SSE 判死后改走长轮询。 */
 function openFollow(id: string, state: StreamState, gen: number) {
   if (state.dead || gen !== state.generation) return
+  if (isPushDead()) {
+    openFollowPoll(id, state, gen)
+    return
+  }
   const controller = api.followSession(
     id,
     state.cursor,
-    (envelope) => {
-      if (state.dead || gen !== state.generation) return
-      state.lastFrameAt = now()
-      if (envelope.seq === state.cursor + 1) {
-        state.cursor = envelope.seq
-        for (const listener of state.listeners) listener.onEnvelope(envelope)
-      } else {
-        // 与本地认知不符的帧一律重拿快照自愈(resnapshot 内有 300ms 节流):
-        // - seq > cursor+1:断档(follow lag 静默丢帧);
-        // - seq <= cursor:正常只应是连接建立时 replay 与广播的重叠重复帧;
-        //   但后端日志被外部改写(回退物理截断后 seq 重新编号、其他标签页/
-        //   其他实例回退)时,新帧 seq 会整段落回 cursor 之下——旧 cursor 从此
-        //   永久失真,若静默丢弃,新消息将一条都收不到,只能靠用户刷新。
-        //   所以重复帧不再无脑吞掉:节流触发一次重对齐,快照校正后即收敛。
-        resnapshot(id, state)
-      }
-    },
+    (envelope) => deliver(id, state, gen, envelope),
     () => {
       // 流结束(EOF/error/lagged):只要不是主动关,就退避重连。
       if (state.dead || gen !== state.generation) return
@@ -226,15 +231,99 @@ function openFollow(id: string, state: StreamState, gen: number) {
     },
   )
   state.controller = controller
-  // watchdog:32s 无帧 → 主动断、重连(SSE keepalive 15s,说明通道死了)。
+  // watchdog:32 秒无帧(SSE 心跳 15 秒一次,说明通道死了)→ 主动断、重连。
+  // 关键是同时把降级决定权交给 pushChannel:只重连不换传输,就还是每 32 秒
+  // 白跑一趟 —— 那正是"AI 早回完了、手机上几十秒才跳出来"的成因。
   state.watchdogTimer = window.setTimeout(() => {
     state.watchdogTimer = null
     if (state.dead || gen !== state.generation) return
-    if (now() - state.lastFrameAt > 30_000) {
-      abortAndNull(state)
-      scheduleRetry(id, state)
-    }
+    if (now() - state.lastFrameAt <= 30_000) return
+    setPushDead(true)
+    abortAndNull(state)
+    scheduleRetry(id, state)
   }, 32_000)
+}
+
+/** seq 连续性判定:SSE 与轮询共用同一套,两条路的行为必须一致。 */
+function deliver(
+  id: string,
+  state: StreamState,
+  gen: number,
+  envelope: SessionEnvelope,
+) {
+  if (state.dead || gen !== state.generation) return
+  state.lastFrameAt = now()
+  if (envelope.seq === state.cursor + 1) {
+    state.cursor = envelope.seq
+    for (const listener of state.listeners) listener.onEnvelope(envelope)
+    return
+  }
+  // 与本地认知不符的帧一律重拿快照自愈(resnapshot 内有 300ms 节流):
+  // - seq > cursor+1:断档(follow lag 静默丢帧);
+  // - seq <= cursor:正常只应是连接建立时 replay 与广播的重叠重复帧;但后端日志
+  //   被外部改写(回退物理截断后 seq 重新编号、其他标签页/其他实例回退)时,
+  //   新帧 seq 会整段落回 cursor 之下——旧 cursor 从此永久失真,若静默丢弃,
+  //   新消息将一条都收不到,只能靠用户刷新。所以重复帧也不无脑吞掉。
+  resnapshot(id, state)
+}
+
+/**
+ * 长轮询版的 follow:SSE 判死时取代 SSE 那条连接。
+ *
+ * 每轮都从服务端读"当前 cursor 之后的已落盘事件",所以不必像 SSE 那样防 replay
+ * 与广播重叠 —— cursor 就是唯一事实。一轮返回后立刻发下一轮、由服务端挂到有事件
+ * 才回,稳态下手机上只有一次往返的延迟,而不是 32 秒一跳。
+ *
+ * 这里**不上报 pushChannel 活性**:长轮询通不等于 SSE 通(见 pushChannel 的
+ * "一条铁律"),否则会立刻解除降级、回到 SSE、又 0 帧,来回挨卡。
+ */
+function openFollowPoll(id: string, state: StreamState, gen: number) {
+  const controller = new AbortController()
+  state.controller = controller
+
+  const nextRound = (delayMs: number) => {
+    if (state.dead || gen !== state.generation) return
+    state.watchdogTimer = window.setTimeout(() => {
+      state.watchdogTimer = null
+      openFollow(id, state, gen)
+    }, delayMs)
+  }
+
+  void (async () => {
+    // 后台不挂长请求:服务端见 wait=0 立即返回,拿一次就按固定间隔再问。
+    const background = typeof document !== 'undefined' && document.hidden
+    const result = await pollSessionFollow<SessionEnvelope>(
+      id,
+      state.cursor,
+      background ? 0 : POLL_HOLD_SEC,
+      controller.signal,
+    )
+    if (state.dead || gen !== state.generation) return
+    if (result.kind === 'ok') {
+      // 轮到就把退避清零:能拿到响应说明链路是通的。
+      state.retryDelayMs = 300
+      for (const envelope of result.batch.envelopes ?? []) {
+        if (state.dead || gen !== state.generation) return
+        deliver(id, state, gen, envelope)
+      }
+      nextRound(background ? FOLLOW_POLL_IDLE_MS : 0)
+      return
+    }
+    // 调用方主动 abort(切会话/代际失效/引擎卸载):不是故障,静默收尾。
+    if (result.kind === 'aborted') return
+    if (result.kind === 'status' && result.status === 404) {
+      state.dead = true
+      state.controller = null
+      for (const listener of state.listeners) listener.onNotFound?.()
+      return
+    }
+    // 轮询也失败 = 网络本身断了(或服务端重启)。放开降级判定,让下一次
+    // openFollow 重新走 SSE 探路 —— 网络恢复后 SSE 可能又能用了。
+    if (result.kind === 'transportError' || (result.kind === 'status' && result.status >= 500)) {
+      setPushDead(false)
+    }
+    scheduleRetry(id, state)
+  })()
 }
 
 function resnapshot(id: string, state: StreamState) {
