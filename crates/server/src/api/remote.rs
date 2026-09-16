@@ -325,13 +325,20 @@ mod tests {
                 None,
             )
             .unwrap();
-        // 与 main.rs 同构:API 路由 + 静态资源 fallback(远程连接要能把
-        // 控制台 HTML 发给扫码的浏览器,少了这层测不出真实形态)。
+        // 与 main.rs 同构:API 路由(压缩层已在 api::router() 内挂载)+ 静态
+        // 资源 fallback(远程连接要能把控制台 HTML 发给扫码的浏览器,少了这层
+        // 测不出真实形态)。
         let business = crate::api::router()
             .with_state(state.clone())
-            .fallback(|uri: axum::http::Uri| async move {
-                crate::web_assets::response_for(&uri, None)
-            });
+            .fallback(
+                |uri: axum::http::Uri, headers: axum::http::HeaderMap| async move {
+                    let accept_encoding = headers
+                        .get(axum::http::header::ACCEPT_ENCODING)
+                        .and_then(|value| value.to_str().ok())
+                        .unwrap_or("");
+                    crate::web_assets::response_for(&uri, None, accept_encoding)
+                },
+            );
         // start_lan 会起真实 listener,需要先装配 Router(与 main.rs 同序)。
         state.remote.attach_router(business.clone());
         (state, business)

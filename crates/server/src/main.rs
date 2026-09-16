@@ -4,6 +4,7 @@ mod agent_runtime;
 mod agent_presets;
 mod api;
 mod error;
+mod event_pulse;
 mod file_history;
 mod jobs;
 mod mcp_runtime;
@@ -25,8 +26,30 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use axum::serve::{ListenerExt, TapIo};
 use state::build_state;
 use tracing_subscriber::EnvFilter;
+
+/// 给每个 accept 出来的连接关掉 Nagle。
+///
+/// 控制台的交互形态决定了这很值钱:打字机式的 SSE 是一连串几十到几百字节的
+/// 小帧,而手机走蜂窝网络时,对端往往不会立刻回 ACK —— Nagle 会把小帧攒住
+/// 等前一帧确认,每一跳白付几十毫秒。keepalive 长连接越多,这个开关的收益越大。
+///
+/// 返回具体的 `TapIo<…>` 而不是 `impl Listener`:axum 的 `Connected` 实现是
+/// 按 `IncomingStream<'_, TapIo<L, F>>` 这个形状写的,类型一旦被抹掉,
+/// `into_make_service_with_connect_info::<SocketAddr>()` 就找不到自己的实现。
+fn nodelay(
+    listener: tokio::net::TcpListener,
+) -> TapIo<tokio::net::TcpListener, fn(&mut tokio::net::TcpStream)> {
+    listener.tap_io(set_nodelay as fn(&mut tokio::net::TcpStream))
+}
+
+fn set_nodelay(stream: &mut tokio::net::TcpStream) {
+    if let Err(error) = stream.set_nodelay(true) {
+        tracing::debug!(%error, "could not set TCP_NODELAY");
+    }
+}
 
 fn main() {
     // Exclusive CLI mode: native folder picker as this process's first window.
@@ -72,11 +95,22 @@ fn main() {
             .with_state(state.clone())
             .fallback({
                 let dir = web_dir.clone();
-                move |uri: axum::http::Uri| {
+                move |uri: axum::http::Uri, headers: axum::http::HeaderMap| {
                     let dir = dir.clone();
-                    async move { web_assets::response_for(&uri, dir.as_deref()) }
+                    async move {
+                        // 静态资源走"构建期预压缩 + 按 Accept-Encoding 选实体":
+                        // 经公网隧道发到手机时,字节数就是延迟。
+                        let accept_encoding = headers
+                            .get(axum::http::header::ACCEPT_ENCODING)
+                            .and_then(|value| value.to_str().ok())
+                            .unwrap_or("");
+                        web_assets::response_for(&uri, dir.as_deref(), accept_encoding)
+                    }
                 }
             });
+        // API 响应压缩在 api::router() 内部挂载:它只包裹注册时已有的路由,
+        // 上面这个 fallback 因此不被压缩层碰 —— 静态资源自己按
+        // Accept-Encoding 挑构建期预压缩好的实体,运行时零 CPU。
         // 主 listener:只做来源标注(本机 UI 要看得到 PIN 与票据链接,而
         // 以 `--host 0.0.0.0` 启动时局域网来客必须被标成 Lan 而不是本机)。
         let router = business.clone().layer(axum::middleware::from_fn_with_state(
@@ -111,7 +145,7 @@ fn main() {
         // 远程连接必须在退出前显式收尾(杀隧道、清票据与会话、关远程 listener)。
         let shutdown_remote = state.remote.clone();
         axum::serve(
-            listener,
+            nodelay(listener),
             router.into_make_service_with_connect_info::<SocketAddr>(),
         )
         .with_graceful_shutdown(async move {

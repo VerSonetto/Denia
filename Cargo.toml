@@ -55,7 +55,11 @@ serde_json = "1"
 serde_yaml = "0.9"
 
 axum = { version = "0.8", features = ["macros", "ws"] }
-tower-http = { version = "0.6", features = ["fs", "cors", "trace"] }
+# 只开 gzip:控制台静态产物由构建期预压缩(node zlib 自带 brotli,零运行时依赖),
+# 这里的中间件只负责 API 响应(会话快照/列表 JSON)。开 compression-br 会额外
+# 拖进 async-compression + brotli 两个 crate,而 JSON 上 br 相对 gzip 的收益
+# 不值得这层体积。
+tower-http = { version = "0.6", features = ["fs", "cors", "trace", "compression-gzip"] }
 http = "1"
 rust-embed = "8"
 mime_guess = "2"
