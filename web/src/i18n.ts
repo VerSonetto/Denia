@@ -778,9 +778,9 @@ const zh = {
   confirmAction: '确认',
   permissionLabel: '权限',
   permissionReadOnly: '只读模式',
-  permissionReadOnlyDesc: '只允许读取与调研,写类操作一律拒绝',
+  permissionReadOnlyDesc: '只开放只读类工具(浏览、读取、检索),bash 与文件编辑不开放',
   permissionAutoEdit: '自动编辑',
-  permissionAutoEditDesc: '工作区内编辑与命令自动放行,越界写文件需批准',
+  permissionAutoEditDesc: '工作区内编辑自动放行;区外写、删除文件、bash 改文件需批准',
   permissionPlan: '计划模式',
   permissionPlanDesc: '只调研不执行,提交计划等批准后再动手',
   permissionFull: '完全访问',
@@ -788,6 +788,7 @@ const zh = {
   approvalLabel: '审批',
   approvalWaiting: '等待审批',
   approvalAllowOnce: '允许一次',
+  approvalAllowSession: '本窗口放行',
   approvalReject: '拒绝',
 
   /* ---- 计划审批面板(exit_plan) ---- */
@@ -1819,9 +1820,9 @@ const en: typeof zh = {
   confirmAction: 'Confirm',
   permissionLabel: 'Permissions',
   permissionReadOnly: 'Read-only',
-  permissionReadOnlyDesc: 'Research only: write-like operations are always denied',
+  permissionReadOnlyDesc: 'Read-only tools only (browse, read, search); bash and file edits are not offered',
   permissionAutoEdit: 'Auto-edit',
-  permissionAutoEditDesc: 'Edits and commands inside the workspace run automatically; outside writes need approval',
+  permissionAutoEditDesc: 'Edits inside the workspace run automatically; outside writes, deletions and bash file changes need approval',
   permissionPlan: 'Plan',
   permissionPlanDesc: 'Research without executing; submit a plan and wait for approval',
   permissionFull: 'Full access',
@@ -1829,6 +1830,7 @@ const en: typeof zh = {
   approvalLabel: 'Approval',
   approvalWaiting: 'Waiting for approval',
   approvalAllowOnce: 'Allow once',
+  approvalAllowSession: 'Allow for this session',
   approvalReject: 'Reject',
 
   /* ---- Plan review panel (exit_plan) ---- */

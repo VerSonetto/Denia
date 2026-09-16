@@ -304,7 +304,7 @@ export type SessionEnvelope =
       time: number
       type: 'approval-decided'
       request_id: string
-      outcome: 'allowed-once' | 'rejected' | 'cancelled' | 'unavailable'
+      outcome: 'allowed-once' | 'allowed-session' | 'rejected' | 'cancelled' | 'unavailable'
     }
   | {
       seq: number

@@ -785,7 +785,7 @@ export function listSkills(id: string, signal?: AbortSignal): Promise<{ skills: 
 
 /** 应答一次挂起的审批;计划审批(exit_plan)的载荷可带执行档位/模型/建议。 */
 export interface ApprovalDecisionPayload {
-  decision: 'allow-once' | 'reject'
+  decision: 'allow-once' | 'allow-session' | 'reject'
   /** 计划批准时的执行档位(仅 auto-edit / full)。 */
   executeMode?: 'auto-edit' | 'full'
   /** 计划批准时选定的执行模型。 */
@@ -797,7 +797,7 @@ export interface ApprovalDecisionPayload {
 export function answerApproval(
   id: string,
   requestId: string,
-  payload: ApprovalDecisionPayload | 'allow-once' | 'reject',
+  payload: ApprovalDecisionPayload | 'allow-once' | 'allow-session' | 'reject',
 ): Promise<{ ok: boolean }> {
   const body = typeof payload === 'string' ? { decision: payload } : payload
   return http(
