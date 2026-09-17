@@ -481,7 +481,13 @@ export function SettingsModal({ notify, onClose }: { notify: Notify; onClose: ()
   }
 
   return (
-    <div className="setm-backdrop">
+    <div
+      className="setm-backdrop"
+      // 遮罩单击不关窗(容易误触),双击才关;点在壳内不算外部点击。
+      onDoubleClick={(event) => {
+        if (event.target === event.currentTarget) onClose()
+      }}
+    >
       <div
         className="setm-shell"
         role="dialog"

@@ -312,7 +312,6 @@ const zh = {
   queueDeleteTitle: '删除这条队列消息',
   queueSentHint: 'AI 本轮结束后自动发送',
   queueSendFailed: 'AI 未能在 5 秒内停止，已保留在输入框，请重试',
-  queueNoAttachments: 'AI 运行中只能排队纯文本消息；带图片/附件请等本轮结束后发送',
   axisLabel: '对话导航',
 
   statsTurns: '{turns} 轮 · {steps} 步',
@@ -563,6 +562,8 @@ const zh = {
   rewindConfirmTitle: '回退到此消息',
   rewindConfirmDesc: '将删除此消息之后的 {removed} 条消息，并恢复 {files} 个文件。此操作不可撤销。',
   rewindConfirmSimple: '将删除此消息之后的 {removed} 条消息，没有文件变化。此操作不可撤销。',
+  rewindConfirmInterrupt: 'AI 正在输出，回退会先中断本轮。',
+  rewindStopFailed: 'AI 未能在 5 秒内停止，请稍后重试',
   rewindDone: '已回退',
   rewindNotFound: '回退点不存在',
   rewindRestore: '恢复',
@@ -1358,7 +1359,6 @@ const en: typeof zh = {
   queueDeleteTitle: 'Delete this queued message',
   queueSentHint: 'Sent automatically when this turn ends',
   queueSendFailed: 'AI did not stop within 5s; message kept in the input box, please retry',
-  queueNoAttachments: 'Only plain text can be queued while the AI is running; send images/attachments after this turn ends',
   axisLabel: 'Conversation navigation',
 
   statsTurns: '{turns} turns · {steps} steps',
@@ -1608,6 +1608,8 @@ const en: typeof zh = {
   rewindConfirmTitle: 'Rewind to this message',
   rewindConfirmDesc: 'This will remove {removed} messages after this point and restore {files} files. This cannot be undone.',
   rewindConfirmSimple: 'This will remove {removed} messages after this point. No file changes. This cannot be undone.',
+  rewindConfirmInterrupt: 'The AI is still responding; rewinding will interrupt this turn first.',
+  rewindStopFailed: 'The AI did not stop within 5s, please retry',
   rewindDone: 'Rewound',
   rewindNotFound: 'Rewind point not found',
   rewindRestore: 'Restore',

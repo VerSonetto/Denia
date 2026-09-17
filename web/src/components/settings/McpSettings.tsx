@@ -511,13 +511,19 @@ export function McpSettings({ notify }: { notify: (kind: 'ok' | 'err', text: str
       </header>
 
       {editing && (
-        <div className={styles.modalBackdrop} onClick={() => setEditing(null)}>
+        <div
+          className={styles.modalBackdrop}
+          // 与设置弹窗/提供方弹窗一致:遮罩单击不关窗(弹层里点空白容易误触),
+          // 双击才退出。
+          onDoubleClick={(event) => {
+            if (event.target === event.currentTarget) setEditing(null)
+          }}
+        >
           <div
             className={styles.modal}
             role="dialog"
             aria-modal="true"
             aria-label={t('mcpEditorTitle')}
-            onClick={(event) => event.stopPropagation()}
           >
             <header className={styles.modalHead}>
               <div>

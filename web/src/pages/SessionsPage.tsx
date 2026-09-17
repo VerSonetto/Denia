@@ -102,6 +102,8 @@ import type {
   SessionSummary,
   TodoItem,
   QueuedMessage,
+  PastedImage,
+  PendingAttachment,
   UserMessageImage,
   WorkspaceRecord,
 } from '../types'
@@ -167,6 +169,26 @@ function firstAvailableSelection(catalog: ModelCatalog): ModelSelection | null {
     if (model) return { provider: group.id, model: model.id }
   }
   return null
+}
+
+/**
+ * 一条待发送消息的完整载荷。省略时取输入区当前内容(手动发送路径);
+ * 队列自动发送/立即发送把当时搬进队列的内容显式传回(那时输入区可能已经
+ * 在写新消息,不能取现场状态)。
+ */
+interface OutgoingPayload {
+  images: PastedImage[]
+  attachments: PendingAttachment[]
+  quotes: TrajectoryQuote[]
+}
+
+/** 把一条队列消息转回发送载荷(队列 → postMessage 的桥)。 */
+function queuedPayload(message: QueuedMessage): OutgoingPayload {
+  return {
+    images: message.images ?? [],
+    attachments: message.attachments ?? [],
+    quotes: (message.quotes ?? []) as TrajectoryQuote[],
+  }
 }
 
 /** 乐观行内容指纹:文本 + 内联图片都参与匹配,避免多条纯图片消息("图片")互相误删。 */
@@ -922,7 +944,11 @@ export default function SessionsPage({
   const [attachments, setAttachments] = useState<{ name: string; mime: string; file: File }[]>([])
   // 轨迹引用(芯片挂在输入框上方,随消息以 injected 上下文注入)。
   const [trajQuotes, setTrajQuotes] = useState<TrajectoryQuote[]>([])
-  const promptEmpty = !prompt.trim() && pastedImages.length === 0
+  const promptEmpty =
+    !prompt.trim() &&
+    pastedImages.length === 0 &&
+    attachments.length === 0 &&
+    trajQuotes.length === 0
   const primaryStops = running && promptEmpty
   // 用户显式选过档位 → 用本地记忆;否则跟随设置里的"默认权限模式"
   // (异步拉取,见下方 default-permission 效应)。会话级档位优先,由事件流覆盖。
@@ -1584,7 +1610,31 @@ export default function SessionsPage({
   const confirmRewind = useCallback(async () => {
     if (!activeId || !rewindReq || rewindBusy) return
     setRewindBusy(true)
+    // 回退期间抑制队列自动发送:上面的打断会让 running 转 false,若不抑制,
+    // 队首消息会在日志即将被截断的瞬间被发出去。
+    suppressAutoFlushRef.current = true
     try {
+      // 运行中也能回退:先替用户打断当前轮次并等它真正退出。不再要求
+      // 先手动暂停 —— 但打断必须发生在用户确认之后(取消确认框时 AI
+      // 照旧跑完,不因一次误点丢掉正在产出的回答)。
+      //
+      // cancel 幂等(没有运行中的轮次时服务端直接返回),所以不先判前端
+      // running:另一个标签页发起的轮次也能被这一步收住。
+      try {
+        await api.cancelSession(activeId)
+      } catch (error) {
+        notify('err', error instanceof Error ? error.message : String(error))
+      }
+      // cancel 是异步的:等 driver 退出 running 再回退(running 期间
+      // 后端拒绝回退,且截断日志会与正在写入的流互相踩)。
+      const deadline = Date.now() + 5000
+      while (runningRef.current && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 150))
+      }
+      if (runningRef.current) {
+        notify('err', t('rewindStopFailed'))
+        return
+      }
       const result = await api.rewindSession(activeId, rewindReq.seq)
       // 后端物理截断后事件 seq 重新编号,本页流引擎的 cursor 与 follow
       // 连接已失真:显式重连对齐(重拉快照校正 cursor、按需重开 follow),
@@ -1619,6 +1669,7 @@ export default function SessionsPage({
     } catch (error) {
       notify('err', error instanceof Error ? error.message : String(error))
     } finally {
+      suppressAutoFlushRef.current = false
       setRewindBusy(false)
     }
   }, [activeId, rewindReq, rewindBusy])
@@ -1674,13 +1725,20 @@ export default function SessionsPage({
    * 4. 失败 → 移除乐观行、恢复输入框、报错。
    */
   /**
-   * 消息入队(AI 运行中):清空输入框与附件,消息进入队列,本轮结束后自动发送。
+   * 消息入队(AI 运行中):输入区的全部内容(文本 + 图片 + 附件 + 轨迹引用)
+   * 整体搬进队列,输入区随之下空,本轮结束后自动发送。
    */
   const enqueueMessage = (text: string) => {
     queueSeqRef.current += 1
     setQueuedMessages((previous) => [
       ...previous,
-      { id: `queue-${queueSeqRef.current}`, text },
+      {
+        id: `queue-${queueSeqRef.current}`,
+        text,
+        images: pastedImages.length > 0 ? pastedImages : undefined,
+        attachments: attachments.length > 0 ? attachments : undefined,
+        quotes: trajQuotes.length > 0 ? trajQuotes : undefined,
+      },
     ])
     applyDraft('')
     setPastedImages([])
@@ -1731,10 +1789,28 @@ export default function SessionsPage({
    * 核心发送:把指定消息发往当前会话(复用乐观行/附件/引用的完整流程)。
    * 供输入框 send 与队列自动发送共用。
    */
-  const postMessage = async (text: string, options?: { clearInput?: boolean }): Promise<boolean> => {
+  const postMessage = async (
+    text: string,
+    options?: { clearInput?: boolean; payload?: OutgoingPayload },
+  ): Promise<boolean> => {
     if (sendingRef.current) return false
+    // 载荷:显式传入优先(队列消息),否则取输入区当前内容。
+    const outgoingImages = options?.payload?.images ?? pastedImages
+    const outgoingAttachments = options?.payload?.attachments ?? attachments
+    const outgoingQuotes = options?.payload?.quotes ?? trajQuotes
+    // 正文兜底:后端拒绝空 prompt,而纯图片/纯附件/纯引用的消息本身合法。
+    // 只在确实无正文时造一句占位文案,用户写过的字一律原样保留。
+    const outgoingText =
+      text.trim() ||
+      (outgoingImages.length > 0
+        ? t('pastedImageLabel')
+        : outgoingAttachments.length > 0
+          ? outgoingAttachments[0].name
+          : outgoingQuotes.length > 0
+            ? outgoingQuotes[0].title
+            : text)
     // 粘贴图片:模型必须标记为可识图,否则拒绝整条发送。
-    if (pastedImages.length > 0 && !ensureVision()) return false
+    if (outgoingImages.length > 0 && !ensureVision()) return false
     // 发送 = 用户要看回复:立即恢复吸底,不等 202——服务端可能先于
     // postPrompt 响应就开始推流,此刻不吸底,后续内容全会落在视口之外。
     snapToBottom()
@@ -1760,7 +1836,9 @@ export default function SessionsPage({
       // 斜杠命令裁定(单一发送咽喉:手动发送/队列自动发送/立即发送共用);
       // 命令优先于技能(对齐 dsh matchEnter 的行认领)。
       const command = parseLeadingCommand(text)
-      let body = text
+      // 命令裁定看原文(占位文案不该被当成命令);实际发往模型的正文用
+      // outgoingText —— 无正文时它已经兜底成图片/附件/引用的可读摘要。
+      let body = outgoingText
       if (command?.kind === 'plan') {
         if (permission !== 'plan') {
           await api.setSessionPermission(id, 'plan')
@@ -1828,7 +1906,7 @@ export default function SessionsPage({
       )
       // 附件上传(不限格式):先持久化,再随消息注入路径。
       const uploadedPaths: string[] = []
-      for (const attachment of attachments) {
+      for (const attachment of outgoingAttachments) {
         try {
           const data = await fileToBase64(attachment.file)
           const result = await api.uploadAttachment({
@@ -1847,14 +1925,14 @@ export default function SessionsPage({
         provider: selection?.provider,
         model: selection?.model,
         reasoningEffort: selection?.reasoningEffort,
-        images: pastedImages.map(({ name, mime, data }) => ({ name, mime, data })),
+        images: outgoingImages.map(({ name, mime, data }) => ({ name, mime, data })),
         files: uploadedPaths,
-        quoted: trajQuotes.map(({ title, text }) => ({ title, text })),
+        quoted: outgoingQuotes.map(({ title, text }) => ({ title, text })),
         skills: skillNames.length > 0 ? skillNames : undefined,
       })
       // 发送成功后立即打开 follow,收流式增量;不要等 running SSE 才建连。
       ensureFollowing(id)
-      const sentImages: UserMessageImage[] = pastedImages.map(({ mime, data }) => ({ mime, data }))
+      const sentImages: UserMessageImage[] = outgoingImages.map(({ mime, data }) => ({ mime, data }))
       // 收到 202:服务端已接单,立即乐观反馈(running 也由服务端 SSE 推送)。
       pushPending(body, sentImages.length > 0 ? sentImages : undefined)
       setRunningStatus(id, true)
@@ -1875,26 +1953,23 @@ export default function SessionsPage({
 
   const send = async () => {
     const trimmed = prompt.trim()
-    const message =
-      trimmed || (pastedImages.length > 0 ? t('pastedImageLabel') : '')
-    if (optimizing || !message || sendingRef.current) return
+    // 可发判定:正文、图片、附件、轨迹引用任一非空即可发(空正文由
+    // postMessage 在发往后端前兜底成一句话,队列里保留用户真实输入)。
+    const hasPayload =
+      pastedImages.length > 0 || attachments.length > 0 || trajQuotes.length > 0
+    if (optimizing || (!trimmed && !hasPayload) || sendingRef.current) return
     if (inert) {
       onOpenPicker()
       return
     }
-    // AI 正在运行:不打断,把消息加入队列,本轮结束后自动发送。
+    // AI 正在运行:不打断,把消息加入队列(含图片/附件/引用),本轮结束后自动发送。
     if (running) {
-      if (pastedImages.length > 0 || attachments.length > 0 || trajQuotes.length > 0) {
-        // 队列只承载纯文本;带图片/附件/轨迹引用时请等本轮结束后直接发送。
-        notify('err', t('queueNoAttachments'))
-        return
-      }
-      enqueueMessage(message)
+      enqueueMessage(trimmed)
       notify('ok', t('queueSentHint'))
       return
     }
     // 不运行时:附件随消息一起发。
-    await postMessage(message)
+    await postMessage(trimmed)
     // postMessage 成功后已清空输入框/附件;发送失败时保留,等待重试。
   }
 
@@ -1918,12 +1993,14 @@ export default function SessionsPage({
       const next = queuedMessagesRef.current[0]
       if (next) {
         setQueuedMessages((previous) => previous.slice(1))
-        void postMessageRef.current(next.text, { clearInput: false }).then((ok) => {
-          if (!ok) {
-            // 发送失败:放回队首,等用户处理(不丢消息)。
-            setQueuedMessages((previous) => [{ ...next }, ...previous])
-          }
-        })
+        void postMessageRef
+          .current(next.text, { clearInput: false, payload: queuedPayload(next) })
+          .then((ok) => {
+            if (!ok) {
+              // 发送失败:放回队首,等用户处理(不丢消息)。
+              setQueuedMessages((previous) => [{ ...next }, ...previous])
+            }
+          })
       }
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -1960,10 +2037,13 @@ export default function SessionsPage({
       notify('err', t('queueSendFailed'))
       return
     }
-    // 打断成功:移出队列并发送(纯文本)。
+    // 打断成功:移出队列并发送(携带入队时的图片/附件/引用)。
     setQueuedMessages((previous) => previous.filter((item) => item.id !== message.id))
     try {
-      const ok = await postMessageRef.current(message.text, { clearInput: false })
+      const ok = await postMessageRef.current(message.text, {
+        clearInput: false,
+        payload: queuedPayload(message),
+      })
       if (!ok) {
         // 发送失败:放回队列(保持原位置),不丢消息。
         setQueuedMessages((previous) => [message, ...previous])
@@ -1973,9 +2053,13 @@ export default function SessionsPage({
     }
   }
 
-  /** 编辑:把消息回填到输入框并移出队列(卡片随词典重建)。 */
+  /** 编辑:把消息(含图片/附件/引用)回填到输入框并移出队列(卡片随词典重建)。 */
   const editQueued = (message: QueuedMessage) => {
     applyDraft(message.text)
+    // 回填是「整体覆盖」:队列消息就是当时输入区的全量快照,直接恢复。
+    setPastedImages(message.images ?? [])
+    setAttachments(message.attachments ?? [])
+    setTrajQuotes((message.quotes ?? []) as TrajectoryQuote[])
     setQueuedMessages((previous) => previous.filter((item) => item.id !== message.id))
     promptRef.current?.focus()
   }
@@ -2688,12 +2772,14 @@ export default function SessionsPage({
           open
           title={t('rewindConfirmTitle')}
           desc={
-            rewindReq.changes.length > 0
+            (rewindReq.changes.length > 0
               ? t('rewindConfirmDesc', {
                   removed: rewindReq.removedMessages,
                   files: rewindReq.changes.length,
                 })
-              : t('rewindConfirmSimple', { removed: rewindReq.removedMessages })
+              : t('rewindConfirmSimple', { removed: rewindReq.removedMessages })) +
+            // 运行中回退会先替用户打断本轮:这件事必须在确认前说清楚。
+            (running ? ` ${t('rewindConfirmInterrupt')}` : '')
           }
           danger
           confirmLabel={t('rewind')}

@@ -288,7 +288,13 @@ export function ProviderModal({
 
   return (
     <div className={styles.overlay}>
-      <div className={styles.backdrop} onClick={onClose} aria-hidden="true" />
+      {/* 遮罩单击不关窗(与设置弹窗一致:弹层里点空白太容易误触),
+          双击才退出。 */}
+      <div
+        className={styles.backdrop}
+        onDoubleClick={onClose}
+        aria-hidden="true"
+      />
       <div
         ref={panelRef}
         className={styles.panel}

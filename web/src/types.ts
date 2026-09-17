@@ -167,10 +167,36 @@ export interface TodoItem {
   status: 'pending' | 'in_progress' | 'completed'
 }
 
-/** One queued message: sent while a turn is running, delivered after it ends. */
+/** 输入框中的一张粘贴图片:预览 data URL 供缩略图,data 是发给模型的原始 base64。 */
+export interface PastedImage {
+  name: string
+  mime: string
+  data: string
+  bytes: number
+  preview: string
+}
+
+/** 输入框中的一份待上传附件:只持 File 句柄,真正上传发生在发送那一刻。 */
+export interface PendingAttachment {
+  name: string
+  mime: string
+  file: File
+}
+
+/**
+ * 一条排队消息:AI 运行中输入的新消息,本轮结束后自动发送。
+ *
+ * 与输入框同一套载荷 —— 图片/附件/轨迹引用都随消息一起排队,不再只承载
+ * 纯文本:排队时把输入区里的这些内容整体搬进队列(输入区随之下空),发送
+ * 时原样交回 postMessage,与手动发送走同一条链路。
+ */
 export interface QueuedMessage {
   id: string
   text: string
+  images?: PastedImage[]
+  attachments?: PendingAttachment[]
+  /** 轨迹引用(与 trajectory.ts 的 TrajectoryQuote 同形,避免循环依赖在此展开)。 */
+  quotes?: { id: string; title: string; text: string }[]
 }
 
 /** One inline image attached to a user message (mirrors Rust `ImageData`). */
