@@ -123,6 +123,16 @@ pub fn register_shipped_prompt(
         audience: SectionAudience::Model,
     })?;
     prompt.section(PromptSection {
+        name: "tool:webfetch".to_string(),
+        order: SectionOrder::ToolWebFetch.value(),
+        text: PromptText::Static(
+            "用 web_fetch 抓取网页内容:给它完整 URL,返回提取后的 Markdown 正文。它是纯 HTTP 抓取,不执行 JavaScript——需要登录的页面、单页应用、靠脚本渲染的动态内容拿到的只是空壳,这类页面直接用 browser 打开;下载文件、调 REST 接口、看响应头这类活交给 bash 的 curl。调用接口拿 JSON 时加 raw=true 取原文,不要硬解析被提取过的正文。抓回来的内容不符合预期时,先换 URL 或调整参数,不要原样重抓超过一次。"
+                .to_string(),
+        ),
+        complete: false,
+        audience: SectionAudience::Model,
+    })?;
+    prompt.section(PromptSection {
         name: "tool:todo".to_string(),
         order: SectionOrder::ToolWrite.value() + 1,
         text: PromptText::Static(
@@ -646,6 +656,50 @@ mod tests {
 
     use super::*;
 
+    /// web_fetch 的双路径断言:随 default_registry 注册——纪律段存在、
+    /// audience 为 Model、不进用户可见副本,schema 同步进 prompt 工具面;
+    /// 子代理白名单收窄(不含 web_fetch)时段与 schema 一起消失。
+    #[test]
+    fn webfetch_section_follows_tool_registration() {
+        let (prompt, registry) = default_shipped();
+        let assembly = prompt
+            .assemble(&AssembleContext {
+                cwd: Some("/work".to_string()),
+                ..Default::default()
+            })
+            .unwrap();
+        let section = assembly
+            .sections
+            .iter()
+            .find(|section| section.name == "tool:webfetch")
+            .expect("tool:webfetch 段必须随 shipped 工具注册");
+        assert_eq!(section.audience, SectionAudience::Model);
+        assert!(
+            section.text.contains("不执行 JavaScript"),
+            "纪律段应说明能力边界(不执行 JS)"
+        );
+        assert!(
+            section.text.contains("raw=true"),
+            "纪律段应给出接口抓取的用法"
+        );
+        assert!(
+            registry.get("web_fetch").is_some(),
+            "web_fetch 应注册进 shipped 工具面"
+        );
+        let tool_names: Vec<String> = assembly.tools.iter().map(|tool| tool.name.clone()).collect();
+        assert!(
+            tool_names.contains(&"web_fetch".to_string()),
+            "web_fetch schema 必须进 prompt 工具面:{tool_names:?}"
+        );
+        let user = render_prompt_for_user(&assembly);
+        assert!(
+            !user.contains("不执行 JavaScript"),
+            "纪律段是模型侧私货,不应进用户可见副本"
+        );
+        // 段与工具同进退的收窄路径(agent-loop 的白名单机制)在
+        // agent-loop/tests.rs 里断言。
+    }
+
     /// 行为与表达纪律段的两条路径断言:
     /// 带工具时存在、audience 为 Model、不进用户可见副本。
     #[test]
@@ -885,8 +939,8 @@ mod tests {
                 .any(|section| section.name == "tool:todo")
         );
         assert!(!render_context_snapshot(&assembly).is_empty());
-        // bash/read/write/todo/ls/glob/grep/edit/exit_plan/get_goal/update_goal。
-        assert_eq!(assembly.tools.len(), 11);
+        // bash/read/write/todo/ls/glob/grep/edit/exit_plan/get_goal/update_goal/web_fetch。
+        assert_eq!(assembly.tools.len(), 12);
     }
 
     /// 全量兜底:出厂提示词里**任何一处**都不许把探索动作推给 bash。

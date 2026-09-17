@@ -24,6 +24,7 @@ pub mod shell;
 pub mod shell_session;
 pub mod support;
 mod todo;
+mod web_fetch;
 
 use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
@@ -55,6 +56,7 @@ pub use prompt::{
 };
 pub use shell_session::{Captured, PersistentShell, ShellHub};
 pub use todo::TodoWriteTool;
+pub use web_fetch::WebFetchTool;
 
 /// Session-event sink handed to tools that emit log-only state (todo_write).
 /// The agent loop wires it to the session append + broadcast; tools never
@@ -75,11 +77,14 @@ pub type SessionEventSink = Arc<dyn Fn(SessionEvent) + Send + Sync>;
 /// 常常需要。它带来的资源副作用(常驻浏览器实例)由父代理统一收尾——
 /// `tool:browser` 纪律段说明"任务完成后彻底清除",子代理同样受该纪律约束。
 ///
+/// `web_fetch` 在此集合内:读文档/抓文章是调研日常,纯 HTTP 无进程与
+/// tab 资源,无收尾义务。
+///
 /// 与 dsh 的差异:dsh 让子代理继承父代理的完整工具面,只靠深度与审批兜底;
 /// 这里在授予层直接收口,子代理拿不到交互/写类工具,也就不存在"子代理
 /// 提问没人应答"的问题。
 pub const SUBAGENT_READ_ONLY_TOOLS: &[&str] =
-    &["read_file", "ls", "glob", "grep", "skill", "browser"];
+    &["read_file", "ls", "glob", "grep", "skill", "browser", "web_fetch"];
 
 /// 提问通道:宿主实现,把 `ask` 工具的提问挂到会话的挂起表并等待用户应答。
 ///
@@ -228,7 +233,7 @@ impl ToolRegistry {
     }
 }
 
-/// The shipped tool set: bash + read_file + write_file + todo_write + ls + glob + grep + edit + exit_plan.
+/// The shipped tool set: bash + read_file + write_file + todo_write + ls + glob + grep + edit + exit_plan + web_fetch.
 pub fn default_registry() -> ToolRegistry {
     let mut registry = ToolRegistry::default();
     registry.register(Arc::new(BashTool::default()));
@@ -242,6 +247,7 @@ pub fn default_registry() -> ToolRegistry {
     registry.register(Arc::new(ExitPlanTool));
     registry.register(Arc::new(GetGoalTool::default()));
     registry.register(Arc::new(UpdateGoalTool::default()));
+    registry.register(Arc::new(WebFetchTool::new()));
     registry
 }
 

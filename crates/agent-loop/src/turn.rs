@@ -601,6 +601,7 @@ pub(crate) fn section_tools(section: &str) -> Option<&'static [&'static str]> {
         "tool:goal" => &["get_goal", "update_goal"],
         "tool:plan" => &["exit_plan"],
         "tool:preset" => &["create_preset"],
+        "tool:webfetch" => &["web_fetch"],
         // 记忆沉淀复用 write_file/edit;映射让提取子代理(白名单含这两个
         // 写工具)能看到纪律段,只读子代理看不到。
         "tool:memory" => &["write_file", "edit"],

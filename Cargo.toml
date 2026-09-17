@@ -65,7 +65,12 @@ rust-embed = "8"
 mime_guess = "2"
 rfd = "0.15"
 
-reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
+# web_fetch 抓取用:gzip/brotli 自动协商解压,cookies 承接重定向链上的 set-cookie
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls", "gzip", "brotli", "cookies"] }
+# 网页抓取:HTML 解析(html5ever 内核)与字符集嗅探解码(GBK 等老中文站)
+scraper = "0.20"
+ego-tree = "0.6"
+encoding_rs = "0.8"
 eventsource-stream = "0.2"
 
 thiserror = "2"

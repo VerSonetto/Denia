@@ -2480,3 +2480,51 @@ async fn read_only_hides_bash_and_write_tools() {
     assert!(results[0].0, "hallucinated bash call must be denied");
     assert!(results[0].1.contains("bash 命令不可用"), "{}", results[0].1);
 }
+
+#[test]
+fn webfetch_section_travels_with_tool_in_allowlist_narrowing() {
+    // 段与工具同进退(AGENTS.md 同步要求):白名单不含 web_fetch 时,其
+    // 纪律段与 schema 一起消失;含 web_fetch 时段保留。
+    let (prompt, _registry) = denia_tools::default_shipped();
+    let mut assembly = prompt
+        .assemble(&denia_system_prompt::AssembleContext::default())
+        .unwrap();
+    crate::preset::apply_tool_allowlist(
+        &mut assembly,
+        &["read_file".to_string(), "ls".to_string()],
+    );
+    assert!(
+        assembly.tools.iter().all(|tool| tool.name != "web_fetch"),
+        "白名单收窄后 web_fetch schema 必须消失"
+    );
+    assert!(
+        !assembly
+            .sections
+            .iter()
+            .any(|section| section.name == "tool:webfetch"),
+        "白名单收窄后 webfetch 纪律段必须一起消失"
+    );
+    assert!(
+        !assembly
+            .sections
+            .iter()
+            .any(|section| section.name == "tool:bash"),
+        "bash 同理:工具消失则纪律段消失"
+    );
+
+    let (prompt, _registry) = denia_tools::default_shipped();
+    let mut assembly = prompt
+        .assemble(&denia_system_prompt::AssembleContext::default())
+        .unwrap();
+    crate::preset::apply_tool_allowlist(
+        &mut assembly,
+        &["read_file".to_string(), "web_fetch".to_string()],
+    );
+    assert!(
+        assembly
+            .sections
+            .iter()
+            .any(|section| section.name == "tool:webfetch"),
+        "白名单含 web_fetch 时纪律段必须保留"
+    );
+}

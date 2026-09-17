@@ -56,6 +56,8 @@ pub enum SectionOrder {
     ToolJobs,
     /// 技能工具(skill)的工具纪律段。
     ToolSkill,
+    /// 网页抓取工具(web_fetch)的纪律段;随 default_registry 注册。
+    ToolWebFetch,
     /// 浏览器工具的资源回收纪律段;仅在注册了 browser 工具时注入。
     ToolBrowser,
     /// 提问工具(ask)的使用纪律段;仅在注册了 ask 工具时注入。
@@ -111,6 +113,7 @@ impl SectionOrder {
             Self::ToolAgents => 1600,
             Self::ToolJobs => 1700,
             Self::ToolSkill => 1800,
+            Self::ToolWebFetch => 1850,
             Self::ToolBrowser => 1900,
             Self::ToolAsk => 2000,
             Self::ToolPreset => 2060,

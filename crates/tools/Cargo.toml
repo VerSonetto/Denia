@@ -19,3 +19,7 @@ regex = { workspace = true }
 ignore = { workspace = true }
 base64 = { workspace = true }
 uuid = { workspace = true }
+reqwest = { workspace = true }
+scraper = { workspace = true }
+ego-tree = { workspace = true }
+encoding_rs = { workspace = true }
