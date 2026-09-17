@@ -151,6 +151,9 @@ pub(crate) async fn dispatch_request(
         let mut finish: Option<FinishReason> = None;
         let mut stream_error: Option<LlmFailure> = None;
         let mut interrupted = false;
+        // 首个 token 帧的落盘时刻:首字延迟与解码吞吐的锚点。框架帧
+        // (block-start 等)不算 token,锚定第一个真正的输出增量。
+        let mut first_token_time: Option<u64> = None;
         loop {
             let next = tokio::select! {
                 biased;
@@ -172,6 +175,9 @@ pub(crate) async fn dispatch_request(
                         },
                     )?;
                     source_event_seqs.push(envelope.seq);
+                    if first_token_time.is_none() && chunk.is_token_delta() {
+                        first_token_time = Some(envelope.time);
+                    }
                     match chunk {
                         StreamChunk::BlockEnd { block, .. } => blocks.push(block),
                         StreamChunk::Usage { usage: next_usage } => usage = Some(next_usage),
@@ -198,6 +204,7 @@ pub(crate) async fn dispatch_request(
                     usage,
                     interrupted: true,
                     source_event_seqs: source_event_seqs.clone(),
+                    first_token_time,
                 },
             )?;
             return close_aborted(state, step);
@@ -251,15 +258,16 @@ pub(crate) async fn dispatch_request(
                         append(
                             &state.session,
                             &state.emit,
-                            SessionEvent::AssistantMessage {
-                                turn: state.turn,
-                                step,
-                                blocks: blocks.clone(),
-                                usage,
-                                interrupted: true,
-                                source_event_seqs: source_event_seqs.clone(),
-                            },
-                        )?;
+                        SessionEvent::AssistantMessage {
+                            turn: state.turn,
+                            step,
+                            blocks: blocks.clone(),
+                            usage,
+                            interrupted: true,
+                            source_event_seqs: source_event_seqs.clone(),
+                            first_token_time,
+                        },
+                    )?;
                     }
                     return close_aborted(state, step);
                 }
@@ -301,15 +309,16 @@ pub(crate) async fn dispatch_request(
         append(
             &state.session,
             &state.emit,
-            SessionEvent::AssistantMessage {
-                turn: state.turn,
-                step,
-                blocks: blocks.clone(),
-                usage,
-                interrupted: false,
-                source_event_seqs,
-            },
-        )?;
+        SessionEvent::AssistantMessage {
+            turn: state.turn,
+            step,
+            blocks: blocks.clone(),
+            usage,
+            interrupted: false,
+            source_event_seqs,
+            first_token_time,
+        },
+    )?;
         return Ok(RequestOutcome::Step { blocks, finish });
     }
 }

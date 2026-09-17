@@ -22,7 +22,7 @@ export interface SessionStats {
   cacheReadTokens: number
   /** 累计推理 token。 */
   reasoningTokens: number
-  /** 平均首 token 延迟(step-start → 第一个 chunk),毫秒;无数据为 null。 */
+  /** 平均首 token 延迟(step-start → 首个 token 帧),毫秒;无数据为 null。 */
   avgTtftMs: number | null
   /** 解码吞吐:output tokens / decode 墙钟秒;无数据为 null。 */
   tokensPerSecond: number | null
@@ -71,17 +71,28 @@ export function deriveStats(nodes: TranscriptNode[]): SessionStats {
         if (!node.streaming) {
           steps += 1
           addUsage(node.usage)
-          // TTFT: step-start → 第一个 chunk。
-          if (node.stepStartTime !== undefined && node.firstChunkTime !== undefined) {
-            ttftSum += Math.max(0, node.firstChunkTime - node.stepStartTime)
+          // TTFT: step-start → 首个 token 帧(后端落盘的 first_token_time
+          // 为权威;实时流由 chunk 推断补齐,口径一致)。
+          if (node.stepStartTime !== undefined && node.firstTokenTime !== undefined) {
+            ttftSum += Math.max(0, node.firstTokenTime - node.stepStartTime)
             ttftCount += 1
           }
-          // 吞吐: 第一个 chunk → settle 之间的 output tokens。
-          if (node.firstChunkTime !== undefined && node.settleTime !== undefined && node.usage) {
-            const ms = Math.max(0, node.settleTime - node.firstChunkTime)
+          // 吞吐: 首 token → settle 之间的产出。usage.outputTokens 是本步
+          // 全部输出;当推理内容没有流式回传(流里没有非空 reasoning 块)时,
+          // usage 里报的 reasoning tokens 耗在首 token 之前的思考期,不在
+          // 解码窗口内,要从分子剔除,否则速度被低估。
+          if (node.firstTokenTime !== undefined && node.settleTime !== undefined && node.usage) {
+            const ms = Math.max(0, node.settleTime - node.firstTokenTime)
             if (ms > 0) {
-              decodeMs += ms
-              decodeTokens += node.usage.outputTokens
+              const streamedReasoning = node.blocks.some(
+                (block) => block.kind === 'reasoning' && /\S/.test(block.text),
+              )
+              const reasoning = streamedReasoning ? 0 : (node.usage.reasoningTokens ?? 0)
+              const decoded = node.usage.outputTokens - reasoning
+              if (decoded > 0) {
+                decodeMs += ms
+                decodeTokens += decoded
+              }
             }
           }
         }

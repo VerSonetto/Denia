@@ -440,6 +440,7 @@ mod tests {
                 usage: None,
                 interrupted: false,
                 source_event_seqs: Vec::new(),
+                first_token_time: None,
             },
         ));
         // 新窗口:刚发生的工具调用对 + 用户新需求。
@@ -456,6 +457,7 @@ mod tests {
                 usage: None,
                 interrupted: false,
                 source_event_seqs: Vec::new(),
+                first_token_time: None,
             },
         ));
         events.push(envelope(

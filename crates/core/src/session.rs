@@ -655,6 +655,11 @@ pub enum SessionEvent {
         /// 空流(无任何 chunk)时为缺省,不记录。
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         source_event_seqs: Vec<u64>,
+        /// 首个 token 帧(正文/推理/工具参数增量)落盘时刻(epoch ms)。
+        /// 首字延迟与解码吞吐的锚点:框架帧(block-start 等)不算 token,
+        /// 历史回放没有 chunk 事件,统计从这里读取。旧日志缺省。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        first_token_time: Option<u64>,
     },
     ToolCall {
         turn: u32,
@@ -1185,6 +1190,7 @@ mod tests {
                     usage: None,
                     interrupted: false,
                     source_event_seqs: Vec::new(),
+                    first_token_time: None,
                 },
             ),
             // 截图注入:插在 tool-call 与 tool-result 之间(原 MiniMax 2013 的时序)
@@ -1276,6 +1282,68 @@ mod tests {
     }
 
     #[test]
+    fn first_token_time_round_trips_and_defaults() {
+        // 新日志:首 token 时间随事件往返;旧日志:字段缺省反序列化为 None。
+        let with_time = envelope(
+            7,
+            SessionEvent::AssistantMessage {
+                turn: 1,
+                step: 1,
+                blocks: Vec::new(),
+                usage: None,
+                interrupted: false,
+                source_event_seqs: Vec::new(),
+                first_token_time: Some(1_700_000_004_200),
+            },
+        );
+        let json = serde_json::to_string(&with_time).unwrap();
+        assert!(json.contains(r#""first_token_time":1700000004200"#));
+        assert_eq!(serde_json::from_str::<SessionEnvelope>(&json).unwrap(), with_time);
+
+        let without_time = envelope(
+            8,
+            SessionEvent::AssistantMessage {
+                turn: 1,
+                step: 2,
+                blocks: Vec::new(),
+                usage: None,
+                interrupted: false,
+                source_event_seqs: Vec::new(),
+                first_token_time: None,
+            },
+        );
+        let json = serde_json::to_string(&without_time).unwrap();
+        assert!(!json.contains("first_token_time"), "None 不落盘: {json}");
+        // 旧日志(无此字段)反序列化不报错。
+        let legacy = r#"{"seq":9,"time":1700000000009,"type":"assistant-message","turn":1,"step":3,"blocks":[]}"#;
+        let parsed = serde_json::from_str::<SessionEnvelope>(legacy).unwrap();
+        assert!(
+            matches!(
+                parsed.event,
+                SessionEvent::AssistantMessage { first_token_time: None, .. }
+            ),
+            "{parsed:?}"
+        );
+    }
+
+    #[test]
+    fn token_delta_excludes_frame_chunks() {
+        // token 帧:非空正文/推理增量、工具参数增量、带名首帧。
+        assert!(StreamChunk::TextDelta { index: 0, text: "你".into() }.is_token_delta());
+        assert!(StreamChunk::ReasoningDelta { index: 0, text: "想".into() }.is_token_delta());
+        assert!(StreamChunk::ToolCallDelta { index: 0, id: "c".into(), name: Some("bash".into()), arguments_delta: String::new() }.is_token_delta());
+        assert!(StreamChunk::ToolCallDelta { index: 0, id: "c".into(), name: None, arguments_delta: "{\"".into() }.is_token_delta());
+        // 空增量与框架帧不算 token。
+        assert!(!StreamChunk::TextDelta { index: 0, text: String::new() }.is_token_delta());
+        assert!(!StreamChunk::ReasoningDelta { index: 0, text: String::new() }.is_token_delta());
+        assert!(!StreamChunk::ToolCallDelta { index: 0, id: String::new(), name: None, arguments_delta: String::new() }.is_token_delta());
+        assert!(!StreamChunk::BlockStart { index: 0, block_type: BlockType::Text }.is_token_delta());
+        assert!(!StreamChunk::BlockEnd { index: 0, block: crate::stream::ContentBlock::Text { text: "x".into() } }.is_token_delta());
+        assert!(!StreamChunk::Usage { usage: crate::stream::TokenUsage::default() }.is_token_delta());
+        assert!(!StreamChunk::Finish { reason: crate::stream::FinishReason::Stop }.is_token_delta());
+    }
+
+    #[test]
     fn derive_projects_user_assistant_and_tool() {
         let events = vec![
             envelope(1, SessionEvent::TurnStart { turn: 1 }),
@@ -1308,6 +1376,7 @@ mod tests {
                     usage: None,
                     interrupted: false,
                     source_event_seqs: vec![4],
+                    first_token_time: None,
                 },
             ),
             envelope(
@@ -1351,6 +1420,7 @@ mod tests {
                     }),
                     interrupted: false,
                     source_event_seqs: Vec::new(),
+                    first_token_time: None,
                 },
             ),
             envelope(
@@ -1398,6 +1468,7 @@ mod tests {
                     usage: None,
                     interrupted: false,
                     source_event_seqs: Vec::new(),
+                    first_token_time: None,
                 },
             ),
             envelope(
@@ -1467,6 +1538,7 @@ mod tests {
                     usage: Some(TokenUsage::default()),
                     interrupted: false,
                     source_event_seqs: Vec::new(),
+                    first_token_time: None,
                 },
             ),
             envelope(
@@ -1482,6 +1554,7 @@ mod tests {
                     usage: None,
                     interrupted: true,
                     source_event_seqs: Vec::new(),
+                    first_token_time: None,
                 },
             ),
         ];
@@ -1735,6 +1808,7 @@ mod tests {
                     usage: None,
                     interrupted: false,
                     source_event_seqs: Vec::new(),
+                    first_token_time: None,
                 },
             ),
             envelope(
@@ -1765,6 +1839,7 @@ mod tests {
                     usage: None,
                     interrupted: false,
                     source_event_seqs: Vec::new(),
+                    first_token_time: None,
                 },
             ),
             envelope(
@@ -1877,6 +1952,7 @@ mod tests {
                     usage: None,
                     interrupted: false,
                     source_event_seqs: Vec::new(),
+                    first_token_time: None,
                 },
             ),
             // 压缩:事件 1..=2 被折叠成摘要,保留窗口从 3 开始。
@@ -1913,6 +1989,7 @@ mod tests {
                     usage: None,
                     interrupted: false,
                     source_event_seqs: Vec::new(),
+                    first_token_time: None,
                 },
             ),
         ];

@@ -2212,6 +2212,7 @@ mod tests {
                 usage: None,
                 interrupted: false,
                 source_event_seqs: Vec::new(),
+                first_token_time: None,
             })
             .unwrap();
         session
@@ -2263,6 +2264,7 @@ mod tests {
                 usage: None,
                 interrupted: false,
                 source_event_seqs: Vec::new(),
+                first_token_time: None,
             })
             .unwrap();
         session
@@ -2363,6 +2365,7 @@ mod tests {
                     usage: None,
                     interrupted: false,
                     source_event_seqs: Vec::new(),
+                    first_token_time: None,
                 })
                 .unwrap();
             session
@@ -2815,6 +2818,7 @@ mod tests {
                 usage: None,
                 interrupted: false,
                 source_event_seqs: Vec::new(),
+                first_token_time: None,
             })
             .unwrap();
         source
@@ -2903,6 +2907,7 @@ mod tests {
                 }),
                 interrupted: false,
                 source_event_seqs: Vec::new(),
+                first_token_time: None,
             })
             .unwrap();
         session
@@ -3086,6 +3091,7 @@ mod tests {
                 usage: None,
                 interrupted: false,
                 source_event_seqs: Vec::new(),
+                first_token_time: None,
             })
             .unwrap();
         session
@@ -3152,6 +3158,7 @@ mod tests {
                 usage: None,
                 interrupted: false,
                 source_event_seqs: Vec::new(),
+                first_token_time: None,
             })
             .unwrap();
         session

@@ -43,9 +43,9 @@ export interface TrajectoryRecord {
   content?: string
   usage?: TokenUsage
   interrupted?: boolean
-  /** 首 token 延迟(step-start → 首个 assistant-chunk)。 */
+  /** 首 token 延迟(step-start → 首个 token 帧)。 */
   ttftMs?: number
-  /** 生成耗时(首个 chunk → settle)。 */
+  /** 生成耗时(首 token → settle)。 */
   decodeMs?: number
   /* ---- tool ---- */
   callId?: string
@@ -94,9 +94,10 @@ export function deriveTrajectory(events: SessionEnvelope[]): TrajectoryLayout {
     // context 节点推进但不产出记录)。
     lastSurface: null as number | null,
   }
-  // chunk 级时钟:step-start / 首 chunk 时间,按 turn:step。
+  // chunk 级时钟:step-start / 首 token 时间,按 turn:step。只有 token 帧
+  // (正文/推理/工具参数增量)才记;block-start 等框架帧不算 token。
   const stepStarts = new Map<string, number>()
-  const firstChunks = new Map<string, number>()
+  const firstTokens = new Map<string, number>()
   // callId → tool 记录(配对 tool-result)。
   const toolByCall = new Map<string, TrajectoryRecord>()
   // 先于 turn-start 落库的用户消息(本仓驱动器布局):按 dsh 规则
@@ -215,18 +216,25 @@ export function deriveTrajectory(events: SessionEnvelope[]): TrajectoryLayout {
       }
       case 'assistant-chunk': {
         const key = `${event.turn}:${event.step}`
-        if (!firstChunks.has(key)) firstChunks.set(key, event.time)
+        const chunk = event.chunk
+        const isToken =
+          ((chunk.type === 'text-delta' || chunk.type === 'reasoning-delta') && chunk.text !== '') ||
+          (chunk.type === 'tool-call-delta' && (chunk.arguments_delta !== '' || chunk.name !== undefined))
+        if (isToken && !firstTokens.has(key)) firstTokens.set(key, event.time)
         break
       }
       case 'assistant-message': {
         const group = ctx.group
-        const stepStart = stepStarts.get(`${event.turn}:${event.step}`)
-        const firstChunk = firstChunks.get(`${event.turn}:${event.step}`)
+        const key = `${event.turn}:${event.step}`
+        const stepStart = stepStarts.get(key)
+        // 后端落盘的首 token 时间优先;旧流回退 chunk 推断。
+        const firstToken =
+          event.first_token_time ?? firstTokens.get(key)
         const ttftMs =
-          stepStart !== undefined && firstChunk !== undefined
-            ? Math.max(0, firstChunk - stepStart)
+          stepStart !== undefined && firstToken !== undefined
+            ? Math.max(0, firstToken - stepStart)
             : undefined
-        const decodeMs = firstChunk !== undefined ? Math.max(0, event.time - firstChunk) : undefined
+        const decodeMs = firstToken !== undefined ? Math.max(0, event.time - firstToken) : undefined
         const durationMs =
           ctx.lastSurface !== null ? Math.max(0, event.time - ctx.lastSurface) : undefined
         const textBlocks = event.blocks

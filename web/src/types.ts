@@ -211,6 +211,8 @@ export type SessionEnvelope =
       blocks: ContentBlock[]
       usage?: TokenUsage
       interrupted?: boolean
+      /** 首个 token 帧落盘时刻(epoch ms);旧日志无此字段。 */
+      first_token_time?: number
     }
   | {
       seq: number

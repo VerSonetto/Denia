@@ -90,3 +90,23 @@ pub enum StreamChunk {
         reason: FinishReason,
     },
 }
+
+impl StreamChunk {
+    /// 该帧是否承载模型输出的一个 token:非空正文/推理增量,或工具调用
+    /// 参数增量(带名字的首帧也算,即使参数增量为空)。`block-start`/
+    /// `block-end`/`usage`/`finish` 是流框架帧,不算 token —— 首 token
+    /// 延迟锚定第一个 token 帧,而不是块框架帧。
+    pub fn is_token_delta(&self) -> bool {
+        match self {
+            StreamChunk::TextDelta { text, .. } | StreamChunk::ReasoningDelta { text, .. } => {
+                !text.is_empty()
+            }
+            StreamChunk::ToolCallDelta {
+                name,
+                arguments_delta,
+                ..
+            } => !arguments_delta.is_empty() || name.is_some(),
+            _ => false,
+        }
+    }
+}

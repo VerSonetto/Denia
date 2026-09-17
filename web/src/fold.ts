@@ -47,9 +47,13 @@ export type TranscriptNode =
       streaming: boolean
       /** step-start 事件的 epoch ms;无 step-start 时为 undefined。 */
       stepStartTime?: number
-      /** 第一个 assistant-chunk 的 epoch ms;TTFT = firstChunkTime - stepStartTime。 */
-      firstChunkTime?: number
-      /** assistant-message settle 的 epoch ms;decodeMs = settleTime - firstChunkTime。 */
+      /**
+       * 首个 token 帧(正文/推理/工具参数增量)的 epoch ms;TTFT =
+       * firstTokenTime - stepStartTime。实时流从 chunk 推断,历史回放读
+       * assistant-message 的 first_token_time(框架帧不算 token,旧日志两者皆无)。
+       */
+      firstTokenTime?: number
+      /** assistant-message settle 的 epoch ms;decodeMs = settleTime - firstTokenTime。 */
       settleTime?: number
     }
   | {
@@ -210,6 +214,23 @@ function applyChunk(blocks: UiBlock[], chunk: StreamChunk): UiBlock[] {
 }
 
 /**
+ * 该 chunk 是否承载模型的一个输出 token:非空正文/推理增量,或工具调用
+ * 参数增量(带名字的首帧也算)。block-start/block-end/usage/finish 是
+ * 流框架帧,不算 —— 首 token 延迟锚定第一个真正的输出增量。
+ */
+function isTokenDeltaChunk(chunk: StreamChunk): boolean {
+  switch (chunk.type) {
+    case 'text-delta':
+    case 'reasoning-delta':
+      return chunk.text !== ''
+    case 'tool-call-delta':
+      return chunk.arguments_delta !== '' || chunk.name !== undefined
+    default:
+      return false
+  }
+}
+
+/**
  * The deterministic fold: identical output for cold history and live
  * streaming. Chunk deltas accumulate into an in-progress assistant node;
  * the settled `assistant-message` replaces it with authoritative blocks.
@@ -296,9 +317,11 @@ export function foldEvents(events: SessionEnvelope[]): TranscriptNode[] {
             interrupted: false,
             streaming: true,
             stepStartTime: stepStarts.get(`${event.turn}:${event.step}`),
-            firstChunkTime: event.time,
           }
           nodes.push(open)
+        }
+        if (open.firstTokenTime === undefined && isTokenDeltaChunk(event.chunk)) {
+          open.firstTokenTime = event.time
         }
         open.blocks = applyChunk(open.blocks, event.chunk)
         break
@@ -311,6 +334,9 @@ export function foldEvents(events: SessionEnvelope[]): TranscriptNode[] {
           open.interrupted = event.interrupted ?? false
           open.settleTime = event.time
           open.seq = event.seq
+          // 后端落盘的首 token 时间是权威事实;旧日志无此字段时回退
+          // chunk 推断值。
+          if (event.first_token_time !== undefined) open.firstTokenTime = event.first_token_time
           closeOpen()
         } else {
           closeOpen()
@@ -324,6 +350,7 @@ export function foldEvents(events: SessionEnvelope[]): TranscriptNode[] {
             interrupted: event.interrupted ?? false,
             streaming: false,
             stepStartTime: stepStarts.get(`${event.turn}:${event.step}`),
+            firstTokenTime: event.first_token_time,
             settleTime: event.time,
           })
         }
@@ -527,6 +554,9 @@ export function applyEnvelopes(
         last.turn === event.turn &&
         last.step === event.step
       ) {
+        if (acc.node.firstTokenTime === undefined && isTokenDeltaChunk(event.chunk)) {
+          acc.node = { ...acc.node, firstTokenTime: event.time }
+        }
         acc.blocks = applyChunk(acc.blocks, event.chunk)
         continue
       }
@@ -539,8 +569,9 @@ export function applyEnvelopes(
         tail.turn === event.turn &&
         tail.step === event.step
       ) {
-        const blocks = applyChunk(tail.blocks, event.chunk)
-        acc = { node: { ...tail }, blocks }
+        const node = isTokenDeltaChunk(event.chunk) ? { ...tail, firstTokenTime: tail.firstTokenTime ?? event.time } : tail
+        const blocks = applyChunk(node.blocks, event.chunk)
+        acc = { node, blocks }
       } else {
         const fresh: Extract<TranscriptNode, { kind: 'assistant' }> = {
           kind: 'assistant',
@@ -550,8 +581,8 @@ export function applyEnvelopes(
           interrupted: false,
           streaming: true,
           stepStartTime: incrementalStepStarts.get(`${event.turn}:${event.step}`),
-          firstChunkTime: event.time,
         }
+        if (isTokenDeltaChunk(event.chunk)) fresh.firstTokenTime = event.time
         acc = { node: fresh, blocks: applyChunk(fresh.blocks, event.chunk) }
         current = [...current, fresh]
       }
@@ -613,7 +644,11 @@ function applyEnvelopeStep(
         last.turn === event.turn &&
         last.step === event.step
       ) {
-        return [...nodes.slice(0, -1), { ...last, blocks: applyChunk(last.blocks, event.chunk) }]
+        const node =
+          last.firstTokenTime === undefined && isTokenDeltaChunk(event.chunk)
+            ? { ...last, firstTokenTime: event.time }
+            : last
+        return [...nodes.slice(0, -1), { ...node, blocks: applyChunk(node.blocks, event.chunk) }]
       }
       const fresh: Extract<TranscriptNode, { kind: 'assistant' }> = {
         kind: 'assistant',
@@ -623,13 +658,13 @@ function applyEnvelopeStep(
         interrupted: false,
         streaming: true,
         stepStartTime: incrementalStepStarts.get(`${event.turn}:${event.step}`),
-        firstChunkTime: event.time,
       }
+      if (isTokenDeltaChunk(event.chunk)) fresh.firstTokenTime = event.time
       return [...nodes, { ...fresh, blocks: applyChunk(fresh.blocks, event.chunk) }]
     }
     case 'assistant-message': {
       const last = nodes[nodes.length - 1]
-      // settle 时保留流式阶段积累的时间戳。
+      // settle 时保留流式阶段积累的时间戳;后端落盘的首 token 时间优先。
       const prior = last?.kind === 'assistant' && last.turn === event.turn && last.step === event.step
         ? last
         : undefined
@@ -643,7 +678,7 @@ function applyEnvelopeStep(
         interrupted: event.interrupted ?? false,
         streaming: false,
         stepStartTime: prior?.stepStartTime ?? incrementalStepStarts.get(`${event.turn}:${event.step}`),
-        firstChunkTime: prior?.firstChunkTime,
+        firstTokenTime: event.first_token_time ?? prior?.firstTokenTime,
         settleTime: event.time,
       }
       if (
