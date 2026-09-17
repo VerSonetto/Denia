@@ -77,7 +77,7 @@ fn main() {
     runtime.block_on(async move {
         let home = resolve_home(args.home.as_deref());
         let bound_remote = !matches!(args.host.as_str(), "127.0.0.1" | "localhost" | "::1");
-        let state = match build_state(&home, bound_remote).await {
+        let state = match build_state(&home, bound_remote, args.port).await {
             Ok(state) => Arc::new(state),
             Err(error) => {
                 tracing::error!(%error, "failed to initialize");

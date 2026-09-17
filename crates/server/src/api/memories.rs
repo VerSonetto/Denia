@@ -158,7 +158,7 @@ mod tests {
     async fn memory_api_lists_projects_and_reads_files() {
         let home = std::env::temp_dir().join(format!("denia-mem-api-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&home).unwrap();
-        let state = Arc::new(crate::state::build_state(&home, false).await.unwrap());
+        let state = Arc::new(crate::state::build_state(&home, false, 3600).await.unwrap());
         let ws_dir = home.join("ws");
         std::fs::create_dir_all(&ws_dir).unwrap();
         let record = state

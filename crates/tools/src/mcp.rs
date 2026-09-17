@@ -258,3 +258,170 @@ mod tests {
         assert!(tool.schema().description.contains("读取文件"));
     }
 }
+
+// —— 完全目录化工具面:mcp_list 发现入口 ——
+
+/// `mcp_list` 工具名。
+pub const MCP_LIST_TOOL: &str = "mcp_list";
+
+/// `mcp_list` 的 schema(注册表与提示词 provider 共用同一份)。
+pub fn mcp_list_schema() -> ToolSchema {
+    ToolSchema {
+        name: MCP_LIST_TOOL.to_string(),
+        description: "列出已接入的 MCP 外部工具清单(名称与用途)。需要 denia 内置能力之外的外部能力时,先用本工具查看有哪些 MCP 工具可用,再按清单里的名称直接调用。".to_string(),
+        parameters: json!({
+            "type": "object",
+            "properties": {
+                "server": {
+                    "type": "string",
+                    "description": "只列出这个服务器的工具;省略则列出全部已连接服务器的工具。"
+                }
+            }
+        }),
+    }
+}
+
+/// 目录文本渲染(纯函数,便于测试):按服务器分组列出已连接服务器的
+/// 模型可见工具。被关闭/冲突的工具不出现——它们本就不进路由。
+fn render_tool_catalog(servers: &[denia_mcp::McpServerState], only: Option<&str>) -> String {
+    let visible: Vec<&denia_mcp::McpServerState> = servers
+        .iter()
+        .filter(|server| {
+            server.enabled
+                && server.status == denia_mcp::McpServerStatus::Connected
+                && only.is_none_or(|id| server.id == id)
+        })
+        .collect();
+    if visible.is_empty() {
+        return match only {
+            Some(id) => format!("没有名为 {id} 的已连接 MCP 服务器;不带 server 参数再调一次可查看全部。"),
+            None => "当前没有已连接的 MCP 服务器;可到设置 → MCP 检查服务器状态或重新连接。".to_string(),
+        };
+    }
+    let mut body = String::from("已接入的 MCP 外部工具(按名称直接调用;首次调用只返回参数定义,不会执行):\n");
+    for server in visible {
+        body.push_str(&format!("\n[服务器 {}]\n", server.id));
+        let mut listed = 0usize;
+        for tool in &server.tools {
+            if !tool.enabled {
+                continue;
+            }
+            let description = tool.description.trim();
+            let description = if description.is_empty() {
+                "(无描述)"
+            } else {
+                description
+            };
+            body.push_str(&format!("- {} — {description}\n", tool.qualified));
+            listed += 1;
+        }
+        if listed == 0 {
+            body.push_str("(该服务器没有可用的工具)\n");
+        }
+    }
+    body
+}
+
+/// MCP 工具目录(`mcp_list`):完全目录化工具面的发现入口。
+///
+/// 默认装配里 `mcp__*` 工具不进请求(tools 数组只有已装载的那些),
+/// 模型靠本工具按需查看可用清单;看中的工具按清单名称直接调用,首次
+/// 调用由 agent-loop 拦截返回参数定义并装载,之后正常执行。本工具自身
+/// 是内置工具,只要有已连接的 MCP 服务器就常驻注册表与请求工具面。
+pub struct McpListTool {
+    manager: Arc<McpManager>,
+    schema: ToolSchema,
+}
+
+impl McpListTool {
+    pub fn new(manager: Arc<McpManager>) -> Self {
+        Self {
+            manager,
+            schema: mcp_list_schema(),
+        }
+    }
+}
+
+#[async_trait]
+impl Tool for McpListTool {
+    fn schema(&self) -> &ToolSchema {
+        &self.schema
+    }
+
+    async fn execute(&self, arguments: &str, _ctx: &ToolContext) -> ToolOutput {
+        let only: Option<String> = match parse_tool_args::<Value>(arguments) {
+            Ok(value) => value
+                .get("server")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|id| !id.is_empty())
+                .map(str::to_string),
+            Err(_) => None,
+        };
+        let snapshot = self.manager.snapshot();
+        ToolOutput::text(render_tool_catalog(&snapshot.servers, only.as_deref()))
+    }
+}
+
+#[cfg(test)]
+mod catalog_tests {
+    use super::*;
+    use denia_mcp::{McpServerState, McpServerStatus, McpToolState};
+
+    fn server(id: &str, status: McpServerStatus, enabled: bool, tools: Vec<McpToolState>) -> McpServerState {
+        McpServerState {
+            id: id.to_string(),
+            transport: "stdio".to_string(),
+            command: "cmd".to_string(),
+            args: Vec::new(),
+            url: None,
+            env_keys: Vec::new(),
+            header_keys: Vec::new(),
+            cwd: None,
+            enabled,
+            status,
+            error: None,
+            tools,
+        }
+    }
+
+    fn tool(name: &str, qualified: &str, enabled: bool) -> McpToolState {
+        McpToolState {
+            name: name.to_string(),
+            qualified: qualified.to_string(),
+            description: format!("{name} 的用途说明"),
+            enabled,
+            disabled_reason: None,
+        }
+    }
+
+    #[test]
+    fn catalog_lists_connected_servers_grouped() {
+        let servers = vec![
+            server("fx", McpServerStatus::Connected, true, vec![
+                tool("echo", "mcp__fx__echo", true),
+                tool("off", "mcp__fx__off", false),
+            ]),
+            server("dead", McpServerStatus::Error, true, vec![]),
+        ];
+        let text = render_tool_catalog(&servers, None);
+        assert!(text.contains("mcp__fx__echo — echo 的用途说明"));
+        assert!(!text.contains("mcp__fx__off"), "被关闭的工具不得出现在目录");
+        assert!(!text.contains("[服务器 dead]"), "连接失败的服务器不得出现在目录");
+    }
+
+    #[test]
+    fn catalog_filters_by_server_and_reports_missing() {
+        let servers = vec![server(
+            "fx",
+            McpServerStatus::Connected,
+            true,
+            vec![tool("echo", "mcp__fx__echo", true)],
+        )];
+        assert!(render_tool_catalog(&servers, Some("fx")).contains("mcp__fx__echo"));
+        let miss = render_tool_catalog(&servers, Some("nope"));
+        assert!(miss.contains("nope") && miss.contains("没有"));
+        let disabled = vec![server("off", McpServerStatus::Connected, false, vec![])];
+        assert!(render_tool_catalog(&disabled, None).contains("没有已连接"));
+    }
+}

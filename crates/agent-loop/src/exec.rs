@@ -58,6 +58,12 @@ pub(crate) async fn execute_calls(
                 next += 1;
                 continue;
             }
+            if let Some(output) = mcp_load_intercept(driver, state, call) {
+                append_call(state, step, call)?;
+                commit_result(state, step, call, output, touched, &cwd).await?;
+                next += 1;
+                continue;
+            }
             match decide_for(driver, state, &cwd, call, memory_root.as_deref()) {
                 Decision::Allow => {
                     append_call(state, step, call)?;
@@ -227,6 +233,34 @@ fn reject_before_dispatch(
         )));
     }
     None
+}
+
+/// 两段式 MCP 工具面的第二段:未装载的 `mcp__*` 工具首次调用被拦截,
+/// 不派发给外部服务器,而是登记装载并把完整参数定义作为工具结果返回
+/// (模型据此重新调用)。参数定义取自注册表里的装饰后 schema——与装载
+/// 后随请求下发的完全一致,模型不会看到两份口径。
+///
+/// 拦截发生在策略判定之前:装载调用不产生任何外部副作用,与权限无关。
+fn mcp_load_intercept(
+    driver: &SessionDriver,
+    state: &TurnState,
+    call: &ToolCallRef,
+) -> Option<ToolOutput> {
+    if !call.name.starts_with(crate::turn::MCP_TOOL_PREFIX)
+        || driver.mcp_loaded(state.session.id(), &call.name)
+    {
+        return None;
+    }
+    let definition = match driver.tools().get(&call.name) {
+        Some(tool) => serde_json::to_string_pretty(&tool.schema().parameters)
+            .unwrap_or_else(|_| "{\"type\":\"object\"}".to_string()),
+        None => return None, // 未知工具由 reject_before_dispatch 处理
+    };
+    driver.load_mcp_tool(state.session.id(), &call.name);
+    Some(ToolOutput::text(format!(
+        "本工具尚未加载参数定义,本次调用未执行。完整参数定义(JSON Schema)如下:\n{definition}\n\
+         请按参数定义重新调用本工具,即可正常执行。",
+    )))
 }
 
 /// 策略判定:当前会话模式 × 调用类别 → Allow/Ask/Deny。

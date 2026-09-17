@@ -19,7 +19,7 @@ metadata:
 
 ## 读写入口
 
-- 服务地址先确认端口，默认 `http://127.0.0.1:3600`（开发实例一般是 3601）。用户改过端口先问。
+- 服务地址用**运行时上下文快照里的「本实例 API」行**（每轮注入，就是当前进程的真实地址）。绝不凭默认端口猜：多实例共享数据目录，猜错会把配置写进另一个实例——你这边 HTTP 200 看似成功，用户的面板毫无变化。快照里找不到时才问用户。
 - 读：`GET /api/settings`（全部命名空间快照，含各 `revision`）、`GET /api/llm/catalog`（ live 路由与模型）、`GET /api/mcp`（服务器与工具数）、`GET /api/agent-presets`（名册与健康状态）、`GET /api/system-prompt`。
 - 写设置：`PATCH /api/settings/{ns}`（merge patch）或 `PUT`（整段替换，空对象=重置），body `{"value":{...},"expectedRevision":N}`，N 取自刚 GET 到的 revision。未知命名空间 404，revision 对不上 409。
 - 数据目录默认 `~/.denia`（`settings.yaml`、`SYSTEM.md`、`agent-presets/` 等都在这），但走 API 就不用管路径。
@@ -59,6 +59,7 @@ metadata:
 - `stdio` 必须给 `command`（`args` 无空串，`cwd` 给了就必须是绝对路径）；`http/sse` 必须给合法 `http(s)` 的 `url`，且不接受 `command/args/env`（填了就拒绝）。`env`/`headers` 的值是凭据，只存不回传。
 - `protocolVersion` 目前固定 `2024-11-05`（空拒绝）；`callTimeoutMs` 给了就得在 1–600000 之间；`scope: project` 必须配 `workspaceId`（本期仍按全局生效，先保证字段合法）。
 - 写路径：改 settings→重连→同步工具面→广播，控制台 `PUT /api/mcp/servers`（`{server, expectedRevision?}`，同名替换否则追加，顺序即展示顺序）一条龙；只开关某个工具走 `POST /api/mcp/tools`（不过滤重连，最便宜）。模型侧工具名形如 `mcp__<server>__<tool>`。
+- 接入后模型默认只看到 MCP 服务器目录和 `mcp_list` 工具（工具清单与参数定义按需发现、首次调用装载）——这是目录化工具面的预期行为，不是没生效；生效的判定口径是 `GET /api/mcp` 里 status=connected 且 toolCount 增加。
 - 常见拒绝：id 非法/重复、传输不支持、http 缺 url、stdio 缺 command、cwd 相对路径、参数超限、project 缺 workspace_id——报错里都已点名，按字面修。
 
 ## 全局系统提示词与控制台默认

@@ -149,6 +149,11 @@ pub struct SessionDriver {
     /// 审批(bash 写/删除/区外写)选"本窗口放行"后,同类操作在本会话
     /// 内直接放行不再询问。运行时内存态,不落盘,进程重启后自然失效。
     ask_grants: std::sync::Mutex<std::collections::HashMap<String, std::collections::HashSet<denia_tools::permission::ActionClass>>>,
+    /// 已装载完整参数定义的 MCP 工具(按会话):两段式工具面的第二段。
+    /// 未装载的 `mcp__*` 工具在请求里只带名称与描述,首次调用拦截返回
+    /// 参数定义并登记到此表,之后 schema 全量进请求、调用正常执行。
+    /// 运行时内存态:进程重启或会话淘汰后回到轻量态,重新装载即可。
+    mcp_loads: std::sync::Mutex<std::collections::HashMap<String, std::collections::HashSet<String>>>,
 }
 
 impl SessionDriver {
@@ -175,6 +180,7 @@ impl SessionDriver {
             loop_guards: std::sync::Mutex::new(std::collections::HashMap::new()),
             read_states: std::sync::Mutex::new(std::collections::HashMap::new()),
             ask_grants: std::sync::Mutex::new(std::collections::HashMap::new()),
+            mcp_loads: std::sync::Mutex::new(std::collections::HashMap::new()),
         }
     }
 
@@ -505,6 +511,35 @@ impl SessionDriver {
     /// 清空某会话的审批放行表(会话删除时调用,防止句柄泄漏式累积)。
     pub fn clear_ask_grants(&self, session_id: &str) {
         self.ask_grants
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .remove(session_id);
+    }
+
+    /// 某会话是否已装载某 MCP 工具的完整参数定义。
+    pub fn mcp_loaded(&self, session_id: &str, qualified: &str) -> bool {
+        self.mcp_loads
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .get(session_id)
+            .is_some_and(|set| set.contains(qualified))
+    }
+
+    /// 登记一次 MCP 工具装载:之后该工具的完整 schema 随请求下发,
+    /// 调用不再被拦截。重复登记无害(集合语义)。
+    pub fn load_mcp_tool(&self, session_id: &str, qualified: &str) {
+        self.mcp_loads
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .entry(session_id.to_string())
+            .or_default()
+            .insert(qualified.to_string());
+    }
+
+    /// 清空某会话的 MCP 装载表(会话淘汰时调用,防句柄累积)。
+    /// 清空后回到轻量态:工具只剩名称与描述,再次调用会重新装载。
+    pub fn clear_mcp_loads(&self, session_id: &str) {
+        self.mcp_loads
             .lock()
             .unwrap_or_else(|poison| poison.into_inner())
             .remove(session_id);

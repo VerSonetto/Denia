@@ -2,8 +2,10 @@
 //!
 //! 一次配置变更要同时对齐三处,否则模型会看到"存在但调不动"的工具:
 //! 1. `McpManager`:子进程连接与工具路由(执行面);
-//! 2. `SessionDriver` 的工具注册表:`mcp__*` 工具可被派发(派发面);
-//! 3. `SystemPrompt` 的 tool provider:schema 与纪律段(模型可见面)。
+//! 2. `SessionDriver` 的工具注册表:`mcp__*` 与 `mcp_list` 可被派发(派发面);
+//! 3. `SystemPrompt`:MCP 纪律段(动态服务器目录)与 schema provider
+//!    (模型可见面)由 [`crate::system_prompt_store::SystemPromptState`]
+//!    按同一 manager 重建——单一来源,配置热更新不会叠加残留。
 //!
 //! 三者都在 [`McpRuntime::apply`] 里按同一份配置重建,顺序固定:先重连
 //! (拿到真实工具清单),再替换注册表,最后刷新提示词。
@@ -14,7 +16,6 @@ use std::sync::Arc;
 use denia_agent_loop::SessionDriver;
 use denia_mcp::McpManager;
 use denia_settings::SettingsStore;
-use denia_system_prompt::SystemPrompt;
 use denia_tools::Tool;
 
 use crate::mcp_settings::{MCP_NS, McpSettings};
@@ -24,8 +25,8 @@ pub struct McpRuntime {
     manager: Arc<McpManager>,
     settings: Arc<SettingsStore>,
     driver: Arc<SessionDriver>,
-    /// 提示词句柄(系统提示词热替换);MCP 段与 schema 都挂在它上面。
-    prompt: Arc<arc_swap::ArcSwap<SystemPrompt>>,
+    /// 提示词状态:reload 按同一 manager 整体重建 MCP 段与 provider。
+    system_prompt: Arc<crate::system_prompt_store::SystemPromptState>,
 }
 
 impl McpRuntime {
@@ -33,13 +34,13 @@ impl McpRuntime {
         manager: Arc<McpManager>,
         settings: Arc<SettingsStore>,
         driver: Arc<SessionDriver>,
-        prompt: Arc<arc_swap::ArcSwap<SystemPrompt>>,
+        system_prompt: Arc<crate::system_prompt_store::SystemPromptState>,
     ) -> Self {
         Self {
             manager,
             settings,
             driver,
-            prompt,
+            system_prompt,
         }
     }
 
@@ -77,10 +78,15 @@ impl McpRuntime {
     /// 用当前快照重建 driver 的工具注册表 + 系统提示词工具面。
     ///
     /// 内置工具从 driver 现有注册表里保留(带着 server 侧的定制,如带
-    /// runtime 的 bash),再追加当前 MCP 工具。
+    /// runtime 的 bash),再追加当前 MCP 工具与目录工具 mcp_list。
     fn sync_tools(&self) {
         let mut registry = self.base_registry();
         denia_tools::register_mcp_tools(&mut registry, &self.manager);
+        if !self.manager.snapshot().tool_defs().is_empty() {
+            registry.register(Arc::new(denia_tools::McpListTool::new(
+                self.manager.clone(),
+            )));
+        }
         self.driver.replace_tools(registry);
         self.sync_prompt();
     }
@@ -88,12 +94,12 @@ impl McpRuntime {
     /// 内置工具集:重建一份与 [`crate::state::build_state`] 初始注册等价
     /// 的注册表(server 部署总是带 browser/ask/宿主能力)。
     fn base_registry(&self) -> denia_tools::ToolRegistry {
-        // 从当前注册表里剔除旧的 mcp__* 条目,其余原样保留——这样 server
-        // 侧对 bash 的定制(with_runtime)等不会被重建冲掉。
+        // 从当前注册表里剔除旧的 mcp__* 条目与 mcp_list,其余原样保留——
+        // 这样 server 侧对 bash 的定制(with_runtime)等不会被重建冲掉。
         let current = self.driver.tools();
         let mut rebuilt = denia_tools::ToolRegistry::default();
         for name in current.names() {
-            if name.starts_with(MCP_TOOL_PREFIX) {
+            if name.starts_with(MCP_TOOL_PREFIX) || name == denia_tools::MCP_LIST_TOOL {
                 continue;
             }
             if let Some(tool) = current.get(&name) {
@@ -103,38 +109,14 @@ impl McpRuntime {
         rebuilt
     }
 
-    /// 刷新系统提示词:MCP 工具的 schema 与纪律段按当前快照进退。
+    /// 刷新系统提示词:按当前 manager 整体重建。
     ///
-    /// 段的进退规则(AGENTS.md 硬要求):有已连接的 MCP 服务器才注入
-    /// `tool:mcp`;一个都没有时不注入,模型不会看到不存在的工具。
+    /// MCP 纪律段(动态:文本首行是当前已连接的服务器目录)与 schema
+    /// provider 都由 [`crate::system_prompt_store::build_prompt`] 按同一
+    /// manager 挂载——单一来源、整体替换:配置热更新不会在旧提示词上叠加
+    /// provider,段文本也始终反映最新快照。
     fn sync_prompt(&self) {
-        let manager = self.manager.clone();
-        let mut prompt = (**self.prompt.load()).clone();
-        // 段重名会报错(已存在即跳过);schema provider 是追加语义。
-        // 有 MCP 工具才注入纪律段,一个都没有时不注入(模型看不到
-        // 不存在的工具,AGENTS.md 的段与工具同步要求)。
-        if !manager.snapshot().tool_defs().is_empty() {
-            let _ = denia_tools::register_mcp_prompt_section(&mut prompt);
-        }
-        prompt.tools(move |_| {
-            let snapshot = manager.snapshot();
-            // 直接复用 McpTool 的 schema 构造:模型可见的 schema 与可派发
-            // 的工具必须是同一份(描述与分页字段不会两处漂移)。
-            let schemas = snapshot
-                .tool_defs()
-                .into_iter()
-                .map(|(name, description, parameters)| {
-                    denia_tools::McpTool::new(&name, description, parameters, manager.clone())
-                        .schema()
-                        .clone()
-                })
-                .collect();
-            denia_system_prompt::ToolProviderResult {
-                schemas,
-                known_names: None,
-            }
-        });
-        self.prompt.store(Arc::new(prompt));
+        self.system_prompt.reload();
     }
 }
 

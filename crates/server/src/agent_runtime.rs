@@ -1562,7 +1562,7 @@ mod tests {
         let home =
             std::env::temp_dir().join(format!("denia-runtime-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&home).unwrap();
-        let state = crate::state::build_state(&home, false).await.unwrap();
+        let state = crate::state::build_state(&home, false, 3600).await.unwrap();
         state
             .registry
             .register(

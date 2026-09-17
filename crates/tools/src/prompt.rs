@@ -268,21 +268,63 @@ pub fn register_preset_prompt_section(prompt: &mut SystemPrompt) -> Result<(), S
 
 /// MCP 外部工具的使用纪律段。
 ///
-/// 与实际注册的工具严格同步:仅在有已连接 MCP 服务器、且确实注册了
-/// `mcp__*` 工具时注入(无 MCP 的部署模型不会看到不存在的工具)。
-/// 纪律与 description 分工不重叠:description 写调用机制与分页字段,
-/// 本段写"这些工具是什么、什么时候用、失败怎么办"的行为准则。
+/// 与实际注册的工具严格同步:仅在部署有 MCP 管理器时注入(无 MCP 的部署
+/// 模型不会看到不存在的工具)。段文本是**动态的**:纪律部分固定,首行的
+/// "已接入 MCP 服务器"目录按当前快照渲染——工具清单默认不随请求下发,
+/// 服务器名册常驻可见,模型据此知道"接入了什么能力",需要时再用 mcp_list
+/// 查具体工具。纪律与 description 分工不重叠:description 写调用机制与
+/// 分页字段,本段写"这些工具是什么、什么时候用、失败怎么办"的行为准则。
 pub fn register_mcp_prompt_section(prompt: &mut SystemPrompt) -> Result<(), String> {
     prompt.section(PromptSection {
         name: "tool:mcp".to_string(),
         order: SectionOrder::ToolMcp.value(),
-        text: PromptText::Static(
-            "形如 mcp__<服务器>__<工具> 的是 MCP 外部工具,能力来自用户在设置里接入的第三方 MCP 服务器,不是 denia 内置功能。用法:与内置工具一样直接调用,参数按工具声明的 JSON Schema 给;不要向用户解释你在\"用 MCP\"。\n结果分页:长结果按字符分页返回,尾部会给出\"第 N-M 字符 / 共 X 字符\"与下一个 offset;要看后面的内容,用那个 offset 再调一次同一工具(不要改其它参数,否则会重新执行工具而不是翻页)。优先把查询范围收窄,不要靠翻页从头读到尾。\n失败处理:调用失败的文本通常来自外部服务器(未连接/超时/参数被拒)。先读错误里的可执行建议——多半是让用户到设置 → MCP 检查服务器状态或重新连接;一次失败不要反复重试同一个调用,换内置工具或请用户处理。同名能力优先用内置工具(ls/glob/grep/read_file 等),MCP 工具只在内置工具做不到时才用。".to_string(),
-        ),
+        text: PromptText::Static(render_mcp_section(&[])),
         complete: false,
         audience: SectionAudience::Model,
     })?;
     Ok(())
+}
+
+/// 带连接目录的 MCP 纪律段:文本每次装配按 `McpManager` 快照实时渲染。
+pub fn register_mcp_prompt_section_with_manager(
+    prompt: &mut SystemPrompt,
+    manager: Arc<denia_mcp::McpManager>,
+) -> Result<(), String> {
+    prompt.section(PromptSection {
+        name: "tool:mcp".to_string(),
+        order: SectionOrder::ToolMcp.value(),
+        text: PromptText::Dynamic(Arc::new(move |_| {
+            render_mcp_section(&connected_server_ids(&manager))
+        })),
+        complete: false,
+        audience: SectionAudience::Model,
+    })?;
+    Ok(())
+}
+
+/// 当前已连接且启用的 MCP 服务器 id(快照同步读,无 await)。
+fn connected_server_ids(manager: &denia_mcp::McpManager) -> Vec<String> {
+    let snapshot = manager.snapshot();
+    snapshot
+        .servers
+        .iter()
+        .filter(|server| {
+            server.enabled && server.status == denia_mcp::McpServerStatus::Connected
+        })
+        .map(|server| server.id.clone())
+        .collect()
+}
+
+/// 纪律段文本(纯函数):目录行 + 固定纪律。
+pub fn render_mcp_section(server_ids: &[String]) -> String {
+    let catalog = if server_ids.is_empty() {
+        "(当前没有已连接的 MCP 服务器)".to_string()
+    } else {
+        server_ids.join("、")
+    };
+    format!(
+        "当前已接入的 MCP 服务器:{catalog}。\n形如 mcp__<服务器>__<工具> 的是 MCP 外部工具,能力来自用户在设置里接入的第三方 MCP 服务器,不是 denia 内置功能。不要向用户解释你在\"用 MCP\"。同名能力优先用内置工具(ls/glob/grep/read_file 等),MCP 工具只在内置工具做不到时才用。\n按需发现:这类工具的清单默认不随请求下发。需要外部能力时先用 mcp_list 查看可用工具(可用 server 参数只看某个服务器),再按清单里的名称直接调用。\n两段式装载:首次调用某个 mcp__ 工具不会执行,只返回它的完整参数定义(JSON Schema),按定义重新调用即正常执行。不要靠猜参数使用外部工具;拿到定义后尽快完成实际调用,不要反复装载同一个工具。\n结果分页:长结果按字符分页返回,尾部会给出\"第 N-M 字符 / 共 X 字符\"与下一个 offset;要看后面的内容,用那个 offset 再调一次同一工具(不要改其它参数,否则会重新执行工具而不是翻页)。优先把查询范围收窄,不要靠翻页从头读到尾。\n失败处理:调用失败的文本通常来自外部服务器(未连接/超时/参数被拒)。先读错误里的可执行建议——多半是让用户到设置 → MCP 检查服务器状态或重新连接;一次失败不要反复重试同一个调用,换内置工具或请用户处理。"
+    )
 }
 
 /// 计划呈交工具(exit_plan)的纪律段。

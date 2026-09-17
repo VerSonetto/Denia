@@ -886,6 +886,7 @@ fn validate_openai(value: Value) -> Result<Value, String> {
 pub async fn build_state(
     home: &Path,
     bound_remote: bool,
+    api_port: u16,
 ) -> Result<AppState, Box<dyn std::error::Error>> {
     let events = broadcast::channel::<ServerEvent>(64).0;
     // 环由这一个订阅者喂:22 个既有发送点不必改签名。
@@ -952,6 +953,8 @@ pub async fn build_state(
         home,
         Some(browser_hub.clone()),
         Some(crate::preset_tool::schema()),
+        // 本实例 API 地址:runtime-context 快照注入,模型改配置时打对进程。
+        Some(format!("http://127.0.0.1:{api_port}")),
     ));
     let file_history = Arc::new(crate::file_history::FileHistoryStore::new(home));
     let runtime = crate::agent_runtime::Runtime::new(
@@ -1013,6 +1016,7 @@ pub async fn build_state(
             Arc::new(move |id: &str| {
                 file_history_for_evict.forget(id);
                 driver_for_evict.clear_read_state(id);
+                driver_for_evict.clear_mcp_loads(id);
             }),
         );
     }
@@ -1024,13 +1028,17 @@ pub async fn build_state(
 
     // MCP:按 `mcp` 命名空间的配置连接外部服务器,并把它们的工具并入
     // 注册表与系统提示词。连接失败不阻断启动(单个服务器自己标 error)。
+    // 提示词侧走单一来源:manager 先挂进 SystemPromptState(attach_mcp 重建),
+    // 之后每次配置变更的 sync_prompt 只是再 reload 一次,不叠加残留。
+    let mcp_manager = Arc::new(denia_mcp::McpManager::new(
+        crate::mcp_runtime::builtin_tool_names(&driver.tools()),
+    ));
+    system_prompt.attach_mcp(mcp_manager.clone());
     let mcp = Arc::new(crate::mcp_runtime::McpRuntime::new(
-        Arc::new(denia_mcp::McpManager::new(
-            crate::mcp_runtime::builtin_tool_names(&driver.tools()),
-        )),
+        mcp_manager,
         settings.clone(),
         driver.clone(),
-        system_prompt.handle(),
+        system_prompt.clone(),
     ));
     mcp.apply().await;
 

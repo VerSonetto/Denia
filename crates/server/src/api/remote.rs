@@ -314,7 +314,7 @@ mod tests {
     async fn harness() -> (Arc<AppState>, axum::Router) {
         let home = std::env::temp_dir().join(format!("denia-remote-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&home).unwrap();
-        let state = Arc::new(crate::state::build_state(&home, false).await.unwrap());
+        let state = Arc::new(crate::state::build_state(&home, false, 3600).await.unwrap());
         // 测试里的 Host 用一个固定的"局域网地址";真实环境靠网卡探测进白名单,
         // 测试机不一定有对应网段,所以显式列进 allowedHosts。
         state

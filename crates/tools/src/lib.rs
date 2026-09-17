@@ -43,13 +43,14 @@ pub use glob::GlobTool;
 pub use goal::{GetGoalTool, UpdateGoalTool};
 pub use grep::GrepTool;
 pub use ls::LsTool;
-pub use mcp::McpTool;
+pub use mcp::{MCP_LIST_TOOL, McpListTool, McpTool, mcp_list_schema};
 pub use plan::{ExitPlanArgs, ExitPlanTool};
 pub use prompt::{
     default_shipped, default_shipped_with_browser, default_shipped_with_browser_and_ask,
     register_ask_prompt_section, register_capability_prompt_sections,
     register_code_style_section, register_communication_section,
     register_context_management_section, register_mcp_prompt_section,
+    register_mcp_prompt_section_with_manager, render_mcp_section,
     register_memory_prompt_section, register_preset_prompt_section,
     register_risk_honesty_section, register_shipped_prompt, register_working_style_section,
     render_memory_section, shipped_with_persona, shipped_with_persona_and_browser_and_ask,

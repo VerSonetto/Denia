@@ -2528,3 +2528,193 @@ fn webfetch_section_travels_with_tool_in_allowlist_narrowing() {
         "白名单含 web_fetch 时纪律段必须保留"
     );
 }
+
+// —— MCP 两段式工具面:轻量暴露 + 首次调用装载 ——
+
+/// 带执行计数的假 MCP 工具:拦截调用不执行,计数不增长。
+struct CountingMcpTool {
+    executes: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+#[async_trait]
+impl denia_tools::Tool for CountingMcpTool {
+    fn schema(&self) -> &ToolSchema {
+        Box::leak(Box::new(ToolSchema {
+            name: "mcp__fx__echo".to_string(),
+            description: "echoes via mcp".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": { "text": { "type": "string" } },
+                "required": ["text"]
+            }),
+        }))
+    }
+
+    async fn execute(&self, arguments: &str, _ctx: &denia_tools::ToolContext) -> denia_tools::ToolOutput {
+        self.executes.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        denia_tools::ToolOutput {
+            content: format!("echo:{arguments}"),
+            is_error: false,
+        }
+    }
+}
+
+fn mcp_call_script(name: &str, arguments: &str) -> Vec<StreamChunk> {
+    vec![
+        StreamChunk::BlockStart {
+            index: 0,
+            block_type: BlockType::ToolCall,
+        },
+        StreamChunk::BlockEnd {
+            index: 0,
+            block: ContentBlock::ToolCall {
+                id: "call_m1".to_string(),
+                name: name.to_string(),
+                arguments: arguments.to_string(),
+            },
+        },
+        StreamChunk::Finish {
+            reason: FinishReason::ToolCalls,
+        },
+    ]
+}
+
+/// 目录化装配:未装载的 mcp__* 工具整体移出请求工具面;装载后保留全量;
+/// 非 MCP 工具不受影响。
+#[test]
+fn unloaded_mcp_tools_are_removed_until_loaded() {
+    let full_parameters = serde_json::json!({
+        "type": "object",
+        "properties": { "text": { "type": "string" } },
+        "required": ["text"]
+    });
+    let registry = Arc::new(LlmRegistry::new());
+    let mut tools = ToolRegistry::default();
+    tools.register(Arc::new(CountingMcpTool {
+        executes: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+    }));
+    tools.register(Arc::new(EchoTool));
+    let prompt = SystemPrompt::new(denia_system_prompt::SystemPromptConfig {
+        include_runtime_context: false,
+        ..Default::default()
+    });
+    let driver = SessionDriver::new(
+        registry,
+        Arc::new(tools),
+        Arc::new(ArcSwap::from_pointee(prompt)),
+    );
+
+    let mcp_schema = ToolSchema {
+        name: "mcp__fx__echo".to_string(),
+        description: "echoes via mcp".to_string(),
+        parameters: full_parameters.clone(),
+    };
+    let echo_schema = ToolSchema {
+        name: "echo".to_string(),
+        description: "echoes".to_string(),
+        parameters: serde_json::json!({ "type": "object" }),
+    };
+    let mut assembly = denia_system_prompt::PromptAssembly {
+        sections: Vec::new(),
+        contexts: Vec::new(),
+        tools: vec![mcp_schema.clone(), echo_schema],
+        variables: Default::default(),
+    };
+    crate::turn::retain_loaded_mcp_tools(&driver, "s1", &mut assembly);
+
+    assert!(
+        !assembly
+            .tools
+            .iter()
+            .any(|schema| schema.name == "mcp__fx__echo"),
+        "未装载的 MCP 工具必须整体移出请求工具面"
+    );
+    let echo = assembly.tools.iter().find(|schema| schema.name == "echo").unwrap();
+    assert_eq!(
+        echo.parameters,
+        serde_json::json!({ "type": "object" }),
+        "非 MCP 工具不受目录化影响"
+    );
+
+    // 装载之后:同一工具保留全量 schema。
+    driver.load_mcp_tool("s1", "mcp__fx__echo");
+    let mut assembly = denia_system_prompt::PromptAssembly {
+        sections: Vec::new(),
+        contexts: Vec::new(),
+        tools: vec![mcp_schema],
+        variables: Default::default(),
+    };
+    crate::turn::retain_loaded_mcp_tools(&driver, "s1", &mut assembly);
+    assert_eq!(assembly.tools.len(), 1);
+    assert_eq!(assembly.tools[0].parameters, full_parameters);
+    // 会话隔离:另一会话仍是未装载态。
+    assert!(driver.mcp_loaded("s1", "mcp__fx__echo"));
+    assert!(!driver.mcp_loaded("s2", "mcp__fx__echo"));
+    driver.clear_mcp_loads("s1");
+    assert!(!driver.mcp_loaded("s1", "mcp__fx__echo"));
+}
+
+/// 首次调用拦截:返回参数定义不执行;装载后第二次调用正常执行。
+#[tokio::test]
+async fn first_mcp_call_returns_definition_and_second_executes() {
+    let executes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counter = executes.clone();
+    let (driver, _registry) = driver_with_tools(
+        vec![
+            MockScript::Chunks(mcp_call_script(
+                "mcp__fx__echo",
+                r#"{"text":"hi"}"#,
+            )),
+            MockScript::Chunks(mcp_call_script(
+                "mcp__fx__echo",
+                r#"{"text":"hi"}"#,
+            )),
+            MockScript::Chunks(text_script("done")),
+        ],
+        move |tools| {
+            tools.register(Arc::new(CountingMcpTool { executes: counter }));
+        },
+    );
+    let session = temp_session();
+    let reason = driver
+        .run_turn(
+            &session,
+            &selection(),
+            "call the mcp tool",
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            true,
+            CancellationToken::new(),
+            noop_emit(),
+        )
+        .await;
+    assert_eq!(reason, TurnEndReason::Completed);
+    // 第一次调用被拦截(未执行),第二次正常执行:总执行次数为 1。
+    assert_eq!(
+        executes.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "拦截调用不得触达工具,装载后调用必须执行"
+    );
+    assert!(driver.mcp_loaded(session.id(), "mcp__fx__echo"));
+    let results: Vec<String> = session
+        .events()
+        .iter()
+        .filter_map(|envelope| match &envelope.event {
+            SessionEvent::ToolResult { content, .. } => Some(content.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(results.len(), 2, "两次调用各落一条结果");
+    assert!(
+        results[0].contains("参数定义") && results[0].contains("\"text\""),
+        "拦截结果必须携带完整参数定义: {}",
+        results[0]
+    );
+    assert!(
+        !results[0].starts_with("echo:"),
+        "拦截调用不得产生工具执行结果: {}",
+        results[0]
+    );
+    assert_eq!(results[1], "echo:{\"text\":\"hi\"}");
+}

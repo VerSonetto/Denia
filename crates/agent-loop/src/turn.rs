@@ -624,6 +624,24 @@ pub(crate) fn apply_session_preset(
     }
 }
 
+/// 模型可见的 MCP 工具名前缀(与 `denia_mcp::qualify_tool_name` 的输出一致)。
+pub(crate) const MCP_TOOL_PREFIX: &str = "mcp__";
+
+/// 目录化装配:未装载的 `mcp__*` 工具整体移出请求工具面,只留目录工具
+/// `mcp_list` 与已装载的条目。外部服务器的工具清单与 inputSchema 都不再
+/// 常驻每个请求——模型需要外部能力时先用 `mcp_list` 发现,看中的工具
+/// 直接按名调用,首次调用被 exec 层拦截返回参数定义并装载(见
+/// `exec::mcp_load_intercept`),之后该工具全量进请求。
+pub(crate) fn retain_loaded_mcp_tools(
+    driver: &SessionDriver,
+    session_id: &str,
+    assembly: &mut PromptAssembly,
+) {
+    assembly.tools.retain(|schema| {
+        !schema.name.starts_with(MCP_TOOL_PREFIX) || driver.mcp_loaded(session_id, &schema.name)
+    });
+}
+
 /// 装配本 step 的系统提示与工具集。
 /// 系统提示热更新不丢能力(bash schema 回填实际注册表版本);
 /// 子代理 persona 覆盖 + 工具白名单过滤。
@@ -657,6 +675,10 @@ fn assemble_step(
     // 放在能力 schema 追加之后:preset 说"不给 bash"就得对追加进来的
     // 扩展工具同样生效。
     apply_session_preset(driver, state.session.agent_preset().as_deref(), &mut assembly);
+    // MCP 目录化:未装载的 `mcp__*` 工具整体移出工具面,模型经 mcp_list
+    // 发现、按名调用、首次调用装载。放白名单收窄之后:被 preset/子代理
+    // 白名单排除的 MCP 工具同样不进请求。
+    retain_loaded_mcp_tools(driver, state.session.id(), &mut assembly);
     if let Some(child) = &state.session.header().subagent {
         if let Some(persona) = &child.persona
             && let Some(section) = assembly
