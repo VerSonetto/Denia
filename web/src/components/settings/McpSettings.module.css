@@ -1,0 +1,452 @@
+/* MCP 设置面板。只用语义 token,暗/亮主题自动生效。 */
+
+.head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 14px;
+}
+
+.summary {
+  margin: 0 0 4px;
+  font-size: 13px;
+  font-weight: 650;
+  color: var(--label-primary);
+}
+
+.hint {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--label-tertiary);
+}
+
+.error {
+  margin: 0 0 12px;
+  padding: 9px 12px;
+  border-radius: 10px;
+  border: 1px solid var(--danger-border);
+  background: var(--danger-soft);
+  color: var(--danger);
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+
+.empty {
+  margin: 8px 0 0;
+  padding: 18px 14px;
+  border-radius: 12px;
+  border: 1px dashed var(--border-l2);
+  color: var(--label-tertiary);
+  font-size: 12.5px;
+  line-height: 1.6;
+  text-align: center;
+}
+
+/* ---- 表单 ---- */
+
+.form {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 14px;
+  margin-bottom: 16px;
+  border-radius: 12px;
+  border: 1px solid var(--border-l1);
+  background: var(--bg-layer-2);
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 12px;
+}
+
+.envBlock {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.envLabel {
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--label-caption);
+}
+
+.envRow {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.4fr) auto;
+  gap: 8px;
+  align-items: center;
+}
+
+.formActions {
+  display: flex;
+  gap: 8px;
+}
+
+/* ---- 服务器卡片 ---- */
+
+.list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.card {
+  padding: 12px 14px;
+  border-radius: 12px;
+  border: 1px solid var(--border-l1);
+  background: var(--bg-layer-2);
+}
+
+.cardHead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.cardTitle {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+  padding: 0;
+  border: none;
+  background: none;
+  text-align: left;
+  cursor: pointer;
+  font-family: inherit;
+}
+
+.cardName {
+  font-size: 13.5px;
+  font-weight: 650;
+  color: var(--label-primary);
+}
+
+.cardCommand {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--label-tertiary);
+}
+
+.cardMeta {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: none;
+}
+
+.toolCount {
+  font-size: 11.5px;
+  color: var(--label-tertiary);
+  white-space: nowrap;
+}
+
+.serverError {
+  margin: 8px 0 0;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--danger-border);
+  background: var(--danger-soft);
+  color: var(--danger);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.cardBody {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border-l1);
+}
+
+.meta {
+  margin: 0 0 8px;
+  font-size: 11.5px;
+  color: var(--label-tertiary);
+}
+
+.meta code {
+  font-family: var(--font-mono);
+  color: var(--label-secondary);
+}
+
+.tools {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.tool {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.toolToggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+}
+
+.toolName {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--label-primary);
+}
+
+.toolDesc {
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--label-tertiary);
+}
+
+.toolReason {
+  font-size: 11.5px;
+  color: var(--danger);
+}
+
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+/* ---- 对话框(新建/编辑) ---- */
+
+.modalBackdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 32px;
+  background: var(--modal-backdrop, rgba(0, 0, 0, 0.55));
+}
+
+.modal {
+  width: min(640px, 100%);
+  max-height: calc(100vh - 64px);
+  display: flex;
+  flex-direction: column;
+  border-radius: 14px;
+  border: 1px solid var(--border-l1);
+  background: var(--bg-layer-1);
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.35);
+  overflow: hidden;
+}
+
+.modalHead {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 18px 20px 4px;
+}
+
+.modalTitle {
+  margin: 0 0 4px;
+  font-size: 16px;
+  font-weight: 700;
+  color: var(--label-primary);
+}
+
+.modeSwitch {
+  display: inline-flex;
+  padding: 3px;
+  border-radius: 999px;
+  background: var(--bg-layer-2);
+  border: 1px solid var(--border-l1);
+}
+
+.modeBtn {
+  padding: 5px 14px;
+  border-radius: 999px;
+  border: none;
+  background: transparent;
+  color: var(--label-secondary);
+  font-size: 12px;
+  font-weight: 650;
+  font-family: inherit;
+  cursor: pointer;
+  transition:
+    background 0.15s var(--ease),
+    color 0.15s var(--ease);
+}
+
+.modeBtn:hover {
+  color: var(--label-primary);
+}
+
+.modeBtn.active {
+  background: var(--bg-layer-1);
+  color: var(--label-primary);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.18);
+}
+
+.scopeRow {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 4px 20px 12px;
+  border-bottom: 1px solid var(--border-l1);
+  margin: 0 0 12px;
+}
+
+.scopeLabel {
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--label-caption);
+}
+
+.scopeChips {
+  display: inline-flex;
+  gap: 8px;
+}
+
+.scopeChip {
+  padding: 5px 12px;
+  border-radius: 999px;
+  border: 1px solid var(--border-l1);
+  background: var(--bg-layer-2);
+  color: var(--label-secondary);
+  font-size: 12px;
+  font-weight: 600;
+  font-family: inherit;
+  cursor: pointer;
+}
+
+.scopeChip:hover {
+  color: var(--label-primary);
+  border-color: var(--border-l2);
+}
+
+.scopeChip.active {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--label-primary);
+}
+
+.modalBody {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 0 20px 16px;
+  overflow-y: auto;
+}
+
+.typeChips {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.typeChip {
+  padding: 6px 14px;
+  border-radius: 10px;
+  border: 1px solid var(--border-l1);
+  background: var(--bg-layer-2);
+  color: var(--label-secondary);
+  font-size: 13px;
+  font-weight: 600;
+  font-family: inherit;
+  cursor: pointer;
+}
+
+.typeChip:hover {
+  color: var(--label-primary);
+  border-color: var(--border-l2);
+}
+
+.typeChip.active {
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--label-primary);
+}
+
+.envBlock {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid var(--border-l1);
+  background: var(--bg-layer-2);
+}
+
+.envBlock summary {
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--label-caption);
+}
+
+.envTextarea {
+  width: 100%;
+  min-height: 80px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--border-l1);
+  background: var(--bg-layer-1);
+  color: var(--label-primary);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  resize: vertical;
+  outline: none;
+}
+
+.envTextarea:focus-visible {
+  border-color: var(--accent-tint);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+.jsonTextarea {
+  width: 100%;
+  min-height: 240px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid var(--border-l1);
+  background: var(--bg-layer-2);
+  color: var(--label-primary);
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  line-height: 1.55;
+  resize: vertical;
+  outline: none;
+}
+
+.jsonTextarea:focus-visible {
+  border-color: var(--accent-tint);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+.modalActions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+  padding: 14px 20px;
+  border-top: 1px solid var(--border-l1);
+  background: var(--bg-layer-2);
+}

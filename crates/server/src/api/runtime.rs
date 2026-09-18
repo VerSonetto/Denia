@@ -1,0 +1,144 @@
+//! 人类控制入口与模型工具共用同一运行时、身份边界和资源限制。
+use crate::{error::ApiError, state::AppState};
+use axum::{
+    Json, Router,
+    extract::{Path, State},
+    routing::{get, post},
+};
+use serde::Deserialize;
+use serde_json::{Value, json};
+use std::sync::Arc;
+
+pub fn router() -> Router<Arc<AppState>> {
+    Router::new()
+        .route("/api/sessions/{id}/agents", get(agents))
+        .route("/api/sessions/{id}/agents/{target}/message", post(message))
+        .route(
+            "/api/sessions/{id}/agents/{target}/interrupt",
+            post(interrupt),
+        )
+        .route("/api/sessions/{id}/jobs", get(jobs))
+        .route("/api/sessions/{id}/jobs/{job}/output", get(output))
+        .route("/api/sessions/{id}/jobs/{job}/kill", post(kill))
+        .route("/api/sessions/{id}/skills", get(skills))
+        .route("/api/sessions/{id}/skills/{name}", get(skill))
+}
+fn error(e: String) -> ApiError {
+    ApiError::bad_request("runtime/operation-failed", e)
+}
+async fn ensure(state: &AppState, id: &str) -> Result<Arc<crate::state::LiveSession>, ApiError> {
+    let live = state.live.clone();
+    let sessions = state.sessions.clone();
+    let id = id.to_string();
+    let live = tokio::task::spawn_blocking(move || live.get_or_load(&sessions, &id))
+        .await
+        .map_err(|e| error(e.to_string()))?
+        .map_err(ApiError::from_session)?;
+    // runtime 操作(派生代理/收发指令)是参与路径:事件必须驻留。
+    // 走 LiveSessions 的入口而非直接 session.ensure_hot:热升级会让驻留量
+    // 从 0 跳到几十 MB,必须立刻复核预算(见 `LiveSessions::ensure_hot`)。
+    state
+        .live
+        .ensure_hot(&live)
+        .map_err(ApiError::from_session)?;
+    Ok(live)
+}
+async fn agents(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    ensure(&state, &id).await?;
+    Ok(Json(json!({"agents":state.runtime.list(&id)})))
+}
+#[derive(Deserialize)]
+struct Message {
+    message: String,
+}
+async fn message(
+    State(state): State<Arc<AppState>>,
+    Path((id, target)): Path<(String, String)>,
+    Json(body): Json<Message>,
+) -> Result<Json<Value>, ApiError> {
+    let live = ensure(&state, &id).await?;
+    use denia_tools::capabilities::AgentRuntime;
+    let ctx = denia_tools::ToolContext {
+        session_id: Some(id.clone()),
+        selection: None,
+        cwd: live.session.header().cwd.clone().into(),
+        cancel: tokio_util::sync::CancellationToken::new(),
+        confined: true,
+        vision_supported: false,
+        emit_event: None,
+        file_history: None,
+        permission_mode: live.session.permission_mode(),
+        ask: None,
+        call_id: None,
+        goal_reader: None,
+        // 与 agent-loop 共享同一张读状态表:这个入口发起的工具调用
+        // 也参与重复读取去重,不会在会话历史里留下"假新鲜"的标记。
+        read_state: Some(state.driver.read_state_for(&id)),
+    };
+    Ok(Json(
+        state
+            .runtime
+            .execute(
+                "send_message",
+                json!({"target":target,"message":body.message}),
+                &ctx,
+            )
+            .await
+            .map_err(error)?,
+    ))
+}
+async fn interrupt(
+    State(state): State<Arc<AppState>>,
+    Path((id, target)): Path<(String, String)>,
+) -> Result<Json<Value>, ApiError> {
+    ensure(&state, &id).await?;
+    state.runtime.interrupt(&id, &target).await.map_err(error)?;
+    Ok(Json(json!({"ok":true})))
+}
+async fn jobs(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    ensure(&state, &id).await?;
+    Ok(Json(json!({"jobs":state.runtime.jobs().list(&id)})))
+}
+async fn output(
+    State(state): State<Arc<AppState>>,
+    Path((id, job)): Path<(String, String)>,
+) -> Result<Json<Value>, ApiError> {
+    ensure(&state, &id).await?;
+    Ok(Json(state.runtime.jobs().peek(&job, &id).map_err(error)?))
+}
+async fn kill(
+    State(state): State<Arc<AppState>>,
+    Path((id, job)): Path<(String, String)>,
+) -> Result<Json<Value>, ApiError> {
+    ensure(&state, &id).await?;
+    state.runtime.jobs().kill(&job, &id).map_err(error)?;
+    Ok(Json(json!({"ok":true})))
+}
+async fn skills(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    let live = ensure(&state, &id).await?;
+    Ok(Json(
+        json!({"skills":state.runtime.skills(live.session.header().cwd.clone().into()).await.map_err(error)?}),
+    ))
+}
+async fn skill(
+    State(state): State<Arc<AppState>>,
+    Path((id, name)): Path<(String, String)>,
+) -> Result<Json<Value>, ApiError> {
+    let live = ensure(&state, &id).await?;
+    Ok(Json(
+        state
+            .runtime
+            .load_skill(live.session.header().cwd.clone().into(), name, true)
+            .await
+            .map_err(error)?,
+    ))
+}

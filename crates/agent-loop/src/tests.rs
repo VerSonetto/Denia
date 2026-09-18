@@ -1,0 +1,2720 @@
+//! SessionDriver 集成测试:脚本化 adapter 驱动主循环的全部关键路径,
+//! 外加死循环检测与输出预算的端到端断言。
+
+use super::*;
+use crate::errors::MAX_FEEDBACK;
+use async_trait::async_trait;
+use denia_core::error::LlmError;
+use denia_core::session::{
+    AbortCause, ApprovalOutcome, PermissionMode, PlanReviewDecision, RequestHeaderReason,
+};
+use denia_core::stream::{BlockType, ContentBlock, FinishReason, StreamChunk, TokenUsage};
+use denia_core::tool::ToolSchema;
+use denia_llm::{ChunkStream, GenerateRequest, LlmAdapter, LlmModelInfo, LlmResolvedModelInfo, ProviderInfo};
+use denia_system_prompt::SystemPrompt;
+use denia_tools::ToolRegistry;
+use futures::StreamExt;
+use std::collections::VecDeque;
+use std::sync::Mutex;
+
+#[test]
+fn system_prompt_frames_runtime_authority() {
+    let (prompt, _) = denia_tools::default_shipped();
+    let assembly = prompt
+        .assemble(&denia_system_prompt::AssembleContext {
+            cwd: Some("/tmp/ws".to_string()),
+            model: Some("mock".to_string()),
+            provider: Some("mock".to_string()),
+            ..Default::default()
+        })
+        .unwrap();
+    let body = denia_system_prompt::render_prompt(&assembly);
+    assert!(!body.contains("最高优先级"));
+    // 工作目录是运行时事实,归 harness:runtime(动态快照),不在静态段落里。
+    assert!(!body.contains("/tmp/ws"));
+    let snapshot = denia_system_prompt::render_context_snapshot(&assembly);
+    assert!(
+        snapshot.contains("/tmp/ws"),
+        "工作目录必须由运行时快照携带:{snapshot}"
+    );
+
+    // 框架只包静态正文:快照随每步变化,包进去会让缓存前缀失效。
+    let model = denia_system_prompt::frame_system_prompt_for_model(&body);
+    assert!(model.contains("最高优先级"));
+    assert!(model.contains("再次确认"));
+    assert!(model.contains("你是由 denia 驱动的"));
+}
+
+/// 子代理的纪律段必须跟着工具授予走:拿不到的工具,其纪律段不得注入。
+/// 段名到工具的映射(`section_tools`)是唯一权威,新增段忘了登记时本测试
+/// 会失败,而不是让子代理读到不存在的工具纪律。
+#[test]
+fn subagent_sections_follow_tool_grant() {
+    use denia_tools::SUBAGENT_READ_ONLY_TOOLS;
+    // 用 shipped 基础提示词 + capability 段覆盖段名全集;browser 段由
+    // tools 侧的单测覆盖(agent-loop 不依赖 denia-browser)。
+    let (mut prompt, _) = denia_tools::default_shipped();
+    denia_tools::register_capability_prompt_sections(&mut prompt).unwrap();
+    let assembly = prompt
+        .assemble(&denia_system_prompt::AssembleContext {
+            cwd: Some("/tmp/ws".to_string()),
+            ..Default::default()
+        })
+        .unwrap();
+    // 提示词里出现的每个 tool: 段都必须能在映射表里找到归属,
+    // 否则子代理过滤会静默漏掉它。
+    for section in &assembly.sections {
+        if section.name.starts_with("tool:") {
+            assert!(
+                crate::turn::section_tools(&section.name).is_some(),
+                "纪律段 {} 未在 section_tools 登记",
+                section.name
+            );
+        }
+    }
+    // 只读集合下的期望:read/glob/grep/skill/browser 段保留,
+    // bash/write/todo/edit/agents/jobs/ask 段移除。
+    let allowed: Vec<String> = SUBAGENT_READ_ONLY_TOOLS
+        .iter()
+        .map(|name| (*name).to_string())
+        .collect();
+    let kept: Vec<&str> = assembly
+        .sections
+        .iter()
+        .filter(|section| match crate::turn::section_tools(&section.name) {
+            Some(tools) => tools.iter().any(|name| allowed.contains(&name.to_string())),
+            None => true,
+        })
+        .map(|section| section.name.as_str())
+        .filter(|name| name.starts_with("tool:"))
+        .collect();
+    for expected in ["tool:read", "tool:glob", "tool:grep", "tool:skill"] {
+        assert!(kept.contains(&expected), "{expected} 应保留:{kept:?}");
+    }
+    for removed in [
+        "tool:bash",
+        "tool:write",
+        "tool:todo",
+        "tool:edit",
+        "tool:agents",
+        "tool:jobs",
+        "tool:ask",
+        "tool:goal",
+    ] {
+        assert!(!kept.contains(&removed), "{removed} 应移除:{kept:?}");
+    }
+}
+
+/// Scripted adapter: each `stream` call pops the next queued chunk run.
+enum MockScript {
+    Chunks(Vec<StreamChunk>),
+    Fail(LlmFailure),
+    /// 先产出 chunk,再以流错误终止(模拟 [DONE] 前断流)。
+    ChunksThenFail(Vec<StreamChunk>, LlmFailure),
+}
+
+struct MockAdapter {
+    scripts: Mutex<VecDeque<MockScript>>,
+    /// 录制每次请求的 system 字节(冻结断言用);None = 不录制。
+    capture: Option<Arc<Mutex<Vec<Option<String>>>>>,
+}
+
+#[async_trait]
+impl LlmAdapter for MockAdapter {
+    fn provider_info(&self, provider: &str) -> ProviderInfo {
+        ProviderInfo {
+            id: provider.to_string(),
+            name: "mock".to_string(),
+        }
+    }
+
+    async fn list_models(&self, provider: &str) -> Result<Vec<LlmModelInfo>, LlmError> {
+        Ok(vec![LlmModelInfo {
+            provider: provider.to_string(),
+            id: "mock-1".to_string(),
+            name: "Mock One".to_string(),
+            description: None,
+            input_modalities: vec!["text".to_string()],
+        }])
+    }
+
+    async fn resolve_model(
+        &self,
+        provider: &str,
+        model: &str,
+    ) -> Result<LlmResolvedModelInfo, LlmError> {
+        Ok(LlmResolvedModelInfo {
+            info: LlmModelInfo {
+                provider: provider.to_string(),
+                id: model.to_string(),
+                name: model.to_string(),
+                description: None,
+                input_modalities: vec!["text".to_string()],
+            },
+            context_window: Some(100_000),
+            default_max_tokens: Some(4_000),
+            reasoning: None,
+        })
+    }
+
+    async fn stream(
+        &self,
+        _provider: &str,
+        request: &GenerateRequest,
+    ) -> Result<ChunkStream, LlmError> {
+        if let Some(capture) = &self.capture {
+            capture.lock().unwrap().push(request.system.clone());
+        }
+        match self.scripts.lock().unwrap().pop_front() {
+            Some(MockScript::Fail(failure)) => {
+                Err(denia_core::error::LlmError::from_failure(failure))
+            }
+            Some(MockScript::Chunks(chunks)) => {
+                Ok(Box::pin(futures::stream::iter(chunks.into_iter().map(Ok))))
+            }
+            Some(MockScript::ChunksThenFail(chunks, failure)) => Ok(Box::pin(
+                futures::stream::iter(chunks.into_iter().map(Ok)).chain(futures::stream::once(
+                    async move { Err::<StreamChunk, LlmFailure>(failure) },
+                )),
+            )),
+            None => Ok(Box::pin(futures::stream::empty())),
+        }
+    }
+}
+
+struct EchoTool;
+
+#[async_trait]
+impl denia_tools::Tool for EchoTool {
+    fn schema(&self) -> &ToolSchema {
+        // Leaked once for the &'static contract of the test trait object.
+        Box::leak(Box::new(ToolSchema {
+            name: "echo".to_string(),
+            description: "echoes".to_string(),
+            parameters: serde_json::json!({ "type": "object" }),
+        }))
+    }
+
+    async fn execute(&self, arguments: &str, _ctx: &denia_tools::ToolContext) -> denia_tools::ToolOutput {
+        denia_tools::ToolOutput {
+            content: format!("echo:{arguments}"),
+            is_error: false,
+        }
+    }
+}
+
+/// 输出超预算的工具:验证落盘层统一截断。
+struct BulkyTool;
+
+#[async_trait]
+impl denia_tools::Tool for BulkyTool {
+    fn schema(&self) -> &ToolSchema {
+        Box::leak(Box::new(ToolSchema {
+            name: "bulky".to_string(),
+            description: "emits oversized output".to_string(),
+            parameters: serde_json::json!({ "type": "object" }),
+        }))
+    }
+
+    async fn execute(&self, _arguments: &str, _ctx: &denia_tools::ToolContext) -> denia_tools::ToolOutput {
+        denia_tools::ToolOutput {
+            content: "x".repeat(denia_tools::support::OUTPUT_BUDGET_CHARS + 500),
+            is_error: false,
+        }
+    }
+}
+
+/// 一条 finish-error 流:模拟网关空响应(EMPTY_RESPONSE 以 finish 错误产出)。
+fn error_finish_script() -> Vec<StreamChunk> {
+    vec![StreamChunk::Finish {
+        reason: FinishReason::Error {
+            failure: LlmFailure::new(
+                denia_core::error::codes::EMPTY_RESPONSE,
+                "empty response",
+            ),
+        },
+    }]
+}
+
+fn text_script(text: &str) -> Vec<StreamChunk> {
+    vec![
+        StreamChunk::BlockStart {
+            index: 0,
+            block_type: BlockType::Text,
+        },
+        StreamChunk::TextDelta {
+            index: 0,
+            text: text.to_string(),
+        },
+        StreamChunk::BlockEnd {
+            index: 0,
+            block: ContentBlock::Text {
+                text: text.to_string(),
+            },
+        },
+        StreamChunk::Usage {
+            usage: TokenUsage {
+                input_tokens: 5,
+                output_tokens: 2,
+                cache_read_tokens: None,
+                reasoning_tokens: None,
+            },
+        },
+        StreamChunk::Finish {
+            reason: FinishReason::Stop,
+        },
+    ]
+}
+
+fn tool_script() -> Vec<StreamChunk> {
+    vec![
+        StreamChunk::BlockStart {
+            index: 0,
+            block_type: BlockType::ToolCall,
+        },
+        StreamChunk::ToolCallDelta {
+            index: 0,
+            id: "call_1".to_string(),
+            name: Some("echo".to_string()),
+            arguments_delta: "{\"text\":\"hi\"}".to_string(),
+        },
+        StreamChunk::BlockEnd {
+            index: 0,
+            block: ContentBlock::ToolCall {
+                id: "call_1".to_string(),
+                name: "echo".to_string(),
+                arguments: "{\"text\":\"hi\"}".to_string(),
+            },
+        },
+        StreamChunk::Finish {
+            reason: FinishReason::ToolCalls,
+        },
+    ]
+}
+
+fn driver(scripts: Vec<MockScript>) -> (SessionDriver, Arc<LlmRegistry>) {
+    driver_with_tools(scripts, |tools| {
+        tools.register(Arc::new(EchoTool));
+    })
+}
+
+fn driver_with_tools(
+    scripts: Vec<MockScript>,
+    register: impl FnOnce(&mut ToolRegistry),
+) -> (SessionDriver, Arc<LlmRegistry>) {
+    let registry = Arc::new(LlmRegistry::new());
+    registry
+        .register(
+            &["mock".to_string()],
+            Arc::new(MockAdapter {
+                scripts: Mutex::new(VecDeque::from(scripts)),
+                capture: None,
+            }),
+            denia_llm::RetryPolicy::default(),
+        )
+        .unwrap();
+    let mut tools = ToolRegistry::default();
+    register(&mut tools);
+    let mut prompt = SystemPrompt::new(denia_system_prompt::SystemPromptConfig {
+        include_runtime_context: false,
+        ..Default::default()
+    });
+    let schemas = tools.schemas();
+    prompt.tools(move |_| denia_system_prompt::ToolProviderResult {
+        schemas: schemas.clone(),
+        known_names: None,
+    });
+    prompt
+        .variable("cwd", |context| context.cwd.clone())
+        .unwrap();
+    prompt
+        .variable("model", |context| context.model.clone())
+        .unwrap();
+    prompt
+        .variable("provider", |context| context.provider.clone())
+        .unwrap();
+    (
+        SessionDriver::new(
+            registry.clone(),
+            Arc::new(tools),
+            Arc::new(ArcSwap::from_pointee(prompt)),
+        ),
+        registry,
+    )
+}
+
+fn temp_session() -> Arc<Session> {
+    let dir = std::env::temp_dir().join(format!(
+        "denia-loop-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    Arc::new(Session::create(&dir, uuid::Uuid::new_v4().to_string(), &dir, true, None).unwrap())
+}
+
+/// 带请求录制的驱动器:捕获每次派发请求的 system 字节,供冻结断言用。
+fn recording_driver(
+    scripts: Vec<MockScript>,
+) -> (SessionDriver, Arc<Mutex<Vec<Option<String>>>>) {
+    let capture = Arc::new(Mutex::new(Vec::new()));
+    let registry = Arc::new(LlmRegistry::new());
+    registry
+        .register(
+            &["mock".to_string()],
+            Arc::new(MockAdapter {
+                scripts: Mutex::new(VecDeque::from(scripts)),
+                capture: Some(capture.clone()),
+            }),
+            denia_llm::RetryPolicy::default(),
+        )
+        .unwrap();
+    let tools = ToolRegistry::default();
+    let prompt = SystemPrompt::new(denia_system_prompt::SystemPromptConfig {
+        include_runtime_context: false,
+        ..Default::default()
+    });
+    (
+        SessionDriver::new(
+            registry,
+            Arc::new(tools),
+            Arc::new(ArcSwap::from_pointee(prompt)),
+        ),
+        capture,
+    )
+}
+
+/// 会话日志里的 preset 落到本 step 的装配上:工具面与 persona 一起收窄,
+/// 而日志里的 id 从名册消失时回退到部署默认组装(不中断会话)。
+#[test]
+fn session_preset_narrows_the_step_assembly() {
+    struct FakeSource(Vec<denia_core::preset::AgentPreset>);
+
+    impl crate::preset::AgentPresetSource for FakeSource {
+        fn resolve(&self, id: &str) -> Option<denia_core::preset::AgentPreset> {
+            self.0.iter().find(|preset| preset.id == id).cloned()
+        }
+
+        fn default_id(&self) -> String {
+            "standard".to_string()
+        }
+    }
+
+    fn preset(id: &str, tools: Option<Vec<&str>>, persona: Option<&str>) -> denia_core::preset::AgentPreset {
+        denia_core::preset::AgentPreset {
+            id: id.to_string(),
+            name: id.to_string(),
+            description: String::new(),
+            trust: denia_core::preset::PresetTrust::Shipped,
+            tools: tools.map(|names| names.into_iter().map(str::to_string).collect()),
+            persona: persona.map(str::to_string),
+            persona_complete: false,
+            features: denia_core::preset::PresetFeatures::default(),
+            path: None,
+        }
+    }
+
+    let (prompt, tools) = denia_tools::default_shipped();
+    let registry = Arc::new(LlmRegistry::new());
+    let full_driver = SessionDriver::new(
+        registry.clone(),
+        Arc::new(tools.clone()),
+        Arc::new(ArcSwap::from_pointee(prompt.clone())),
+    );
+    let source = Arc::new(FakeSource(vec![
+        preset("standard", None, None),
+        preset("minimal", Some(vec!["bash", "read_file"]), Some("你是极简助手。")),
+    ]));
+    let preset_driver = SessionDriver::new(
+        registry,
+        Arc::new(tools),
+        Arc::new(ArcSwap::from_pointee(prompt)),
+    )
+    .with_presets(source);
+
+    let assemble = |driver: &SessionDriver, preset_id: Option<&str>| {
+        let mut assembly = driver
+            .system_prompt
+            .load()
+            .assemble(&denia_system_prompt::AssembleContext {
+                cwd: Some("/tmp/ws".to_string()),
+                ..Default::default()
+            })
+            .unwrap();
+        crate::turn::apply_session_preset(driver, preset_id, &mut assembly);
+        (assembly.tools, assembly.sections)
+    };
+
+    // 无名册(无 preset 的部署):装配原样保留全量工具面。
+    let (tools, sections) = assemble(&full_driver, Some("minimal"));
+    assert!(tools.iter().any(|schema| schema.name == "write_file"));
+    assert!(sections.iter().any(|section| section.name == "tool:write"));
+
+    // minimal:只剩 bash 与 read_file,拿不到的工具的纪律段同进退。
+    let (tools, sections) = assemble(&preset_driver, Some("minimal"));
+    let names: Vec<&str> = tools.iter().map(|schema| schema.name.as_str()).collect();
+    assert_eq!(names, vec!["bash", "read_file"]);
+    assert!(sections.iter().all(|section| section.name != "tool:write"));
+    assert!(sections
+        .iter()
+        .any(|section| section.name == "deployment:persona"
+            && section.text.starts_with("你是极简助手。")));
+
+    // 会话未指定 preset:用部署默认(全量工具集)。
+    let (tools, _) = assemble(&preset_driver, None);
+    assert!(tools.iter().any(|schema| schema.name == "write_file"));
+
+    // 日志里的 id 已被删掉:回退默认组装,而不是让会话发不出请求。
+    let (tools, _) = assemble(&preset_driver, Some("gone"));
+    assert!(tools.iter().any(|schema| schema.name == "write_file"));
+}
+
+fn selection() -> ModelSelection {
+    ModelSelection {
+        provider: "mock".to_string(),
+        model: "mock-1".to_string(),
+        reasoning_effort: None,
+    }
+}
+
+fn noop_emit() -> Arc<dyn Fn(&SessionEnvelope) + Send + Sync> {
+    Arc::new(|_| {})
+}
+
+#[tokio::test]
+async fn plain_text_turn_completes() {
+    let (driver, _registry) = driver(vec![MockScript::Chunks(text_script("done!"))]);
+    let session = temp_session();
+    let reason = driver
+        .run_turn(
+            &session,
+            &selection(),
+            "hello",
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            true,
+            CancellationToken::new(),
+            noop_emit(),
+        )
+        .await;
+    assert_eq!(reason, TurnEndReason::Completed);
+
+    let kinds: Vec<&str> = session
+        .events()
+        .iter()
+        .map(|envelope| match &envelope.event {
+            SessionEvent::UserMessage { .. } => "user",
+            SessionEvent::TurnStart { .. } => "turn-start",
+            SessionEvent::StepStart { .. } => "step-start",
+            SessionEvent::SystemPrompt { .. } => "system-prompt",
+            SessionEvent::AssistantMessage { .. } => "assistant",
+            SessionEvent::StepEnd { .. } => "step-end",
+            SessionEvent::TurnEnd { .. } => "turn-end",
+            _ => "chunk",
+        })
+        .filter(|kind| *kind != "chunk")
+        .collect();
+    assert_eq!(
+        kinds,
+        vec![
+            "user",
+            "turn-start",
+            "step-start",
+            "system-prompt",
+            "assistant",
+            "step-end",
+            "turn-end"
+        ]
+    );
+    let messages = session.derive_messages();
+    assert_eq!(messages.len(), 2);
+    assert_eq!(messages[1].content, "done!");
+}
+
+#[tokio::test]
+async fn tool_call_continues_to_second_step() {
+    let (driver, _registry) = driver(vec![
+        MockScript::Chunks(tool_script()),
+        MockScript::Chunks(text_script("after tool")),
+    ]);
+    let session = temp_session();
+    let reason = driver
+        .run_turn(
+            &session,
+            &selection(),
+            "use the tool",
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            true,
+            CancellationToken::new(),
+            noop_emit(),
+        )
+        .await;
+    assert_eq!(reason, TurnEndReason::Completed);
+
+    let flat: Vec<String> = session
+        .events()
+        .iter()
+        .map(|envelope| match &envelope.event {
+            SessionEvent::ToolCall { .. } => "call".to_string(),
+            SessionEvent::ToolResult { is_error, .. } => format!("result:{is_error}"),
+            SessionEvent::StepStart { step, .. } => format!("step:{step}"),
+            _ => "-".to_string(),
+        })
+        .collect();
+    let call_pos = flat.iter().position(|k| k == "call").unwrap();
+    let result_pos = flat.iter().position(|k| k == "result:false").unwrap();
+    assert!(call_pos < result_pos, "tool/call must precede tool/result");
+    assert!(flat.iter().any(|k| k == "step:2"), "expected a second step");
+
+    // The second request saw the tool result in derived history.
+    let messages = session.derive_messages();
+    assert!(
+        messages
+            .iter()
+            .any(|m| m.role == denia_core::message::ChatRole::Tool)
+    );
+}
+
+/// 系统提示变更 in-history 追加(dsh `systemPromptUpdate: 'in-history'` 对齐):
+/// 已发过请求的会话里,system 字节冻结在最后一次发出的值,提示词变化以
+/// 注入消息全文追加(声明取代旧版),内容不变不重发。请求首条消息字节
+/// 稳定,提供方前缀缓存不因提示词变化从第 0 个 token 失效。
+#[tokio::test]
+async fn system_prompt_change_appends_in_history_and_freezes_system() {
+    let (driver, capture) = recording_driver(vec![
+        MockScript::Chunks(text_script("t1")),
+        MockScript::Chunks(text_script("t2")),
+        MockScript::Chunks(text_script("t3")),
+    ]);
+    let session = temp_session();
+    async fn run(
+        driver: &SessionDriver,
+        session: &Arc<Session>,
+        prompt: &str,
+    ) -> TurnEndReason {
+        driver
+            .run_turn(
+                session,
+                &selection(),
+                prompt,
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                true,
+                CancellationToken::new(),
+                noop_emit(),
+            )
+            .await
+    }
+
+    // 第一轮:出厂 persona(尚未发过请求时,当前提示词即基准)。
+    assert_eq!(run(&driver, &session, "u1").await, TurnEndReason::Completed);
+    // 换 persona(SYSTEM.md 热更新等价场景)后再跑两轮:第二轮应追加更新,
+    // 第三轮内容未变不得重发。
+    let swapped = SystemPrompt::new_with_persona(
+        denia_system_prompt::SystemPromptConfig {
+            include_runtime_context: false,
+            ..Default::default()
+        },
+        "热更新后的身份句。".to_string(),
+    );
+    driver.system_prompt_handle().store(Arc::new(swapped));
+    assert_eq!(run(&driver, &session, "u2").await, TurnEndReason::Completed);
+    assert_eq!(run(&driver, &session, "u3").await, TurnEndReason::Completed);
+
+    // 三次请求的 system 字节全部等于第一轮的提示词(冻结生效):新 persona
+    // 不进 system 字段,只经更新通道追加。
+    let captured = capture.lock().unwrap().clone();
+    assert_eq!(captured.len(), 3);
+    let frozen = captured[0].as_deref().expect("first request has system");
+    assert!(frozen.contains("你是由 denia 驱动的"));
+    for (index, system) in captured.iter().enumerate() {
+        assert_eq!(
+            system.as_deref(),
+            Some(frozen),
+            "第 {index} 次请求的 system 字节必须与首次一致(冻结)"
+        );
+        assert!(
+            !system.as_ref().unwrap().contains("热更新后的身份句"),
+            "冻结的 system 字节不得混入新提示词"
+        );
+    }
+
+    // 更新通道:恰好一条,携带新提示词全文与取代声明;派生历史包含它。
+    let updates: Vec<String> = session
+        .events()
+        .iter()
+        .filter_map(|envelope| match &envelope.event {
+            SessionEvent::UserMessage {
+                text,
+                injected: true,
+                channel: Some(name),
+                ..
+            } if name == crate::injections::SYSTEM_UPDATE_CHANNEL => Some(text.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(updates.len(), 1, "内容未变不得重发更新");
+    assert!(updates[0].contains("系统提示更新"));
+    assert!(updates[0].contains("取代此前系统消息中的旧版本"));
+    assert!(
+        updates[0].contains("热更新后的身份句"),
+        "更新消息必须携带新提示词全文"
+    );
+    assert!(
+        session
+            .derive_messages()
+            .iter()
+            .any(|m| m.content.contains("热更新后的身份句")),
+        "更新消息必须进派生历史,模型才能真正看到新提示词"
+    );
+}
+
+#[tokio::test]
+async fn parallel_tool_calls_emit_one_result_each_in_order() {
+    // 一次 step 返回 3 个 echo 工具调用:并行执行,但每个 call 恰好一条
+    // ToolResult,且结果按 model-order 提交(事件源不变量)。
+    fn multi_tool_script() -> Vec<StreamChunk> {
+        let mut chunks = vec![StreamChunk::BlockStart {
+            index: 0,
+            block_type: BlockType::ToolCall,
+        }];
+        for (i, id) in ["call_a", "call_b", "call_c"].iter().enumerate() {
+            chunks.push(StreamChunk::ToolCallDelta {
+                index: i as u32,
+                id: id.to_string(),
+                name: Some("echo".to_string()),
+                arguments_delta: format!("{{\"text\":\"{id}\"}}"),
+            });
+            chunks.push(StreamChunk::BlockEnd {
+                index: i as u32,
+                block: ContentBlock::ToolCall {
+                    id: id.to_string(),
+                    name: "echo".to_string(),
+                    arguments: format!("{{\"text\":\"{id}\"}}"),
+                },
+            });
+        }
+        chunks.push(StreamChunk::Finish {
+            reason: FinishReason::ToolCalls,
+        });
+        chunks
+    }
+    let (driver, _registry) = driver(vec![
+        MockScript::Chunks(multi_tool_script()),
+        MockScript::Chunks(text_script("done")),
+    ]);
+    let session = temp_session();
+    let reason = driver
+        .run_turn(
+            &session,
+            &selection(),
+            "parallel",
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            true,
+            CancellationToken::new(),
+            noop_emit(),
+        )
+        .await;
+    assert_eq!(reason, TurnEndReason::Completed);
+
+    let calls: Vec<String> = session
+        .events()
+        .iter()
+        .filter_map(|envelope| match &envelope.event {
+            SessionEvent::ToolCall { call_id, .. } => Some(call_id.clone()),
+            _ => None,
+        })
+        .collect();
+    let results: Vec<String> = session
+        .events()
+        .iter()
+        .filter_map(|envelope| match &envelope.event {
+            SessionEvent::ToolResult { call_id, .. } => Some(call_id.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(calls, vec!["call_a", "call_b", "call_c"]);
+    // 结果按 model-order 提交,每个 call 恰好一条。
+    assert_eq!(results, vec!["call_a", "call_b", "call_c"]);
+}
+
+#[tokio::test]
+async fn unknown_tool_yields_error_result_and_continues() {
+    let mut unknown = tool_script();
+    if let StreamChunk::BlockEnd { block, .. } = &mut unknown[2] {
+        *block = ContentBlock::ToolCall {
+            id: "call_x".to_string(),
+            name: "nope".to_string(),
+            arguments: "{}".to_string(),
+        };
+    }
+    let (driver, _registry) = driver(vec![
+        MockScript::Chunks(unknown),
+        MockScript::Chunks(text_script("ok")),
+    ]);
+    let session = temp_session();
+    let reason = driver
+        .run_turn(
+            &session,
+            &selection(),
+            "go",
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            true,
+            CancellationToken::new(),
+            noop_emit(),
+        )
+        .await;
+    assert_eq!(reason, TurnEndReason::Completed);
+    let result = session
+        .events()
+        .iter()
+        .find_map(|envelope| match &envelope.event {
+            SessionEvent::ToolResult {
+                content, is_error, ..
+            } => Some((content.clone(), *is_error)),
+            _ => None,
+        });
+    let (content, is_error) = result.unwrap();
+    assert!(is_error);
+    assert!(content.contains("unknown tool: nope"));
+}
+
+#[tokio::test]
+async fn pending_stream_cancel_aborts() {
+    struct PendingAdapter;
+    #[async_trait]
+    impl LlmAdapter for PendingAdapter {
+        fn provider_info(&self, provider: &str) -> ProviderInfo {
+            ProviderInfo {
+                id: provider.to_string(),
+                name: "pending".to_string(),
+            }
+        }
+        async fn list_models(&self, _p: &str) -> Result<Vec<LlmModelInfo>, LlmError> {
+            Ok(Vec::new())
+        }
+        async fn resolve_model(
+            &self,
+            p: &str,
+            m: &str,
+        ) -> Result<LlmResolvedModelInfo, LlmError> {
+            Ok(LlmResolvedModelInfo {
+                info: LlmModelInfo {
+                    provider: p.to_string(),
+                    id: m.to_string(),
+                    name: m.to_string(),
+                    description: None,
+                    input_modalities: vec![],
+                },
+                context_window: None,
+                default_max_tokens: None,
+                reasoning: None,
+            })
+        }
+        async fn stream(
+            &self,
+            _p: &str,
+            _r: &GenerateRequest,
+        ) -> Result<ChunkStream, LlmError> {
+            Ok(Box::pin(futures::stream::pending()))
+        }
+    }
+    let registry = Arc::new(LlmRegistry::new());
+    registry
+        .register(
+            &["mock".to_string()],
+            Arc::new(PendingAdapter),
+            denia_llm::RetryPolicy::default(),
+        )
+        .unwrap();
+    let mut prompt = SystemPrompt::new(denia_system_prompt::SystemPromptConfig {
+        include_runtime_context: false,
+        ..Default::default()
+    });
+    prompt
+        .variable("cwd", |context| context.cwd.clone())
+        .unwrap();
+    prompt
+        .variable("model", |context| context.model.clone())
+        .unwrap();
+    prompt
+        .variable("provider", |context| context.provider.clone())
+        .unwrap();
+    let driver = SessionDriver::new(
+        registry,
+        Arc::new(ToolRegistry::default()),
+        Arc::new(ArcSwap::from_pointee(prompt)),
+    );
+    let session = temp_session();
+    let cancel = CancellationToken::new();
+    let cancel_clone = cancel.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        cancel_clone.cancel();
+    });
+    let reason = driver
+        .run_turn(
+            &session,
+            &selection(),
+            "go",
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            true,
+            cancel,
+            noop_emit(),
+        )
+        .await;
+    assert_eq!(
+        reason,
+        TurnEndReason::Aborted {
+            cause: Some(AbortCause::User)
+        }
+    );
+    let has_interrupted = session.events().iter().any(|envelope| {
+        matches!(
+            &envelope.event,
+            SessionEvent::AssistantMessage {
+                interrupted: true,
+                ..
+            }
+        )
+    });
+    assert!(has_interrupted);
+}
+
+#[tokio::test]
+async fn text_rendered_call_is_rescued_and_executed() {
+    // 模型输出文本标签的 bash 调用:harness 代为解析执行,工具结果
+    // 回给模型,下一步模型基于真实结果继续——qwen3.8-flash 这类无
+    // 原生 FC 能力的模型也能真正干活。
+    let fake = "我先看一下\n\n<tool_call>\n<function=echo>\n<parameter=text>\nhello\n</parameter>\n</function>\n</tool_call>";
+    let (driver, _registry) = driver(vec![
+        MockScript::Chunks(text_script(fake)),
+        MockScript::Chunks(text_script("done")),
+    ]);
+    let session = temp_session();
+    let reason = driver
+        .run_turn(
+            &session,
+            &selection(),
+            "分析项目",
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            true,
+            CancellationToken::new(),
+            noop_emit(),
+        )
+        .await;
+    assert_eq!(reason, TurnEndReason::Completed);
+    // 工具被执行,且结果进了派生历史(模型下一步看得到)。
+    let result = session.events().iter().find_map(|e| match &e.event {
+        SessionEvent::ToolResult {
+            content, is_error, ..
+        } => Some((content.clone(), *is_error)),
+        _ => None,
+    });
+    let (content, is_error) = result.expect("rescued call must be dispatched");
+    assert!(!is_error);
+    assert!(content.contains("hello"));
+    let messages = session.derive_messages();
+    assert!(
+        messages
+            .iter()
+            .any(|m| m.role == denia_core::message::ChatRole::Tool)
+    );
+    // 自纠注入未发生(救援成功,无需反馈)。
+    let injected = session
+        .events()
+        .iter()
+        .filter_map(|e| match &e.event {
+            SessionEvent::UserMessage {
+                text,
+                injected: true,
+                ..
+            } => Some(text.clone()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        injected.is_empty(),
+        "no feedback needed when rescue succeeded"
+    );
+}
+
+#[tokio::test]
+async fn rescued_unknown_tool_yields_error_result() {
+    // 救援不校验工具存在性:未知工具照常走 dispatch,is_error 结果
+    // 回给模型自纠(与原生 tool_calls 的行为一致)。
+    let fake = "<tool_call>\n<function=nope>\n<parameter=text>\nx\n</parameter>\n</function>\n</tool_call>";
+    let (driver, _registry) = driver(vec![
+        MockScript::Chunks(text_script(fake)),
+        MockScript::Chunks(text_script("ok")),
+    ]);
+    let session = temp_session();
+    let reason = driver
+        .run_turn(
+            &session,
+            &selection(),
+            "go",
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            true,
+            CancellationToken::new(),
+            noop_emit(),
+        )
+        .await;
+    assert_eq!(reason, TurnEndReason::Completed);
+    let result = session.events().iter().find_map(|e| match &e.event {
+        SessionEvent::ToolResult {
+            content, is_error, ..
+        } => Some((content.clone(), *is_error)),
+        _ => None,
+    });
+    let (content, is_error) = result.unwrap();
+    assert!(is_error);
+    assert!(content.contains("unknown tool: nope"));
+}
+
+#[tokio::test]
+async fn text_fake_tool_call_is_fed_back_and_recovered() {
+    // 伪调用格式烂到无法救援(参数块未闭合)→ 注入自纠,重启一步后
+    // 模型改用原生 tool_calls,工具真正被执行。
+    let fake = "我先看一下\n\n<tool_call>\n<function=echo>\n<parameter=text>\nhi\n</tool_call>";
+    let (driver, _registry) = driver(vec![
+        MockScript::Chunks(text_script(fake)),
+        MockScript::Chunks(tool_script()),
+        MockScript::Chunks(text_script("done")),
+    ]);
+    let session = temp_session();
+    let reason = driver
+        .run_turn(
+            &session,
+            &selection(),
+            "优化模型选择框",
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            true,
+            CancellationToken::new(),
+            noop_emit(),
+        )
+        .await;
+    assert_eq!(reason, TurnEndReason::Completed);
+    // 注入的纠错提示恰一条,且点名了伪调用函数。
+    let injected = session
+        .events()
+        .iter()
+        .filter_map(|e| match &e.event {
+            SessionEvent::UserMessage {
+                text,
+                injected: true,
+                ..
+            } => Some(text.clone()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(injected.len(), 1, "one self-correction injection expected");
+    assert!(injected[0].contains("原生 tool_calls"));
+    assert!(injected[0].contains("echo()"));
+    // 模型随后真的发了原生调用,工具被执行。
+    let has_call = session
+        .events()
+        .iter()
+        .any(|e| matches!(&e.event, SessionEvent::ToolCall { name, .. } if name == "echo"));
+    assert!(
+        has_call,
+        "recovered step must dispatch the native tool call"
+    );
+}
+
+#[tokio::test]
+async fn fake_tool_call_quota_exhausts_then_completes() {
+    // 模型连续输出无法救援的伪调用(参数块未闭合):注入 2 次自纠后配额
+    // 耗尽,第 3 条相同文本以 Completed 收尾(死循环线只累计到 3 次,未到
+    // "三次以上"的拦截阈值,不触发)。
+    let fake = "<tool_call><function=bash><parameter=command>ls</tool_call>";
+    let (driver, _registry) = driver(vec![
+        MockScript::Chunks(text_script(fake)),
+        MockScript::Chunks(text_script(fake)),
+        MockScript::Chunks(text_script(fake)),
+    ]);
+    let session = temp_session();
+    let reason = driver
+        .run_turn(
+            &session,
+            &selection(),
+            "go",
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            true,
+            CancellationToken::new(),
+            noop_emit(),
+        )
+        .await;
+    assert_eq!(reason, TurnEndReason::Completed);
+    let injected = session
+        .events()
+        .iter()
+        .filter_map(|e| match &e.event {
+            SessionEvent::UserMessage {
+                text,
+                injected: true,
+                channel,
+                ..
+            } => Some((text.clone(), channel.clone())),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    // 两类注入各自计数:自纠反馈受 MAX_FEEDBACK 配额约束;死循环提醒
+    // 由 loop_guard 在第 3 次重复时给出(独立通道,不占反馈配额)。
+    let feedback = injected
+        .iter()
+        .filter(|(_, channel)| channel.as_deref() != Some("loop-warning"))
+        .count();
+    let loop_warnings = injected
+        .iter()
+        .filter(|(_, channel)| channel.as_deref() == Some("loop-warning"))
+        .count();
+    assert_eq!(
+        feedback, MAX_FEEDBACK as usize,
+        "feedback quota must cap at MAX_FEEDBACK"
+    );
+    assert_eq!(
+        loop_warnings, 1,
+        "第 3 次重复应当给出一次死循环提醒(提醒线 3,中断线 4)"
+    );
+    let calls = session
+        .events()
+        .iter()
+        .filter(|e| matches!(e.event, SessionEvent::ToolCall { .. }))
+        .count();
+    assert_eq!(calls, 0, "no native tool call ever arrived");
+    // 日志平衡:step 数与 step-end 数一致。
+    let step_starts = session
+        .events()
+        .iter()
+        .filter(|e| matches!(e.event, SessionEvent::StepStart { .. }))
+        .count();
+    let step_ends = session
+        .events()
+        .iter()
+        .filter(|e| matches!(e.event, SessionEvent::StepEnd { .. }))
+        .count();
+    assert_eq!(step_starts, step_ends);
+}
+
+#[tokio::test]
+async fn request_failure_is_fed_back_for_self_correction() {
+    let (driver, _registry) = driver(vec![
+        // MALFORMED_RESPONSE:feedback_eligible 且不在可重试集 → 注入自纠。
+        MockScript::Fail(LlmFailure::new("MALFORMED_RESPONSE", "bad payload")),
+        MockScript::Chunks(text_script("fixed")),
+    ]);
+    let session = temp_session();
+    let reason = driver
+        .run_turn(
+            &session,
+            &selection(),
+            "go",
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            true,
+            CancellationToken::new(),
+            noop_emit(),
+        )
+        .await;
+    assert_eq!(reason, TurnEndReason::Completed);
+    // 纠错提示以 injected 用户消息落日志,模型看得见。
+    let injected = session
+        .events()
+        .iter()
+        .filter_map(|e| match &e.event {
+            SessionEvent::UserMessage { text, injected, .. } if *injected => Some(text.clone()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(injected.len(), 1, "feedback-injected message must exist");
+    assert!(injected[0].contains("MALFORMED_RESPONSE"));
+}
+
+#[tokio::test]
+async fn provider_failure_terminates_without_feedback_waste() {
+    // AUTH:不可重试、不可自纠 → 直接 error 终止,不注入反馈(不烧配额)。
+    let (driver, _registry) =
+        driver(vec![MockScript::Fail(LlmFailure::new("AUTH", "bad key"))]);
+    let session = temp_session();
+    let reason = driver
+        .run_turn(
+            &session,
+            &selection(),
+            "go",
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            true,
+            CancellationToken::new(),
+            noop_emit(),
+        )
+        .await;
+    match &reason {
+        TurnEndReason::Error { failure } => {
+            assert_eq!(failure.code, "AUTH");
+            // 中文摘要:结论 + 建议 + 原始信息。
+            assert!(failure.message.contains("认证失败"), "{}", failure.message);
+            assert!(failure.message.contains("凭据"), "{}", failure.message);
+            assert!(failure.message.contains("bad key"), "{}", failure.message);
+        }
+        other => panic!("expected Error, got {other:?}"),
+    }
+    let injected = session
+        .events()
+        .iter()
+        .filter_map(|e| match &e.event {
+            SessionEvent::UserMessage { text, injected, .. } if *injected => Some(text.clone()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        injected.is_empty(),
+        "AUTH must not waste the feedback quota"
+    );
+    // 日志平衡:step-end 与 turn-end 都已落盘。
+    let step_starts = session
+        .events()
+        .iter()
+        .filter(|e| matches!(e.event, SessionEvent::StepStart { .. }))
+        .count();
+    let step_ends = session
+        .events()
+        .iter()
+        .filter(|e| matches!(e.event, SessionEvent::StepEnd { .. }))
+        .count();
+    assert_eq!(step_starts, step_ends);
+}
+
+#[tokio::test]
+async fn retryable_setup_failure_retries_and_records_attempts() {
+    // INVALID_REQUEST 在可重试集:registry 内部退避重试,重试轨迹落盘。
+    let (driver, _registry) = driver(vec![
+        MockScript::Fail(LlmFailure::new("INVALID_REQUEST", "openai_error").with_status(404)),
+        MockScript::Fail(LlmFailure::new("INVALID_REQUEST", "openai_error").with_status(404)),
+        MockScript::Chunks(text_script("ok")),
+    ]);
+    let session = temp_session();
+    let reason = driver
+        .run_turn(
+            &session,
+            &selection(),
+            "go",
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            true,
+            CancellationToken::new(),
+            noop_emit(),
+        )
+        .await;
+    assert_eq!(reason, TurnEndReason::Completed);
+    // 两次失败 → 两次 retry-attempt 落盘(带退避与错误信息)。
+    let attempts = session
+        .events()
+        .iter()
+        .filter_map(|e| match &e.event {
+            SessionEvent::RetryAttempt {
+                attempt,
+                code,
+                delay_ms,
+                ..
+            } => Some((*attempt, code.clone(), *delay_ms)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(attempts.len(), 2);
+    assert_eq!(attempts[0].0, 1);
+    assert_eq!(attempts[1].0, 2);
+    assert!(
+        attempts
+            .iter()
+            .all(|(_, code, _)| code == "INVALID_REQUEST")
+    );
+    assert!(
+        attempts[0].2 >= 400 && attempts[1].2 >= 800,
+        "backoff must grow"
+    );
+}
+
+#[tokio::test]
+async fn finish_error_is_not_swallowed_as_completed() {
+    // finish 带 Error{…}(如 EMPTY_RESPONSE):不再被吞成 Completed;
+    // 可重试码空流重试一次后成功(step 内 attempt 循环)。
+    let (driver, _registry) = driver(vec![
+        MockScript::Chunks(error_finish_script()),
+        MockScript::Chunks(text_script("recovered")),
+    ]);
+    let session = temp_session();
+    let reason = driver
+        .run_turn(
+            &session,
+            &selection(),
+            "go",
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            true,
+            CancellationToken::new(),
+            noop_emit(),
+        )
+        .await;
+    assert_eq!(reason, TurnEndReason::Completed);
+    // step 内重试轨迹:1 条 retry-attempt(EMPTY_RESPONSE)。
+    let attempts = session
+        .events()
+        .iter()
+        .filter_map(|e| match &e.event {
+            SessionEvent::RetryAttempt { code, .. } => Some(code.clone()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(attempts, vec!["EMPTY_RESPONSE".to_string()]);
+}
+
+#[tokio::test]
+async fn stream_closed_with_partial_output_retries_and_recovers() {
+    // 网关在 [DONE] 前断流(已有部分输出):step 内重试一次后成功。
+    // 曾限制"仅无输出时重试",导致收尾步被断流白白掐死——现在有输出
+    // 也重放(重放无副作用:半成品 chunk 不进派生历史)。
+    let (driver, _registry) = driver(vec![
+        MockScript::ChunksThenFail(
+            vec![
+                StreamChunk::BlockStart {
+                    index: 0,
+                    block_type: BlockType::Text,
+                },
+                StreamChunk::TextDelta {
+                    index: 0,
+                    text: "partial".to_string(),
+                },
+            ],
+            LlmFailure::new(
+                denia_core::error::codes::STREAM_CLOSED,
+                "stream ended before the [DONE] marker",
+            ),
+        ),
+        MockScript::Chunks(text_script("recovered")),
+    ]);
+    let session = temp_session();
+    let reason = driver
+        .run_turn(
+            &session,
+            &selection(),
+            "go",
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            true,
+            CancellationToken::new(),
+            noop_emit(),
+        )
+        .await;
+    assert_eq!(reason, TurnEndReason::Completed);
+    // 重试轨迹:1 条 STREAM_CLOSED。
+    let attempts = session
+        .events()
+        .iter()
+        .filter_map(|e| match &e.event {
+            SessionEvent::RetryAttempt { code, .. } => Some(code.clone()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(attempts, vec!["STREAM_CLOSED".to_string()]);
+    // 最终 assistant-message 的 source_event_seqs 只引用第二次尝试的 chunk
+    // (partial 尝试的 chunk 不在序列内)——重放未污染派生历史。
+    let final_msg = session.events().iter().find_map(|e| match &e.event {
+        SessionEvent::AssistantMessage {
+            interrupted,
+            source_event_seqs,
+            ..
+        } if !interrupted => Some(source_event_seqs.clone()),
+        _ => None,
+    });
+    let seqs = final_msg.expect("final assistant-message must exist");
+    assert_eq!(
+        seqs.len(),
+        5,
+        "source seqs must cover only the recovered attempt"
+    );
+}
+
+#[tokio::test]
+async fn request_header_and_context_are_logged() {
+    let (driver, _registry) = driver(vec![MockScript::Chunks(text_script("hi"))]);
+    let session = temp_session();
+    let reason = driver
+        .run_turn(
+            &session,
+            &selection(),
+            "go",
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            true,
+            CancellationToken::new(),
+            noop_emit(),
+        )
+        .await;
+    assert_eq!(reason, TurnEndReason::Completed);
+
+    let events = session.events();
+    // request-header:initial 快照,带 provider/model/system/tools。
+    let (snapshot, header_reason) = events
+        .iter()
+        .find_map(|envelope| match &envelope.event {
+            SessionEvent::RequestHeader { header, reason, .. } => Some((header, reason)),
+            _ => None,
+        })
+        .expect("request-header must be logged on the first request");
+    assert_eq!(*header_reason, RequestHeaderReason::Initial);
+    assert_eq!(snapshot.config.provider, "mock");
+    assert_eq!(snapshot.config.model, "mock-1");
+    assert!(
+        snapshot
+            .system
+            .as_deref()
+            .unwrap_or("")
+            .contains("你是由 denia 驱动的")
+    );
+    assert!(!snapshot.tools.is_empty());
+    // 注册路由后只写一次:同一 step 循环的下一请求不会重复落盘(snapshot 相同)。
+    let header_count = events
+        .iter()
+        .filter(|envelope| matches!(envelope.event, SessionEvent::RequestHeader { .. }))
+        .count();
+    assert_eq!(header_count, 1);
+
+    // request-context:provider/model/context_window(来自 resolve_call)。
+    events
+        .iter()
+        .find_map(|envelope| match &envelope.event {
+            SessionEvent::RequestContext {
+                provider,
+                model,
+                context_window,
+                ..
+            } => Some((provider, model, context_window)),
+            _ => None,
+        })
+        .map(|(provider, model, window)| {
+            assert_eq!(provider, "mock");
+            assert_eq!(model, "mock-1");
+            assert_eq!(*window, Some(100_000));
+        })
+        .expect("request-context must be logged");
+
+    // assistant-message 的 source_event_seqs 引用全部 chunk seq(5 个)。
+    let seqs = events
+        .iter()
+        .find_map(|envelope| match &envelope.event {
+            SessionEvent::AssistantMessage {
+                source_event_seqs, ..
+            } => Some(source_event_seqs),
+            _ => None,
+        })
+        .expect("assistant-message must exist");
+    assert_eq!(seqs.len(), 5);
+    // 引用的 seq 都是磁盘日志里的 chunk 事件。内存事件表不驻留已闭合
+    // 轮次的 chunk,这里按文件核对方向。
+    let disk: Vec<SessionEnvelope> = {
+        let text = std::fs::read_to_string(session.file()).unwrap();
+        text.lines()
+            .skip(1)
+            .filter_map(|line| serde_json::from_str(line).ok())
+            .collect()
+    };
+    let chunk_seqs = disk
+        .iter()
+        .filter(|envelope| matches!(envelope.event, SessionEvent::AssistantChunk { .. }))
+        .map(|envelope| envelope.seq)
+        .collect::<Vec<_>>();
+    assert_eq!(chunk_seqs, *seqs);
+}
+
+// —— 死循环检测(LoopGuard 端到端)——
+
+/// 文本相同但工具调用不同:文本线在第 4 次触发(与工具线独立)。
+fn mixed_script(text: &str, call_id: &str, arg: &str) -> Vec<StreamChunk> {
+    vec![
+        StreamChunk::BlockStart { index: 0, block_type: BlockType::Text },
+        StreamChunk::TextDelta { index: 0, text: text.to_string() },
+        StreamChunk::BlockEnd { index: 0, block: ContentBlock::Text { text: text.to_string() } },
+        StreamChunk::BlockStart { index: 1, block_type: BlockType::ToolCall },
+        StreamChunk::ToolCallDelta {
+            index: 1,
+            id: call_id.to_string(),
+            name: Some("echo".to_string()),
+            arguments_delta: format!(r#"{{"text":"{arg}"}}"#),
+        },
+        StreamChunk::BlockEnd {
+            index: 1,
+            block: ContentBlock::ToolCall {
+                id: call_id.to_string(),
+                name: "echo".to_string(),
+                arguments: format!(r#"{{"text":"{arg}"}}"#),
+            },
+        },
+        StreamChunk::Finish { reason: FinishReason::ToolCalls },
+    ]
+}
+
+#[tokio::test]
+async fn identical_text_fourth_time_forces_loop_abort() {
+    // 模型连续输出完全相同的文本(工具调用不同,工具线不计):前 3 次
+    // 都正常处理,第 4 次出现才触发死循环保护("三次以上"语义)。
+    let (driver, _registry) = driver(vec![
+        MockScript::Chunks(mixed_script("我在重复", "c1", "a")),
+        MockScript::Chunks(mixed_script("我在重复", "c2", "b")),
+        MockScript::Chunks(mixed_script("我在重复", "c3", "c")),
+        MockScript::Chunks(mixed_script("我在重复", "c4", "d")),
+    ]);
+    let session = temp_session();
+    let reason = driver
+        .run_turn(
+            &session,
+            &selection(),
+            "go",
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            true,
+            CancellationToken::new(),
+            noop_emit(),
+        )
+        .await;
+    assert_eq!(reason, TurnEndReason::LoopDetected { repeats: 4 });
+    // 第 4 条重复消息已落盘。
+    let assistant_count = session
+        .events()
+        .iter()
+        .filter(|e| matches!(e.event, SessionEvent::AssistantMessage { .. }))
+        .count();
+    assert_eq!(assistant_count, 4);
+    // 前 3 条的工具调用都被完整执行(放行语义)。
+    let executed = session
+        .events()
+        .iter()
+        .filter(|e| matches!(e.event, SessionEvent::ToolCall { .. }))
+        .count();
+    assert_eq!(executed, 3, "the first three identical calls must execute");
+    // turn-end 事件带 loop-detected 标记(前端据此渲染提示)。
+    let turn_end = session
+        .events()
+        .iter()
+        .find_map(|e| match &e.event {
+            SessionEvent::TurnEnd { reason, .. } => Some(reason.clone()),
+            _ => None,
+        })
+        .expect("turn-end must exist");
+    assert_eq!(turn_end, TurnEndReason::LoopDetected { repeats: 4 });
+    // 日志平衡。
+    let step_starts = session
+        .events()
+        .iter()
+        .filter(|e| matches!(e.event, SessionEvent::StepStart { .. }))
+        .count();
+    let step_ends = session
+        .events()
+        .iter()
+        .filter(|e| matches!(e.event, SessionEvent::StepEnd { .. }))
+        .count();
+    assert_eq!(step_starts, step_ends);
+}
+
+#[tokio::test]
+async fn identical_tool_calls_fourth_time_forces_loop_abort() {
+    // 模型连续发起完全相同的工具调用(即使文本不同):前 3 次全部执行,
+    // 第 4 次出现才拦截("三次以上"语义)。
+    let (driver, _registry) = driver(vec![
+        MockScript::Chunks(tool_script()),
+        MockScript::Chunks(tool_script()),
+        MockScript::Chunks(tool_script()),
+        MockScript::Chunks(tool_script()),
+    ]);
+    let session = temp_session();
+    let reason = driver
+        .run_turn(
+            &session,
+            &selection(),
+            "go",
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            true,
+            CancellationToken::new(),
+            noop_emit(),
+        )
+        .await;
+    assert_eq!(reason, TurnEndReason::LoopDetected { repeats: 4 });
+    // 前 3 次的工具调用全部执行(第 4 条的调用不再执行)。
+    let executed = session
+        .events()
+        .iter()
+        .filter(|e| matches!(e.event, SessionEvent::ToolCall { .. }))
+        .count();
+    assert_eq!(executed, 3, "the fourth identical call must not execute");
+}
+
+#[tokio::test]
+async fn varying_output_does_not_trigger_loop_guard() {
+    // 内容每轮都不同:正常完成,不误伤。
+    let (driver, _registry) = driver(vec![
+        MockScript::Chunks(text_script("第一")),
+        MockScript::Chunks(text_script("第二")),
+        MockScript::Chunks(text_script("第三")),
+    ]);
+    let session = temp_session();
+    let reason = driver
+        .run_turn(
+            &session,
+            &selection(),
+            "go",
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            true,
+            CancellationToken::new(),
+            noop_emit(),
+        )
+        .await;
+    assert_eq!(reason, TurnEndReason::Completed);
+}
+
+#[tokio::test]
+async fn identical_text_streak_resets_after_variation() {
+    // 两次相同 → 换内容 → 再两次相同:不触发(连续计数被重置)。
+    let (driver, _registry) = driver(vec![
+        MockScript::Chunks(text_script("同")),
+        MockScript::Chunks(text_script("同")),
+        MockScript::Chunks(text_script("不同")),
+        MockScript::Chunks(text_script("同")),
+        MockScript::Chunks(text_script("同")),
+        MockScript::Chunks(text_script("收尾")),
+    ]);
+    let session = temp_session();
+    let reason = driver
+        .run_turn(
+            &session,
+            &selection(),
+            "go",
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            true,
+            CancellationToken::new(),
+            noop_emit(),
+        )
+        .await;
+    assert_eq!(reason, TurnEndReason::Completed);
+}
+
+// —— 输出预算兜底截断 ——
+
+#[tokio::test]
+async fn oversized_tool_result_is_truncated_with_notice() {
+    // 工具输出超过统一预算:落盘内容被截断并附中文提示,截断事实进事件。
+    let (driver, _registry) = driver_with_tools(
+        vec![
+            MockScript::Chunks(tool_script_with("bulky", "call_big")),
+            MockScript::Chunks(text_script("done")),
+        ],
+        |tools| {
+            tools.register(Arc::new(EchoTool));
+            tools.register(Arc::new(BulkyTool));
+        },
+    );
+    let session = temp_session();
+    let reason = driver
+        .run_turn(
+            &session,
+            &selection(),
+            "go",
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            true,
+            CancellationToken::new(),
+            noop_emit(),
+        )
+        .await;
+    assert_eq!(reason, TurnEndReason::Completed);
+    let result = session
+        .events()
+        .iter()
+        .find_map(|e| match &e.event {
+            SessionEvent::ToolResult {
+                content, truncation, ..
+            } => Some((content.clone(), truncation.clone())),
+            _ => None,
+        })
+        .expect("tool result must exist");
+    let (content, truncation) = result;
+    assert!(
+        content.contains("输出已截断"),
+        "truncation notice must be model-visible"
+    );
+    assert!(
+        content.contains(&format!(
+            "共 {} 字符",
+            denia_tools::support::OUTPUT_BUDGET_CHARS + 500
+        )),
+        "{}",
+        &content[content.len() - 300..]
+    );
+    let truncation = truncation.expect("truncation info must be recorded");
+    assert_eq!(
+        truncation.total_chars,
+        (denia_tools::support::OUTPUT_BUDGET_CHARS + 500) as u64
+    );
+    assert_eq!(truncation.shown_chars, denia_tools::support::OUTPUT_BUDGET_CHARS as u64);
+}
+
+fn tool_script_with(name: &str, id: &str) -> Vec<StreamChunk> {
+    vec![
+        StreamChunk::BlockStart {
+            index: 0,
+            block_type: BlockType::ToolCall,
+        },
+        StreamChunk::ToolCallDelta {
+            index: 0,
+            id: id.to_string(),
+            name: Some(name.to_string()),
+            arguments_delta: "{}".to_string(),
+        },
+        StreamChunk::BlockEnd {
+            index: 0,
+            block: ContentBlock::ToolCall {
+                id: id.to_string(),
+                name: name.to_string(),
+                arguments: "{}".to_string(),
+            },
+        },
+        StreamChunk::Finish {
+            reason: FinishReason::ToolCalls,
+        },
+    ]
+}
+
+// —— 注入通道(channel 字段)——
+
+#[tokio::test]
+async fn feedback_injection_carries_channel() {
+    // 自纠反馈注入带显式通道名,前端可按通道弱化渲染。
+    let (driver, _registry) = driver(vec![
+        MockScript::Fail(LlmFailure::new("MALFORMED_RESPONSE", "bad payload")),
+        MockScript::Chunks(text_script("fixed")),
+    ]);
+    let session = temp_session();
+    driver
+        .run_turn(
+            &session,
+            &selection(),
+            "go",
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            true,
+            CancellationToken::new(),
+            noop_emit(),
+        )
+        .await;
+    let has_feedback_channel = session.events().iter().any(|e| match &e.event {
+        SessionEvent::UserMessage {
+            injected: true,
+            channel,
+            ..
+        } => channel.as_deref() == Some("feedback"),
+        _ => false,
+    });
+    assert!(has_feedback_channel, "feedback injection must carry channel");
+}
+
+fn png_image(n: usize) -> Vec<denia_core::message::ImageData> {
+    (0..n)
+        .map(|i| denia_core::message::ImageData {
+            mime: "image/png".into(),
+            data: format!("AAAA{i}"),
+            path: None,
+        })
+        .collect()
+}
+
+/// 带落盘路径的图片(粘贴图的实际形状)。
+fn png_image_paths(paths: &[&str]) -> Vec<denia_core::message::ImageData> {
+    paths
+        .iter()
+        .map(|p| denia_core::message::ImageData {
+            mime: "image/png".into(),
+            data: "AAAA".into(),
+            path: Some((*p).to_string()),
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn pasted_images_get_text_notice_before_real_message() {
+    // 图片只挂在真实消息的 images 上,模型侧没有对应文本;下游一旦丢弃,
+    // 表现就是"模型不知道有图"。要求:与 file-notice 同构的显式留痕,
+    // 且排在真实用户消息之前(模型先知道有图,再看到提问)。
+    let (driver, _registry) = driver(vec![MockScript::Chunks(text_script("ok"))]);
+    let session = temp_session();
+    driver
+        .run_turn(
+            &session,
+            &selection(),
+            "看得见这图片吗",
+            png_image(2),
+            Vec::new(),
+            Vec::new(),
+            true,
+            CancellationToken::new(),
+            noop_emit(),
+        )
+        .await;
+    let mut notice_seq = None;
+    let mut real: Option<(u64, usize)> = None;
+    for envelope in session.events() {
+        if let SessionEvent::UserMessage {
+            text,
+            injected,
+            channel,
+            images,
+        } = &envelope.event
+        {
+            if *injected && channel.as_deref() == Some("image-notice") {
+                notice_seq = Some(envelope.seq);
+                assert!(
+                    text.contains("2 张图片") && text.contains("PNG×2"),
+                    "通知要给出张数与类型: {text}"
+                );
+                assert!(
+                    text.contains("未收到图片"),
+                    "要指示模型在收不到时明说: {text}"
+                );
+                assert!(images.is_empty(), "通知本身不携带图片");
+            }
+            if !injected {
+                real = Some((envelope.seq, images.len()));
+            }
+        }
+    }
+    let notice = notice_seq.expect("必须有 image-notice 注入");
+    let (real_seq, real_images) = real.expect("真实用户消息必须落库");
+    assert_eq!(real_images, 2, "图片仍随真实消息发送");
+    assert!(notice < real_seq, "通知必须先于真实消息");
+}
+
+#[tokio::test]
+async fn images_without_prompt_text_still_reach_history() {
+    // 只发图不打字:prompt 为空时图片不得整条丢失。
+    let (driver, _registry) = driver(vec![MockScript::Chunks(text_script("ok"))]);
+    let session = temp_session();
+    driver
+        .run_turn(
+            &session,
+            &selection(),
+            "",
+            png_image(1),
+            Vec::new(),
+            Vec::new(),
+            true,
+            CancellationToken::new(),
+            noop_emit(),
+        )
+        .await;
+    let carried = session
+        .events()
+        .iter()
+        .filter(|e| matches!(&e.event, SessionEvent::UserMessage { injected: false, images, .. } if images.len() == 1))
+        .count();
+    assert_eq!(carried, 1, "空文本+一张图仍须落库为真实用户消息");
+    // 且派生历史里图片在场(wire 层据此发 image_url)。
+    let with_images = session
+        .derive_messages()
+        .iter()
+        .filter(|m| !m.images.is_empty())
+        .count();
+    assert_eq!(with_images, 1, "derive_messages 必须带上图片");
+}
+
+#[test]
+fn image_paths_list_renders_only_present_paths() {
+    // 路径是粘贴图落盘后才有;没有路径时不能留下空行或"路径如下"这种废话。
+    assert_eq!(crate::turn::image_paths_list(&png_image(2)), "");
+    let with = png_image_paths(&["C:\\h\\uploads\\s\\pasted-1.png", "C:\\h\\uploads\\s\\pasted-2.png"]);
+    let rendered = crate::turn::image_paths_list(&with);
+    assert!(rendered.contains("pasted-1.png"), "{rendered}");
+    assert!(rendered.contains("pasted-2.png"), "{rendered}");
+    assert_eq!(rendered.matches("\n- ").count(), 2, "每条路径一行");
+}
+
+#[tokio::test]
+async fn image_notice_names_persisted_paths() {
+    // 内联 data URL 被转换层丢弃时,模型要靠通知里的路径 read_file 自救。
+    let (driver, _registry) = driver(vec![MockScript::Chunks(text_script("ok"))]);
+    let session = temp_session();
+    driver
+        .run_turn(
+            &session,
+            &selection(),
+            "看得见这图片吗",
+            png_image_paths(&["C:\\denia\\uploads\\s1\\pasted-1.png"]),
+            Vec::new(),
+            Vec::new(),
+            true,
+            CancellationToken::new(),
+            noop_emit(),
+        )
+        .await;
+    let notice = session
+        .events()
+        .iter()
+        .find_map(|e| match &e.event {
+            SessionEvent::UserMessage {
+                injected: true,
+                channel: Some(channel),
+                text,
+                ..
+            } if channel == "image-notice" => Some(text.clone()),
+            _ => None,
+        })
+        .expect("image-notice 注入必须存在");
+    assert!(
+        notice.contains("pasted-1.png"),
+        "通知要写出落盘路径: {notice}"
+    );
+    assert!(notice.contains("read_file"), "要给出自救指令: {notice}");
+}
+
+#[test]
+fn image_kind_summary_groups_by_mime_in_first_seen_order() {
+    let image = |mime: &str| denia_core::message::ImageData {
+        mime: mime.into(),
+        data: "AAAA".into(),
+        path: None,
+    };
+    let images = vec![
+        image("image/png"),
+        image("image/jpeg"),
+        image("image/png"),
+        image("image/svg+xml"),
+    ];
+    assert_eq!(
+        crate::turn::image_kind_summary(&images),
+        "PNG×2、JPEG、SVG+XML"
+    );
+    assert_eq!(crate::turn::image_kind_summary(&[]), "");
+}
+
+/* ---- 权限策略引擎(四档 × Allow/Ask/Deny)集成测试 ---- */
+
+/// 多工具调用脚本:一次 step 返回若干调用。
+fn tool_calls_script(calls: &[(&str, &str, &str)]) -> Vec<StreamChunk> {
+    let mut chunks = vec![StreamChunk::BlockStart {
+        index: 0,
+        block_type: BlockType::ToolCall,
+    }];
+    for (i, (id, name, arguments)) in calls.iter().enumerate() {
+        chunks.push(StreamChunk::ToolCallDelta {
+            index: i as u32,
+            id: id.to_string(),
+            name: Some(name.to_string()),
+            arguments_delta: arguments.to_string(),
+        });
+        chunks.push(StreamChunk::BlockEnd {
+            index: i as u32,
+            block: ContentBlock::ToolCall {
+                id: id.to_string(),
+                name: name.to_string(),
+                arguments: arguments.to_string(),
+            },
+        });
+    }
+    chunks.push(StreamChunk::Finish {
+        reason: FinishReason::ToolCalls,
+    });
+    chunks
+}
+
+/// 桩审批桥:按预置决策回话(不落事件;事件由 driver 落)。
+struct StubApprovalBridge {
+    decision: Mutex<PlanReviewDecision>,
+}
+
+#[async_trait]
+impl crate::ApprovalBridge for StubApprovalBridge {
+    async fn request(
+        &self,
+        _session_id: &str,
+        _request_id: &str,
+        _cancel: CancellationToken,
+    ) -> PlanReviewDecision {
+        self.decision.lock().unwrap().clone()
+    }
+}
+
+fn plan_decision(
+    outcome: ApprovalOutcome,
+    execute_mode: Option<PermissionMode>,
+    feedback: Option<&str>,
+) -> PlanReviewDecision {
+    PlanReviewDecision {
+        outcome,
+        execute_mode,
+        selection: None,
+        vision_supported: None,
+        feedback: feedback.map(str::to_string),
+    }
+}
+
+/// (is_error, content) 工具结果列表。
+fn result_texts(session: &Session) -> Vec<(bool, String)> {
+    session
+        .events()
+        .iter()
+        .filter_map(|envelope| match &envelope.event {
+            SessionEvent::ToolResult {
+                is_error, content, ..
+            } => Some((*is_error, content.clone())),
+            _ => None,
+        })
+        .collect()
+}
+
+/// 最近一次请求头快照的工具名列表(模式过滤的直接证据)。
+fn last_header_tool_names(session: &Session) -> Vec<String> {
+    session
+        .events()
+        .iter()
+        .rev()
+        .find_map(|envelope| match &envelope.event {
+            SessionEvent::RequestHeader { header, .. } => Some(
+                header
+                    .tools
+                    .iter()
+                    .map(|tool| tool.name.clone())
+                    .collect::<Vec<_>>(),
+            ),
+            _ => None,
+        })
+        .unwrap_or_default()
+}
+
+async fn run_simple_turn(driver: &SessionDriver, session: &Arc<Session>, prompt: &str) {
+    driver
+        .run_turn(
+            session,
+            &selection(),
+            prompt,
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            true,
+            CancellationToken::new(),
+            noop_emit(),
+        )
+        .await;
+}
+
+#[tokio::test]
+async fn plan_mode_denies_writes_and_keeps_tool_face_stable() {
+    let (driver, _registry) = driver_with_tools(
+        vec![
+            MockScript::Chunks(tool_calls_script(&[(
+                "call_w",
+                "write_file",
+                r#"{"path":"a.txt","content":"x"}"#,
+            )])),
+            MockScript::Chunks(text_script("planned")),
+        ],
+        |tools| *tools = denia_tools::default_registry(),
+    );
+    let session = temp_session();
+    session.set_permission_mode(PermissionMode::Plan).unwrap();
+    run_simple_turn(&driver, &session, "plan first").await;
+
+    let results = result_texts(&session);
+    assert!(!results.is_empty(), "expected a tool result");
+    assert!(results[0].0, "write must be denied in plan mode");
+    assert!(results[0].1.contains("计划模式"), "{}", results[0].1);
+    // 工作区没有落盘。
+    assert!(
+        !std::path::Path::new(&session.header().cwd).join("a.txt").exists(),
+        "plan mode must not write files"
+    );
+    // 工具面跨模式稳定(缓存前缀不破):计划档**保留** write_file/edit
+    // schema,越权由权限引擎拒绝;不再按模式增删 schema。
+    let names = last_header_tool_names(&session);
+    assert!(names.iter().any(|n| n == "exit_plan"), "{names:?}");
+    assert!(names.iter().any(|n| n == "bash"), "{names:?}");
+    assert!(names.iter().any(|n| n == "write_file"), "{names:?}");
+    assert!(names.iter().any(|n| n == "edit"), "{names:?}");
+}
+
+#[tokio::test]
+async fn exit_plan_outside_plan_mode_is_denied_without_approval() {
+    // 非计划档调用 exit_plan:权限引擎直接拒绝(不弹审批卡),模型拿
+    // isError 自纠正;工具面保持稳定(执行档不隐藏 exit_plan)。
+    let (driver, _registry) = driver_with_tools(
+        vec![
+            MockScript::Chunks(tool_calls_script(&[(
+                "call_p",
+                "exit_plan",
+                r##"{"plan":"# 计划\n\n- 步骤一"}"##,
+            )])),
+            MockScript::Chunks(text_script("understood")),
+        ],
+        |tools| *tools = denia_tools::default_registry(),
+    );
+    let session = temp_session(); // 默认 auto-edit
+    run_simple_turn(&driver, &session, "submit anyway").await;
+
+    let results = result_texts(&session);
+    assert_eq!(results.len(), 1, "exactly one result");
+    assert!(results[0].0, "exit_plan must be denied outside plan mode");
+    assert!(
+        !session.events().iter().any(|envelope| {
+            matches!(envelope.event, SessionEvent::ApprovalAsked { .. })
+        }),
+        "denial must not pop an approval card"
+    );
+    assert_eq!(session.permission_mode(), PermissionMode::AutoEdit);
+}
+
+#[tokio::test]
+async fn oversized_write_args_are_stubbed_in_derived_history() {
+    // write_file 大参数(≥8KB):执行成功后参数在**派生历史**里替换为短
+    // 占位(保留 path 与体量说明),日志与 UI 保留全文;小参数不打桩。
+    let big = "x".repeat(9000);
+    let (driver, _registry) = driver_with_tools(
+        vec![
+            MockScript::Chunks(tool_calls_script(&[
+                (
+                    "call_big",
+                    "write_file",
+                    &format!(r#"{{"path":"big.js","content":"{big}"}}"#),
+                ),
+                ("call_small", "write_file", r#"{"path":"small.txt","content":"tiny"}"#),
+            ])),
+            MockScript::Chunks(text_script("done")),
+        ],
+        |tools| *tools = denia_tools::default_registry(),
+    );
+    let session = temp_session();
+    run_simple_turn(&driver, &session, "write files").await;
+
+    // 日志诚实:ToolCall 事件里大参数原样在案(UI 展示不受影响)。
+    assert!(
+        session.events().iter().any(|envelope| matches!(
+            &envelope.event,
+            SessionEvent::ToolCall { name, arguments, .. }
+                if name == "write_file" && arguments.contains(&big)
+        )),
+        "log must keep full arguments"
+    );
+
+    // 模型面:大参数换成占位,小参数原样保留。
+    let messages = session.derive_messages();
+    let find_call = |id: &str| {
+        messages
+            .iter()
+            .find_map(|m| m.tool_calls.iter().find(|c| c.id == id))
+            .unwrap_or_else(|| panic!("{id} must be in derived history"))
+    };
+    let big_call = find_call("call_big");
+    assert!(
+        big_call.arguments.len() < 500,
+        "big args must be stubbed, got {} chars: {}",
+        big_call.arguments.len(),
+        &big_call.arguments[..big_call.arguments.len().min(120)]
+    );
+    assert!(big_call.arguments.contains("big.js"), "{}", big_call.arguments);
+    assert!(
+        big_call.arguments.contains("_args_cleared"),
+        "{}",
+        big_call.arguments
+    );
+    let small_call = find_call("call_small");
+    assert!(
+        small_call.arguments.contains("tiny"),
+        "small args stay intact: {}",
+        small_call.arguments
+    );
+}
+
+#[tokio::test]
+async fn auto_edit_allows_inside_write_and_fails_closed_outside_without_bridge() {
+    let outside = std::env::temp_dir().join(format!(
+        "denia-outside-{}.txt",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let outside_raw = outside.to_string_lossy().replace('\\', "/");
+    let (driver, _registry) = driver_with_tools(
+        vec![
+            MockScript::Chunks(tool_calls_script(&[
+                (
+                    "call_in",
+                    "write_file",
+                    r#"{"path":"a.txt","content":"x"}"#,
+                ),
+                (
+                    "call_out",
+                    "write_file",
+                    &format!(r#"{{"path":"{outside_raw}","content":"y"}}"#),
+                ),
+            ])),
+            MockScript::Chunks(text_script("done")),
+        ],
+        |tools| *tools = denia_tools::default_registry(),
+    );
+    // 沙箱会话(temp_session,sandbox=true):自动编辑档不沙箱,区外写不被
+    // 路径解析硬拦,而是由策略引擎 Ask 转审批;无桥时 fail-closed。沙箱
+    // 只在只读/计划档生效(见 permission::sandbox_applies)。
+    let session = temp_session();
+    run_simple_turn(&driver, &session, "write").await;
+
+    let results = result_texts(&session);
+    assert_eq!(results.len(), 2, "each call gets exactly one result");
+    assert!(!results[0].0, "inside write must succeed in auto-edit");
+    assert!(results[1].0, "outside write needs approval");
+    assert!(results[1].1.contains("审批通道"), "{}", results[1].1);
+    assert!(
+        std::path::Path::new(&session.header().cwd).join("a.txt").exists(),
+        "inside write must land"
+    );
+    assert!(!outside.exists(), "outside write must not land");
+    let _ = std::fs::remove_file(&outside);
+}
+
+#[tokio::test]
+async fn sandbox_still_confines_readonly_and_plan_outside_writes() {
+    // 只读/计划档沙箱照旧:区外写不弹审批,策略引擎先行拒绝(Read 类的
+    // 区外访问则由工具层 resolve_within 兜底)。
+    let outside = std::env::temp_dir().join(format!(
+        "denia-ro-outside-{}.txt",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let outside_raw = outside.to_string_lossy().replace('\\', "/");
+    let (driver, _registry) = driver_with_tools(
+        vec![
+            MockScript::Chunks(tool_calls_script(&[(
+                "call_out",
+                "write_file",
+                &format!(r#"{{"path":"{outside_raw}","content":"y"}}"#),
+            )])),
+            MockScript::Chunks(text_script("done")),
+        ],
+        |tools| *tools = denia_tools::default_registry(),
+    );
+    let session = temp_session();
+    session.set_permission_mode(PermissionMode::ReadOnly).unwrap();
+    run_simple_turn(&driver, &session, "write").await;
+
+    let results = result_texts(&session);
+    assert_eq!(results.len(), 1);
+    assert!(results[0].0, "outside write must be denied in read-only");
+    // 策略引擎先行拒绝(比工具层沙箱更早),文案点名只读模式。
+    assert!(results[0].1.contains("只读模式"), "{}", results[0].1);
+    assert!(!outside.exists(), "outside write must not land");
+    let _ = std::fs::remove_file(&outside);
+}
+
+#[tokio::test]
+async fn plan_approval_switches_mode_and_returns_feedback() {
+    let (driver, _registry) = driver_with_tools(
+        vec![
+            MockScript::Chunks(tool_calls_script(&[(
+                "call_p",
+                "exit_plan",
+                r##"{"plan":"# 计划\n\n- 步骤一"}"##,
+            )])),
+            MockScript::Chunks(text_script("executing")),
+        ],
+        |tools| *tools = denia_tools::default_registry(),
+    );
+    let driver = driver.with_approval(Arc::new(StubApprovalBridge {
+        decision: Mutex::new(plan_decision(
+            ApprovalOutcome::AllowedOnce,
+            Some(PermissionMode::Full),
+            Some("注意兼容旧数据"),
+        )),
+    }));
+    let session = temp_session();
+    session.set_permission_mode(PermissionMode::Plan).unwrap();
+    run_simple_turn(&driver, &session, "submit plan").await;
+
+    let results = result_texts(&session);
+    assert!(!results[0].0, "approval outcome is a normal result");
+    assert!(results[0].1.contains("计划已批准"), "{}", results[0].1);
+    assert!(results[0].1.contains("full"), "{}", results[0].1);
+    assert!(results[0].1.contains("注意兼容旧数据"), "{}", results[0].1);
+    assert_eq!(session.permission_mode(), PermissionMode::Full);
+    // 档位切换有事件可回放。
+    assert!(session.events().iter().any(|envelope| matches!(
+        &envelope.event,
+        SessionEvent::PermissionMode { mode } if *mode == PermissionMode::Full
+    )));
+}
+
+#[tokio::test]
+async fn plan_rejection_with_feedback_drives_rewrite() {
+    let (driver, _registry) = driver_with_tools(
+        vec![
+            MockScript::Chunks(tool_calls_script(&[(
+                "call_p",
+                "exit_plan",
+                r##"{"plan":"# 计划\n\n- 步骤一"}"##,
+            )])),
+            MockScript::Chunks(text_script("revising")),
+        ],
+        |tools| *tools = denia_tools::default_registry(),
+    );
+    let driver = driver.with_approval(Arc::new(StubApprovalBridge {
+        decision: Mutex::new(plan_decision(
+            ApprovalOutcome::Rejected,
+            None,
+            Some("改成只改后端"),
+        )),
+    }));
+    let session = temp_session();
+    session.set_permission_mode(PermissionMode::Plan).unwrap();
+    run_simple_turn(&driver, &session, "submit plan").await;
+
+    let results = result_texts(&session);
+    assert!(!results[0].0);
+    assert!(
+        results[0].1.contains("按以下补充建议修订计划"),
+        "{}",
+        results[0].1
+    );
+    assert!(results[0].1.contains("改成只改后端"), "{}", results[0].1);
+    assert_eq!(session.permission_mode(), PermissionMode::Plan);
+}
+
+#[tokio::test]
+async fn exit_plan_with_empty_plan_never_reaches_approval() {
+    let (driver, _registry) = driver_with_tools(
+        vec![
+            MockScript::Chunks(tool_calls_script(&[(
+                "call_p",
+                "exit_plan",
+                r#"{"plan":"  "}"#,
+            )])),
+            MockScript::Chunks(text_script("retrying")),
+        ],
+        |tools| *tools = denia_tools::default_registry(),
+    );
+    let driver = driver.with_approval(Arc::new(StubApprovalBridge {
+        decision: Mutex::new(plan_decision(
+            ApprovalOutcome::AllowedOnce,
+            Some(PermissionMode::AutoEdit),
+            None,
+        )),
+    }));
+    let session = temp_session();
+    session.set_permission_mode(PermissionMode::Plan).unwrap();
+    run_simple_turn(&driver, &session, "submit plan").await;
+
+    let results = result_texts(&session);
+    assert!(results[0].0, "empty plan is an error");
+    assert!(results[0].1.contains("计划提交参数无效"), "{}", results[0].1);
+    // 档位未被切换:审批桥根本没被调用。
+    assert_eq!(session.permission_mode(), PermissionMode::Plan);
+}
+
+#[tokio::test]
+async fn auto_edit_asks_for_bash_writes_and_deletions() {
+    // 自动编辑档新口径:bash 增删改写与文件删除都要过用户审批(删除即使
+    // 落点在工作区内也不例外);审批被拒时按错误结果回给模型。
+    let (driver, _registry) = driver_with_tools(
+        vec![
+            MockScript::Chunks(tool_calls_script(&[
+                ("call_m", "bash", r#"{"command":"mkdir denia-ask-x"}"#),
+                ("call_r", "bash", r#"{"command":"rm denia-ask-x"}"#),
+            ])),
+            MockScript::Chunks(text_script("done")),
+        ],
+        |tools| *tools = denia_tools::default_registry(),
+    );
+    let driver = driver.with_approval(Arc::new(StubApprovalBridge {
+        decision: Mutex::new(plan_decision(ApprovalOutcome::Rejected, None, None)),
+    }));
+    let session = temp_session(); // 默认 auto-edit
+    run_simple_turn(&driver, &session, "run commands").await;
+
+    let results = result_texts(&session);
+    assert_eq!(results.len(), 2);
+    assert!(results[0].0, "bash write must ask; rejection is an error result");
+    assert!(results[1].0, "deletion must ask too");
+    // 审批卡理由按类别点题:删除的理由说"删除",bash 写的理由说"增删改写"。
+    let reasons: Vec<String> = session
+        .events()
+        .iter()
+        .filter_map(|envelope| match &envelope.event {
+            SessionEvent::ApprovalAsked { reason, .. } => reason.clone(),
+            _ => None,
+        })
+        .collect();
+    assert!(reasons.iter().any(|r| r.contains("删除")), "{reasons:?}");
+    assert!(reasons.iter().any(|r| r.contains("增删改写")), "{reasons:?}");
+}
+
+#[tokio::test]
+async fn allowed_session_grant_skips_later_asks_across_turns() {
+    // "本窗口放行":首次 bash 写审批选放行本会话后,同类调用在本会话内
+    // 直接放行(审批桥只被询问一次),且跨 turn 仍然生效。
+    struct CountingBridge {
+        calls: Mutex<usize>,
+    }
+    #[async_trait]
+    impl crate::ApprovalBridge for CountingBridge {
+        async fn request(&self, _: &str, _: &str, _: CancellationToken) -> PlanReviewDecision {
+            *self.calls.lock().unwrap() += 1;
+            PlanReviewDecision {
+                outcome: ApprovalOutcome::AllowedSession,
+                execute_mode: None,
+                selection: None,
+                vision_supported: None,
+                feedback: None,
+            }
+        }
+    }
+    let bridge = Arc::new(CountingBridge {
+        calls: Mutex::new(0),
+    });
+    let (driver, _registry) = driver_with_tools(
+        vec![
+            MockScript::Chunks(tool_calls_script(&[(
+                "call_1",
+                "bash",
+                r#"{"command":"mkdir denia-grant-a"}"#,
+            )])),
+            MockScript::Chunks(text_script("first done")),
+            MockScript::Chunks(tool_calls_script(&[(
+                "call_2",
+                "bash",
+                r#"{"command":"mkdir denia-grant-b"}"#,
+            )])),
+            MockScript::Chunks(text_script("second done")),
+        ],
+        |tools| *tools = denia_tools::default_registry(),
+    );
+    let driver = driver.with_approval(bridge.clone());
+    let session = temp_session();
+    run_simple_turn(&driver, &session, "first turn").await;
+    run_simple_turn(&driver, &session, "second turn").await;
+
+    assert_eq!(*bridge.calls.lock().unwrap(), 1, "asked exactly once");
+    let results = result_texts(&session);
+    let ok_results: Vec<&(bool, String)> = results.iter().filter(|(is_error, _)| !*is_error).collect();
+    assert_eq!(ok_results.len(), 2, "both mkdir calls ran, got {results:?}");
+    // 放行有事件可回放。
+    assert!(session.events().iter().any(|envelope| matches!(
+        &envelope.event,
+        SessionEvent::ApprovalDecided {
+            outcome: ApprovalOutcome::AllowedSession,
+            ..
+        }
+    )));
+    assert_eq!(driver.ask_granted(session.id(), denia_tools::permission::ActionClass::BashWrite), true);
+    // 其他类别不受牵连:删除与区外写仍要审批。
+    assert_eq!(driver.ask_granted(session.id(), denia_tools::permission::ActionClass::Delete), false);
+}
+
+#[tokio::test]
+async fn read_only_hides_bash_and_write_tools() {
+    // 只读档工具面收窄:bash/write_file/edit 不下发(用户口径:只开放
+    // ls/read_file/glob/grep 等只读类);幻觉调用 bash 由执行层兜底拒绝,
+    // 连读命令也不放行。
+    let (driver, _registry) = driver_with_tools(
+        vec![
+            MockScript::Chunks(tool_calls_script(&[(
+                "call_b",
+                "bash",
+                r#"{"command":"ls"}"#,
+            )])),
+            MockScript::Chunks(text_script("done")),
+        ],
+        |tools| *tools = denia_tools::default_registry(),
+    );
+    let session = temp_session();
+    session.set_permission_mode(PermissionMode::ReadOnly).unwrap();
+    run_simple_turn(&driver, &session, "read only").await;
+
+    let names = last_header_tool_names(&session);
+    assert!(!names.iter().any(|n| n == "bash"), "{names:?}");
+    assert!(!names.iter().any(|n| n == "write_file"), "{names:?}");
+    assert!(!names.iter().any(|n| n == "edit"), "{names:?}");
+    assert!(names.iter().any(|n| n == "ls"), "{names:?}");
+    assert!(names.iter().any(|n| n == "glob"), "{names:?}");
+    assert!(names.iter().any(|n| n == "grep"), "{names:?}");
+    assert!(names.iter().any(|n| n == "read_file"), "{names:?}");
+    let results = result_texts(&session);
+    assert!(results[0].0, "hallucinated bash call must be denied");
+    assert!(results[0].1.contains("bash 命令不可用"), "{}", results[0].1);
+}
+
+#[test]
+fn webfetch_section_travels_with_tool_in_allowlist_narrowing() {
+    // 段与工具同进退(AGENTS.md 同步要求):白名单不含 web_fetch 时,其
+    // 纪律段与 schema 一起消失;含 web_fetch 时段保留。
+    let (prompt, _registry) = denia_tools::default_shipped();
+    let mut assembly = prompt
+        .assemble(&denia_system_prompt::AssembleContext::default())
+        .unwrap();
+    crate::preset::apply_tool_allowlist(
+        &mut assembly,
+        &["read_file".to_string(), "ls".to_string()],
+    );
+    assert!(
+        assembly.tools.iter().all(|tool| tool.name != "web_fetch"),
+        "白名单收窄后 web_fetch schema 必须消失"
+    );
+    assert!(
+        !assembly
+            .sections
+            .iter()
+            .any(|section| section.name == "tool:webfetch"),
+        "白名单收窄后 webfetch 纪律段必须一起消失"
+    );
+    assert!(
+        !assembly
+            .sections
+            .iter()
+            .any(|section| section.name == "tool:bash"),
+        "bash 同理:工具消失则纪律段消失"
+    );
+
+    let (prompt, _registry) = denia_tools::default_shipped();
+    let mut assembly = prompt
+        .assemble(&denia_system_prompt::AssembleContext::default())
+        .unwrap();
+    crate::preset::apply_tool_allowlist(
+        &mut assembly,
+        &["read_file".to_string(), "web_fetch".to_string()],
+    );
+    assert!(
+        assembly
+            .sections
+            .iter()
+            .any(|section| section.name == "tool:webfetch"),
+        "白名单含 web_fetch 时纪律段必须保留"
+    );
+}
+
+// —— MCP 两段式工具面:轻量暴露 + 首次调用装载 ——
+
+/// 带执行计数的假 MCP 工具:拦截调用不执行,计数不增长。
+struct CountingMcpTool {
+    executes: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+#[async_trait]
+impl denia_tools::Tool for CountingMcpTool {
+    fn schema(&self) -> &ToolSchema {
+        Box::leak(Box::new(ToolSchema {
+            name: "mcp__fx__echo".to_string(),
+            description: "echoes via mcp".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": { "text": { "type": "string" } },
+                "required": ["text"]
+            }),
+        }))
+    }
+
+    async fn execute(&self, arguments: &str, _ctx: &denia_tools::ToolContext) -> denia_tools::ToolOutput {
+        self.executes.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        denia_tools::ToolOutput {
+            content: format!("echo:{arguments}"),
+            is_error: false,
+        }
+    }
+}
+
+fn mcp_call_script(name: &str, arguments: &str) -> Vec<StreamChunk> {
+    vec![
+        StreamChunk::BlockStart {
+            index: 0,
+            block_type: BlockType::ToolCall,
+        },
+        StreamChunk::BlockEnd {
+            index: 0,
+            block: ContentBlock::ToolCall {
+                id: "call_m1".to_string(),
+                name: name.to_string(),
+                arguments: arguments.to_string(),
+            },
+        },
+        StreamChunk::Finish {
+            reason: FinishReason::ToolCalls,
+        },
+    ]
+}
+
+/// 目录化装配:未装载的 mcp__* 工具整体移出请求工具面;装载后保留全量;
+/// 非 MCP 工具不受影响。
+#[test]
+fn unloaded_mcp_tools_are_removed_until_loaded() {
+    let full_parameters = serde_json::json!({
+        "type": "object",
+        "properties": { "text": { "type": "string" } },
+        "required": ["text"]
+    });
+    let registry = Arc::new(LlmRegistry::new());
+    let mut tools = ToolRegistry::default();
+    tools.register(Arc::new(CountingMcpTool {
+        executes: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+    }));
+    tools.register(Arc::new(EchoTool));
+    let prompt = SystemPrompt::new(denia_system_prompt::SystemPromptConfig {
+        include_runtime_context: false,
+        ..Default::default()
+    });
+    let driver = SessionDriver::new(
+        registry,
+        Arc::new(tools),
+        Arc::new(ArcSwap::from_pointee(prompt)),
+    );
+
+    let mcp_schema = ToolSchema {
+        name: "mcp__fx__echo".to_string(),
+        description: "echoes via mcp".to_string(),
+        parameters: full_parameters.clone(),
+    };
+    let echo_schema = ToolSchema {
+        name: "echo".to_string(),
+        description: "echoes".to_string(),
+        parameters: serde_json::json!({ "type": "object" }),
+    };
+    let mut assembly = denia_system_prompt::PromptAssembly {
+        sections: Vec::new(),
+        contexts: Vec::new(),
+        tools: vec![mcp_schema.clone(), echo_schema],
+        variables: Default::default(),
+    };
+    crate::turn::retain_loaded_mcp_tools(&driver, "s1", &mut assembly);
+
+    assert!(
+        !assembly
+            .tools
+            .iter()
+            .any(|schema| schema.name == "mcp__fx__echo"),
+        "未装载的 MCP 工具必须整体移出请求工具面"
+    );
+    let echo = assembly.tools.iter().find(|schema| schema.name == "echo").unwrap();
+    assert_eq!(
+        echo.parameters,
+        serde_json::json!({ "type": "object" }),
+        "非 MCP 工具不受目录化影响"
+    );
+
+    // 装载之后:同一工具保留全量 schema。
+    driver.load_mcp_tool("s1", "mcp__fx__echo");
+    let mut assembly = denia_system_prompt::PromptAssembly {
+        sections: Vec::new(),
+        contexts: Vec::new(),
+        tools: vec![mcp_schema],
+        variables: Default::default(),
+    };
+    crate::turn::retain_loaded_mcp_tools(&driver, "s1", &mut assembly);
+    assert_eq!(assembly.tools.len(), 1);
+    assert_eq!(assembly.tools[0].parameters, full_parameters);
+    // 会话隔离:另一会话仍是未装载态。
+    assert!(driver.mcp_loaded("s1", "mcp__fx__echo"));
+    assert!(!driver.mcp_loaded("s2", "mcp__fx__echo"));
+    driver.clear_mcp_loads("s1");
+    assert!(!driver.mcp_loaded("s1", "mcp__fx__echo"));
+}
+
+/// 首次调用拦截:返回参数定义不执行;装载后第二次调用正常执行。
+#[tokio::test]
+async fn first_mcp_call_returns_definition_and_second_executes() {
+    let executes = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counter = executes.clone();
+    let (driver, _registry) = driver_with_tools(
+        vec![
+            MockScript::Chunks(mcp_call_script(
+                "mcp__fx__echo",
+                r#"{"text":"hi"}"#,
+            )),
+            MockScript::Chunks(mcp_call_script(
+                "mcp__fx__echo",
+                r#"{"text":"hi"}"#,
+            )),
+            MockScript::Chunks(text_script("done")),
+        ],
+        move |tools| {
+            tools.register(Arc::new(CountingMcpTool { executes: counter }));
+        },
+    );
+    let session = temp_session();
+    let reason = driver
+        .run_turn(
+            &session,
+            &selection(),
+            "call the mcp tool",
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            true,
+            CancellationToken::new(),
+            noop_emit(),
+        )
+        .await;
+    assert_eq!(reason, TurnEndReason::Completed);
+    // 第一次调用被拦截(未执行),第二次正常执行:总执行次数为 1。
+    assert_eq!(
+        executes.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "拦截调用不得触达工具,装载后调用必须执行"
+    );
+    assert!(driver.mcp_loaded(session.id(), "mcp__fx__echo"));
+    let results: Vec<String> = session
+        .events()
+        .iter()
+        .filter_map(|envelope| match &envelope.event {
+            SessionEvent::ToolResult { content, .. } => Some(content.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(results.len(), 2, "两次调用各落一条结果");
+    assert!(
+        results[0].contains("参数定义") && results[0].contains("\"text\""),
+        "拦截结果必须携带完整参数定义: {}",
+        results[0]
+    );
+    assert!(
+        !results[0].starts_with("echo:"),
+        "拦截调用不得产生工具执行结果: {}",
+        results[0]
+    );
+    assert_eq!(results[1], "echo:{\"text\":\"hi\"}");
+}

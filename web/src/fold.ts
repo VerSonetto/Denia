@@ -1,0 +1,1047 @@
+import type {
+  AskQuestion,
+  AskResolution,
+  ContentBlock,
+  SessionEnvelope,
+  StreamChunk,
+  TokenUsage,
+  TurnEndReason,
+  UserMessageImage,
+} from './types'
+import { parseArgsObject } from './toolDisplay'
+import type { TodoSnapshotItem } from './toolDisplay'
+
+/** `ask` 工具的问答载荷(挂在对应工具行上)。 */
+export interface AskCardData {
+  requestId: string
+  questions: AskQuestion[]
+  timeoutMs: number
+  /** 请求发起时刻(epoch ms),倒计时用。 */
+  startedAt: number
+  /** 已结算时的结果;缺省 = 仍在等待。 */
+  resolution?: AskResolution
+}
+
+/** One rendered block inside an assistant message. */
+export interface UiBlock {
+  kind: 'text' | 'reasoning' | 'tool-call'
+  text: string
+  id?: string
+  name?: string
+  args?: string
+}
+
+export type TranscriptNode =
+  | { kind: 'user'; text: string; anchor?: number; images?: UserMessageImage[] }
+  | { kind: 'context-injection'; text: string; seq?: number }
+  | { kind: 'system-prompt'; text: string }
+  | {
+      kind: 'assistant'
+      turn: number
+      step: number
+      /** assistant-message 事件的 seq;流式未 settle 时缺省。分支锚点。 */
+      seq?: number
+      blocks: UiBlock[]
+      usage?: TokenUsage
+      interrupted: boolean
+      streaming: boolean
+      /** step-start 事件的 epoch ms;无 step-start 时为 undefined。 */
+      stepStartTime?: number
+      /**
+       * 首个 token 帧(正文/推理/工具参数增量)的 epoch ms;TTFT =
+       * firstTokenTime - stepStartTime。实时流从 chunk 推断,历史回放读
+       * assistant-message 的 first_token_time(框架帧不算 token,旧日志两者皆无)。
+       */
+      firstTokenTime?: number
+      /** assistant-message settle 的 epoch ms;decodeMs = settleTime - firstTokenTime。 */
+      settleTime?: number
+    }
+  | {
+      kind: 'tool'
+      callId: string
+      name: string
+      args: string
+      /** tool-call 事件的 seq;孤儿结果行用 result 事件的 seq。 */
+      seq?: number
+      result?: { content: string; isError: boolean }
+      /** `ask` 工具的提问载荷:挂在对应工具行上渲染问答卡片。 */
+      ask?: AskCardData
+      /**
+       * todo_write 的前一次清单快照(上一次 todo-write 事件的 todos)。
+       * 卡片据此标出"本次哪些条目推进了";首张清单为 undefined。
+       */
+      prevTodos?: TodoSnapshotItem[]
+    }
+  | { kind: 'turn-start'; turn: number; time: number }
+  | {
+      kind: 'turn-end'
+      turn: number
+      time: number
+      reason: TurnEndReason
+      usage?: TokenUsage
+      /**
+       * 本轮成功落盘的文件产物:write_file/edit 调用且工具结果非 error 的
+       * path,按首次出现去重。仅 groupTranscript 在分组时填充,事件 fold
+       * 不产此字段。
+       */
+      produced?: string[]
+    }
+  | {
+      kind: 'compaction'
+      turn: number
+      step: number
+      summary: string
+      replacesFrom: number
+      replacesTo: number
+      keepFrom: number
+      preTokens?: number
+      postTokens?: number
+      seq: number
+    }
+  | {
+      /**
+       * 压缩进行中的占位行:**不来自事件流**,由前端在发起手动压缩时插入、
+       * 收到结果后移除(真正的摘要会作为 compaction 事件落盘到达)。
+       *
+       * 后端 `compact_manually` 是一次 await、没有中间进度事件,所以这里
+       * 只能表达"进行中",做不出百分比 —— 不假装有进度。
+       */
+      kind: 'compacting'
+      /** 发起时刻(epoch ms)。 */
+      startedAt: number
+    }
+  | {
+      /** 本地斜杠命令回显(如 /goal):右对齐命令气泡,按事件 seq 排序。 */
+      kind: 'command-echo'
+      name: string
+      text: string
+      seq: number
+    }
+
+/**
+ * 把一步的用量并入轮次总量。
+ *
+ * 冷启动与增量两条折叠路径**必须共用这一个函数**:先前各写一份累加,
+ * 增量那份漏了 cacheRead/reasoning,同一轮对话"实时跑完"与"刷新后"
+ * 会读出两组不同的数。input/output 恒存在,cache/推理无数据时不出现
+ * (0 与"提供方没报"是两回事,不拿 0 冒充)。
+ */
+function mergeUsage(total: TokenUsage | null, usage?: TokenUsage): TokenUsage | null {
+  if (!usage) return total
+  const cacheRead = (total?.cacheReadTokens ?? 0) + (usage.cacheReadTokens ?? 0)
+  const reasoning = (total?.reasoningTokens ?? 0) + (usage.reasoningTokens ?? 0)
+  return {
+    inputTokens: (total?.inputTokens ?? 0) + usage.inputTokens,
+    outputTokens: (total?.outputTokens ?? 0) + usage.outputTokens,
+    cacheReadTokens: cacheRead > 0 ? cacheRead : undefined,
+    reasoningTokens: reasoning > 0 ? reasoning : undefined,
+  }
+}
+
+function toUiBlock(block: ContentBlock): UiBlock {
+  switch (block.type) {
+    case 'text':
+      return { kind: 'text', text: block.text }
+    case 'reasoning':
+      return { kind: 'reasoning', text: block.text }
+    case 'tool-call':
+      return {
+        kind: 'tool-call',
+        text: '',
+        id: block.id,
+        name: block.name,
+        args: block.arguments,
+      }
+  }
+}
+
+/**
+ * Applies one stream chunk to an immutable block list. The delta decides the
+ * block kind when it arrives before its `block-start` (reasoning deltas are
+ * never rendered as plain text); an existing loose `text` block is upgraded,
+ * never downgraded. `block-end` replaces the block with the authority.
+ */
+function applyChunk(blocks: UiBlock[], chunk: StreamChunk): UiBlock[] {
+  switch (chunk.type) {
+    case 'block-start': {
+      // 正常流:delta 携带的 index 与已打开块数一致。异常流(网络错误重试,
+      // 模型从头重新生成)会重发同 index 的 block-start,而后续 delta 仍按
+      // 原 index 路由 —— 原样追加会造出一个永远收不到内容的空块(并且旧块
+      // 还会串进重试后的 delta)。把 index 规范化为"当前块数"并跳过对已
+      // 存在块的重复开启,两条路径(冷历史/实时流)才与 settle 后的权威块
+      // (重试尝试整体重建、无重复块)保持一致。
+      const existing = blocks[chunk.index]
+      if (
+        existing !== undefined &&
+        (chunk.index !== blocks.length || existing.kind === chunk.block_type)
+      ) {
+        return blocks
+      }
+      return [...blocks, { kind: chunk.block_type, text: '' }]
+    }
+    case 'text-delta':
+    case 'reasoning-delta': {
+      const kind = chunk.type === 'reasoning-delta' ? 'reasoning' as const : 'text' as const
+      const block = blocks[chunk.index] ?? { kind, text: '' }
+      const next = [...blocks]
+      next[chunk.index] = {
+        ...block,
+        kind: block.kind === 'text' ? kind : block.kind,
+        text: block.text + chunk.text,
+      }
+      return next
+    }
+    case 'tool-call-delta': {
+      const block = blocks[chunk.index] ?? { kind: 'tool-call' as const, text: '' }
+      const next = [...blocks]
+      next[chunk.index] = {
+        ...block,
+        args: (block.args ?? '') + chunk.arguments_delta,
+        id: chunk.id || block.id,
+        name: chunk.name ?? block.name,
+      }
+      return next
+    }
+    case 'block-end': {
+      const settled = toUiBlock(chunk.block)
+      const next = [...blocks]
+      next[chunk.index] = { ...settled, text: settled.text || blocks[chunk.index]?.text || '' }
+      return next
+    }
+    default:
+      return blocks
+  }
+}
+
+/**
+ * 该 chunk 是否承载模型的一个输出 token:非空正文/推理增量,或工具调用
+ * 参数增量(带名字的首帧也算)。block-start/block-end/usage/finish 是
+ * 流框架帧,不算 —— 首 token 延迟锚定第一个真正的输出增量。
+ */
+function isTokenDeltaChunk(chunk: StreamChunk): boolean {
+  switch (chunk.type) {
+    case 'text-delta':
+    case 'reasoning-delta':
+      return chunk.text !== ''
+    case 'tool-call-delta':
+      return chunk.arguments_delta !== '' || chunk.name !== undefined
+    default:
+      return false
+  }
+}
+
+/**
+ * The deterministic fold: identical output for cold history and live
+ * streaming. Chunk deltas accumulate into an in-progress assistant node;
+ * the settled `assistant-message` replaces it with authoritative blocks.
+ */
+export function foldEvents(events: SessionEnvelope[]): TranscriptNode[] {
+  const nodes: TranscriptNode[] = []
+  let open: Extract<TranscriptNode, { kind: 'assistant' }> | null = null
+  const tools = new Map<string, Extract<TranscriptNode, { kind: 'tool' }>>()
+  let turnUsage: TokenUsage | null = null
+  // step-start 时间表:turn:step → epoch ms,供 assistant 节点算 TTFT。
+  const stepStarts = new Map<string, number>()
+  // 当前清单快照:供下一次 todo_write 卡片比对"这次推进了哪条"。
+  let lastTodos: TodoSnapshotItem[] | undefined
+
+  const addUsage = (usage?: TokenUsage) => {
+    turnUsage = mergeUsage(turnUsage, usage)
+  }
+
+  const closeOpen = () => {
+    if (open) {
+      open.streaming = false
+      open = null
+    }
+  }
+
+  // 上一次已显示的 system-prompt 全文(内容去重依据,见下方 case)。
+  let lastSystemPrompt: string | null = null
+
+  for (const event of events) {
+    switch (event.type) {
+      case 'agent-delivery':
+        closeOpen()
+        nodes.push({ kind: 'context-injection', text: event.text, seq: event.seq })
+        break
+      case 'command-run':
+        closeOpen()
+        nodes.push({ kind: 'command-echo', name: event.name, text: event.text, seq: event.seq })
+        break
+      case 'turn-start':
+        closeOpen()
+        nodes.push({ kind: 'turn-start', turn: event.turn, time: event.time })
+        break
+      case 'user-message':
+        closeOpen()
+        if (event.injected) {
+          nodes.push({ kind: 'context-injection', text: event.text, seq: event.seq })
+        } else {
+          nodes.push({
+            kind: 'user',
+            text: event.text,
+            anchor: event.seq,
+            images: event.images?.length ? event.images : undefined,
+          })
+        }
+        break
+      case 'system-prompt':
+        // 后端按 step 判重,而 step 是本 turn 内计数,每轮第一个 step 恒为
+        // 1 —— 于是内容一字未变的 system-prompt 每轮都记一条。这里按内容
+        // 去重:只在与上一次不同时才显示(切模型 / 改系统提示词 / 换 persona
+        // 都会让文本变化,那些必须显示)。
+        closeOpen()
+        if (lastSystemPrompt !== event.text) {
+          lastSystemPrompt = event.text
+          nodes.push({ kind: 'system-prompt', text: event.text })
+        }
+        break
+      case 'step-start':
+        stepStarts.set(`${event.turn}:${event.step}`, event.time)
+        break
+      case 'step-end':
+        break
+      case 'agent-preset':
+        // 会话事实(会话运行哪份组装),不产生转录节点:当前值由会话流的
+        // 订阅方单独取用,这里只保证 fold 不把它当未知事件截断后续。
+        break
+      case 'assistant-chunk': {
+        if (!open || open.turn !== event.turn || open.step !== event.step) {
+          closeOpen()
+          open = {
+            kind: 'assistant',
+            turn: event.turn,
+            step: event.step,
+            blocks: [],
+            interrupted: false,
+            streaming: true,
+            stepStartTime: stepStarts.get(`${event.turn}:${event.step}`),
+          }
+          nodes.push(open)
+        }
+        if (open.firstTokenTime === undefined && isTokenDeltaChunk(event.chunk)) {
+          open.firstTokenTime = event.time
+        }
+        open.blocks = applyChunk(open.blocks, event.chunk)
+        break
+      }
+      case 'assistant-message': {
+        const blocks = event.blocks.map(toUiBlock)
+        if (open && open.turn === event.turn && open.step === event.step) {
+          open.blocks = blocks
+          open.usage = event.usage
+          open.interrupted = event.interrupted ?? false
+          open.settleTime = event.time
+          open.seq = event.seq
+          // 后端落盘的首 token 时间是权威事实;旧日志无此字段时回退
+          // chunk 推断值。
+          if (event.first_token_time !== undefined) open.firstTokenTime = event.first_token_time
+          closeOpen()
+        } else {
+          closeOpen()
+          nodes.push({
+            kind: 'assistant',
+            turn: event.turn,
+            step: event.step,
+            seq: event.seq,
+            blocks,
+            usage: event.usage,
+            interrupted: event.interrupted ?? false,
+            streaming: false,
+            stepStartTime: stepStarts.get(`${event.turn}:${event.step}`),
+            firstTokenTime: event.first_token_time,
+            settleTime: event.time,
+          })
+        }
+        addUsage(event.usage)
+        break
+      }
+      case 'tool-call': {
+        closeOpen()
+        const node: Extract<TranscriptNode, { kind: 'tool' }> = {
+          kind: 'tool',
+          callId: event.call_id,
+          name: event.name,
+          args: event.arguments,
+          seq: event.seq,
+        }
+        // todo_write:带上本次调用之前的清单快照(工具执行时才 emit
+        // todo-write 事件,所以这里的 lastTodos 就是"上一次的")。
+        if (event.name === 'todo_write') node.prevTodos = lastTodos
+        tools.set(event.call_id, node)
+        nodes.push(node)
+        break
+      }
+      case 'todo-write':
+        // 清单快照(last-write-wins):只更新状态,不产生对话流节点 ——
+        // 清单由对应的 todo_write 工具行渲染,避免同一份数据出现两处。
+        lastTodos = event.todos
+        break
+      case 'ask-requested': {
+        const node = tools.get(event.call_id)
+        const ask: AskCardData = {
+          requestId: event.request_id,
+          questions: event.questions,
+          timeoutMs: event.timeout_ms,
+          startedAt: event.time,
+        }
+        if (node) {
+          node.ask = ask
+        } else {
+          closeOpen()
+          nodes.push({
+            kind: 'tool',
+            callId: event.call_id,
+            name: 'ask',
+            args: '',
+            seq: event.seq,
+            ask,
+          })
+        }
+        break
+      }
+      case 'ask-resolved': {
+        for (const node of nodes) {
+          if (node.kind === 'tool' && node.ask?.requestId === event.request_id) {
+            node.ask = { ...node.ask, resolution: event.resolution }
+            break
+          }
+        }
+        break
+      }
+      case 'tool-result': {
+        // 带 replaces 的 tool-result 是模型侧的原位替换(微压缩清理),
+        // 对话流里继续显示原始调用/结果,不落占位行。
+        if (event.replaces != null) break
+        const node = tools.get(event.call_id)
+        const result = { content: event.content, isError: event.is_error }
+        if (node) {
+          node.result = result
+        } else {
+          nodes.push({
+            kind: 'tool',
+            callId: event.call_id,
+            name: '?',
+            args: '',
+            seq: event.seq,
+            result,
+          })
+        }
+        break
+      }
+      case 'compaction-summary': {
+        closeOpen()
+        nodes.push({
+          kind: 'compaction',
+          turn: event.turn,
+          step: event.step,
+          summary: event.summary,
+          replacesFrom: event.replaces_from,
+          replacesTo: event.replaces_to,
+          keepFrom: event.keep_from,
+          preTokens: event.pre_tokens,
+          postTokens: event.post_tokens,
+          seq: event.seq,
+        })
+        break
+      }
+      case 'turn-end':
+        closeOpen()
+        nodes.push({
+          kind: 'turn-end',
+          turn: event.turn,
+          time: event.time,
+          reason: event.reason,
+          usage: turnUsage ?? undefined,
+        })
+        turnUsage = null
+        break
+      default:
+        break
+    }
+  }
+  closeOpen()
+  // 冷启动(切会话/重拉快照)是全量权威结果:把增量路径的暂存对齐到它,
+  // 否则换会话后模块级暂存还留着上一个会话的值,新会话首条 system-prompt
+  // 可能因与旧会话文本相同而被误吞,todo 也会比对出假变化。
+  incrementalLastTodos = lastTodos
+  incrementalLastSystemPrompt = lastSystemPrompt
+  return nodes
+}
+
+/** A turn is live when some `turn-start` lacks its `turn-end`. */
+export function hasOpenTurn(events: SessionEnvelope[]): boolean {
+  let open = false
+  for (const event of events) {
+    if (event.type === 'turn-start') open = true
+    else if (event.type === 'turn-end') open = false
+  }
+  return open
+}
+
+/** 当前未闭合 turn 的起点(epoch ms);无 open turn 返回 undefined。 */
+export function openTurnStartedAt(nodes: TranscriptNode[]): number | undefined {
+  let started: number | undefined
+  for (const node of nodes) {
+    if (node.kind === 'turn-start') started = node.time
+    else if (node.kind === 'turn-end') started = undefined
+  }
+  return started
+}
+
+/** 增量 fold 的 step-start 时间暂存:turn:step → epoch ms。 */
+const incrementalStepStarts = new Map<string, number>()
+
+/** 增量 fold 的清单快照暂存:供下一次 todo_write 卡片比对变化。 */
+let incrementalLastTodos: TodoSnapshotItem[] | undefined
+
+/** 增量 fold 的 system-prompt 暂存:与冷启动路径同规则的内容去重依据。 */
+let incrementalLastSystemPrompt: string | null = null
+
+/**
+ * Incremental fold: applies one envelope to an existing node list without
+ * refolding the prefix. Only the affected tail node is copied, so a live
+ * stream costs O(1) per envelope instead of O(n).
+ */
+export function applyEnvelope(
+  nodes: TranscriptNode[],
+  event: SessionEnvelope,
+): TranscriptNode[] {
+  return applyEnvelopes(nodes, [event])
+}
+
+/**
+ * 批量应用一帧内的多条事件(流式 rAF 合并路径)。
+ *
+ * 单条逐次 `applyEnvelope` 对连续 assistant-chunk 是 O(m·n):每条都要
+ * `[...nodes.slice(0, -1), { ...last, ... }]` 复制整个节点数组。流式高频
+ * 帧(一帧可达数十条 chunk)在长会话上会放大成每帧 O(m·n) 的数组复制。
+ *
+ * 这里把落在同一流式 assistant 节点上的连续 chunk 累积进一个可变
+ * `blocks` 缓冲,中途完全不动节点数组;遇到非 chunk 事件(settle/
+ * turn-end/工具调用等)或帧末,才把缓冲一次 flush 成新数组。连续 chunk
+ * 的数组复制从每帧 m 次降到 1 次,语义与 `applyEnvelope` 逐条应用完全一致。
+ */
+export function applyEnvelopes(
+  nodes: TranscriptNode[],
+  events: SessionEnvelope[],
+): TranscriptNode[] {
+  if (events.length === 0) return nodes
+  let current = nodes
+  // 正在累积的流式尾节点:存在时 current 尾部就是它(引用未变,
+  // 只有 accumulate 真实发生时才在 flush 时重建数组)。
+  interface Accum {
+    node: Extract<TranscriptNode, { kind: 'assistant' }>
+    blocks: UiBlock[]
+  }
+  let acc: Accum | null = null
+  const flush = (): Extract<TranscriptNode, { kind: 'assistant' }> | null => {
+    if (acc === null) return null
+    const settled = { ...acc.node, blocks: acc.blocks }
+    current = current.slice(0, -1)
+    current.push(settled)
+    acc = null
+    return settled
+  }
+  for (const event of events) {
+    if (event.type === 'assistant-chunk') {
+      const last = current[current.length - 1]
+      if (
+        acc !== null &&
+        last?.kind === 'assistant' &&
+        last.streaming &&
+        last.turn === event.turn &&
+        last.step === event.step
+      ) {
+        if (acc.node.firstTokenTime === undefined && isTokenDeltaChunk(event.chunk)) {
+          acc.node = { ...acc.node, firstTokenTime: event.time }
+        }
+        acc.blocks = applyChunk(acc.blocks, event.chunk)
+        continue
+      }
+      // 先落掉上一个累积节点(节点迁移),再开新累积。
+      if (acc !== null) flush()
+      const tail = current[current.length - 1]
+      if (
+        tail?.kind === 'assistant' &&
+        tail.streaming &&
+        tail.turn === event.turn &&
+        tail.step === event.step
+      ) {
+        const node = isTokenDeltaChunk(event.chunk) ? { ...tail, firstTokenTime: tail.firstTokenTime ?? event.time } : tail
+        const blocks = applyChunk(node.blocks, event.chunk)
+        acc = { node, blocks }
+      } else {
+        const fresh: Extract<TranscriptNode, { kind: 'assistant' }> = {
+          kind: 'assistant',
+          turn: event.turn,
+          step: event.step,
+          blocks: [],
+          interrupted: false,
+          streaming: true,
+          stepStartTime: incrementalStepStarts.get(`${event.turn}:${event.step}`),
+        }
+        if (isTokenDeltaChunk(event.chunk)) fresh.firstTokenTime = event.time
+        acc = { node: fresh, blocks: applyChunk(fresh.blocks, event.chunk) }
+        current = [...current, fresh]
+      }
+      continue
+    }
+    if (acc !== null) flush()
+    current = applyEnvelopeStep(current, event)
+  }
+  if (acc !== null) flush()
+  return current
+}
+
+/** 单条事件应用(applyEnvelope 的主体,供批量路径逐条复用)。 */
+function applyEnvelopeStep(
+  nodes: TranscriptNode[],
+  event: SessionEnvelope,
+): TranscriptNode[] {
+  switch (event.type) {
+    case 'agent-delivery':
+      return [...nodes, { kind: 'context-injection', text: event.text, seq: event.seq }]
+    case 'command-run':
+      return [
+        ...nodes,
+        { kind: 'command-echo', name: event.name, text: event.text, seq: event.seq },
+      ]
+    case 'turn-start':
+      return [...nodes, { kind: 'turn-start', turn: event.turn, time: event.time }]
+    case 'user-message':
+      if (event.injected) {
+        return [...nodes, { kind: 'context-injection', text: event.text, seq: event.seq }]
+      }
+      return [
+        ...nodes,
+        {
+          kind: 'user',
+          text: event.text,
+          anchor: event.seq,
+          images: event.images?.length ? event.images : undefined,
+        },
+      ]
+    case 'system-prompt':
+      // 与冷启动路径同规则:内容未变则不新增节点(后端按 step 判重,而
+      // step 是本 turn 内计数,每轮恒为 1,导致未变化的提示词每轮都记)。
+      if (incrementalLastSystemPrompt === event.text) return nodes
+      incrementalLastSystemPrompt = event.text
+      return [...nodes, { kind: 'system-prompt', text: event.text }]
+    case 'step-start':
+      incrementalStepStarts.set(`${event.turn}:${event.step}`, event.time)
+      return nodes
+    case 'step-end':
+      return nodes
+    case 'agent-preset':
+      return nodes
+    case 'assistant-chunk': {
+      const last = nodes[nodes.length - 1]
+      if (
+        last?.kind === 'assistant' &&
+        last.streaming &&
+        last.turn === event.turn &&
+        last.step === event.step
+      ) {
+        const node =
+          last.firstTokenTime === undefined && isTokenDeltaChunk(event.chunk)
+            ? { ...last, firstTokenTime: event.time }
+            : last
+        return [...nodes.slice(0, -1), { ...node, blocks: applyChunk(node.blocks, event.chunk) }]
+      }
+      const fresh: Extract<TranscriptNode, { kind: 'assistant' }> = {
+        kind: 'assistant',
+        turn: event.turn,
+        step: event.step,
+        blocks: [],
+        interrupted: false,
+        streaming: true,
+        stepStartTime: incrementalStepStarts.get(`${event.turn}:${event.step}`),
+      }
+      if (isTokenDeltaChunk(event.chunk)) fresh.firstTokenTime = event.time
+      return [...nodes, { ...fresh, blocks: applyChunk(fresh.blocks, event.chunk) }]
+    }
+    case 'assistant-message': {
+      const last = nodes[nodes.length - 1]
+      // settle 时保留流式阶段积累的时间戳;后端落盘的首 token 时间优先。
+      const prior = last?.kind === 'assistant' && last.turn === event.turn && last.step === event.step
+        ? last
+        : undefined
+      const settled: TranscriptNode = {
+        kind: 'assistant',
+        turn: event.turn,
+        step: event.step,
+        seq: event.seq,
+        blocks: event.blocks.map(toUiBlock),
+        usage: event.usage,
+        interrupted: event.interrupted ?? false,
+        streaming: false,
+        stepStartTime: prior?.stepStartTime ?? incrementalStepStarts.get(`${event.turn}:${event.step}`),
+        firstTokenTime: event.first_token_time ?? prior?.firstTokenTime,
+        settleTime: event.time,
+      }
+      if (
+        last?.kind === 'assistant' &&
+        last.streaming &&
+        last.turn === event.turn &&
+        last.step === event.step
+      ) {
+        return [...nodes.slice(0, -1), settled]
+      }
+      return [...nodes, settled]
+    }
+    case 'tool-call': {
+      const base: Extract<TranscriptNode, { kind: 'tool' }> = {
+        kind: 'tool',
+        callId: event.call_id,
+        name: event.name,
+        args: event.arguments,
+        seq: event.seq,
+      }
+      // 与冷路径一致:todo_write 带上本次调用之前的清单快照。
+      if (event.name === 'todo_write') base.prevTodos = incrementalLastTodos
+      return [...nodes, base]
+    }
+    case 'todo-write':
+      // 清单快照(last-write-wins):不产生节点,清单由工具行渲染。
+      incrementalLastTodos = event.todos
+      return nodes
+    // ask 的提问/结算挂到对应工具行(卡片与工具行同体,不产生游离节点)。
+    case 'ask-requested': {
+      const patch = (node: Extract<TranscriptNode, { kind: 'tool' }>) => ({
+        ...node,
+        ask: {
+          requestId: event.request_id,
+          questions: event.questions,
+          timeoutMs: event.timeout_ms,
+          startedAt: event.time,
+          resolution: undefined,
+        },
+      })
+      for (let i = nodes.length - 1; i >= 0; i--) {
+        const node = nodes[i]
+        if (node.kind === 'tool' && node.callId === event.call_id) {
+          const copy = nodes.slice()
+          copy[i] = patch(node)
+          return copy
+        }
+      }
+      // 找不到对应工具行(日志截断等):以孤儿工具行承载卡片。
+      return [
+        ...nodes,
+        {
+          kind: 'tool',
+          callId: event.call_id,
+          name: 'ask',
+          args: '',
+          seq: event.seq,
+          ask: {
+            requestId: event.request_id,
+            questions: event.questions,
+            timeoutMs: event.timeout_ms,
+            startedAt: event.time,
+          },
+        },
+      ]
+    }
+    case 'ask-resolved': {
+      for (let i = nodes.length - 1; i >= 0; i--) {
+        const node = nodes[i]
+        if (node.kind === 'tool' && node.ask?.requestId === event.request_id) {
+          const copy = nodes.slice()
+          copy[i] = { ...node, ask: { ...node.ask, resolution: event.resolution } }
+          return copy
+        }
+      }
+      return nodes
+    }
+    case 'compaction-summary':
+      return [
+        ...nodes,
+        {
+          kind: 'compaction',
+          turn: event.turn,
+          step: event.step,
+          summary: event.summary,
+          replacesFrom: event.replaces_from,
+          replacesTo: event.replaces_to,
+          keepFrom: event.keep_from,
+          preTokens: event.pre_tokens,
+          postTokens: event.post_tokens,
+          seq: event.seq,
+        },
+      ]
+    case 'tool-result': {
+      // 带 replaces 的 tool-result 是模型侧的原位替换(微压缩清理),
+      // 对话流里继续显示原始调用/结果,不落占位行。
+      if (event.replaces != null) return nodes
+      for (let i = nodes.length - 1; i >= 0; i--) {
+        const node = nodes[i]
+        if (node.kind === 'tool' && node.callId === event.call_id) {
+          const copy = nodes.slice()
+          copy[i] = {
+            ...node,
+            result: { content: event.content, isError: event.is_error },
+          }
+          return copy
+        }
+      }
+      return [
+        ...nodes,
+        {
+          kind: 'tool',
+          callId: event.call_id,
+          name: '?',
+          args: '',
+          seq: event.seq,
+          result: { content: event.content, isError: event.is_error },
+        },
+      ]
+    }
+    case 'turn-end': {
+      // 与冷启动路径共用 mergeUsage:反向扫本轮 assistant 步,四字段全累加。
+      // 先前这里只加 input/output,缓存读与推理实时恒为 0、刷新后才有值。
+      let usage: TokenUsage | null = null
+      for (let i = nodes.length - 1; i >= 0; i--) {
+        const node = nodes[i]
+        if (node.kind === 'turn-end') break
+        if (node.kind === 'assistant') usage = mergeUsage(usage, node.usage)
+      }
+      return [
+        ...nodes,
+        {
+          kind: 'turn-end',
+          turn: event.turn,
+          time: event.time,
+          reason: event.reason,
+          usage: usage ?? undefined,
+        },
+      ]
+    }
+    default:
+      return nodes
+  }
+}
+
+/* ---- presentation grouping ---- */
+
+/** One closed turn's folded prefix: work duration, tool count, hidden rows. */
+export interface OverviewRow {
+  kind: 'overview'
+  durationMs: number
+  toolCount: number
+  hidden: TranscriptNode[]
+}
+
+/**
+ * 在对话流末尾挂上"正在压缩"占位行;已在压缩中则原样返回(幂等,避免
+ * 连点产生两行)。
+ */
+export function withCompacting(nodes: TranscriptNode[], startedAt: number): TranscriptNode[] {
+  if (nodes.some((node) => node.kind === 'compacting')) return nodes
+  return [...nodes, { kind: 'compacting', startedAt }]
+}
+
+/** 移除压缩占位行:压缩结束(成功、无可压缩、失败)都走这里。 */
+export function withoutCompacting(nodes: TranscriptNode[]): TranscriptNode[] {
+  if (!nodes.some((node) => node.kind === 'compacting')) return nodes
+  return nodes.filter((node) => node.kind !== 'compacting')
+}
+
+export type TranscriptRow =
+  | { kind: 'node'; node: TranscriptNode }
+  | OverviewRow
+
+/* ---- 收尾轮次的文件产物 ---- */
+
+/**
+ * 变更类工具调用参数里的目标文件路径;非变更调用、参数不完整或路径为空
+ * 返回 null。只有 write_file 与 edit 是第一方文件变更工具。
+ *
+ * edit 的两种形式都认:单处(old_string/new_string 成对且不同)与
+ * 多处(edits 数组每项都是合法且非 no-op 的编辑)。
+ */
+function mutationPath(name: string, args: string): string | null {
+  if (name !== 'write_file' && name !== 'edit') return null
+  const parsed = parseArgsObject(args)
+  if (!parsed) return null
+  const path = typeof parsed.path === 'string' && parsed.path.trim().length > 0 ? parsed.path : null
+  if (path === null) return null
+  if (name === 'write_file') return typeof parsed.content === 'string' ? path : null
+  const edits = parsed.edits
+  if (Array.isArray(edits)) {
+    return edits.length > 0 &&
+      edits.every((raw) => {
+        if (raw === null || typeof raw !== 'object') return false
+        const item = raw as Record<string, unknown>
+        return (
+          typeof item.old_string === 'string' &&
+          item.old_string.length > 0 &&
+          typeof item.new_string === 'string' &&
+          item.old_string !== item.new_string &&
+          (item.replace_all === undefined || typeof item.replace_all === 'boolean')
+        )
+      })
+      ? path
+      : null
+  }
+  const oldString = parsed.old_string
+  return typeof oldString === 'string' &&
+    oldString.length > 0 &&
+    typeof parsed.new_string === 'string' &&
+    oldString !== parsed.new_string &&
+    (parsed.replace_all === undefined || typeof parsed.replace_all === 'boolean')
+    ? path
+    : null
+}
+
+type ToolNode = Extract<TranscriptNode, { kind: 'tool' }>
+type TurnEndNode = Extract<TranscriptNode, { kind: 'turn-end' }>
+
+/**
+ * 单个工具节点的产物路径缓存。分组在每次渲染都会重跑,而 write_file 的
+ * 参数可能很大,不能每帧 JSON.parse;键是节点引用,结果到达(result 引用
+ * 变化)时重算一次。
+ */
+const producedPathCache = new WeakMap<ToolNode, { result: unknown; path: string | null }>()
+
+function toolProducedPath(node: ToolNode): string | null {
+  const cached = producedPathCache.get(node)
+  if (cached && cached.result === node.result) return cached.path
+  const path =
+    node.result && !node.result.isError ? mutationPath(node.name, node.args) : null
+  producedPathCache.set(node, { result: node.result, path })
+  return path
+}
+
+/**
+ * 给收尾轮次挂上本轮文件产物;无产物时原节点返回(引用稳定,行 memo 不
+ * 失效)。按收尾节点身份在首次分组时冻结:工具结果先于 turn-end 落盘,
+ * 之后才到的结果不在口径内。
+ */
+const producedTurnCache = new WeakMap<TurnEndNode, TranscriptNode>()
+
+function withProduced(endNode: TurnEndNode, span: TranscriptNode[]): TranscriptNode {
+  const cached = producedTurnCache.get(endNode)
+  if (cached) return cached
+  const paths: string[] = []
+  const seen = new Set<string>()
+  for (const node of span) {
+    if (node.kind !== 'tool') continue
+    const path = toolProducedPath(node)
+    if (path === null || seen.has(path)) continue
+    seen.add(path)
+    paths.push(path)
+  }
+  const next: TranscriptNode = paths.length === 0 ? endNode : { ...endNode, produced: paths }
+  producedTurnCache.set(endNode, next)
+  return next
+}
+
+/**
+ * Groups transcript nodes for display. A closed turn folds everything through
+ * its last tool call (inclusive) into one "worked X · N tool calls" overview
+ * row, keeping only the answer that follows it visible; genuine user messages
+ * stay in place. An open (running) turn is left flat: tool calls render as
+ * individual rows so the reader always sees live progress.
+ */
+export function groupTranscript(nodes: TranscriptNode[]): TranscriptRow[] {
+  const rows: TranscriptRow[] = []
+  let index = 0
+  while (index < nodes.length) {
+    const marker = nodes[index]
+    if (marker.kind !== 'turn-start') {
+      rows.push({ kind: 'node', node: marker })
+      index += 1
+      continue
+    }
+    let end = -1
+    for (let j = index + 1; j < nodes.length; j++) {
+      if (nodes[j].kind === 'turn-end') {
+        end = j
+        break
+      }
+    }
+    if (end < 0) {
+      for (const node of nodes.slice(index + 1)) {
+        if (node.kind !== 'turn-start') rows.push({ kind: 'node', node })
+      }
+      break
+    }
+    const span = nodes.slice(index + 1, end)
+    const endNode = nodes[end] as TurnEndNode
+    rows.push(...closedTurnRows(span, marker, endNode))
+    rows.push({ kind: 'node', node: withProduced(endNode, span) })
+    index = end + 1
+  }
+  return rows
+}
+
+/** Fold one closed turn's prefix *through* its last tool call into an overview row. */
+function closedTurnRows(
+  span: TranscriptNode[],
+  marker: Extract<TranscriptNode, { kind: 'turn-start' }>,
+  endNode: Extract<TranscriptNode, { kind: 'turn-end' }>,
+): TranscriptRow[] {
+  let lastTool = -1
+  for (let i = span.length - 1; i >= 0; i--) {
+    if (span[i].kind === 'tool') {
+      lastTool = i
+      break
+    }
+  }
+  if (lastTool < 0) return span.map((node) => ({ kind: 'node', node }) as TranscriptRow)
+  // 折叠窗口含最后一条工具调用(用户规格:最后一条工具调用"以上"全部折叠),
+  // 可见部分只剩其后的最终回答。
+  const foldEnd = lastTool + 1
+  const prefix = span.slice(0, foldEnd)
+  const hidden = prefix.filter((node) => node.kind !== 'user')
+  // The overview is inserted where the first folded row would sit; when there
+  // is nothing expandable, no overview is shown at all.
+  const overview: TranscriptRow | null = hidden.some(rendersContent)
+    ? {
+      kind: 'overview',
+      durationMs: Math.max(0, endNode.time - marker.time),
+      toolCount: span.reduce((count, node) => count + (node.kind === 'tool' ? 1 : 0), 0),
+      hidden,
+    }
+    : null
+  const rows: TranscriptRow[] = []
+  let placed = false
+  for (const node of prefix) {
+    const foldable = node.kind !== 'user'
+    if (!foldable || overview === null) {
+      rows.push({ kind: 'node', node })
+      continue
+    }
+    if (!placed) {
+      rows.push(overview)
+      placed = true
+    }
+  }
+  if (overview !== null && !placed) rows.push(overview)
+  rows.push(...span.slice(foldEnd).map((node) => ({ kind: 'node', node }) as TranscriptRow))
+  return rows
+}
+
+/** Whether a hidden node would paint anything when expanded. */
+function rendersContent(node: TranscriptNode): boolean {
+  if (
+    node.kind === 'tool' ||
+    node.kind === 'user' ||
+    node.kind === 'context-injection' ||
+    node.kind === 'system-prompt' ||
+    node.kind === 'compacting'
+  ) {
+    return true
+  }
+  if (node.kind === 'assistant') {
+    return (
+      node.streaming ||
+      node.interrupted ||
+      node.blocks.some((block) => block.kind !== 'tool-call')
+    )
+  }
+  return false
+}

@@ -1,0 +1,722 @@
+//! System-prompt assembly for model requests (mirrors `@deepseek-ai/dsh-system-prompt`).
+//!
+//! Plugins contribute ordered [`PromptSection`]s, dynamic [`PromptContext`]s,
+//! tool-schema providers, and named variables. The loop calls [`SystemPrompt::assemble`]
+//! once per step, renders sections into the system string, and materializes
+//! runtime context as injected user messages.
+
+mod render;
+
+use std::collections::{BTreeMap, HashMap, HashSet};
+
+use denia_core::tool::ToolSchema;
+
+pub use render::{
+    frame_system_prompt_for_model, is_runtime_context_snapshot, join_context_sections,
+    render_context_sections, render_context_snapshot, render_prompt, render_prompt_for_user,
+};
+
+/// Deployment persona section name; shadowing replaces the global persona.
+pub const PERSONA_SECTION: &str = "deployment:persona";
+
+/// Reserved rest marker for explicit [`SystemPromptConfig::tool_order`].
+pub const TOOL_ORDER_REST: &str = "<unlisted-tools>";
+
+/// Prefix for a materialized runtime-context snapshot (DSH-compatible prose).
+pub const RUNTIME_CONTEXT_HEADER: &str =
+    "Current runtime context. This snapshot supersedes earlier runtime-context snapshots.";
+
+/// Cleared-runtime marker when no context contributions remain.
+pub const RUNTIME_CONTEXT_CLEARED: &str =
+    "Current runtime context: none. Earlier runtime-context snapshots no longer apply.";
+
+/// Centrally allocated section positions (subset for the shipped tool set).
+///
+/// 缓存前缀策略(对齐 dsh system-prompt 的位置纪律):**全部段落在会话内
+/// 字节稳定**——权限模式等运行状态不得增删段落或工具 schema,语义变化由
+/// `harness:permission` 运行时快照(注入追加)与 agent-loop 的 system
+/// 冻结 + in-history 追加机制承担,系统提示正文一经发出不再改写。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SectionOrder {
+    HarnessIdentity,
+    DeploymentPersona,
+    ToolBash,
+    /// 列目录工具(ls)的纪律段;紧跟 bash 收口段,是"看目录里有什么"的专用入口。
+    ToolLs,
+    ToolRead,
+    /// 用户消息中 `@路径` 文件引用说明(对照 dsh FILE_REFERENCE 段),紧跟 read 纪律。
+    FileReference,
+    ToolWrite,
+    ToolGlob,
+    ToolGrep,
+    ToolEdit,
+    /// 宿主能力工具(子代理委派)的工具纪律段;仅在注册了对应工具时注入。
+    ToolAgents,
+    /// 后台任务工具(job 三件套)的工具纪律段。
+    ToolJobs,
+    /// 技能工具(skill)的工具纪律段。
+    ToolSkill,
+    /// 网页抓取工具(web_fetch)的纪律段;随 default_registry 注册。
+    ToolWebFetch,
+    /// 浏览器工具的资源回收纪律段;仅在注册了 browser 工具时注入。
+    ToolBrowser,
+    /// 提问工具(ask)的使用纪律段;仅在注册了 ask 工具时注入。
+    ToolAsk,
+    /// 组装创作工具(create_preset)的纪律段;仅在注册了该工具的部署
+    /// (控制台)注入,配合创造模式 preset 使用。
+    ToolPreset,
+    /// 会话目标工具(get_goal/update_goal)的纪律段;随 default_registry
+    /// 注册,仅存在目标的会话在上下文注入里携带目标详情。
+    ToolGoal,
+    /// 计划呈交工具(exit_plan)的纪律段;仅计划模式注入。
+    ToolPlan,
+    /// MCP 外部工具(`mcp__<server>__<tool>`)的纪律段;仅在至少有一个
+    /// MCP 服务器已连接时注入。
+    ToolMcp,
+    /// 项目记忆(记忆目录写沉淀 + MEMORY.md 索引维护)的纪律段;仅在
+    /// 项目记忆启用(runtime.memoryEnabled)时注入。
+    ToolMemory,
+    /// 工作方式纪律段:
+    /// 有足够信息就行动、不重复推导、不罗列不打算做的选项。
+    ///
+    /// 放在工具段之后、输出纪律之前——它约束的是"怎么推进工作",
+    /// 而不是"怎么说话"。
+    WorkingStyle,
+    /// 输出与沟通纪律段:
+    /// 先给结论、为读者写、可读性优先于简洁。
+    Communication,
+    /// 上下文管理纪律段:
+    /// 上下文变长会被摘要,工作可以继续,不必提前收尾或中途交接。
+    ContextManagement,
+    /// 代码风格纪律段:
+    /// 代码要像周围的代码;注释只写代码本身表达不了的约束。
+    CodeStyle,
+    /// 风险与诚实纪律段:
+    /// 难以撤销/对外的操作先确认;删除前先看目标;如实报告结果。
+    RiskHonesty,
+}
+
+impl SectionOrder {
+    /// Numeric sort key for one repository-owned section placement.
+    pub fn value(self) -> i32 {
+        match self {
+            Self::HarnessIdentity => -1000,
+            Self::DeploymentPersona => 0,
+            Self::ToolBash => 1000,
+            Self::ToolLs => 1050,
+            Self::ToolRead => 1100,
+            Self::FileReference => 1150,
+            Self::ToolWrite => 1200,
+            Self::ToolGlob => 1300,
+            Self::ToolGrep => 1400,
+            Self::ToolEdit => 1500,
+            Self::ToolAgents => 1600,
+            Self::ToolJobs => 1700,
+            Self::ToolSkill => 1800,
+            Self::ToolWebFetch => 1850,
+            Self::ToolBrowser => 1900,
+            Self::ToolAsk => 2000,
+            Self::ToolPreset => 2060,
+            Self::ToolGoal => 1950,
+            Self::ToolPlan => 2050,
+            Self::ToolMcp => 2100,
+            Self::ToolMemory => 2150,
+            Self::WorkingStyle => 2200,
+            Self::Communication => 2250,
+            Self::ContextManagement => 2260,
+            Self::CodeStyle => 2270,
+            Self::RiskHonesty => 2280,
+        }
+    }
+}
+
+/// Per-step inputs resolved while assembling a prompt.
+#[derive(Debug, Clone, Default)]
+pub struct AssembleContext {
+    pub cwd: Option<String>,
+    pub model: Option<String>,
+    pub provider: Option<String>,
+    /// 当前会话权限模式(read-only / auto-edit / plan / full)。
+    pub permission_mode: Option<String>,
+}
+
+/// Audience for a system-prompt section.
+///
+/// `Model` —— 只发给模型(用户不应看到,如工具纪律/工具使用说明)。
+/// `User`  —— 既发给模型,也展示给用户(身份块/部署 persona 等)。
+/// `Context` —— 运行时上下文块,落日志但不在对话流渲染(用户只看到 metadata)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SectionAudience {
+    Model,
+    User,
+    Context,
+}
+
+impl Default for SectionAudience {
+    fn default() -> Self {
+        Self::Model
+    }
+}
+
+/// One contributed system-prompt section.
+#[derive(Clone)]
+pub struct PromptSection {
+    pub name: String,
+    pub order: i32,
+    pub text: PromptText,
+    pub complete: bool,
+    /// Default [`SectionAudience::Model`]:这条 section 是给模型看的私货。
+    /// 身份/部署 persona 类应显式标 `User`,UI 才会展示。
+    pub audience: SectionAudience,
+}
+
+/// Static or per-assembly section/context text.
+#[derive(Clone)]
+pub enum PromptText {
+    Static(String),
+    Dynamic(std::sync::Arc<dyn Fn(&AssembleContext) -> String + Send + Sync>),
+}
+
+impl PromptText {
+    fn resolve(&self, context: &AssembleContext) -> String {
+        match self {
+            Self::Static(text) => text.clone(),
+            Self::Dynamic(provider) => provider(context),
+        }
+    }
+}
+
+/// One dynamic runtime-context contribution.
+#[derive(Clone)]
+pub struct PromptContext {
+    pub name: String,
+    pub order: i32,
+    pub text: PromptText,
+}
+
+/// One resolved section before variable interpolation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AssembledSection {
+    pub name: String,
+    pub text: String,
+    /// 该段受众,UI 渲染时只显示 `User` 类。
+    pub audience: SectionAudience,
+}
+
+/// One resolved runtime-context contribution.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AssembledContext {
+    pub name: String,
+    pub text: String,
+}
+
+/// Tool schemas visible in one assembly plus the pre-restriction name universe.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ToolProviderResult {
+    pub schemas: Vec<ToolSchema>,
+    pub known_names: Option<Vec<String>>,
+}
+
+/// Merge-extensible assembled model input.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PromptAssembly {
+    pub sections: Vec<AssembledSection>,
+    pub contexts: Vec<AssembledContext>,
+    pub tools: Vec<ToolSchema>,
+    pub variables: BTreeMap<String, String>,
+}
+
+/// Plugin config for the shipped system-prompt registry.
+#[derive(Debug, Clone)]
+pub struct SystemPromptConfig {
+    pub include_harness_identity: bool,
+    pub include_runtime_context: bool,
+    pub persona: String,
+    pub tool_order: Option<Vec<String>>,
+}
+
+impl Default for SystemPromptConfig {
+    fn default() -> Self {
+        Self {
+            // 身份句并入 deployment:persona,由用户整段替换,不再单独注入 harness:identity。
+            include_harness_identity: false,
+            include_runtime_context: true,
+            persona: default_persona_template().to_string(),
+            tool_order: None,
+        }
+    }
+}
+
+/// Registry for prompt inputs assembled before each model step.
+#[derive(Clone)]
+pub struct SystemPrompt {
+    config: SystemPromptConfig,
+    sections: HashMap<String, PromptSection>,
+    contexts: HashMap<String, PromptContext>,
+    tool_providers:
+        Vec<std::sync::Arc<dyn Fn(&AssembleContext) -> ToolProviderResult + Send + Sync>>,
+    variables:
+        HashMap<String, std::sync::Arc<dyn Fn(&AssembleContext) -> Option<String> + Send + Sync>>,
+    runtime_context_suppressed: bool,
+}
+
+impl SystemPrompt {
+    /// Create an empty registry with validated config defaults.
+    pub fn new(config: SystemPromptConfig) -> Self {
+        let tool_order = config
+            .tool_order
+            .clone()
+            .map(|order| validate_tool_order(&order));
+        let mut prompt = Self {
+            config: SystemPromptConfig {
+                tool_order,
+                ..config
+            },
+            sections: HashMap::new(),
+            contexts: HashMap::new(),
+            tool_providers: Vec::new(),
+            variables: HashMap::new(),
+            runtime_context_suppressed: false,
+        };
+        if prompt.config.include_harness_identity {
+            let _ = prompt.section(PromptSection {
+                name: "harness:identity".to_string(),
+                order: SectionOrder::HarnessIdentity.value(),
+                text: PromptText::Static("你是由 denia 驱动的 AI 编码 agent。".to_string()),
+                complete: false,
+                // 身份块对用户可见(展示"你被告知的身份")。
+                audience: SectionAudience::User,
+            });
+        }
+        let _ = prompt.section(PromptSection {
+            name: PERSONA_SECTION.to_string(),
+            order: SectionOrder::DeploymentPersona.value(),
+            text: PromptText::Static(prompt.config.persona.clone()),
+            complete: false,
+            // 部署 persona 同样展示给用户;它是 agent 当前行事身份。
+            audience: SectionAudience::User,
+        });
+        if !prompt.config.include_runtime_context {
+            prompt.suppress_runtime_context();
+        }
+        prompt
+    }
+
+    /// 用自定义文本整体替换 `deployment:persona` 段(发给模型的 User 段之一)。
+    pub fn with_persona_text(mut self, text: String) -> Self {
+        self.config.persona = text.clone();
+        if let Some(section) = self.sections.get_mut(PERSONA_SECTION) {
+            section.text = PromptText::Static(text);
+        }
+        self
+    }
+
+    /// 出厂配置 + 自定义 persona 文本,再注册其余 shipped 段由调用方完成。
+    pub fn new_with_persona(config: SystemPromptConfig, persona_text: String) -> Self {
+        let mut config = config;
+        config.persona = persona_text.clone();
+        Self::new(config).with_persona_text(persona_text)
+    }
+
+    /// Register an ordered prompt section. Duplicate names within one registry fail.
+    pub fn section(&mut self, section: PromptSection) -> Result<(), String> {
+        if self.sections.contains_key(&section.name) {
+            return Err(format!(
+                "prompt section \"{}\" is already registered",
+                section.name
+            ));
+        }
+        self.sections.insert(section.name.clone(), section);
+        Ok(())
+    }
+
+    /// Register ordered dynamic runtime context.
+    pub fn context(&mut self, context: PromptContext) -> Result<(), String> {
+        if self.contexts.contains_key(&context.name) {
+            return Err(format!(
+                "prompt context \"{}\" is already registered",
+                context.name
+            ));
+        }
+        self.contexts.insert(context.name.clone(), context);
+        Ok(())
+    }
+
+    /// Suppress every dynamic runtime-context contribution.
+    pub fn suppress_runtime_context(&mut self) {
+        self.runtime_context_suppressed = true;
+    }
+
+    /// Register a tool-schema provider evaluated on each assembly.
+    pub fn tools(
+        &mut self,
+        provider: impl Fn(&AssembleContext) -> ToolProviderResult + Send + Sync + 'static,
+    ) {
+        self.tool_providers.push(std::sync::Arc::new(provider));
+    }
+
+    /// Register a prompt variable referenced as `{{name}}` during render.
+    pub fn variable(
+        &mut self,
+        name: &str,
+        provider: impl Fn(&AssembleContext) -> Option<String> + Send + Sync + 'static,
+    ) -> Result<(), String> {
+        if !is_valid_variable_name(name) {
+            return Err(format!(
+                "invalid prompt variable name \"{name}\" (must match [a-z][a-z0-9_]*)"
+            ));
+        }
+        if self.variables.contains_key(name) {
+            return Err(format!("prompt variable \"{name}\" is already registered"));
+        }
+        self.variables
+            .insert(name.to_string(), std::sync::Arc::new(provider));
+        Ok(())
+    }
+
+    /// Assemble registered providers into one model-facing snapshot.
+    pub fn assemble(&self, context: &AssembleContext) -> Result<PromptAssembly, String> {
+        let mut variables = BTreeMap::new();
+        for (name, provider) in &self.variables {
+            let value = provider(context);
+            if let Some(value) = value {
+                variables.insert(name.clone(), value);
+            }
+        }
+
+        let mut section_definitions: Vec<&PromptSection> = self.sections.values().collect();
+        section_definitions.sort_by(|left, right| {
+            left.order
+                .cmp(&right.order)
+                .then_with(|| left.name.cmp(&right.name))
+        });
+
+        let complete_sections: Vec<&PromptSection> = section_definitions
+            .iter()
+            .copied()
+            .filter(|section| section.complete)
+            .collect();
+        if complete_sections.len() > 1 {
+            return Err(format!(
+                "multiple complete prompt sections are active: {}",
+                complete_sections
+                    .iter()
+                    .map(|section| format!("\"{}\"", section.name))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+        let complete_section = complete_sections.first().map(|section| AssembledSection {
+            name: section.name.clone(),
+            text: section.text.resolve(context),
+            audience: section.audience,
+        });
+
+        let sections = section_definitions
+            .into_iter()
+            .map(|section| AssembledSection {
+                name: section.name.clone(),
+                text: section.text.resolve(context),
+                audience: section.audience,
+            })
+            .collect::<Vec<_>>();
+
+        let contexts: Vec<AssembledContext> = if self.runtime_context_suppressed {
+            Vec::new()
+        } else {
+            let mut entries: Vec<&PromptContext> = self.contexts.values().collect();
+            entries.sort_by_key(|entry| entry.order);
+            entries
+                .into_iter()
+                .map(|entry| AssembledContext {
+                    name: entry.name.clone(),
+                    text: entry.text.resolve(context),
+                })
+                .collect()
+        };
+
+        let mut collected = Vec::new();
+        let mut known_names = HashSet::new();
+        for provider in &self.tool_providers {
+            let result = provider(context);
+            let schemas = result.schemas;
+            let accepted = result
+                .known_names
+                .unwrap_or_else(|| schemas.iter().map(|tool| tool.name.clone()).collect());
+            collected.extend(schemas);
+            known_names.extend(accepted);
+        }
+
+        let tools = order_tools(collected, self.config.tool_order.as_deref(), &known_names)?;
+
+        let mut assembly = PromptAssembly {
+            sections,
+            contexts,
+            tools,
+            variables,
+        };
+
+        if let Some(complete) = complete_section {
+            assembly.sections = vec![complete];
+        }
+        if self.runtime_context_suppressed {
+            assembly.contexts.clear();
+        }
+        Ok(assembly)
+    }
+}
+
+/// 出厂 persona 模板;`SYSTEM.md` 为空时沿用。
+///
+/// 只放**身份**:"我是谁"。它不承担环境事实(工作目录/平台/日期 → `harness:runtime`)、
+/// 工具选择规矩(→ 各 `tool:*` 段)、推进方式(→ `harness:working-style`)与
+/// 表达偏好(→ `harness:communication`)——那些各有归属,混进来只会形成
+/// 重复的第二个来源,还会因为 order 0 的位置反过来压制后面的专职段落。
+pub fn default_persona_template() -> &'static str {
+    "你是由 denia 驱动的 AI 编码 agent。"
+}
+
+fn is_valid_variable_name(name: &str) -> bool {
+    let Some(first) = name.chars().next() else {
+        return false;
+    };
+    first.is_ascii_lowercase()
+        && name
+            .chars()
+            .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '_')
+}
+
+fn validate_tool_order(tool_order: &[String]) -> Vec<String> {
+    let mut seen = HashSet::new();
+    for name in tool_order {
+        if !seen.insert(name.clone()) {
+            panic!("toolOrder lists \"{name}\" more than once");
+        }
+    }
+    if !seen.contains(TOOL_ORDER_REST) {
+        panic!("toolOrder must contain the \"{TOOL_ORDER_REST}\" rest entry");
+    }
+    tool_order.to_vec()
+}
+
+fn order_tools(
+    tools: Vec<ToolSchema>,
+    tool_order: Option<&[String]>,
+    known_names: &HashSet<String>,
+) -> Result<Vec<ToolSchema>, String> {
+    if tools.iter().any(|tool| tool.name == TOOL_ORDER_REST) {
+        return Err(format!(
+            "tool provider returned reserved tool name \"{TOOL_ORDER_REST}\""
+        ));
+    }
+    let Some(tool_order) = tool_order else {
+        let mut ordered = tools;
+        ordered.sort_by(|left, right| left.name.cmp(&right.name));
+        return Ok(ordered);
+    };
+    let unknown: Vec<&String> = tool_order
+        .iter()
+        .filter(|name| **name != TOOL_ORDER_REST && !known_names.contains(*name))
+        .collect();
+    if !unknown.is_empty() {
+        let mut known: Vec<&String> = known_names.iter().collect();
+        known.sort();
+        return Err(format!(
+            "toolOrder lists unregistered tools {}; known tools: {}",
+            unknown
+                .iter()
+                .map(|name| format!("\"{name}\""))
+                .collect::<Vec<_>>()
+                .join(", "),
+            if known.is_empty() {
+                "(none)".to_string()
+            } else {
+                known
+                    .iter()
+                    .map(|name| (*name).as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            }
+        ));
+    }
+    let listed: HashSet<&str> = tool_order.iter().map(String::as_str).collect();
+    let mut by_name: HashMap<String, ToolSchema> = tools
+        .into_iter()
+        .map(|tool| (tool.name.clone(), tool))
+        .collect();
+    let mut rest: Vec<ToolSchema> = by_name
+        .values()
+        .filter(|tool| !listed.contains(tool.name.as_str()))
+        .cloned()
+        .collect();
+    rest.sort_by(|left, right| left.name.cmp(&right.name));
+    Ok(tool_order
+        .iter()
+        .flat_map(|name| {
+            if name == TOOL_ORDER_REST {
+                rest.clone()
+            } else {
+                by_name.remove(name).into_iter().collect::<Vec<_>>()
+            }
+        })
+        .collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn assembles_persona_and_tools() {
+        let mut prompt = SystemPrompt::new(SystemPromptConfig::default());
+        prompt
+            .variable("cwd", |_| Some("/tmp/ws".to_string()))
+            .unwrap();
+        prompt.tools(|_| ToolProviderResult {
+            schemas: vec![ToolSchema {
+                name: "echo".to_string(),
+                description: "echo".to_string(),
+                parameters: serde_json::json!({}),
+            }],
+            known_names: None,
+        });
+        let assembly = prompt
+            .assemble(&AssembleContext {
+                cwd: Some("/tmp/ws".to_string()),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(
+            assembly
+                .sections
+                .first()
+                .map(|section| section.name.as_str()),
+            Some(PERSONA_SECTION)
+        );
+        assert!(
+            !assembly
+                .sections
+                .iter()
+                .any(|section| section.name == "harness:identity")
+        );
+        assert!(render_prompt(&assembly).contains("denia 驱动的"));
+        assert_eq!(assembly.tools.len(), 1);
+    }
+
+    #[test]
+    fn with_persona_text_replaces_deployment_persona() {
+        let custom = "你是自定义 agent,工作目录 {{cwd}}。".to_string();
+        let mut prompt =
+            SystemPrompt::new_with_persona(SystemPromptConfig::default(), custom.clone());
+        prompt
+            .variable("cwd", |_| Some("/tmp/custom".to_string()))
+            .unwrap();
+        let assembly = prompt
+            .assemble(&AssembleContext {
+                cwd: Some("/tmp/custom".to_string()),
+                ..Default::default()
+            })
+            .unwrap();
+        assert!(
+            !assembly
+                .sections
+                .iter()
+                .any(|section| section.name == "harness:identity")
+        );
+        let persona = assembly
+            .sections
+            .iter()
+            .find(|section| section.name == PERSONA_SECTION)
+            .expect("persona section");
+        assert!(persona.text.contains("{{cwd}}"));
+        assert!(!persona.text.contains("denia 里的编码 agent"));
+        let rendered = render_prompt(&assembly);
+        assert!(rendered.contains("/tmp/custom"));
+        assert!(rendered.contains("自定义 agent"));
+    }
+
+    #[test]
+    fn runtime_context_joins_like_dsh() {
+        let mut prompt = SystemPrompt::new(SystemPromptConfig::default());
+        prompt
+            .context(PromptContext {
+                name: "policy".to_string(),
+                order: 10,
+                text: PromptText::Static("Mode: read-only.".to_string()),
+            })
+            .unwrap();
+        let assembly = prompt.assemble(&AssembleContext::default()).unwrap();
+        assert_eq!(
+            render_context_snapshot(&assembly),
+            format!("{RUNTIME_CONTEXT_HEADER}\n\nMode: read-only.")
+        );
+    }
+
+    /// 出厂 persona 是 prompt 里第一个被读到的段落(order 0),比后面的工具纪律段
+    /// 更有分量。它只放身份句:一旦它开始讲工具选择/环境事实/表达偏好,就等于
+    /// 在专职段落之外造了第二个来源,而且因为位置靠前会压过后者。
+    #[test]
+    fn default_persona_stays_identity_only() {
+        let persona = default_persona_template();
+        assert!(
+            persona.contains("denia 驱动的 AI 编码 agent"),
+            "出厂 persona 必须声明身份:{persona}"
+        );
+        for banned in [
+            // 环境事实 → harness:runtime
+            "{{cwd}}",
+            "工作目录",
+            // 工具选择 → 各 tool:* 段
+            "bash",
+            "ls 列目录",
+            "glob",
+            "grep",
+            "read_file",
+            // 推进方式 → harness:working-style
+            "每步聚焦",
+            "能回答时就停止",
+            // 表达偏好 → harness:communication
+            "简体中文",
+        ] {
+            assert!(
+                !persona.contains(banned),
+                "出厂 persona 混入了非身份职责({banned}),应归入专职段落:{persona}"
+            );
+        }
+    }
+
+    /// 环境事实(工作目录)由 `harness:runtime` 承担,它是动态段:
+    /// 会话切换工作目录时会重新注入,而 persona 是静态的。
+    #[test]
+    fn runtime_context_carries_working_directory() {
+        let mut prompt = SystemPrompt::new(SystemPromptConfig::default());
+        prompt
+            .context(PromptContext {
+                name: "harness:runtime".to_string(),
+                order: 10,
+                text: PromptText::Dynamic(std::sync::Arc::new(|context| {
+                    format!(
+                        "工作目录:{}（相对路径以它为根）。",
+                        context.cwd.as_deref().unwrap_or("(unknown)")
+                    )
+                })),
+            })
+            .unwrap();
+        prompt.variable("cwd", |context| context.cwd.clone()).unwrap();
+        let assembly = prompt
+            .assemble(&AssembleContext {
+                cwd: Some("/tmp/ws".to_string()),
+                ..Default::default()
+            })
+            .unwrap();
+        let snapshot = render_context_snapshot(&assembly);
+        assert!(
+            snapshot.contains("工作目录:/tmp/ws"),
+            "运行时快照必须携带工作目录:{snapshot}"
+        );
+        assert!(
+            snapshot.contains("相对路径以它为根"),
+            "运行时快照必须说明相对路径基准:{snapshot}"
+        );
+    }
+}

@@ -1,0 +1,204 @@
+/* 文件读取标签页:内部条目标签 + 路径头 + 只读代码正文。
+ *
+ * 视觉与「工作区文件」面板同族(头部一条分隔线 + 正文铺满剩余高度),
+ * 颜色全部走语义 token,暗/亮主题自动跟随;正文复用对话流的 shiki 主题
+ * 变量(`--shiki-*`),所以与代码卡片的配色天然一致。 */
+
+.file-reader {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  background: var(--bg-base);
+}
+
+/* ---- 内部条目标签(多文件时出现) ---- */
+
+.file-reader-tabs {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 4px;
+  width: 100%;
+  min-width: 0;
+  padding: 8px 10px 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  overscroll-behavior-x: contain;
+  scrollbar-width: thin;
+}
+
+.file-reader-tab {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  max-width: 180px;
+  border: 1px solid transparent;
+  border-radius: var(--r-xs);
+  background: transparent;
+  color: var(--label-tertiary);
+}
+
+.file-reader-tab:hover {
+  background: var(--hover-fill);
+  color: var(--label-secondary);
+}
+
+.file-reader-tab.active {
+  border-color: var(--border-l1);
+  background: var(--bg-layer-2);
+  color: var(--label-primary);
+}
+
+.file-reader-tab-main {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  padding: 4px 2px 4px 7px;
+  border: none;
+  background: transparent;
+  color: inherit;
+  font-size: 11.5px;
+  font-family: inherit;
+  cursor: pointer;
+}
+
+.file-reader-tab-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.file-reader-tab-close {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  margin-right: 3px;
+  padding: 0;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--label-caption);
+  cursor: pointer;
+}
+
+.file-reader-tab-close:hover {
+  background: var(--active-fill);
+  color: var(--label-primary);
+}
+
+/* ---- 头部:路径 + 行数/大小 + 动作 ---- */
+
+.file-reader-head {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border-l1);
+}
+
+.file-reader-path {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  font-size: 12px;
+  color: var(--label-secondary);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.file-reader-meta {
+  flex: 0 0 auto;
+  font-size: 11px;
+  color: var(--label-caption);
+  white-space: nowrap;
+}
+
+.file-reader-icon-btn {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border: 1px solid var(--border-l1);
+  border-radius: var(--r-xs);
+  background: transparent;
+  color: var(--label-tertiary);
+  cursor: pointer;
+  transition: background 0.12s var(--ease), color 0.12s var(--ease);
+}
+
+.file-reader-icon-btn:hover {
+  background: var(--hover-fill);
+  color: var(--label-primary);
+}
+
+/* ---- 正文 ---- */
+
+.file-reader-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+}
+
+.file-reader-code {
+  /* 代码块自身带内边距,这里不再叠加,避免出现双重留白。 */
+  padding: 0;
+}
+
+.file-reader-code .shiki {
+  margin: 0;
+  border-radius: 0;
+  font-size: 12.5px;
+  line-height: 1.6;
+}
+
+.file-reader-hint {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 16px 14px;
+  font-size: 12px;
+  color: var(--label-tertiary);
+}
+
+.file-reader-error {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 16px 14px;
+}
+
+.file-reader-error p {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--label-secondary);
+  word-break: break-word;
+}
+
+.file-reader-retry {
+  padding: 5px 12px;
+  border: 1px solid var(--border-l2);
+  border-radius: var(--r-xs);
+  background: transparent;
+  color: var(--label-secondary);
+  font-size: 12px;
+  font-family: inherit;
+  cursor: pointer;
+  transition: background 0.12s var(--ease), color 0.12s var(--ease);
+}
+
+.file-reader-retry:hover {
+  background: var(--hover-fill);
+  color: var(--label-primary);
+}

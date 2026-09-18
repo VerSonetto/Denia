@@ -1,0 +1,357 @@
+/* 提供方编辑弹窗:设置弹窗之上的居中模态层;宽 <768 时占满整屏。 */
+
+.overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 70;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 28px 20px;
+}
+
+.backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.32);
+  backdrop-filter: blur(2px);
+}
+
+.panel {
+  position: relative;
+  z-index: 1;
+  width: min(640px, 100%);
+  /* 面板永远不超出可视区:超出交给 .body 自己滚,而不是把顶部顶出屏幕
+     (flex 居中 + 超高内容会从上下两端一起溢出,顶部就再也够不到了)。 */
+  max-height: 100%;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-layer-1);
+  border: 1px solid var(--border-l2);
+  border-radius: 18px;
+  overflow: hidden;
+  box-shadow: var(--shadow-float);
+  animation: panel-in 0.18s var(--ease);
+}
+
+@keyframes panel-in {
+  from {
+    transform: translateY(8px) scale(0.99);
+    opacity: 0;
+  }
+  to {
+    transform: none;
+    opacity: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .panel {
+    animation: none;
+  }
+}
+
+.head {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 18px 22px 14px;
+  border-bottom: 1px solid var(--border-l1);
+}
+
+.head h3 {
+  margin: 0;
+  font-size: 17px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  color: var(--label-primary);
+}
+
+.close {
+  width: 32px;
+  height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: 9px;
+  background: var(--hover-fill);
+  color: var(--label-secondary);
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+  transition: background 0.15s var(--ease), color 0.15s var(--ease);
+}
+
+.close:hover {
+  background: var(--active-fill);
+  color: var(--label-primary);
+}
+
+.close:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+/* ---- 步进条 ---- */
+
+.steps {
+  flex: none;
+  display: flex;
+  gap: 6px;
+  padding: 12px 22px 0;
+}
+
+.stepItem {
+  flex: 1;
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 7px 10px;
+  border: 1px solid transparent;
+  border-radius: 9px;
+  background: transparent;
+  color: var(--label-caption);
+  font-size: 12px;
+  font-weight: 550;
+  font-family: inherit;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background 0.15s var(--ease), color 0.15s var(--ease), border-color 0.15s var(--ease);
+}
+
+.stepItem:hover {
+  color: var(--label-primary);
+  background: var(--hover-fill);
+}
+
+.stepItem:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+.stepIndex {
+  flex: none;
+  width: 18px;
+  height: 18px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  border: 1px solid var(--border-l2);
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+}
+
+.stepActive {
+  color: var(--label-primary);
+  border-color: var(--border-l2);
+  background: var(--accent-soft);
+}
+
+.stepDone {
+  color: var(--label-secondary);
+}
+
+.stepDone .stepIndex {
+  background: var(--label-primary);
+  border-color: var(--label-primary);
+  color: var(--bg-base);
+}
+
+/* ---- 正文 ---- */
+
+.body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 18px 22px 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+.section {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+}
+
+.sectionTitle {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--label-caption);
+}
+
+.sectionHint {
+  margin: -6px 0 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--label-tertiary);
+}
+
+.gridTwo {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  /* 字段提示文案长短不一:底对齐保证输入框成行,不因 hint 挤错位。 */
+  align-items: end;
+}
+
+/* ---- 自定义请求头 ---- */
+
+.headerRows {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.headerRow {
+  display: grid;
+  grid-template-columns: minmax(130px, 1.2fr) minmax(120px, 1fr) 30px;
+  gap: 8px;
+  align-items: center;
+}
+
+.headerRemove {
+  width: 30px;
+  height: 30px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--label-caption);
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+  transition: background 0.12s var(--ease), color 0.12s var(--ease);
+}
+
+.headerRemove:hover {
+  background: var(--hover-fill);
+  color: var(--label-primary);
+}
+
+.headerAdd {
+  align-self: flex-start;
+  border: 1px dashed var(--border-l2);
+  border-radius: 10px;
+  background: transparent;
+  color: var(--label-secondary);
+  font-size: 12.5px;
+  font-weight: 550;
+  font-family: inherit;
+  padding: 7px 14px;
+  cursor: pointer;
+  transition: background 0.12s var(--ease), color 0.12s var(--ease), border-color 0.12s var(--ease);
+}
+
+.headerAdd:hover {
+  color: var(--label-primary);
+  border-color: var(--border-l3);
+  background: var(--hover-fill);
+}
+
+.footRow {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  padding-top: 4px;
+}
+
+/* ---- 密钥区 ---- */
+
+.keyValueWrap {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.keyOptional {
+  font-size: 11.5px;
+  color: var(--label-caption);
+}
+
+.keyWarn {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 10px 12px;
+  border: 1px dashed var(--border-l2);
+  border-radius: 10px;
+}
+
+.keyWarnText {
+  flex: 1;
+  min-width: 120px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--label-tertiary);
+}
+
+.keyUnknown {
+  margin: 0;
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--label-caption);
+}
+
+.modelsError {
+  margin: 0;
+  font-size: 12px;
+  color: var(--label-primary);
+}
+
+/* ---- 底栏 ---- */
+
+.foot {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 14px 22px;
+  border-top: 1px solid var(--border-l1);
+}
+
+.footError {
+  font-size: 12px;
+  color: var(--label-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.footActions {
+  display: flex;
+  gap: 10px;
+  margin-left: auto;
+}
+
+@media (max-width: 767px) {
+  .overlay {
+    padding: 0;
+  }
+
+  .panel {
+    width: 100%;
+    height: 100%;
+    max-height: none;
+    border: none;
+    border-radius: 0;
+  }
+
+  .gridTwo {
+    grid-template-columns: 1fr;
+  }
+}

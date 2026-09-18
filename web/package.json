@@ -1,0 +1,44 @@
+{
+  "name": "@denia/console",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "check": "node scripts/check-hooks.mjs && node scripts/check-fold.mjs && node scripts/check-turn-usage.mjs && node scripts/check-tool-display.mjs && node scripts/check-stick.mjs && node scripts/check-side-pane.mjs && node scripts/check-side-pane-render.mjs && node scripts/check-file-tree.mjs && node scripts/check-review-commit.mjs && node scripts/check-markdown-repair.mjs",
+    "build": "node scripts/check-hooks.mjs && node scripts/check-stick.mjs && node scripts/check-side-pane.mjs && node scripts/check-side-pane-render.mjs && node scripts/check-file-tree.mjs && node scripts/check-review-commit.mjs && node scripts/check-markdown-repair.mjs && tsc -b && vite build && node ../scripts/precompress.mjs",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@shikijs/langs": "^4.4.3",
+    "@tauri-apps/api": "^2.11.1",
+    "@xterm/addon-fit": "^0.11.0",
+    "@xterm/addon-web-links": "^0.12.0",
+    "@xterm/xterm": "^6.0.0",
+    "katex": "^0.18.5",
+    "mdast-util-from-markdown": "^2.0.3",
+    "mdast-util-gfm": "^3.1.0",
+    "mdast-util-math": "^3.0.0",
+    "micromark-core-commonmark": "^2.0.3",
+    "micromark-extension-gfm": "^3.0.0",
+    "micromark-extension-math": "^3.1.0",
+    "micromark-util-character": "^2.1.1",
+    "micromark-util-classify-character": "^2.0.1",
+    "micromark-util-sanitize-uri": "^2.0.1",
+    "micromark-util-symbol": "^2.0.1",
+    "micromark-util-types": "^2.0.2",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "shiki": "^4.4.3"
+  },
+  "devDependencies": {
+    "@types/mdast": "^4.0.4",
+    "@types/react": "^18.3.20",
+    "@types/react-dom": "^18.3.7",
+    "@vitejs/plugin-react": "^4.4.1",
+    "esbuild": "^0.28.2",
+    "jsdom": "^30.0.1",
+    "typescript": "~5.8.3",
+    "vite": "^6.3.5"
+  }
+}

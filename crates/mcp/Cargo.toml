@@ -1,0 +1,30 @@
+[package]
+name = "denia-mcp"
+description = "MCP (Model Context Protocol) client: JSON-RPC over stdio transports"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "denia-mcp-fixture"
+path = "tests/fixture_server.rs"
+
+[[bin]]
+name = "denia-mcp-http-fixture"
+path = "tests/http_fixture_server.rs"
+
+[dependencies]
+denia-core = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+async-trait = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+arc-swap = { workspace = true }
+reqwest = { workspace = true }
+futures = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }

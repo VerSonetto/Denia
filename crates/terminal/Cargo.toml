@@ -1,0 +1,22 @@
+[package]
+name = "denia-terminal"
+description = "Interactive PTY terminals for the console side pane"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+denia-core = { workspace = true }
+denia-tools = { workspace = true }
+
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+futures = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+base64 = { workspace = true }
+uuid = { workspace = true }
+
+portable-pty = "0.9.0"

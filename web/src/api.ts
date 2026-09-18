@@ -1,0 +1,1238 @@
+import type {
+  AgentPresetRow,
+  AgentPresetsView,
+  AskAnswer,
+  CredentialInfo,
+  DiscoveredModel,
+  ModelCatalog,
+  ModelSelection,
+  PermissionMode,
+  ProviderInfo,
+  SessionEnvelope,
+  SessionHeader,
+  SessionSummary,
+  SettingsDescribe,
+  StreamChunk,
+  TokenUsage,
+  WorkspaceRecord,
+  WireProtocol,
+} from './types'
+import { subscribeServerEvents } from './serverEvents'
+import { noteSseFrame } from './pushChannel'
+
+export type { AgentPresetRow, AgentPresetsView } from './types'
+
+export class ApiError extends Error {
+  constructor(
+    public code: string,
+    message: string,
+    public status: number,
+  ) {
+    super(message)
+  }
+}
+
+/** 非 follow 型请求的默认超时:15s(挂死的请求不能卡住 UI);传 0 表示不设超时。 */
+const DEFAULT_TIMEOUT_MS = 15_000
+
+async function http<T>(path: string, init?: RequestInit, timeoutMs = DEFAULT_TIMEOUT_MS): Promise<T> {
+  const timeout = new AbortController()
+  // 时长由用户手动操作决定的请求(如原生目录选择器)必须传 0,否则超时 abort 会在
+  // 用户还没选完时掐断请求,后端随之杀掉弹窗进程。
+  const timer = timeoutMs > 0 ? window.setTimeout(() => timeout.abort(), timeoutMs) : undefined
+  try {
+    const response = await fetch(path, {
+      headers: { 'content-type': 'application/json' },
+      ...init,
+      signal: init?.signal ?? timeout.signal,
+    })
+    if (!response.ok) {
+      let code = `http-${response.status}`
+      let message = response.statusText
+      try {
+        const body = await response.json()
+        if (body?.error) {
+          code = body.error.code ?? code
+          message = body.error.message ?? message
+        }
+      } catch {
+        /* body was not JSON */
+      }
+      throw new ApiError(code, message, response.status)
+    }
+    return response.json() as Promise<T>
+  } finally {
+    window.clearTimeout(timer)
+  }
+}
+
+export function getSettings(): Promise<SettingsDescribe> {
+  return http('/api/settings')
+}
+
+export function updateNamespace(
+  ns: string,
+  value: unknown,
+  expectedRevision?: number,
+): Promise<unknown> {
+  return http(`/api/settings/${encodeURIComponent(ns)}`, {
+    method: 'PATCH',
+    body: JSON.stringify({ value, expectedRevision }),
+  })
+}
+
+export function replaceNamespace(
+  ns: string,
+  value: unknown,
+  expectedRevision?: number,
+): Promise<unknown> {
+  return http(`/api/settings/${encodeURIComponent(ns)}`, {
+    method: 'PUT',
+    body: JSON.stringify({ value, expectedRevision }),
+  })
+}
+
+export async function describeCredentials(
+  refs: string[],
+): Promise<Record<string, CredentialInfo>> {
+  if (refs.length === 0) return {}
+  const data = await http<{ credentials: Record<string, CredentialInfo> }>(
+    `/api/credentials?refs=${encodeURIComponent(refs.join(','))}`,
+  )
+  return data.credentials
+}
+
+export function setCredential(reference: string, value: string): Promise<unknown> {
+  return http(`/api/credentials/${encodeURIComponent(reference)}`, {
+    method: 'PUT',
+    body: JSON.stringify({ value }),
+  })
+}
+
+export function unsetCredential(reference: string): Promise<unknown> {
+  return http(`/api/credentials/${encodeURIComponent(reference)}`, { method: 'DELETE' })
+}
+
+export async function getProviders(): Promise<{
+  providers: ProviderInfo[]
+  configurable: unknown[]
+}> {
+  return http('/api/llm/providers')
+}
+
+export function getCatalog(): Promise<ModelCatalog> {
+  return http('/api/llm/catalog')
+}
+
+export function discoverModels(
+  baseURL: string,
+  apiKey?: string,
+  apiKeyEnv?: string,
+  protocol?: WireProtocol,
+  headers?: Record<string, string>,
+): Promise<DiscoveredModel[]> {
+  return http<{ models: DiscoveredModel[] }>('/api/llm/discover', {
+    method: 'POST',
+    body: JSON.stringify({ baseURL, apiKey, apiKeyEnv, protocol, headers }),
+  }).then((data) => data.models)
+}
+
+/** Parses one SSE response body, invoking `onFrame` per data payload. */
+async function parseSseBody(
+  response: Response,
+  onFrame: (payload: unknown, isError: boolean) => void,
+  signal: AbortSignal,
+): Promise<void> {
+  if (!response.body) return
+  const reader = response.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+  let isError = false
+  for (;;) {
+    const { done, value } = await reader.read()
+    if (done) break
+    buffer += decoder.decode(value, { stream: true })
+    const lines = buffer.split('\n')
+    buffer = lines.pop() ?? ''
+    for (const line of lines) {
+      const trimmed = line.trimEnd()
+      if (trimmed.startsWith('event:')) {
+        isError = trimmed.slice(6).trim() === 'error'
+      } else if (trimmed.startsWith('data:')) {
+        const payload = trimmed.slice(5).trim()
+        if (!payload) continue
+        try {
+          onFrame(JSON.parse(payload), isError)
+        } catch {
+          /* skip malformed frame */
+        }
+        isError = false
+      }
+    }
+    if (signal.aborted) break
+  }
+}
+
+/* ---- llm chat (SSE, used by prompt optimization) ---- */
+
+export interface ChatMessageInput {
+  role: 'system' | 'user' | 'assistant'
+  content: string
+}
+
+export interface ChatCompletionOptions {
+  provider: string
+  model: string
+  reasoningEffort?: string
+  system?: string
+  messages: ChatMessageInput[]
+}
+
+/** 优化类长请求允许更长的等待时间(流式,非 15s 默认)。 */
+const CHAT_TIMEOUT_MS = 120_000
+
+interface ChatStreamPayload {
+  type?: string
+  text?: string
+  block?: { type?: string; text?: string }
+  reason?: { kind?: string; failure?: { code?: string; message?: string } }
+  code?: string
+  message?: string
+}
+
+/** Calls the SSE chat smoke-test endpoint and resolves with complete text. */
+export async function chatCompletion(
+  options: ChatCompletionOptions,
+  signal?: AbortSignal,
+): Promise<string> {
+  const controller = new AbortController()
+  let timedOut = false
+  const timer = window.setTimeout(() => {
+    timedOut = true
+    controller.abort()
+  }, CHAT_TIMEOUT_MS)
+  const onOuterAbort = () => controller.abort()
+  if (signal) {
+    if (signal.aborted) controller.abort()
+    else signal.addEventListener('abort', onOuterAbort, { once: true })
+  }
+  try {
+    let response: Response
+    try {
+      response = await fetch('/api/llm/chat', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          provider: options.provider,
+          model: options.model,
+          reasoningEffort: options.reasoningEffort,
+          system: options.system,
+          messages: options.messages.map(({ role, content }) => ({ role, content })),
+        }),
+        signal: controller.signal,
+      })
+    } catch (error) {
+      if (controller.signal.aborted) {
+        throw new ApiError(
+          timedOut ? 'chat/timeout' : 'chat/aborted',
+          timedOut ? '模型请求超时' : '模型请求已取消',
+          timedOut ? 504 : 499,
+        )
+      }
+      throw error
+    }
+    if (!response.ok) {
+      let code = `http-${response.status}`
+      let message = response.statusText
+      try {
+        const body = await response.json()
+        if (body?.error) {
+          code = body.error.code ?? code
+          message = body.error.message ?? message
+        }
+      } catch {
+        /* body was not JSON */
+      }
+      throw new ApiError(code, message, response.status)
+    }
+    if (!response.body) {
+      throw new ApiError('chat/empty-body', '模型没有返回内容', 500)
+    }
+    const reader = response.body.getReader()
+    const decoder = new TextDecoder()
+    let buffer = ''
+    let isError = false
+    let text = ''
+    let failure: { code?: string; message?: string } | null = null
+    for (;;) {
+      const { done, value } = await reader.read()
+      if (done) break
+      buffer += decoder.decode(value, { stream: true })
+      const lines = buffer.split('\n')
+      buffer = lines.pop() ?? ''
+      for (const line of lines) {
+        const trimmed = line.trimEnd()
+        if (trimmed.startsWith('event:')) {
+          isError = trimmed.slice(6).trim() === 'error'
+        } else if (trimmed.startsWith('data:')) {
+          const payload = trimmed.slice(5).trim()
+          if (!payload) continue
+          let parsed: ChatStreamPayload
+          try {
+            parsed = JSON.parse(payload) as ChatStreamPayload
+          } catch {
+            continue
+          }
+          if (isError) {
+            failure = parsed as { code?: string; message?: string }
+            isError = false
+            continue
+          }
+          if (parsed.type === 'text-delta' && typeof parsed.text === 'string') {
+            text += parsed.text
+          } else if (
+            parsed.type === 'block-end' &&
+            parsed.block?.type === 'text' &&
+            typeof parsed.block.text === 'string'
+          ) {
+            text = parsed.block.text
+          } else if (parsed.type === 'finish') {
+            const kind = parsed.reason?.kind
+            if (kind && kind !== 'stop') {
+              failure = parsed.reason?.failure ?? { message: '模型输出失败' }
+            }
+          }
+        }
+      }
+      if (controller.signal.aborted) break
+    }
+    if (controller.signal.aborted) {
+      throw new ApiError(
+        timedOut ? 'chat/timeout' : 'chat/aborted',
+        timedOut ? '模型请求超时' : '模型请求已取消',
+        timedOut ? 504 : 499,
+      )
+    }
+    if (failure) {
+      throw new ApiError(
+        failure.code ?? 'chat/failed',
+        failure.message ?? '模型调用失败',
+        500,
+      )
+    }
+    return text.trim()
+  } finally {
+    window.clearTimeout(timer)
+    signal?.removeEventListener('abort', onOuterAbort)
+  }
+}
+
+/* ---- llm chat probe (settings 连通性测试的流式回调版) ---- */
+
+export interface ProbeStreamHandlers {
+  /** 响应头已返回、开始读流(连接 OK,进入等待模型阶段)。 */
+  onConnected: () => void
+  /** 收到第一个输出增量(即 TTFT 锚点)。 */
+  onFirstToken: () => void
+  /** 每个输出增量(驱动流式进度)。 */
+  onDelta: (text: string) => void
+  /** 服务端上报的 token 用量。 */
+  onUsage: (usage: TokenUsage) => void
+  /** 正常结束。 */
+  onSuccess: (reason: string) => void
+  /** 流内/握手失败(错误码、状态与网关返回体由后端脱敏后随 failure 下发)。 */
+  onFailure: (failure: { code: string; message: string; status?: number; requestId?: string; retryAfterMs?: number }) => void
+}
+
+/**
+ * 调一次 /api/llm/chat 并把 StreamChunk 翻译成探测回调。
+ * 与 chatCompletion 的区别:不聚合文本,而是边流边回报,供进度/TTFT/用量展示。
+ */
+export async function probeChatStream(
+  options: { provider: string; model: string; reasoningEffort?: string; prompt: string; maxTokens?: number },
+  handlers: ProbeStreamHandlers,
+  signal?: AbortSignal,
+  timeoutMs = 120_000,
+): Promise<void> {
+  const controller = new AbortController()
+  let timedOut = false
+  const timer = window.setTimeout(() => {
+    timedOut = true
+    controller.abort()
+  }, timeoutMs)
+  const onOuterAbort = () => controller.abort()
+  if (signal) {
+    if (signal.aborted) controller.abort()
+    else signal.addEventListener('abort', onOuterAbort, { once: true })
+  }
+  const toFailure = (raw: {
+    code?: string
+    message?: string
+    status?: number
+    requestId?: string
+    providerRetryAfterMs?: number
+  }) => ({
+    code: raw.code ?? 'probe/failed',
+    message: raw.message ?? '模型调用失败',
+    status: raw.status,
+    requestId: raw.requestId,
+    retryAfterMs: raw.providerRetryAfterMs,
+  })
+  try {
+    let response: Response
+    try {
+      response = await fetch('/api/llm/chat', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          provider: options.provider,
+          model: options.model,
+          reasoningEffort: options.reasoningEffort,
+          prompt: options.prompt,
+          ...(options.maxTokens !== undefined ? { max_tokens: options.maxTokens } : {}),
+        }),
+        signal: controller.signal,
+      })
+    } catch (error) {
+      if (controller.signal.aborted) {
+        handlers.onFailure(
+          timedOut
+            ? { code: 'probe/timeout', message: '连接超时,网关长时间无响应', status: 504 }
+            : { code: 'probe/aborted', message: '测试已取消' },
+        )
+        return
+      }
+      handlers.onFailure({ code: 'probe/network', message: error instanceof Error ? error.message : String(error) })
+      return
+    }
+    if (!response.ok) {
+      let code = `http-${response.status}`
+      let message = response.statusText
+      try {
+        const body = await response.json()
+        if (body?.error) {
+          code = body.error.code ?? code
+          message = body.error.message ?? message
+        }
+      } catch {
+        /* body was not JSON */
+      }
+      handlers.onFailure({ code, message, status: response.status })
+      return
+    }
+    if (!response.body) {
+      handlers.onFailure({ code: 'probe/empty-body', message: '网关没有返回内容', status: response.status })
+      return
+    }
+    handlers.onConnected()
+    const reader = response.body.getReader()
+    const decoder = new TextDecoder()
+    let buffer = ''
+    let isErrorFrame = false
+    let settled = false
+    for (;;) {
+      const { done, value } = await reader.read()
+      if (done) break
+      buffer += decoder.decode(value, { stream: true })
+      const lines = buffer.split('\n')
+      buffer = lines.pop() ?? ''
+      for (const line of lines) {
+        const trimmed = line.trimEnd()
+        if (trimmed.startsWith('event:')) {
+          isErrorFrame = trimmed.slice(6).trim() === 'error'
+        } else if (trimmed.startsWith('data:')) {
+          const payload = trimmed.slice(5).trim()
+          if (!payload) continue
+          let parsed: StreamChunk | { code?: string; message?: string; status?: number; requestId?: string; providerRetryAfterMs?: number }
+          try {
+            parsed = JSON.parse(payload)
+          } catch {
+            continue
+          }
+          if (isErrorFrame) {
+            settled = true
+            handlers.onFailure(toFailure(parsed as { code?: string; message?: string }))
+            isErrorFrame = false
+            continue
+          }
+          const chunk = parsed as StreamChunk
+          if (chunk.type === 'text-delta') {
+            handlers.onFirstToken()
+            handlers.onDelta(chunk.text)
+          } else if (chunk.type === 'reasoning-delta') {
+            handlers.onFirstToken()
+          } else if (chunk.type === 'usage') {
+            handlers.onUsage(chunk.usage)
+          } else if (chunk.type === 'finish') {
+            settled = true
+            if (chunk.reason.kind === 'stop' || chunk.reason.kind === 'tool-calls') {
+              handlers.onSuccess(chunk.reason.kind)
+            } else {
+              handlers.onFailure(
+                toFailure(
+                  chunk.reason.kind === 'error' || chunk.reason.kind === 'aborted'
+                    ? (chunk.reason.failure as { code?: string; message?: string })
+                    : { message: '输出提前截断' },
+                ),
+              )
+            }
+          }
+        }
+      }
+      if (controller.signal.aborted) break
+    }
+    if (!settled) {
+      if (controller.signal.aborted) {
+        handlers.onFailure(
+          timedOut
+            ? { code: 'probe/timeout', message: '连接超时,网关长时间无响应', status: 504 }
+            : { code: 'probe/aborted', message: '测试已取消' },
+        )
+      } else {
+        handlers.onFailure({ code: 'probe/empty-body', message: '流在完成前提前关闭', status: response.status })
+      }
+    }
+  } finally {
+    window.clearTimeout(timer)
+    signal?.removeEventListener('abort', onOuterAbort)
+  }
+}
+
+/* ---- sessions ---- */
+
+export function listSessions(): Promise<{ sessions: SessionSummary[] }> {
+  return http('/api/sessions')
+}
+
+export function createSession(options: {
+  workspaceId?: string
+  cwd?: string
+  /** 会话运行的 agent preset;缺省用设置里的默认值。 */
+  agentPreset?: string
+}): Promise<{ session: SessionSummary & { cwd: string } }> {
+  return http('/api/sessions', {
+    method: 'POST',
+    body: JSON.stringify(options),
+  })
+}
+
+/* ---- agent presets ---- */
+
+export function listAgentPresets(): Promise<AgentPresetsView> {
+  return http('/api/agent-presets')
+}
+
+export function getAgentPreset(
+  id: string,
+): Promise<{ preset: AgentPresetRow; text: string }> {
+  return http(`/api/agent-presets/${encodeURIComponent(id)}`)
+}
+
+export function copyAgentPreset(body: {
+  from: string
+  id: string
+  name?: string
+}): Promise<{ preset: AgentPresetRow }> {
+  return http('/api/agent-presets', {
+    method: 'POST',
+    body: JSON.stringify(body),
+  })
+}
+
+export function deleteAgentPreset(id: string): Promise<unknown> {
+  return http(`/api/agent-presets/${encodeURIComponent(id)}`, { method: 'DELETE' })
+}
+
+export function setSessionAgentPreset(
+  id: string,
+  preset: string,
+): Promise<{ preset: string }> {
+  return http(`/api/sessions/${encodeURIComponent(id)}/agent-preset`, {
+    method: 'PUT',
+    body: JSON.stringify({ preset }),
+  })
+}
+
+export function listWorkspaces(): Promise<{ workspaces: WorkspaceRecord[] }> {
+  return http('/api/workspaces')
+}
+
+export function createWorkspace(
+  path: string,
+  title?: string,
+): Promise<{ workspace: WorkspaceRecord }> {
+  return http('/api/workspaces', {
+    method: 'POST',
+    body: JSON.stringify({ path, title }),
+  })
+}
+
+export function deleteWorkspace(id: string): Promise<unknown> {
+  return http(`/api/workspaces/${encodeURIComponent(id)}`, { method: 'DELETE' })
+}
+
+export interface MemoryFileInfo {
+  name: string
+  size: number
+  modifiedMs: number
+}
+
+export interface MemoryProject {
+  id: string
+  title: string
+  path: string
+  updatedAt: number
+  root: string
+  index: MemoryFileInfo | null
+  files: MemoryFileInfo[]
+}
+
+export interface MemoryFileView {
+  name: string
+  content: string
+  size: number
+  modifiedMs: number
+}
+
+/** 项目记忆清单(每工作区一条;无记忆的桶 files 为空)。 */
+export function getMemoryProjects(): Promise<{ projects: MemoryProject[] }> {
+  return http('/api/memories/projects')
+}
+
+/** 读取单个记忆文件(只读;超限 413 / 缺失 404 / 非法路径 400)。 */
+export function getMemoryFile(id: string, file: string): Promise<MemoryFileView> {
+  return http(
+    `/api/memories/projects/${encodeURIComponent(id)}/${file
+      .split('/')
+      .map(encodeURIComponent)
+      .join('/')}`,
+  )
+}
+
+export function pickerCapability(): Promise<{
+  kind: 'native' | 'browse'
+  /** 是否远程来客(手机/隧道)。主机控制台为 false。 */
+  remote?: boolean
+}> {
+  return http('/api/fs/capability')
+}
+
+export function mkdir(path: string, name: string): Promise<{ path: string }> {
+  return http('/api/fs/mkdir', {
+    method: 'POST',
+    body: JSON.stringify({ path, name }),
+  })
+}
+
+export function browseDirs(path?: string): Promise<{
+  path: string
+  parent: string | null
+  dirs: string[]
+}> {
+  const query = path ? `?path=${encodeURIComponent(path)}` : ''
+  return http(`/api/fs/dirs${query}`)
+}
+
+/** Opens the OS-native directory chooser on the host; null when cancelled.
+ *  用户可能停留任意久,不设超时;页面离开/刷新会自然 abort 并关掉弹窗。 */
+export function pickDirectory(): Promise<{ path: string | null }> {
+  return http('/api/fs/pick', { method: 'POST' }, 0)
+}
+
+/** `@` 提及候选:相对会话 cwd 的路径条目(目录与文件)。 */
+export interface MentionCandidate {
+  path: string
+  kind: 'file' | 'directory'
+}
+
+/** 搜索会话 cwd 树下的 `@` 提及候选;query 为空 = 列根目录。 */
+export function searchMentions(
+  cwd: string,
+  query: string,
+  signal?: AbortSignal,
+): Promise<{ items: MentionCandidate[] }> {
+  const params = new URLSearchParams({ path: cwd })
+  if (query) params.set('query', query)
+  return http(`/api/fs/mentions?${params.toString()}`, { signal })
+}
+
+/** 工作区文件树的一层条目(相对根的路径,以 `/` 分隔)。 */
+export interface TreeEntry {
+  name: string
+  path: string
+  kind: 'file' | 'directory'
+}
+
+export interface TreeListing {
+  root: string
+  /** 本次列举的目录(相对根;空串 = 根目录)。 */
+  dir: string
+  entries: TreeEntry[]
+  /** 该层条目超过上限被截断(界面据此显式提示,不静默丢弃)。 */
+  truncated: boolean
+}
+
+/** 列举工作区某一层目录(dir 为空 = 根目录)。 */
+export function fetchTree(
+  path: string,
+  dir: string,
+  signal?: AbortSignal,
+): Promise<TreeListing> {
+  const params = new URLSearchParams({ path })
+  if (dir) params.set('dir', dir)
+  return http(`/api/fs/tree?${params.toString()}`, { signal })
+}
+
+/** 工作区文件的只读视图（`/api/fs/file` 响应）。 */
+export interface WorkspaceFileView {
+  /** 相对工作区根的路径（以 `/` 分隔）。 */
+  path: string
+  name: string
+  content: string
+  size: number
+  /** 由扩展名推得的语言提示；推不出为 null（前端按纯文本渲染）。 */
+  language: string | null
+  modifiedMs: number
+  lines: number
+}
+
+/**
+ * 读取工作区内的一个文本文件（只读）。
+ *
+ * 失败形态由后端给不同码，前端据此分别提示：路径非法/目录/二进制 400、
+ * 不存在 404、无权限 403、超限 413。
+ */
+export function fetchWorkspaceFile(
+  path: string,
+  file: string,
+  signal?: AbortSignal,
+): Promise<WorkspaceFileView> {
+  const params = new URLSearchParams({ path, file })
+  return http(`/api/fs/file?${params.toString()}`, { signal })
+}
+
+export function getSession(id: string, signal?: AbortSignal): Promise<{
+  header: SessionHeader
+  events: SessionEnvelope[]
+}> {
+  return http(`/api/sessions/${encodeURIComponent(id)}`, { signal })
+}
+
+export interface SessionAnchor {
+  seq: number
+  text: string
+}
+
+export interface SessionPageResponse {
+  header: SessionHeader
+  events: SessionEnvelope[]
+  total: number
+  hasMoreBefore: boolean
+  /** 全会话非注入 user-message 锚点(轮次轴刻度,不受分页窗口限制)。 */
+  anchors: SessionAnchor[]
+}
+
+/** 分页读取会话事件窗口:不经过全量快照,长会话首屏只拉尾部有限窗口。 */
+export function getSessionPage(
+  id: string,
+  options: { before?: number; limit?: number } = {},
+  signal?: AbortSignal,
+): Promise<SessionPageResponse> {
+  const query = new URLSearchParams()
+  if (options.before !== undefined) query.set('before', String(options.before))
+  if (options.limit !== undefined) query.set('limit', String(options.limit))
+  const qs = query.toString()
+  return http(
+    `/api/sessions/${encodeURIComponent(id)}/events${qs ? `?${qs}` : ''}`,
+    { signal },
+  )
+}
+
+export function deleteSession(id: string): Promise<unknown> {
+  return http(`/api/sessions/${encodeURIComponent(id)}`, { method: 'DELETE' })
+}
+
+/** 从某个已完成轮次边界分支出全新会话(dsh session.fork)。 */
+export function forkSession(
+  id: string,
+  atSeq?: number,
+): Promise<{ session: SessionSummary }> {
+  return http(`/api/sessions/${encodeURIComponent(id)}/fork`, {
+    method: 'POST',
+    body: JSON.stringify(atSeq === undefined ? {} : { atSeq }),
+  })
+}
+
+export function postPrompt(
+  id: string,
+  body: {
+    prompt: string
+    provider?: string
+    model?: string
+    reasoningEffort?: string
+    /** 粘贴的内联图片(base64);模型必须支持识图。 */
+    images?: { name?: string; mime: string; data: string }[]
+    /** 已上传文件的绝对路径(作为注入上下文随消息发送)。 */
+    files?: string[]
+    /** 轨迹引用(标题, 正文);以 injected 上下文消息随本轮注入。 */
+    quoted?: { title: string; text: string }[]
+    /** 显式直调的技能名(user-invocable);后端以「用户显式调用技能」注入正文。 */
+    skills?: string[]
+  },
+): Promise<unknown> {
+  return http(`/api/sessions/${encodeURIComponent(id)}/prompt`, {
+    method: 'POST',
+    body: JSON.stringify(body),
+  })
+}
+
+/** 切换当前会话权限预设(抄 dsh /permission 写路径)。 */
+export function setSessionPermission(
+  id: string,
+  mode: PermissionMode,
+): Promise<{ mode: PermissionMode }> {
+  return http(`/api/sessions/${encodeURIComponent(id)}/permission`, {
+    method: 'PUT',
+    body: JSON.stringify({ mode }),
+  })
+}
+
+/** 会话可用技能条目(`/` 直调候选与输入框 token 装饰共用;字段为后端 camelCase 投影)。 */
+export interface SkillSummary {
+  name: string
+  description: string
+  source: string
+  modelInvocable: boolean
+  userInvocable: boolean
+}
+
+/** 列出会话 cwd 技能目录(分层发现,后端带 mtime 缓存)。 */
+export function listSkills(id: string, signal?: AbortSignal): Promise<{ skills: SkillSummary[] }> {
+  return http(`/api/sessions/${encodeURIComponent(id)}/skills`, { signal })
+}
+
+/** 应答一次挂起的审批;计划审批(exit_plan)的载荷可带执行档位/模型/建议。 */
+export interface ApprovalDecisionPayload {
+  decision: 'allow-once' | 'allow-session' | 'reject'
+  /** 计划批准时的执行档位(仅 auto-edit / full)。 */
+  executeMode?: 'auto-edit' | 'full'
+  /** 计划批准时选定的执行模型。 */
+  selection?: ModelSelection
+  /** 用户补充建议。 */
+  feedback?: string
+}
+
+export function answerApproval(
+  id: string,
+  requestId: string,
+  payload: ApprovalDecisionPayload | 'allow-once' | 'allow-session' | 'reject',
+): Promise<{ ok: boolean }> {
+  const body = typeof payload === 'string' ? { decision: payload } : payload
+  return http(
+    `/api/sessions/${encodeURIComponent(id)}/approvals/${encodeURIComponent(requestId)}`,
+    {
+      method: 'POST',
+      body: JSON.stringify(body),
+    },
+  )
+}
+
+/** 回答一次挂起的模型提问(`ask` 工具)。 */
+export function answerAsk(
+  id: string,
+  requestId: string,
+  answers: AskAnswer[],
+): Promise<{ ok: boolean }> {
+  return http(`/api/sessions/${encodeURIComponent(id)}/asks/${encodeURIComponent(requestId)}`, {
+    method: 'POST',
+    body: JSON.stringify({ answers }),
+  })
+}
+
+/** 放弃一次挂起的模型提问(结算为 cancelled)。 */
+export function cancelAsk(id: string, requestId: string): Promise<{ ok: boolean }> {
+  return http(`/api/sessions/${encodeURIComponent(id)}/asks/${encodeURIComponent(requestId)}`, {
+    method: 'POST',
+    body: JSON.stringify({ answers: [], cancel: true }),
+  })
+}
+
+/** 上传一个附件(不限格式),返回持久化后的绝对路径与字节数。 */
+export function uploadAttachment(params: {
+  sessionId: string
+  name: string
+  mime: string
+  data: string
+}): Promise<{ path: string; name: string; bytes: number }> {
+  return http('/api/attachments', {
+    method: 'POST',
+    body: JSON.stringify({
+      sessionId: params.sessionId,
+      name: params.name,
+      mime: params.mime,
+      data: params.data,
+    }),
+  })
+}
+
+/** 当前上下文 token 拆分(token-meter 服务端 fold)。 */
+export interface ContextBreakdown {
+  systemTokens: number
+  toolsTokens: number
+  messageTokens: number
+}
+
+/** 上下文压力投影(对齐 dsh `contextPressure`:字段各自 last-wins,可缺省)。 */
+export interface ContextPressure {
+  /** 路由容量(最新 request/context 记录的上下文窗口)。 */
+  contextWindow?: number
+  /** 最近一次 provider usage 的 prompt 侧总量(锚点);无样本则缺省。 */
+  pressureTokens?: number
+  /** 锚点 + 锚点后表面增量(下一次请求的期望 prompt 规模)。 */
+  projectedTokens?: number
+}
+
+/** 精确 usage 累计(对齐 dsh `TurnTokenUsage`)。 */
+export interface TurnTokenUsage {
+  uncachedInputTokens: number
+  outputTokens: number
+  cacheReadTokens: number
+  cacheWriteTokens: number
+  reasoningTokens: number
+}
+
+export interface ContextBreakdownResponse {
+  breakdown: ContextBreakdown
+  pressure: ContextPressure
+  usage: TurnTokenUsage
+}
+
+export function contextBreakdown(id: string): Promise<ContextBreakdownResponse> {
+  return http(`/api/sessions/${encodeURIComponent(id)}/context-breakdown`)
+}
+
+export interface ManualCompactResponse {
+  /** 202 接单:压缩在后台跑,结果经 SSE 回来(成功落 compaction-summary
+   *  事件,无可压缩/失败广播 compaction-failed)。 */
+  accepted: boolean
+  id?: string
+}
+
+/**
+ * 手动压缩:**202 接单即返回**,不等待摘要调用完成。
+ *
+ * 压缩与发轮次同构 —— 后端 spawn 成后台任务,刷新页面不再打断它(早先
+ * 这里是长 await,连接一断任务就被 drop,压缩真的会中止)。
+ */
+export function compactSession(id: string): Promise<ManualCompactResponse> {
+  return http(`/api/sessions/${encodeURIComponent(id)}/compact`, { method: 'POST' }, 30_000)
+}
+
+export interface SystemPromptView {
+  text: string
+  source: 'file' | 'default'
+  path: string
+}
+
+export function getSystemPrompt(): Promise<SystemPromptView> {
+  return http('/api/system-prompt')
+}
+
+export function saveSystemPrompt(text: string): Promise<SystemPromptView> {
+  return http('/api/system-prompt', {
+    method: 'PUT',
+    body: JSON.stringify({ text }),
+  })
+}
+
+export function resetSystemPrompt(): Promise<SystemPromptView> {
+  return http('/api/system-prompt', { method: 'DELETE' })
+}
+
+/**
+ * 全局规则(用户级 AGENTS.md,位于 `<home>/AGENTS.md`)。
+ *
+ * 与工作区内的 AGENTS.md 是同一套发现机制的两份文件:全局那份作用域
+ * 最宽、最先注入,模型侧标签 `~/AGENTS.md`。这里只管可编辑的正文。
+ */
+export interface GlobalRulesView {
+  text: string
+  source: 'file' | 'default'
+  /** 模型可见的来源标签(符号路径)。 */
+  displayPath: string
+  path: string
+}
+
+export function getGlobalRules(): Promise<GlobalRulesView> {
+  return http('/api/global-rules')
+}
+
+/** 保存全局规则;传空串等同清空(删除文件回到"未设置")。 */
+export function saveGlobalRules(text: string): Promise<GlobalRulesView> {
+  return http('/api/global-rules', {
+    method: 'PUT',
+    body: JSON.stringify({ text }),
+  })
+}
+
+/** 一个可回退的用户消息 checkpoint。 */
+export interface Checkpoint {
+  seq: number
+  time: number
+  text: string
+}
+
+export function getCheckpoints(id: string): Promise<{ checkpoints: Checkpoint[] }> {
+  return http(`/api/sessions/${encodeURIComponent(id)}/checkpoints`)
+}
+
+/** 回退确认框里的单条文件变化。 */
+export interface FileDiffEntry {
+  path: string
+  action: 'restore' | 'delete'
+}
+
+export function getCheckpointDiff(
+  id: string,
+  seq: number,
+): Promise<{ changes: FileDiffEntry[] }> {
+  return http(`/api/sessions/${encodeURIComponent(id)}/checkpoints/${seq}/diff`)
+}
+
+export interface RewindResult {
+  ok: boolean
+  toSeq: number
+  toMessage: string | null
+  removedEvents: number
+  changedFiles: string[]
+}
+
+export function rewindSession(
+  id: string,
+  toSeq: number,
+): Promise<RewindResult> {
+  return http(`/api/sessions/${encodeURIComponent(id)}/rewind`, {
+    method: 'POST',
+    body: JSON.stringify({ toSeq }),
+  })
+}
+
+export function cancelSession(id: string): Promise<unknown> {
+  return http(`/api/sessions/${encodeURIComponent(id)}/cancel`, { method: 'POST' })
+}
+
+/**
+ * Follows one session's live event stream after `after`; returns the abort
+ * handle. The stream ends on server-side lag or close — callers re-snapshot.
+ */
+export function followSession(
+  id: string,
+  after: number,
+  onEnvelope: (envelope: SessionEnvelope) => void,
+  onEnd: () => void,
+): AbortController {
+  const controller = new AbortController()
+  const run = async () => {
+    try {
+      const response = await fetch(
+        `/api/sessions/${encodeURIComponent(id)}/follow?after=${after}`,
+        { signal: controller.signal },
+      )
+      if (!response.ok) {
+        onEnd()
+        return
+      }
+      await parseSseBody(
+        response,
+        (payload) => {
+          // 这是 SSE 帧:它是"SSE 通"的唯一凭据,降级判定只认这个(长轮询通
+          // 不算,否则会在两条传输之间来回挨卡)。
+          noteSseFrame()
+          // 心跳帧不是会话事件:它没有 seq,交给引擎会被判成断档而触发重快照,
+          // 于是每 15 秒白拉一次全量尾部。
+          if ((payload as { type?: string } | null)?.type === 'hb') return
+          onEnvelope(payload as SessionEnvelope)
+        },
+        controller.signal,
+      )
+    } catch {
+      /* aborted or transport error: caller re-snapshots */
+    }
+    if (!controller.signal.aborted) onEnd()
+  }
+  void run()
+  return controller
+}
+
+/** Subscribes to server push events; returns the close handle. */
+export function subscribeEvents(onEvent: (type: string) => void): () => void {
+  // 走全局共享连接:每个 EventSource 都独占一条同源连接,浏览器上限只有
+  // 6 条,多开会让后续 fetch 永久排队(详见 serverEvents.ts)。
+  return subscribeServerEvents((type) => onEvent(type))
+}
+
+/** 会话目标(goal 模式)投影;服务端权威口径(减法记账的用量含在内)。 */
+export interface GoalState {
+  objective: string
+  status: 'active' | 'paused' | 'blocked' | 'budget-limited' | 'complete'
+  tokenBudget?: number
+  blockedReason?: string
+  baseTokens: number
+  roundsStarted: number
+  createdAt: number
+  updatedAt: number
+}
+
+export interface GoalView {
+  goal: GoalState | null
+  tokensUsed: number
+  maxRounds: number
+  maxGoalTokenBudget: number
+}
+
+export type GoalAction = 'set' | 'edit' | 'pause' | 'resume' | 'clear'
+
+/** 读取当前会话的目标状态与用量。 */
+export function getGoal(id: string): Promise<GoalView> {
+  return http(`/api/sessions/${encodeURIComponent(id)}/goal`)
+}
+
+/** 操作当前会话目标(set/edit/pause/resume/clear);失败 fail loud。
+ * selection 随用户操作记录到服务端:goal 自动续跑据此回推模型
+ * (新会话日志里还没有 request-header,没有它第一轮无从发起)。
+ * echoText 为斜杠命令原文:落 command-run 事件,前端按 seq 回显。 */
+export function goalAction(
+  id: string,
+  body: { action: GoalAction; objective?: string; tokenBudget?: number },
+  selection?: { provider?: string; model?: string; reasoningEffort?: string },
+  echoText?: string,
+): Promise<GoalView> {
+  return http(`/api/sessions/${encodeURIComponent(id)}/goal`, {
+    method: 'POST',
+    body: JSON.stringify({
+      ...body,
+      provider: selection?.provider,
+      model: selection?.model,
+      reasoningEffort: selection?.reasoningEffort,
+      echoText,
+    }),
+  })
+}
+
+/** 一个 MCP 工具(服务器声明 + 是否交给模型)。 */
+export interface McpToolInfo {
+  /** 服务器原始工具名。 */
+  name: string
+  /** 模型可见名 `mcp__<server>__<tool>`。 */
+  qualified: string
+  description: string
+  /** 是否交给模型(服务器启用 + 未被逐条关闭 + 无命名冲突)。 */
+  enabled: boolean
+  /** 未交给模型的原因;未启用时可见。 */
+  disabledReason?: string | null
+}
+
+/** 一个 MCP 服务器的状态(环境变量只回传 key,值不出现在 UI 里)。 */
+export interface McpServerInfo {
+  id: string
+  /** `stdio` | `http` | `sse`。 */
+  transport: string
+  command: string
+  args: string[]
+  envKeys: string[]
+  /** http / sse 传输的服务端地址;stdio 为 null。 */
+  url?: string | null
+  headerKeys: string[]
+  cwd?: string | null
+  enabled: boolean
+  /** connected | disabled | error */
+  status: 'connected' | 'disabled' | 'error'
+  error?: string | null
+  tools: McpToolInfo[]
+}
+
+export interface McpDescribe {
+  servers: McpServerInfo[]
+  /** 当前交给模型的 MCP 工具总数。 */
+  toolCount: number
+}
+
+/** 新增/更新一个服务器时的草稿态;id 决定身份(同名即替换)。 */
+export interface McpServerDraft {
+  id: string
+  /** `stdio` | `http`(Streamable HTTP) | `sse`(HTTP+SSE)。 */
+  transport: string
+  /** stdio 传输:可执行程序;http/sse 留空。 */
+  command: string
+  args: string[]
+  env: Record<string, string>
+  /** http/sse 传输的服务端地址;stdio 为 null。 */
+  url?: string | null
+  /** http/sse 传输的附加请求头(如 Authorization)。 */
+  headers?: Record<string, string>
+  cwd?: string | null
+  enabled: boolean
+  disabledTools: string[]
+}
+
+export function getMcp(): Promise<McpDescribe> {
+  return http('/api/mcp', undefined, 30_000)
+}
+
+/** 保存服务器配置:成功后返回新快照(服务端会立即连接)。 */
+export function saveMcpServer(
+  server: McpServerDraft,
+  expectedRevision?: number,
+): Promise<McpDescribe> {
+  return http(
+    '/api/mcp/servers',
+    {
+      method: 'PUT',
+      body: JSON.stringify({ server, expectedRevision }),
+    },
+    60_000,
+  )
+}
+
+export function deleteMcpServer(id: string): Promise<McpDescribe> {
+  return http(`/api/mcp/servers/${encodeURIComponent(id)}`, { method: 'DELETE' }, 60_000)
+}
+
+/** 服务器动作:enable / disable / reconnect。 */
+export function mcpServerAction(
+  id: string,
+  action: 'enable' | 'disable' | 'reconnect',
+): Promise<McpDescribe> {
+  return http(
+    `/api/mcp/servers/${encodeURIComponent(id)}`,
+    { method: 'POST', body: JSON.stringify({ action }) },
+    60_000,
+  )
+}
+
+/** 工具级开关:关掉的工具不再交给模型(服务器仍连着)。 */
+export function toggleMcpTool(
+  server: string,
+  tool: string,
+  enabled: boolean,
+): Promise<McpDescribe> {
+  return http(
+    '/api/mcp/tools',
+    { method: 'POST', body: JSON.stringify({ server, tool, enabled }) },
+    30_000,
+  )
+}
+
+/** 「用应用打开」:本机探测到的应用 id,保持菜单顺序。 */
+export function getOpenInAppApps(): Promise<{ apps: string[] }> {
+  return http('/api/open-in-app/apps')
+}
+
+/** 用一个应用打开工作区目录;启动观察窗最长约 2s,超时放宽。 */
+export function openInAppOpen(app: string, path: string): Promise<{ ok: boolean }> {
+  return http(
+    '/api/open-in-app/open',
+    { method: 'POST', body: JSON.stringify({ app, path }) },
+    20_000,
+  )
+}

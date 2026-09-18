@@ -1,0 +1,16 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "主窗口的 IPC 权限。壳把窗口导航到进程内 axum 服务的 http://127.0.0.1:<port>,对 Tauri 而言这是 **remote origin**(frontendDist 只是内嵌占位页),所以必须在这里用 remote.urls 显式授权,否则无边框标题栏的 start_dragging / minimize / toggle_maximize / close 会被 ACL 全部拒绝 —— 表现为标题栏画出来了但每个按钮都没反应。",
+  "windows": ["main"],
+  "remote": {
+    "urls": ["http://127.0.0.1:*/*", "http://localhost:*/*"]
+  },
+  "permissions": [
+    "core:default",
+    "core:window:allow-start-dragging",
+    "core:window:allow-minimize",
+    "core:window:allow-toggle-maximize",
+    "core:window:allow-close"
+  ]
+}

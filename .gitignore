@@ -1,0 +1,37 @@
+/target
+/web/node_modules
+/web/dist
+*.log
+.env
+.DS_Store
+*.tsbuildinfo
+/.zcode
+/denia_develop.exe
+
+# tauri-build 编译期生成的 ACL capability schema(见 tauri-utils
+# acl::schema::generate_capability_schema),不是源码,随 capabilities/ 变化重生成。
+/crates/desktop/gen/
+
+# 一次性 esbuild 调试打包产物(由 web/scripts/make-bundle.mjs 生成)
+/web/scripts/app-bundle.mjs
+
+# agent 本地工作约定(不入库)
+/AGENTS.md
+
+# AI 测试落盘的临时脚本
+/chunk*.js
+/turnstile.js
+
+/tmp_chunks/
+
+/mail_page.html
+/register_page.js
+
+# 本地开发实例构建脚本(仅本地使用)
+/scripts/dev.ps1
+
+# WorkBuddy 工具数据目录(记忆与概念稿,不入库)
+/.workbuddy/
+
+# 本地 denia 运行环境的启动脚本(仅本机)
+/.denia/

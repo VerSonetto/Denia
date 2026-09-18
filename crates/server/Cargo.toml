@@ -1,0 +1,68 @@
+[package]
+name = "denia-server"
+description = "axum HTTP API + SSE push + console hosting (lib + bin: denia)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "denia_server"
+path = "src/lib.rs"
+
+[[bin]]
+name = "denia"
+path = "src/main.rs"
+
+[dependencies]
+denia-core = { workspace = true }
+denia-settings = { workspace = true }
+denia-credentials = { workspace = true }
+denia-llm = { workspace = true }
+denia-tools = { workspace = true }
+denia-mcp = { workspace = true }
+denia-session = { workspace = true }
+denia-agent-loop = { workspace = true }
+denia-browser = { workspace = true }
+denia-terminal = { workspace = true }
+denia-system-prompt = { workspace = true }
+
+tokio = { workspace = true }
+tokio-stream = { workspace = true }
+tokio-util = { workspace = true }
+futures = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+axum = { workspace = true }
+http = { workspace = true }
+tower-http = { workspace = true }
+reqwest = { workspace = true }
+rust-embed = { workspace = true }
+mime_guess = { workspace = true }
+rfd = { workspace = true }
+uuid = { workspace = true }
+base64 = { workspace = true }
+rand = { workspace = true }
+qrcode = { workspace = true }
+if-addrs = { workspace = true }
+sha2 = "0.10"
+async-trait = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+arc-swap = { workspace = true }
+notify = "6"
+portable-pty = "0.9.0"
+
+[dev-dependencies]
+# HTTP 层测试用 `Router::oneshot` 直发请求(与 agent_runtime 的测试同路数)。
+tower = { version = "0.5", features = ["util"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_System_Registry",
+    "Win32_System_Threading",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+] }

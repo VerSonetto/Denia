@@ -1,0 +1,45 @@
+/* 代理与任务设置表单:与 llm 抽屉同款两列网格,数字字段底对齐成行。 */
+
+.grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  align-items: end;
+}
+
+.hint {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--label-tertiary);
+}
+
+.actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding-top: 16px;
+  border-top: 1px solid var(--border-l1);
+}
+
+.saved {
+  font-size: 12.5px;
+  font-weight: 550;
+  color: var(--label-secondary);
+}
+
+.error {
+  margin: 0;
+  padding: 10px 12px;
+  border: 1px dashed var(--danger-border);
+  border-radius: 10px;
+  font-size: 12.5px;
+  color: var(--danger);
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 767px) {
+  .grid {
+    grid-template-columns: 1fr;
+  }
+}

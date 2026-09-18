@@ -1,0 +1,89 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/core",
+    "crates/settings",
+    "crates/credentials",
+    "crates/llm",
+    "crates/tools",
+    "crates/mcp",
+    "crates/session",
+    "crates/system-prompt",
+    "crates/token-meter",
+    "crates/agent-loop",
+    "crates/browser",
+    "crates/terminal",
+    "crates/server",
+    "crates/desktop",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/local/denia"
+
+# 热路径是 JSON 序列化 + 正则 + 大量字符串处理(derive_*/estimate_*),
+# 跨 crate 内联收益明显。不加 panic="abort":tokio 任务 panic 隔离与
+# RunningGuard 的兜底依赖 unwind。
+[profile.release]
+lto = "thin"
+codegen-units = 1
+
+[workspace.dependencies]
+denia-core = { path = "crates/core" }
+denia-settings = { path = "crates/settings" }
+denia-credentials = { path = "crates/credentials" }
+denia-llm = { path = "crates/llm" }
+denia-tools = { path = "crates/tools" }
+denia-mcp = { path = "crates/mcp" }
+denia-session = { path = "crates/session" }
+denia-agent-loop = { path = "crates/agent-loop" }
+denia-browser = { path = "crates/browser" }
+denia-terminal = { path = "crates/terminal" }
+denia-system-prompt = { path = "crates/system-prompt" }
+denia-token-meter = { path = "crates/token-meter" }
+
+tokio = { version = "1", features = ["full"] }
+tokio-stream = { version = "0.1", features = ["sync"] }
+tokio-util = "0.7"
+tokio-tungstenite = { version = "0.24", features = ["native-tls"] }
+futures = "0.3"
+async-trait = "0.1"
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+
+axum = { version = "0.8", features = ["macros", "ws"] }
+# 只开 gzip:控制台静态产物由构建期预压缩(node zlib 自带 brotli,零运行时依赖),
+# 这里的中间件只负责 API 响应(会话快照/列表 JSON)。开 compression-br 会额外
+# 拖进 async-compression + brotli 两个 crate,而 JSON 上 br 相对 gzip 的收益
+# 不值得这层体积。
+tower-http = { version = "0.6", features = ["fs", "cors", "trace", "compression-gzip"] }
+http = "1"
+rust-embed = "8"
+mime_guess = "2"
+rfd = "0.15"
+
+# web_fetch 抓取用:gzip/brotli 自动协商解压,cookies 承接重定向链上的 set-cookie
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls", "gzip", "brotli", "cookies"] }
+# 网页抓取:HTML 解析(html5ever 内核)与字符集嗅探解码(GBK 等老中文站)
+scraper = "0.20"
+ego-tree = "0.6"
+encoding_rs = "0.8"
+eventsource-stream = "0.2"
+
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+regex = "1"
+ignore = "0.4"
+base64 = "0.22"
+uuid = { version = "1", features = ["v4"] }
+rand = "0.8"
+arc-swap = "1"
+# 远程连接:二维码编码(只启用 svg 渲染路径,默认 features 会拖进 image 全家桶)
+# 与局域网网卡探测(Windows 下需 GetAdaptersAddresses,手写成本远高于一个轻依赖)。
+qrcode = { version = "0.14", default-features = false, features = ["svg"] }
+if-addrs = "0.15"
