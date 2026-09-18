@@ -5,8 +5,8 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "check": "node scripts/check-hooks.mjs && node scripts/check-fold.mjs && node scripts/check-turn-usage.mjs && node scripts/check-tool-display.mjs && node scripts/check-stick.mjs && node scripts/check-side-pane.mjs && node scripts/check-side-pane-render.mjs && node scripts/check-file-tree.mjs && node scripts/check-review-commit.mjs",
-    "build": "node scripts/check-hooks.mjs && node scripts/check-stick.mjs && node scripts/check-side-pane.mjs && node scripts/check-side-pane-render.mjs && node scripts/check-file-tree.mjs && node scripts/check-review-commit.mjs && tsc -b && vite build && node ../scripts/precompress.mjs",
+    "check": "node scripts/check-hooks.mjs && node scripts/check-fold.mjs && node scripts/check-turn-usage.mjs && node scripts/check-tool-display.mjs && node scripts/check-stick.mjs && node scripts/check-side-pane.mjs && node scripts/check-side-pane-render.mjs && node scripts/check-file-tree.mjs && node scripts/check-review-commit.mjs && node scripts/check-markdown-repair.mjs",
+    "build": "node scripts/check-hooks.mjs && node scripts/check-stick.mjs && node scripts/check-side-pane.mjs && node scripts/check-side-pane-render.mjs && node scripts/check-file-tree.mjs && node scripts/check-review-commit.mjs && node scripts/check-markdown-repair.mjs && tsc -b && vite build && node ../scripts/precompress.mjs",
     "preview": "vite preview"
   },
   "dependencies": {

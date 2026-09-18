@@ -15,6 +15,7 @@ import { memo, useMemo, useRef } from 'react'
 import type { ReactNode } from 'react'
 import { IncrementalMarkdownParser } from './incremental'
 import { parseGfm, parseGfmWithMath } from './parse'
+import { HeadingRepair, repairMalformedHeadings } from './repairHeadings'
 import {
   collectReferenceTargets, createReferenceTargets, renderBlocks, renderFootnoteSection,
   wrapBlockChildren,
@@ -152,6 +153,7 @@ export const MarkdownText = memo(function MarkdownText({ text, streaming = false
   labels: MarkdownLabels
 }) {
   const streamRef = useRef<StreamingRenderer | null>(null)
+  const repairRef = useRef<HeadingRepair | null>(null)
   const streamLabelsRef = useRef<MarkdownLabels>(labels)
   // 流式时逐字 reveal:显示文本与模型到达文本分离(打字机效果)。
   // settle / 非流式时 useTypewriter 立即返回全文,走 settled 渲染。
@@ -159,13 +161,18 @@ export const MarkdownText = memo(function MarkdownText({ text, streaming = false
   const children = useMemo(() => {
     if (!streaming) {
       streamRef.current = null
-      return renderSettled(text, labels)
+      repairRef.current = null
+      // 定稿走全量修复:模型漏写的标题分隔空格与黏连的表格在这一遍统一还原。
+      return renderSettled(repairMalformedHeadings(text), labels)
     }
-    if (streamRef.current === null || streamLabelsRef.current !== labels) {
+    if (streamRef.current === null || repairRef.current === null || streamLabelsRef.current !== labels) {
       streamRef.current = new StreamingRenderer(labels)
+      repairRef.current = new HeadingRepair()
       streamLabelsRef.current = labels
     }
-    return streamRef.current.render(displayText)
+    // 修复后的文本不是原文的逐字前缀(拆分黏连会插入换行),增量解析器会因此
+    // 重置冻结前缀。这是刻意取舍:拆分依赖后到的信息,只追加的方案做不到。
+    return streamRef.current.render(repairRef.current.repair(displayText))
   }, [displayText, streaming, labels])
   return <div className="markdown">{children}</div>
 })
