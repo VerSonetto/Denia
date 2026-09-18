@@ -479,7 +479,10 @@ pub fn register_communication_section(prompt: &mut SystemPrompt) -> Result<(), S
              写出来的部分用完整句子,技术术语写全。不要让读者来回对照你先前发明的标签或编号。\n\
              - 回答要与问题匹配:简单问题用一段话直接答,不要上标题和分节。\
              表格只用于简短的可枚举事实,解释放在表格外的正文里。\
-             对专家可以紧一些,对新手要多解释几句。"
+             对专家可以紧一些,对新手要多解释几句。\n\
+             - **Markdown 语法写完整**。标题的 `#` 后面必须有空格(`## 验证结果`,不是 `##验证结果`);\
+             标题、表格、列表、代码围栏各自独占一行,不要在标题行末尾直接接表格表头或正文。\
+             写歪的语法不会被渲染成结构,而是把 `##`、`|---|` 这些标记原样展示给用户。"
                 .to_string(),
         ),
         complete: false,
@@ -770,6 +773,10 @@ mod tests {
         let model = render_prompt(&assembly);
         assert!(model.contains("有足够信息就动手"), "工作方式纪律必须进模型提示");
         assert!(model.contains("先给结论"), "输出纪律必须进模型提示");
+        assert!(
+            model.contains("Markdown 语法写完整"),
+            "markdown 语法纪律必须进模型提示"
+        );
 
         // 用户可见副本不含这两段(它们是给模型的私货)。
         let user = render_prompt_for_user(&assembly);
