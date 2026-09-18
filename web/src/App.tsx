@@ -35,6 +35,7 @@ import {
 import { useBrowserSidebar } from './hooks/useBrowserSidebar'
 import { useIsMobile } from './hooks/useIsMobile'
 import { useSidePaneController, useTerminalReconcile } from './hooks/useSidePane'
+import { registerOpenFile } from './fileOpen'
 import { SidePane } from './components/SidePane'
 import { TerminalHost } from './components/TerminalHost'
 import { closeTerminal } from './terminalApi'
@@ -136,6 +137,15 @@ export default function App() {
   const openTerminalTab = useCallback(() => {
     pane.openPanel('terminal', { cwd: paneWorkspacePath ?? undefined })
   }, [pane, paneWorkspacePath])
+
+  /**
+   * 把 `pane.openFile` 注册给模块级入口：Markdown 链接渲染是纯函数
+   * （见 `fileOpen.ts` 注释），拿不到 hook，只能走这条注册通道。
+   *
+   * 依赖里带上 `pane.openFile`（它已按 sessionId/workspacePath 记忆），
+   * 切会话时会重新注册，指向新的工作区。
+   */
+  useEffect(() => registerOpenFile(pane.openFile), [pane.openFile])
 
   /** 终端进程退出:抄 ZCode 的 `lMt` —— 最后一个终端退出时连带收起面板。 */
   const handleTerminalExit = useCallback(
@@ -949,6 +959,9 @@ export default function App() {
               if (type === 'terminal') openTerminalTab()
               else pane.openPanel(type)
             }}
+            onOpenFile={(path) => void pane.openFile(path)}
+            onActivateFile={(path) => pane.activateFile(path)}
+            onCloseFile={(path) => pane.closeFile(path)}
             renderTerminals={(tabs: SidePaneTab[], activeId2: string, paneVisible: boolean) => (
               <TerminalHost
                 tabs={tabs}

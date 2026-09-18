@@ -2005,6 +2005,21 @@ button {
   padding-left: 2px;
 }
 
+/* 文件类工具(edit/write_file)的路径可点:点开在「文件读取」标签页。
+   靠虚下划线把“可点”说出来，颜色仍与普通摘要一致 —— 它是路径，
+   不是另一个动作按钮。 */
+.disc-head .tool-file-path {
+  cursor: pointer;
+  border-bottom: 1px dashed transparent;
+}
+
+.disc-head .tool-file-path:hover,
+.disc-head .tool-file-path:focus-visible {
+  color: var(--label-primary);
+  border-bottom-color: var(--label-caption);
+  outline: none;
+}
+
 .disc-head .chev {
   margin-left: auto;
   color: var(--label-caption);
@@ -2363,6 +2378,41 @@ button {
   column-gap: 12px;
   row-gap: 4px;
   min-width: 0;
+}
+
+/* 产物项：文件名(打开文件) + 文件夹按钮(在文件管理器里打开)并排。
+   两者是不同意图，各自一个点击区；文件夹按钮默认很淡，悬停才亮起。 */
+.turn-produced-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  min-width: 0;
+}
+
+.turn-produced-folder {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: none;
+  border-radius: 3px;
+  background: none;
+  color: var(--label-caption);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity var(--ease), color var(--ease);
+}
+
+.turn-produced-item:hover .turn-produced-folder,
+.turn-produced-folder:focus-visible {
+  opacity: 1;
+}
+
+.turn-produced-folder:hover {
+  color: var(--label-primary);
 }
 
 /* chip 沿用链接语言:默认无下划线,悬停/聚焦才亮起,6 个文件名并排时不会

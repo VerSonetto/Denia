@@ -12,10 +12,13 @@
 import { useCallback, useEffect, useMemo, useRef } from 'react'
 import {
   DRAFT_SCOPE,
+  activateFile,
   closeAllTabs,
+  closeFile,
   closeTab,
   findTab,
   hasType,
+  openFileInTab,
   scopeKey,
   upsertTab,
   type ClosedTab,
@@ -40,6 +43,45 @@ function newId(prefix: string): string {
   return `${prefix}:${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`
 }
 
+/**
+ * 把各种形态的路径归一成「相对工作区根、以 `/` 分隔」的坐标。
+ *
+ * 四个触发点给的路径形态不一：对话里的 Markdown 链接多是 `src/main.rs`
+ * 这种相对路径，而 edit/write 工具行与轮次产物列表给的是**相对 cwd 的
+ * 路径**（可能是 `./src/main.rs`、带反斜杠、甚至偶尔是绝对路径）。
+ *
+ * 不归一的话，同一次点击从不同入口进来会得到两个不同 key，同一个文件在
+ * 标签页里出现两条 —— 这正是“重复点击应复用”要避免的。
+ *
+ * 返回 null 表示这个路径不属于当前工作区（绝对路径在根之外、或含 `..`
+ * 逃逸），调用方应当放弃打开而不是猜一个路径。
+ */
+export function normalizeWorkspaceRelative(
+  raw: string,
+  workspacePath: string | null,
+): string | null {
+  // 反斜杠统一成 `/`，去掉 `./` 前缀与重复斜杠。
+  let path = raw.trim().replace(/\\/g, '/').replace(/\/{2,}/g, '/')
+  while (path.startsWith('./')) path = path.slice(2)
+  if (!path) return null
+  const root = workspacePath?.trim().replace(/\\/g, '/').replace(/\/{2,}/g, '/')
+  if (root && path.toLowerCase().startsWith(`${root.toLowerCase()}/`)) {
+    // 工作区内的绝对路径：裁掉根前缀变成相对路径。
+    path = path.slice(root.length + 1)
+  } else if (/^[a-zA-Z]:\//.test(path) || path.startsWith('/')) {
+    // 其他绝对路径（含盘符）：不属于本工作区，不猜。
+    return null
+  }
+  // `..` 一律拒绝：后端也会拦，这里先拦可以避免把无效路径写进标签页。
+  const segments: string[] = []
+  for (const segment of path.split('/')) {
+    if (segment === '' || segment === '.') continue
+    if (segment === '..') return null
+    segments.push(segment)
+  }
+  return segments.length > 0 ? segments.join('/') : null
+}
+
 export interface SidePaneController {
   state: SidePaneState
   collapsed: boolean
@@ -51,6 +93,18 @@ export interface SidePaneController {
   update(updater: (current: SidePaneState) => SidePaneState): void
   /** 打开某个类型的面板(已开则只激活;审查/浏览器是单例)。 */
   openPanel(type: SidePaneTabType, options?: { cwd?: string; title?: string }): void
+  /**
+   * 把工作区内的一个文件打开到「文件读取」标签页（四类点击触发的统一入口）。
+   *
+   * 标签页不存在则创建并激活；已存在则把目标文件开进去（同一文件复用
+   * 已有条目）。返回 false 表示没工作区/路径为空/路径不在本工作区，
+   * 调用方可以据此保持默认行为或提示。
+   */
+  openFile(path: string): boolean
+  /** 切换文件读取标签页内的激活条目。 */
+  activateFile(path: string): void
+  /** 关掉文件读取标签页里的一个条目（最后一条会连带关掉标签页）。 */
+  closeFile(path: string): void
   closeTab(id: string): void
   rememberClosed(tabs: SidePaneTab[]): void
   forgetClosed(id: string): void
@@ -124,6 +178,39 @@ export function useSidePaneController(
     [sessionId],
   )
 
+  /**
+   * 打开文件到「文件读取」标签页：四类触发点（对话里的文件引用、
+   * edit/write 工具行的路径、轮次产物列表、工作区文件树）共用这一个入口。
+   *
+   * 路径统一按**相对工作区根**存（与文件树、拖拽引用、@ 提及同一坐标），
+   * 这样同一次点击从不同入口进来都能复用同一个条目。
+   */
+  const openFile = useCallback(
+    (path: string) => {
+      const raw = path.trim()
+      if (!raw) return false
+      const relative = normalizeWorkspaceRelative(raw, workspacePath)
+      if (relative === null) return false
+      updateSidePane(sessionId, (current) =>
+        openFileInTab(current, { path: relative }, Date.now()),
+      )
+      // 展开面板：点了文件却看不到内容是最坏的一种“没反应”。
+      setSidePaneCollapsed(sessionId, false)
+      return true
+    },
+    [sessionId, workspacePath],
+  )
+
+  const activateFileEntry = useCallback(
+    (path: string) => updateSidePane(sessionId, (current) => activateFile(current, path)),
+    [sessionId],
+  )
+
+  const closeFileEntry = useCallback(
+    (path: string) => updateSidePane(sessionId, (current) => closeFile(current, path)),
+    [sessionId],
+  )
+
   const rememberClosed = useCallback((tabs: SidePaneTab[]) => {
     rememberClosedInStore(tabs)
   }, [])
@@ -154,6 +241,9 @@ export function useSidePaneController(
     toggle,
     update,
     openPanel,
+    openFile,
+    activateFile: activateFileEntry,
+    closeFile: closeFileEntry,
     closeTab: closeTabById,
     rememberClosed,
     forgetClosed,

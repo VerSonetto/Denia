@@ -26,6 +26,7 @@ import { useSyncExternalStore } from 'react'
 import {
   EMPTY_SIDE_PANE,
   type ClosedTab,
+  type OpenedFile,
   type SidePaneState,
   type SidePaneTab,
   type SidePaneTabType,
@@ -110,11 +111,34 @@ function isValidTab(value: unknown): value is SidePaneTab {
   if (typeof tab.id !== 'string' || tab.id.length === 0) return false
   if (!isTabType(tab.type)) return false
   if (typeof tab.openedAt !== 'number') return false
+  // 文件读取标签页的条目列表来自 localStorage，可能被旧版本或手改弄脏；
+  // 校验不通过就当没有条目（而不是整个标签丢掉）。
+  if (tab.files !== undefined) {
+    if (!Array.isArray(tab.files)) return false
+    if (!tab.files.every(isValidOpenedFile)) return false
+  }
   return true
 }
 
+function isValidOpenedFile(value: unknown): value is OpenedFile {
+  if (!value || typeof value !== 'object') return false
+  const file = value as Partial<OpenedFile>
+  return (
+    typeof file.path === 'string' &&
+    file.path.length > 0 &&
+    typeof file.name === 'string' &&
+    typeof file.openedAt === 'number'
+  )
+}
+
 function isTabType(value: unknown): value is SidePaneTabType {
-  return value === 'review' || value === 'terminal' || value === 'browser' || value === 'files'
+  return (
+    value === 'review' ||
+    value === 'terminal' ||
+    value === 'browser' ||
+    value === 'files' ||
+    value === 'file'
+  )
 }
 
 function readCollapsed(): Record<string, boolean> {

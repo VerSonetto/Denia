@@ -24,6 +24,7 @@ use crate::support::{parse_tool_args, tool_error};
 use crate::{Tool, ToolContext, ToolOutput, resolve_within};
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct EditItem {
     /// 要替换的原文,必须精确出现一次(除非 replace_all)。
     old_string: String,
@@ -35,18 +36,21 @@ struct EditItem {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct EditArgs {
     path: String,
     /// 单处形式:要替换的原文。与 edits 二选一。
     old_string: Option<String>,
     /// 单处形式:替换成的新文本。
     new_string: Option<String>,
-    /// 单处形式的替换全部出现开关。
+    /// 单处形式的替换全部出现开关;用 Option 保留“字段是否出现”的信息，
+    /// 这样 edits 形式带上 replace_all:false 也能明确报混用错误。
     #[serde(default)]
-    replace_all: bool,
+    replace_all: Option<bool>,
     /// 多处形式:按顺序依次应用的编辑列表,与 old_string 二选一。
+    /// 用 Option 区分“未提供”与显式传入空数组，避免空数组被当成单处形式。
     #[serde(default)]
-    edits: Vec<EditItem>,
+    edits: Option<Vec<EditItem>>,
 }
 
 /// 一条校验通过的编辑指令(两种形式归一后的统一形态)。
@@ -58,21 +62,20 @@ struct EditSpec {
 
 /// 把两种入参形式归一成编辑列表;形式混用与逐项校验都在这里 fail loud。
 fn parse_specs(args: &EditArgs) -> Result<Vec<EditSpec>, (String, String)> {
-    if !args.edits.is_empty() {
-        if args.old_string.is_some() || args.new_string.is_some() {
+    if let Some(edits) = args.edits.as_ref() {
+        if args.old_string.is_some() || args.new_string.is_some() || args.replace_all.is_some() {
             return Err((
-                "edits 与 old_string/new_string 不能同时提供".to_string(),
-                "单处编辑用 old_string/new_string,多处编辑用 edits 数组,二选一".to_string(),
+                "edits 与 old_string/new_string/replace_all 不能同时提供".to_string(),
+                "单处编辑用 old_string + new_string + 可选 replace_all;多处编辑只用 edits 数组,二选一".to_string(),
             ));
         }
-        if args.replace_all {
+        if edits.is_empty() {
             return Err((
-                "edits 形式下不接受顶层 replace_all".to_string(),
-                "把 replace_all 放进需要全部替换的那个 edits 项里".to_string(),
+                "edits 不能为空".to_string(),
+                "多处编辑至少提供一个 edits 项;如果只改一处,改用 old_string 与 new_string".to_string(),
             ));
         }
-        return args
-            .edits
+        return edits
             .iter()
             .enumerate()
             .map(|(index, item)| {
@@ -100,7 +103,7 @@ fn parse_specs(args: &EditArgs) -> Result<Vec<EditSpec>, (String, String)> {
     let Some(old) = args.old_string.as_deref() else {
         return Err((
             "缺少编辑内容".to_string(),
-            "单处编辑给 old_string 与 new_string;同一文件的多处编辑给 edits 数组".to_string(),
+            "单处编辑给 old_string 与 new_string;同一文件的多处编辑给 edits 数组;两种形式不要混用".to_string(),
         ));
     };
     let Some(new) = args.new_string.as_deref() else {
@@ -124,7 +127,7 @@ fn parse_specs(args: &EditArgs) -> Result<Vec<EditSpec>, (String, String)> {
     Ok(vec![EditSpec {
         old: old.to_string(),
         new: new.to_string(),
-        all: args.replace_all,
+        all: args.replace_all.unwrap_or(false),
     }])
 }
 
@@ -139,29 +142,47 @@ impl EditTool {
         Self {
             schema: ToolSchema {
                 name: "edit".to_string(),
-                description: "对工作区内的一个 UTF-8 文本文件做精确字符串替换,单次调用可完成多处编辑。单处编辑:old_string 必须与文件原文完全一致(空白与换行都算)且默认只能出现一次,多点出现会报错;replace_all=true 时替换全部出现。多处编辑:edits 数组按顺序依次应用,后一项匹配前一项改完后的内容;任一处匹配失败则整次调用不写入。返回替换发生的行号。先 read_file 确认原文,改完可再读校验。".to_string(),
+                description: "对工作区内的一个 UTF-8 文本文件做精确字符串替换,单次调用可完成多处编辑。两种参数形式必须二选一:只改一处时给 old_string + new_string,可选 replace_all;同一文件改多处时只给 edits 数组,至少一个编辑项,不要同时给两种形式。old_string 必须与文件原文完全一致(空白与换行都算),默认只能出现一次;replace_all=true 时替换全部出现。多处编辑按数组顺序应用,后一项匹配前一项改完后的内容;任一项失败则整次调用不写入。返回替换发生的行号。先 read_file 确认原文,改完可再读校验。".to_string(),
                 parameters: serde_json::json!({
                     "type": "object",
-                    "properties": {
-                        "path": { "type": "string", "description": "要编辑的文件路径;相对路径锚定会话工作区。" },
-                        "old_string": { "type": "string", "description": "单处编辑:要被替换的原文,必须与文件内容逐字符一致(包含缩进、空格与换行);与 edits 二选一。" },
-                        "new_string": { "type": "string", "description": "单处编辑:替换成的新文本。" },
-                        "replace_all": { "type": "boolean", "description": "单处编辑:替换全部出现而不是要求恰好一次(默认 false)。" },
-                        "edits": {
-                            "type": "array",
-                            "description": "多处编辑:按顺序依次应用到同一文件,任一处失败则整次调用不写入;与 old_string 二选一。",
-                            "items": {
-                                "type": "object",
-                                "properties": {
-                                    "old_string": { "type": "string", "description": "要被替换的原文,必须与当前内容逐字符一致(包含缩进、空格与换行),默认只能出现一次。" },
-                                    "new_string": { "type": "string", "description": "替换成的新文本。" },
-                                    "replace_all": { "type": "boolean", "description": "替换该项的全部出现(默认 false)。" }
-                                },
-                                "required": ["old_string", "new_string"]
-                            }
+                    "oneOf": [
+                        {
+                            "type": "object",
+                            "description": "单处编辑:只替换一个精确片段。",
+                            "properties": {
+                                "path": { "type": "string", "description": "要编辑的文件路径;相对路径锚定会话工作区。" },
+                                "old_string": { "type": "string", "minLength": 1, "description": "要被替换的原文,必须与文件内容逐字符一致(包含缩进、空格与换行);不能是空串。" },
+                                "new_string": { "type": "string", "description": "替换成的新文本;删除内容时给空串。" },
+                                "replace_all": { "type": "boolean", "description": "可选;true 时替换 old_string 的全部出现,默认只允许恰好出现一次。" }
+                            },
+                            "required": ["path", "old_string", "new_string"],
+                            "additionalProperties": false
+                        },
+                        {
+                            "type": "object",
+                            "description": "多处编辑:按顺序原子应用同一文件的多个替换。",
+                            "properties": {
+                                "path": { "type": "string", "description": "要编辑的文件路径;相对路径锚定会话工作区。" },
+                                "edits": {
+                                    "type": "array",
+                                    "minItems": 1,
+                                    "description": "至少一个编辑项;不要同时提供 old_string/new_string/replace_all。",
+                                    "items": {
+                                        "type": "object",
+                                        "properties": {
+                                            "old_string": { "type": "string", "minLength": 1, "description": "要被替换的原文,必须与当前内容逐字符一致(包含缩进、空格与换行),默认只能出现一次。" },
+                                            "new_string": { "type": "string", "description": "替换成的新文本;删除内容时给空串。" },
+                                            "replace_all": { "type": "boolean", "description": "可选;true 时替换该项的全部出现,默认只允许恰好出现一次。" }
+                                        },
+                                        "required": ["old_string", "new_string"],
+                                        "additionalProperties": false
+                                    }
+                                }
+                            },
+                            "required": ["path", "edits"],
+                            "additionalProperties": false
                         }
-                    },
-                    "required": ["path"]
+                    ]
                 }),
             },
         }
@@ -186,7 +207,7 @@ impl Tool for EditTool {
             Err(error) => {
                 return tool_error(
                     format!("参数解析失败:{error}"),
-                    "参数必须是 JSON 对象:必填 path;编辑内容用 old_string/new_string(单处)或 edits 数组(多处)",
+                    "参数必须是 JSON 对象。单处编辑格式:{\"path\":\"...\",\"old_string\":\"...\",\"new_string\":\"...\"};多处编辑格式:{\"path\":\"...\",\"edits\":[{\"old_string\":\"...\",\"new_string\":\"...\"}]};两种格式不要混用",
                 );
             }
         };
@@ -471,6 +492,38 @@ mod tests {
         }
     }
 
+    #[test]
+    fn schema_separates_single_and_multiple_forms() {
+        let tool = EditTool::new();
+        let parameters = &tool.schema().parameters;
+        assert_eq!(parameters["type"], "object");
+        let branches = parameters["oneOf"].as_array().expect("oneOf schema");
+        assert_eq!(branches.len(), 2);
+        assert_eq!(branches[0]["required"], serde_json::json!(["path", "old_string", "new_string"]));
+        assert_eq!(branches[1]["required"], serde_json::json!(["path", "edits"]));
+        assert_eq!(branches[1]["properties"]["edits"]["minItems"], 1);
+        for branch in branches {
+            assert_eq!(branch["additionalProperties"], false);
+        }
+    }
+
+    #[tokio::test]
+    async fn unknown_top_level_fields_are_rejected() {
+        let root = temp_root();
+        std::fs::write(root.join("a.txt"), "hello\n").unwrap();
+        let ctx = context(root.clone());
+        let tool = EditTool::new();
+        let out = tool
+            .execute(
+                r#"{"path":"a.txt","old_string":"hello","new_string":"X","unexpected":true}"#,
+                &ctx,
+            )
+            .await;
+        assert!(out.is_error);
+        assert!(out.content.contains("参数解析失败"), "{}", out.content);
+        std::fs::remove_dir_all(&ctx.cwd).unwrap();
+    }
+
     #[tokio::test]
     async fn replaces_single_occurrence() {
         let root = temp_root();
@@ -718,12 +771,18 @@ mod tests {
         let out = tool
             .execute(
                 r#"{"path":"a.txt","old_string":"hello","new_string":"X",
+                    "replace_all":false,
                     "edits":[{"old_string":"a","new_string":"b"}]}"#,
                 &ctx,
             )
             .await;
         assert!(out.is_error);
-        assert!(out.content.contains("二选一"), "{}", out.content);
+        assert!(
+            out.content
+                .contains("edits 与 old_string/new_string/replace_all 不能同时提供"),
+            "{}",
+            out.content
+        );
         std::fs::remove_dir_all(&ctx.cwd).unwrap();
     }
 
@@ -737,12 +796,28 @@ mod tests {
             .execute(r#"{"path":"a.txt","edits":[]}"#, &ctx)
             .await;
         assert!(out.is_error);
-        assert!(out.content.contains("缺少编辑内容"), "{}", out.content);
+        assert!(out.content.contains("edits 不能为空"), "{}", out.content);
         let out = tool.execute(r#"{"path":"a.txt"}"#, &ctx).await;
         assert!(out.is_error);
         std::fs::remove_dir_all(&ctx.cwd).unwrap();
     }
 
+    #[tokio::test]
+    async fn top_level_replace_all_is_rejected_with_edits() {
+        let root = temp_root();
+        std::fs::write(root.join("a.txt"), "hello\n").unwrap();
+        let ctx = context(root.clone());
+        let tool = EditTool::new();
+        let out = tool
+            .execute(
+                r#"{"path":"a.txt","replace_all":false,"edits":[{"old_string":"hello","new_string":"X"}]}"#,
+                &ctx,
+            )
+            .await;
+        assert!(out.is_error);
+        assert!(out.content.contains("edits 与 old_string/new_string/replace_all"), "{}", out.content);
+        std::fs::remove_dir_all(&ctx.cwd).unwrap();
+    }
     #[tokio::test]
     async fn edits_array_rejects_identical_pair() {
         let root = temp_root();

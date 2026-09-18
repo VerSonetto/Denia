@@ -25,7 +25,12 @@ export interface PanelContext {
 export interface PanelDescriptor {
   type: SidePaneTabType
   /** i18n 键;标签栏与菜单共用同一份文案。 */
-  labelKey: 'sidePaneReview' | 'sidePaneTerminal' | 'sidePaneBrowser' | 'sidePaneFiles'
+  labelKey:
+    | 'sidePaneReview'
+    | 'sidePaneTerminal'
+    | 'sidePaneBrowser'
+    | 'sidePaneFiles'
+    | 'sidePaneFile'
   /** 该面板此刻能否打开。 */
   available(ctx: PanelContext): boolean
   /** 单例面板已开时是否从菜单隐藏。 */
@@ -33,6 +38,15 @@ export interface PanelDescriptor {
 }
 
 export const PANELS: PanelDescriptor[] = [
+  {
+    type: 'file',
+    labelKey: 'sidePaneFile',
+    // **永远不在菜单里出现**：文件读取标签页没有手动入口（不能新建、不能
+    // 手输路径），它只由四类点击行为打开（见 useSidePane 的 openFile）。
+    // 空态引导页与 `+` 菜单都吃 `availablePanels`，所以这里一律返回 false。
+    available: () => false,
+    singleton: true,
+  },
   {
     type: 'files',
     labelKey: 'sidePaneFiles',

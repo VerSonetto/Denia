@@ -33,6 +33,7 @@ import {
 } from '../sidePane'
 import {
   IconClose,
+  IconFile,
   IconFiles,
   IconGlobe,
   IconPlus,
@@ -54,6 +55,7 @@ export function tabTypeLabel(type: SidePaneTabType): string {
   if (type === 'review') return t('sidePaneReview')
   if (type === 'terminal') return t('sidePaneTerminal')
   if (type === 'files') return t('sidePaneFiles')
+  if (type === 'file') return t('sidePaneFile')
   return t('sidePaneBrowser')
 }
 
@@ -61,6 +63,7 @@ export function TabIcon({ type, size = 13 }: { type: SidePaneTabType; size?: num
   if (type === 'review') return <IconTool size={size} />
   if (type === 'terminal') return <IconTerminal size={size} />
   if (type === 'files') return <IconFiles size={size} />
+  if (type === 'file') return <IconFile size={size} />
   return <IconGlobe size={size} />
 }
 
@@ -68,6 +71,13 @@ export function TabIcon({ type, size = 13 }: { type: SidePaneTabType; size?: num
 export function tabTitle(tab: SidePaneTab): string {
   const custom = tab.title?.trim()
   if (custom) return custom
+  // 文件读取标签页显示当前激活文件的短名:它比“文件读取”四个字更能
+  // 说明“这个标签现在装的是哪个文件”。
+  if (tab.type === 'file') {
+    const active = tab.files?.find((file) => file.path === tab.activeFile)
+    const name = active?.name ?? tab.files?.[tab.files.length - 1]?.name
+    if (name) return name
+  }
   return tabTypeLabel(tab.type)
 }
 
@@ -385,6 +395,21 @@ export function SidePaneTabs({
         ref={viewportRef}
         className={`pane-tab-viewport${overflow.left && overflow.right ? ' mask-both' : overflow.left ? ' mask-left' : overflow.right ? ' mask-right' : ''}`}
         data-pane-tab-viewport=""
+        onWheel={(event) => {
+          // 标签栏只横向溢出；把鼠标滚轮的纵向增量转成横向滚动，
+          // 触控板本身产生的 deltaX 仍按原方向使用。
+          const delta = Math.abs(event.deltaX) >= Math.abs(event.deltaY)
+            ? event.deltaX
+            : event.deltaY
+          if (delta === 0) return
+          const viewport = event.currentTarget
+          const maxScroll = viewport.scrollWidth - viewport.clientWidth
+          if (maxScroll <= 0) return
+          const next = Math.max(0, Math.min(maxScroll, viewport.scrollLeft + delta))
+          if (next === viewport.scrollLeft) return
+          event.preventDefault()
+          viewport.scrollLeft = next
+        }}
       >
         <div className="pane-tab-content" data-pane-tab-content="">
           {tabs.map((tab) => {

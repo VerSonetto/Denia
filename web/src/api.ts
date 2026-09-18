@@ -683,6 +683,34 @@ export function fetchTree(
   return http(`/api/fs/tree?${params.toString()}`, { signal })
 }
 
+/** 工作区文件的只读视图（`/api/fs/file` 响应）。 */
+export interface WorkspaceFileView {
+  /** 相对工作区根的路径（以 `/` 分隔）。 */
+  path: string
+  name: string
+  content: string
+  size: number
+  /** 由扩展名推得的语言提示；推不出为 null（前端按纯文本渲染）。 */
+  language: string | null
+  modifiedMs: number
+  lines: number
+}
+
+/**
+ * 读取工作区内的一个文本文件（只读）。
+ *
+ * 失败形态由后端给不同码，前端据此分别提示：路径非法/目录/二进制 400、
+ * 不存在 404、无权限 403、超限 413。
+ */
+export function fetchWorkspaceFile(
+  path: string,
+  file: string,
+  signal?: AbortSignal,
+): Promise<WorkspaceFileView> {
+  const params = new URLSearchParams({ path, file })
+  return http(`/api/fs/file?${params.toString()}`, { signal })
+}
+
 export function getSession(id: string, signal?: AbortSignal): Promise<{
   header: SessionHeader
   events: SessionEnvelope[]

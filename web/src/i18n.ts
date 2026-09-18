@@ -596,6 +596,7 @@ const zh = {
   producedFilesLabel: '本轮文件改动',
   producedFilesMore: '+{count} 个文件',
   producedFilesOpenFolder: '打开 {name} 所在文件夹',
+  producedFilesOpenFile: '打开 {name}',
   currentModel: '当前模型',
 
   messageBranch: '在新对话中分支',
@@ -964,6 +965,15 @@ const zh = {
   sidePaneFilesTruncated: '条目过多，只显示前 2000 项。',
   sidePaneFilesRetry: '重试',
   sidePaneFilesDragHint: '拖到输入框引用',
+  sidePaneFilesOpenHint: '点击在文件读取中打开',
+  sidePaneFile: '文件读取',
+  sidePaneFileTabs: '已打开的文件',
+  sidePaneFileCloseEntry: '关闭这个文件',
+  sidePaneFileLoading: '读取中…',
+  sidePaneFileRetry: '重试',
+  sidePaneFileReload: '重新读取',
+  sidePaneFileLines: '{count} 行',
+  openInFileReader: '在文件读取中打开',
 
   /* ---- 终端面板 ---- */
   terminalStartFailed: '终端启动失败',
@@ -1640,6 +1650,7 @@ const en: typeof zh = {
   producedFilesLabel: 'Files changed',
   producedFilesMore: '+{count} files',
   producedFilesOpenFolder: 'Open folder containing {name}',
+  producedFilesOpenFile: 'Open {name}',
   currentModel: 'Current model',
 
   messageBranch: 'Branch into a new conversation',
@@ -2007,6 +2018,15 @@ const en: typeof zh = {
   sidePaneFilesTruncated: 'Too many entries; showing the first 2000.',
   sidePaneFilesRetry: 'Retry',
   sidePaneFilesDragHint: 'Drag into the composer to reference',
+  sidePaneFilesOpenHint: 'Click to open in the file reader',
+  sidePaneFile: 'File reader',
+  sidePaneFileTabs: 'Open files',
+  sidePaneFileCloseEntry: 'Close this file',
+  sidePaneFileLoading: 'Reading…',
+  sidePaneFileRetry: 'Retry',
+  sidePaneFileReload: 'Reload',
+  sidePaneFileLines: '{count} lines',
+  openInFileReader: 'Open in file reader',
 
   /* ---- Terminal panel ---- */
   terminalStartFailed: 'Failed to start terminal',

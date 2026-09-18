@@ -44,9 +44,15 @@ export interface FileTreePanelProps {
   workspacePath: string
   /** 会话 id:切会话时重新从根加载(不同会话可能绑定不同工作区)。 */
   sessionId: string | null
+  /**
+   * 点击文件行:在「文件读取」标签页里打开该文件。
+   *
+   * 目录行不走这里 —— 点击目录仍然是展开/收起(那是树自己的主交互)。
+   */
+  onOpenFile?: (path: string) => void
 }
 
-export function FileTreePanel({ workspacePath, sessionId }: FileTreePanelProps) {
+export function FileTreePanel({ workspacePath, sessionId, onOpenFile }: FileTreePanelProps) {
   const [tree, setTree] = useState<FileTreeState>(() => emptyTree(workspacePath))
   const [filter, setFilter] = useState('')
   /**
@@ -117,12 +123,16 @@ export function FileTreePanel({ workspacePath, sessionId }: FileTreePanelProps) 
 
   const onToggle = useCallback(
     (row: TreeRow) => {
-      if (row.entry.kind !== 'directory') return
+      // 文件行:打开到「文件读取」标签页(目录行的展开/收起不变)。
+      if (row.entry.kind !== 'directory') {
+        onOpenFile?.(row.entry.path)
+        return
+      }
       const result = toggleDir(tree, row.entry.path)
       setTree(result.state)
       if (result.needLoad) void load(row.entry.path)
     },
-    [tree, load],
+    [tree, load, onOpenFile],
   )
 
   const rows = useMemo(() => visibleRows(tree), [tree])
@@ -211,7 +221,11 @@ export function FileTreePanel({ workspacePath, sessionId }: FileTreePanelProps) 
                 event.dataTransfer.effectAllowed = 'copy'
               }}
               onClick={() => onToggle(row)}
-              title={`${row.entry.path} · ${t('sidePaneFilesDragHint')}`}
+              title={
+                directory
+                  ? `${row.entry.path} · ${t('sidePaneFilesDragHint')}`
+                  : `${row.entry.path} · ${t('sidePaneFilesOpenHint')}`
+              }
             >
               <span className="file-tree-caret" aria-hidden="true">
                 {directory ? (

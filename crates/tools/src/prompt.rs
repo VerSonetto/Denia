@@ -116,7 +116,7 @@ pub fn register_shipped_prompt(
         name: "tool:edit".to_string(),
         order: SectionOrder::ToolEdit.value(),
         text: PromptText::Static(
-            "精确小改动用 edit 工具(必须精确出现一次的字符串替换);同一文件的多处小改动合并进一次 edit 调用的 edits 数组(按顺序应用,任一处失败则整次不写入),不要拆成多次调用;大段改动用 write_file。改完用 read_file 或 grep 验证结果。"
+            "精确小改动用 edit 工具:先 read_file 确认原文,再按下面两种格式严格二选一。只改一处时只给 {path, old_string, new_string},可选 replace_all;同一文件改多处时只给 {path, edits:[{old_string, new_string, replace_all?}, ...]},至少一个 edits 项。**不要同时提供 edits 和 old_string/new_string/replace_all,也不要传空 edits 数组**。每个 old_string 必须与当前文件逐字符一致(空白与换行都算),默认只能出现一次;replace_all=true 时才替换全部出现。多处 edits 按顺序应用且全有或全无;不要为多处修改拆成多次调用。改完用 read_file 或 grep 验证结果。"
                 .to_string(),
         ),
         complete: false,

@@ -32,6 +32,7 @@ import {
   reorderTab,
   reviveClosed,
   upsertTab,
+  type OpenedFile,
   type SidePaneState,
   type SidePaneTab,
   type SidePaneTabType,
@@ -70,6 +71,12 @@ export interface SidePaneProps {
   renderBrowser?(tab: SidePaneTab, visible: boolean): React.ReactNode
   /** 打开某个类型的面板(创建 tab + 展开)。 */
   onOpenPanel(type: SidePaneTabType): void
+  /** 把文件打开到「文件读取」标签页(由 App 的 pane.openFile 透传)。 */
+  onOpenFile(path: string): void
+  /** 切换文件读取标签页内的激活条目。 */
+  onActivateFile(path: string): void
+  /** 关闭文件读取标签页里的一个条目。 */
+  onCloseFile(path: string): void
 }
 
 export function SidePane({
@@ -87,6 +94,9 @@ export function SidePane({
   renderTerminals,
   renderBrowser,
   onOpenPanel,
+  onOpenFile,
+  onActivateFile,
+  onCloseFile,
 }: SidePaneProps) {
   const rootRef = useRef<HTMLDivElement | null>(null)
   const storedWidth = useSidePaneWidth()
@@ -379,7 +389,23 @@ export function SidePane({
                       ))}
                     {tab.type === 'files' &&
                       (workspacePath ? (
-                        <FileTreeSlot workspacePath={workspacePath} sessionId={sessionId} />
+                        <FileTreeSlot
+                          workspacePath={workspacePath}
+                          sessionId={sessionId}
+                          onOpenFile={onOpenFile}
+                        />
+                      ) : (
+                        <div className="pane-placeholder">{t('sidePaneNeedsWorkspace')}</div>
+                      ))}
+                    {tab.type === 'file' &&
+                      (workspacePath ? (
+                        <FileReaderSlot
+                          workspacePath={workspacePath}
+                          files={tab.files ?? []}
+                          activeFile={tab.activeFile}
+                          onActivate={onActivateFile}
+                          onCloseFile={onCloseFile}
+                        />
                       ) : (
                         <div className="pane-placeholder">{t('sidePaneNeedsWorkspace')}</div>
                       ))}
@@ -414,10 +440,51 @@ const LazyReviewPanel = lazy(() => import('./ReviewPanel'))
 /** 工作区文件面板槽:同样懒加载(树只在真打开该标签时才需要)。 */
 const LazyFileTreePanel = lazy(() => import('./FileTreePanel'))
 
-function FileTreeSlot({ workspacePath, sessionId }: { workspacePath: string; sessionId: string | null }) {
+/** 文件读取面板槽:同样懒加载。 */
+const LazyFileReaderPanel = lazy(() => import('./FileReaderPanel'))
+
+function FileTreeSlot({
+  workspacePath,
+  sessionId,
+  onOpenFile,
+}: {
+  workspacePath: string
+  sessionId: string | null
+  onOpenFile: (path: string) => void
+}) {
   return (
     <Suspense fallback={<div className="pane-placeholder">{t('loading')}</div>}>
-      <LazyFileTreePanel workspacePath={workspacePath} sessionId={sessionId} />
+      <LazyFileTreePanel
+        workspacePath={workspacePath}
+        sessionId={sessionId}
+        onOpenFile={onOpenFile}
+      />
+    </Suspense>
+  )
+}
+
+function FileReaderSlot({
+  workspacePath,
+  files,
+  activeFile,
+  onActivate,
+  onCloseFile,
+}: {
+  workspacePath: string
+  files: readonly OpenedFile[]
+  activeFile: string | undefined
+  onActivate: (path: string) => void
+  onCloseFile: (path: string) => void
+}) {
+  return (
+    <Suspense fallback={<div className="pane-placeholder">{t('loading')}</div>}>
+      <LazyFileReaderPanel
+        workspacePath={workspacePath}
+        files={files}
+        activeFile={activeFile}
+        onActivate={onActivate}
+        onCloseFile={onCloseFile}
+      />
     </Suspense>
   )
 }

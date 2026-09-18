@@ -10,6 +10,7 @@ import {
 } from '../fold'
 import { MarkdownText } from '../markdown/MarkdownText'
 import type { MarkdownLabels } from '../markdown/MarkdownText'
+import { useFileOpen } from '../fileOpen'
 import { useStickToBottom } from '../hooks/useStickToBottom'
 import { useTypewriter } from '../typewriter'
 import {
@@ -743,6 +744,16 @@ function ToolRow({
   // 头部摘要:文件类工具一律显示文件名(不是 old_string/content 原文);
   // todo_write 走 toolCallSummary 里的进度分支,同样不出现 JSON。
   const headSummary = diff ? diff.path : argSummary
+  // 文件类工具(edit / write_file)的**完整路径**:头部只显示短名(shortPath),
+  // 打开文件需要完整相对路径。参数解析失败(流式半截 JSON)时拿不到就
+  // 退化为不可点 —— 宁可少一个入口,也不猜一个路径。
+  const toolFilePath = useMemo(() => {
+    if (node.name !== 'edit' && node.name !== 'write_file') return null
+    const parsed = parseArgsObject(node.args)
+    const raw = parsed?.['path']
+    return typeof raw === 'string' && raw.trim() ? raw.trim() : null
+  }, [node.name, node.args])
+  const openFile = useFileOpen()
   const summary = running
     ? headSummary
     : node.result!.isError
@@ -826,12 +837,38 @@ function ToolRow({
         </span>
         <span className="title">{meta.title}</span>
         <span className="sep" />
-        <span
-          className="summary"
-          style={node.result?.isError ? { color: 'var(--error)' } : undefined}
-        >
-          {summary}
-        </span>
+        {toolFilePath ? (
+          /* edit / write_file 的文件路径：可点开在「文件读取」标签页。
+             嵌在 disc-head 这个 button 里的是 span + role=button（不是嵌套
+             button —— 那是非法 HTML），点击时 stopPropagation 拦住外层
+             的展开/收起。 */
+          <span
+            className="summary tool-file-path"
+            role="button"
+            tabIndex={0}
+            title={t('openInFileReader')}
+            data-tool-file-path={toolFilePath}
+            onClick={(event) => {
+              event.stopPropagation()
+              openFile(toolFilePath)
+            }}
+            onKeyDown={(event) => {
+              if (event.key !== 'Enter' && event.key !== ' ') return
+              event.preventDefault()
+              event.stopPropagation()
+              openFile(toolFilePath)
+            }}
+          >
+            {summary}
+          </span>
+        ) : (
+          <span
+            className="summary"
+            style={node.result?.isError ? { color: 'var(--error)' } : undefined}
+          >
+            {summary}
+          </span>
+        )}
         {diff && !node.result?.isError && (
           <DiffStat
             compact
@@ -976,6 +1013,7 @@ async function openContainingFolder(path: string, cwd: string | null): Promise<v
  * 换行,不用省略号吞掉中间的文件。
  */
 function ProducedFilesRow({ paths, cwd }: { paths: readonly string[]; cwd: string | null }) {
+  const openFile = useFileOpen()
   const shown = paths.slice(0, PRODUCED_SHOWN_LIMIT)
   const remainder = paths.length - shown.length
   return (
@@ -983,17 +1021,30 @@ function ProducedFilesRow({ paths, cwd }: { paths: readonly string[]; cwd: strin
       <span className="turn-produced-label">{t('producedFilesLabel')}</span>
       <span className="turn-produced-lane">
         {shown.map((path) => (
-          <button
-            key={path}
-            type="button"
-            className="turn-produced-file"
-            title={path}
-            aria-label={t('producedFilesOpenFolder', { name: pathBasename(path) })}
-            onClick={() => { void openContainingFolder(path, cwd) }}
-          >
-            <ProducedFileIcon path={path} />
-            <span className="turn-produced-name">{pathBasename(path)}</span>
-          </button>
+          <span className="turn-produced-item" key={path}>
+            {/* 主动作:点击在「文件读取」标签页里打开该文件。
+                右侧的文件夹按钮保留原来的“在文件管理器里打开”能力 ——
+                两者是不同意图，合成一个会必有一方被牺牲。 */}
+            <button
+              type="button"
+              className="turn-produced-file"
+              title={`${path} · ${t('openInFileReader')}`}
+              aria-label={t('producedFilesOpenFile', { name: pathBasename(path) })}
+              onClick={() => openFile(path)}
+            >
+              <ProducedFileIcon path={path} />
+              <span className="turn-produced-name">{pathBasename(path)}</span>
+            </button>
+            <button
+              type="button"
+              className="turn-produced-folder"
+              title={t('producedFilesOpenFolder', { name: pathBasename(path) })}
+              aria-label={t('producedFilesOpenFolder', { name: pathBasename(path) })}
+              onClick={() => { void openContainingFolder(path, cwd) }}
+            >
+              <IconFolder size={12} />
+            </button>
+          </span>
         ))}
         {remainder > 0 && (
           <span className="turn-produced-more" title={paths.join('\n')}>

@@ -194,6 +194,102 @@ const ids = (state) => state.tabs.map((t) => t.id)
   check('scope:draft 桶名稳定', mod.DRAFT_SCOPE, '__draft__')
 }
 
+/* ---------- 文件读取标签页 ---------- */
+
+{
+  const T = 5000
+  // 首次打开:创建标签页并激活。
+  const first = mod.openFileInTab(null, { path: 'src/main.rs' }, T)
+  check(
+    'file:首次打开创建标签页并激活',
+    { ids: ids(first), active: first.activeTabId, files: first.tabs[0].files.map((f) => f.path), activeFile: first.tabs[0].activeFile },
+    { ids: ['file'], active: 'file', files: ['src/main.rs'], activeFile: 'src/main.rs' },
+  )
+  check('file:短名从路径推得', first.tabs[0].files[0].name, 'main.rs')
+
+  // 同一文件重复打开:复用条目,不重复添加,不新建标签页。
+  const again = mod.openFileInTab(first, { path: 'src/main.rs' }, T + 1)
+  check(
+    'file:重复打开同一文件不新增条目',
+    { count: again.tabs.length, files: again.tabs[0].files.length },
+    { count: 1, files: 1 },
+  )
+
+  // 打开另一个文件:追加条目并切激活项。
+  const second = mod.openFileInTab(again, { path: 'a/b/c.ts' }, T + 2)
+  check(
+    'file:不同文件追加条目并切激活',
+    { files: second.tabs[0].files.map((f) => f.path), activeFile: second.tabs[0].activeFile },
+    { files: ['src/main.rs', 'a/b/c.ts'], activeFile: 'a/b/c.ts' },
+  )
+
+  // 切回已打开的文件:只换激活项,顺序不变(不因重复点击而跳动)。
+  const back = mod.openFileInTab(second, { path: 'src/main.rs' }, T + 3)
+  check(
+    'file:切回已打开文件保持顺序',
+    { files: back.tabs[0].files.map((f) => f.path), activeFile: back.tabs[0].activeFile },
+    { files: ['src/main.rs', 'a/b/c.ts'], activeFile: 'src/main.rs' },
+  )
+
+  // 空路径不建标签页。
+  check('file:空路径不打开', mod.openFileInTab(null, { path: '  ' }, T).tabs.length, 0)
+
+  // 激活不存在的条目:原样返回。
+  check('file:激活不存在的条目不变', mod.activateFile(second, 'nope.ts'), second)
+  check(
+    'file:激活已有条目',
+    mod.activateFile(second, 'src/main.rs').tabs[0].activeFile,
+    'src/main.rs',
+  )
+
+  // 关条目:当前激活项顺位接上邻居(优先右边)。
+  const closedActive = mod.closeFile(second, 'a/b/c.ts')
+  check(
+    'file:关掉激活条目后顺位接邻居',
+    { files: closedActive.tabs[0].files.map((f) => f.path), activeFile: closedActive.tabs[0].activeFile },
+    { files: ['src/main.rs'], activeFile: 'src/main.rs' },
+  )
+
+  // 关掉非激活条目:激活项不受影响。
+  const closedOther = mod.closeFile(second, 'src/main.rs')
+  check(
+    'file:关掉非激活条目不影响激活项',
+    { files: closedOther.tabs[0].files.map((f) => f.path), activeFile: closedOther.tabs[0].activeFile },
+    { files: ['a/b/c.ts'], activeFile: 'a/b/c.ts' },
+  )
+
+  // 关掉最后一个条目:标签页一并消失(它没有手动入口,空壳无意义)。
+  const last = mod.closeFile(mod.openFileInTab(null, { path: 'only.ts' }, T), 'only.ts')
+  check('file:关掉最后一个条目连带关掉标签页', { ids: ids(last), active: last.activeTabId }, { ids: [], active: '' })
+
+  // 关掉标签页后重新打开:能重新创建(要求里明确的一条)。
+  const reopened = mod.openFileInTab(last, { path: 'fresh.ts' }, T + 4)
+  check(
+    'file:关闭后可重新创建',
+    { ids: ids(reopened), files: reopened.tabs[0].files.map((f) => f.path) },
+    { ids: ['file'], files: ['fresh.ts'] },
+  )
+
+  // 标签页已存在时打开文件:不能新建第二个标签页。
+  check(
+    'file:已存在时复用同一标签页',
+    mod.openFileInTab(reopened, { path: 'x.ts' }, T + 5).tabs.length,
+    1,
+  )
+
+  // 显式传 name 时用它,不从路径推。
+  check(
+    'file:显式 name 优先',
+    mod.openFileInTab(null, { path: 'a/b/c.ts', name: '自定义' }, T).tabs[0].files[0].name,
+    '自定义',
+  )
+
+  // fileTab 查询。
+  check('file:fileTab 取到标签页', mod.fileTab(first)?.id, 'file')
+  check('file:无标签页时 fileTab 返回 null', mod.fileTab(mod.EMPTY_SIDE_PANE), null)
+  check('file:basename 兼容反斜杠', mod.fileBasename('a\\b\\c.ts'), 'c.ts')
+}
+
 /* ---------- 分桶上限:putScope 的 LRU 语义 ---------- */
 
 {

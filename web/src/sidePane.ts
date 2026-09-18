@@ -24,6 +24,23 @@ export type SidePaneTabType =
   | 'browser'
   /** 工作区文件:文件系统目录树(与 Git 无关)。单例。 */
   | 'files'
+  /**
+   * 文件读取:只读查看工作区内文件内容。单例。
+   *
+   * 没有手动入口 —— 不能从 `+` 菜单新建、不能手输路径。它只能由四类点击
+   * 触发（对话里的文件引用 / edit·write 工具行的路径 / 轮次产物列表 /
+   * 工作区文件树的文件项），具体见 `hooks/useSidePane` 的 `openFile`。
+   */
+  | 'file'
+
+/** 文件读取标签页里已打开的一个文件条目。 */
+export interface OpenedFile {
+  /** 相对工作区根的路径（以 `/` 分隔）：去重键，与文件树/拖拽引用同一坐标。 */
+  path: string
+  /** 文件短名（条目标签上显示）。 */
+  name: string
+  openedAt: number
+}
 
 export interface SidePaneTab {
   id: string
@@ -34,6 +51,15 @@ export interface SidePaneTab {
   title?: string
   /** 终端 tab 的工作目录。 */
   cwd?: string
+  /**
+   * 文件读取标签页已打开的文件列表（只有 `file` 类型用）。
+   *
+   * 存在标签上而不是单独一份 store 里：标签被关掉时这些条目跟着消失，
+   * 不需要额外的清理路径 —— 而“关闭后再点触发点要能重新创建”正是要求。
+   */
+  files?: OpenedFile[]
+  /** 当前激活的文件路径（`files` 里的某一项）。 */
+  activeFile?: string
 }
 
 export interface SidePaneState {
@@ -186,6 +212,103 @@ export function reviveClosed(tab: SidePaneTab, newId: string): SidePaneTab {
     return { ...tab, id: newId, title: undefined }
   }
   return { ...tab, id: newId }
+}
+
+/* ---- 文件读取标签页 ---- */
+
+/** 文件读取标签页的 id。单例：面板里最多只有一个，所以用固定 id。 */
+export const FILE_TAB_ID = 'file'
+
+/** 从路径取短名（兼容 `/` 与 `\`）。 */
+export function fileBasename(path: string): string {
+  const index = Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\'))
+  return index < 0 ? path : path.slice(index + 1)
+}
+
+/** 找到文件读取标签页（没有则 null）。 */
+export function fileTab(state: SidePaneState | null): SidePaneTab | null {
+  if (!state) return null
+  return state.tabs.find((tab) => tab.type === 'file') ?? null
+}
+
+/**
+ * 打开一个文件到文件读取标签页。
+ *
+ * 四种情况合一：
+ * - 标签不存在 → 建一个（连同首个文件条目），并激活；
+ * - 标签已存在但文件未开过 → 追加条目并激活它（**不**重建标签，也不
+ *   重复添加已开过的文件）；
+ * - 文件已打开过 → 只把 `activeFile` 指过去（复用已有条目）；
+ * - 无论哪种情况，标签本身都保持“当前激活”（用户点文件就是要看它）。
+ *
+ * 返回新状态；调用方负责写回 store。
+ */
+export function openFileInTab(
+  state: SidePaneState | null,
+  file: { path: string; name?: string },
+  openedAt: number,
+): SidePaneState {
+  const base = state ?? EMPTY_SIDE_PANE
+  const path = file.path.trim()
+  if (!path) return base
+  const name = file.name?.trim() || fileBasename(path)
+  const existing = fileTab(base)
+  if (existing === null) {
+    const tab: SidePaneTab = {
+      id: FILE_TAB_ID,
+      type: 'file',
+      openedAt,
+      files: [{ path, name, openedAt }],
+      activeFile: path,
+    }
+    return upsertTab(base, tab)
+  }
+  const files = existing.files ?? []
+  // 已开过：只切激活项，不重复添加（条目顺序保持稳定，不因重复点击而跳动）。
+  const nextFiles = files.some((item) => item.path === path)
+    ? files
+    : [...files, { path, name, openedAt }]
+  const tabs = base.tabs.map((tab) =>
+    tab.id === existing.id ? { ...tab, files: nextFiles, activeFile: path } : tab,
+  )
+  return { tabs, activeTabId: existing.id }
+}
+
+/** 切换文件读取标签页内的激活条目（不存在则原样返回）。 */
+export function activateFile(state: SidePaneState | null, path: string): SidePaneState {
+  const existing = fileTab(state)
+  if (existing === null) return state ?? EMPTY_SIDE_PANE
+  if (existing.activeFile === path) return state ?? EMPTY_SIDE_PANE
+  if (!(existing.files ?? []).some((item) => item.path === path)) return state ?? EMPTY_SIDE_PANE
+  return {
+    tabs: state!.tabs.map((tab) => (tab.id === existing.id ? { ...tab, activeFile: path } : tab)),
+    activeTabId: existing.id,
+  }
+}
+
+/**
+ * 从文件读取标签页里关掉一个文件条目。
+ *
+ * 关掉最后一个条目时**连带关掉标签页**：留一个没有任何条目的空壳既没有
+ * 内容可看，也没有入口可以再往里加（该标签页本来就没有手动入口）。
+ */
+export function closeFile(state: SidePaneState | null, path: string): SidePaneState {
+  const existing = fileTab(state)
+  if (existing === null) return state ?? EMPTY_SIDE_PANE
+  const files = (existing.files ?? []).filter((item) => item.path !== path)
+  if (files.length === 0) return closeTab(state, existing.id)
+  // 关掉的正是当前激活项：顺位接上邻居（优先右边，与标签栏关闭同一语义）。
+  let activeFile = existing.activeFile
+  if (activeFile === path) {
+    const order = (existing.files ?? []).map((item) => item.path)
+    const index = order.indexOf(path)
+    const next = order[index + 1] ?? order[index - 1] ?? files[files.length - 1]!.path
+    activeFile = files.some((item) => item.path === next) ? next : files[0]!.path
+  }
+  return {
+    tabs: state!.tabs.map((tab) => (tab.id === existing.id ? { ...tab, files, activeFile } : tab)),
+    activeTabId: state!.activeTabId,
+  }
 }
 
 /* ---- 作用域键 ---- */

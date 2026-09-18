@@ -25,6 +25,7 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/api/fs/capability", get(capability))
         .route("/api/fs/mentions", get(list_mentions))
         .route("/api/fs/tree", get(list_tree))
+        .route("/api/fs/file", get(read_workspace_file))
 }
 
 /// 目录选择器 seam 的能力决策(抄 dsh directory-picker-auto):
@@ -610,6 +611,369 @@ fn sort_tree_entries(entries: &mut [TreeEntry]) {
             .then_with(|| left.name.to_lowercase().cmp(&right.name.to_lowercase()))
             .then_with(|| left.name.cmp(&right.name))
     });
+}
+
+/* ---- 工作区文件内容读取(右侧「文件读取」标签页) ----
+ *
+ * 只读展示：路径一律相对工作区根解析，与文件树/拖拽引用共用同一套坐标
+ * （见 `resolve_relative_directory`）。安全口径与树列举一致：拒 `..` 逃逸、
+ * 拒绝对路径段与盘符段、不跟随符号链接（避免绕出工作区）。
+ */
+
+/// 单文件读取上限：超过则明确拒绝而不是把几十 MB 基磊塞给浏览器。
+const FILE_MAX_BYTES: u64 = 2 * 1024 * 1024;
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FileView {
+    /// 相对根目录的路径（以 `/` 分隔），前端标签以此作去重键。
+    path: String,
+    /// 文件短名（标签与标题用）。
+    name: String,
+    /// 文件正文。非 UTF-8（二进制）不走这里，直接报错。
+    content: String,
+    size: u64,
+    /// 语言提示（由扩展名推得），前端语法高亮用；推不出为 null。
+    language: Option<String>,
+    modified_ms: u64,
+    /// 行数：前端行号栏与「已截断」提示需要。
+    lines: u64,
+}
+
+#[derive(Debug, Deserialize)]
+struct FileQuery {
+    /// 工作区根目录绝对路径。
+    path: String,
+    /// 相对根的路径（以 `/` 分隔）。
+    file: String,
+}
+
+/// 读取工作区内一个文本文件。
+///
+/// 失败形态各自给码，前端据此给出不同提示：
+/// - 400 路径非法（逃逸/绝对/盘符）、目标是目录、不是 UTF-8 文本；
+/// - 404 文件不存在（含读取期被删）；
+/// - 413 超过读取上限。
+async fn read_workspace_file(Query(query): Query<FileQuery>) -> Result<impl IntoResponse, ApiError> {
+    let inner = tokio::task::spawn_blocking(move || {
+        read_file_impl(query.path.as_str(), query.file.as_str())
+    })
+    .await
+    .map_err(|e| {
+        ApiError::new(
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            "fs/file-failed",
+            e.to_string(),
+        )
+    })?;
+    Ok(Json(inner?))
+}
+
+fn read_file_impl(root_path: &str, raw_file: &str) -> Result<FileView, ApiError> {
+    let root = PathBuf::from(root_path.trim());
+    if !root.is_dir() {
+        return Err(ApiError::bad_request(
+            "fs/file-not-a-directory",
+            format!("'{}' is not a directory", root.display()),
+        ));
+    }
+    let rel = raw_file.replace('\\', "/");
+    // 只在首尾斜杠上做**去尾**归一（前端可能给 `src/main.rs/` 这种拖拽残留），
+    // 但**绝不**把开头的 `/` 抹掉：那正是绝对路径的标记，抹了就变成相对路径，
+    // `/etc/passwd` 会被当成工作区内的 `etc/passwd` —— 实测就是这样漏过校验的。
+    let rel = rel.trim_end_matches('/').to_string();
+    if rel.is_empty() || rel.trim().is_empty() {
+        return Err(ApiError::bad_request("fs/file-bad-path", "file path is empty"));
+    }
+    // 复用目录解析的同一条路径校验：拒 `..`/绝对路径/盘符段。
+    let Some(abs) = resolve_relative_file(&root, &rel) else {
+        return Err(ApiError::bad_request(
+            "fs/file-bad-path",
+            format!("'{raw_file}' is not a readable file under the workspace root"),
+        ));
+    };
+    // 解析结果必须仍在根内（双保险：即使将来有人放松了 `resolve_relative_file`
+    // 的段校验，越界仍会在这里被拦住）。
+    if !abs.starts_with(&root) {
+        return Err(ApiError::bad_request(
+            "fs/file-bad-path",
+            format!("'{raw_file}' is not a readable file under the workspace root"),
+        ));
+    }
+    let metadata = std::fs::symlink_metadata(&abs).map_err(|error| file_io_error(error, &rel))?;
+    // 符号链接一律拒绝：树与提及索引都不 follow 链接，读取也不应该例外 ——
+    // 否则一个指向工作区外的链接就能把根约束绕过去。
+    if metadata.file_type().is_symlink() {
+        return Err(ApiError::bad_request(
+            "fs/file-symlink",
+            format!("'{rel}' 是符号链接，不跟随打开"),
+        ));
+    }
+    if metadata.is_dir() {
+        return Err(ApiError::bad_request(
+            "fs/file-is-directory",
+            format!("'{rel}' 是一个目录，无法作为文件打开"),
+        ));
+    }
+    if metadata.len() > FILE_MAX_BYTES {
+        return Err(ApiError::new(
+            axum::http::StatusCode::PAYLOAD_TOO_LARGE,
+            "fs/file-too-large",
+            format!(
+                "文件 {} MiB，超过 {} MiB 的读取上限",
+                metadata.len() / (1024 * 1024),
+                FILE_MAX_BYTES / (1024 * 1024)
+            ),
+        ));
+    }
+    let bytes = std::fs::read(&abs).map_err(|error| file_io_error(error, &rel))?;
+    // 二进制文件拒绝：不能当作文本“尽力而为”地展示 —— 那只会得到一屏乱码。
+    // 判定口径：UTF-8 解码失败或含 NUL 字节（文本文件不会有 NUL）。
+    let content = match String::from_utf8(bytes) {
+        Ok(text) if !text.contains('\0') => text,
+        Ok(_) => {
+            return Err(ApiError::bad_request(
+                "fs/file-binary",
+                format!("'{rel}' 看起来是二进制文件，无法以文本方式打开"),
+            ));
+        }
+        Err(_) => {
+            return Err(ApiError::bad_request(
+                "fs/file-not-utf8",
+                format!("'{rel}' 不是 UTF-8 文本文件，无法以文本方式打开"),
+            ));
+        }
+    };
+    let name = abs
+        .file_name()
+        .map(|value| value.to_string_lossy().to_string())
+        .unwrap_or_else(|| rel.clone());
+    let lines = if content.is_empty() {
+        0
+    } else {
+        content.lines().count() as u64
+    };
+    Ok(FileView {
+        language: language_hint(&name).map(str::to_string),
+        path: rel,
+        name,
+        content,
+        size: metadata.len(),
+        modified_ms: metadata
+            .modified()
+            .ok()
+            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0),
+        lines,
+    })
+}
+
+/// 解析相对根的文件路径。与 [`resolve_relative_directory`] 同一套拒绝口径，
+/// 但**不**要求目标是目录（也不要求此刻存在 —— 不存在交给调用方报 404）。
+fn resolve_relative_file(root: &Path, relative: &str) -> Option<PathBuf> {
+    // 纯空白不是合法路径：它会被下面的分段循环全部跳过，
+    // 解析成 root 自身，报出一个误导的“是目录”错误。
+    if relative.trim().is_empty() {
+        return None;
+    }
+    if relative.starts_with('/') {
+        return None;
+    }
+    let mut abs = root.to_path_buf();
+    for segment in relative.split('/') {
+        if segment.is_empty() || segment == "." {
+            continue;
+        }
+        if segment == ".." || segment.contains(':') {
+            return None;
+        }
+        abs.push(segment);
+    }
+    Some(abs)
+}
+
+fn file_io_error(error: std::io::Error, rel: &str) -> ApiError {
+    if error.kind() == std::io::ErrorKind::NotFound {
+        ApiError::new(
+            axum::http::StatusCode::NOT_FOUND,
+            "fs/file-not-found",
+            format!("'{rel}' 不存在（可能已被删除或重命名）"),
+        )
+    } else if error.kind() == std::io::ErrorKind::PermissionDenied {
+        ApiError::new(
+            axum::http::StatusCode::FORBIDDEN,
+            "fs/file-denied",
+            format!("没有读取 '{rel}' 的权限"),
+        )
+    } else {
+        ApiError::bad_request("fs/file-read-failed", format!("读取 '{rel}' 失败：{error}"))
+    }
+}
+
+/// 由扩展名推语言提示（语法高亮用）。推不出返回 None，前端按纯文本渲染。
+fn language_hint(name: &str) -> Option<&'static str> {
+    let ext = name.rsplit_once('.')?.1.to_lowercase();
+    let language = match ext.as_str() {
+        "rs" => "rust",
+        "ts" | "tsx" | "mts" | "cts" => "typescript",
+        "js" | "jsx" | "mjs" | "cjs" => "javascript",
+        "json" | "jsonc" => "json",
+        "md" | "markdown" => "markdown",
+        "py" => "python",
+        "go" => "go",
+        "java" => "java",
+        "c" | "h" => "c",
+        "cpp" | "cc" | "cxx" | "hpp" => "cpp",
+        "cs" => "csharp",
+        "rb" => "ruby",
+        "php" => "php",
+        "sh" | "bash" | "zsh" => "bash",
+        "ps1" | "psm1" => "powershell",
+        "toml" => "toml",
+        "yaml" | "yml" => "yaml",
+        "xml" => "xml",
+        "html" | "htm" => "html",
+        "css" => "css",
+        "scss" | "less" => "scss",
+        "sql" => "sql",
+        "kt" | "kts" => "kotlin",
+        "swift" => "swift",
+        "lua" => "lua",
+        "r" => "r",
+        "dart" => "dart",
+        "vue" => "vue",
+        "svelte" => "svelte",
+        "proto" => "protobuf",
+        "graphql" | "gql" => "graphql",
+        "ini" | "cfg" | "conf" => "ini",
+        "dockerfile" => "dockerfile",
+        _ => return None,
+    };
+    Some(language)
+}
+
+#[cfg(test)]
+mod file_read_tests {
+    use super::*;
+
+    fn scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("denia-file-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create scratch dir");
+        dir
+    }
+
+    /// 断言用的错误码（ApiError 没有实现 Serialize，直接读字段）。
+    fn err_code(error: &ApiError) -> String {
+        error.code.clone()
+    }
+
+    /// 正常读取：正文、行数、语言提示、大小与相对路径都要对。
+    #[test]
+    fn reads_utf8_text_with_metadata() {
+        let root = scratch("text");
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("src/main.rs"), "fn main() {}\n// 注释\n").unwrap();
+        let view = read_file_impl(root.to_str().unwrap(), "src/main.rs").unwrap();
+        assert_eq!(view.path, "src/main.rs");
+        assert_eq!(view.name, "main.rs");
+        assert_eq!(view.language.as_deref(), Some("rust"));
+        assert_eq!(view.lines, 2);
+        assert!(view.content.contains("fn main"));
+        assert!(view.size > 0);
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// 反斜杠与尾部斜杠要容忍（Windows 前端/拖拽可能给不同形态）。
+    /// 开头的 `/` **不**容忍：那是绝对路径的标记，必须拒。
+    #[test]
+    fn normalizes_path_separators() {
+        let root = scratch("sep");
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("src/a.txt"), "hello").unwrap();
+        let root_str = root.to_str().unwrap();
+        assert_eq!(read_file_impl(root_str, "src\\a.txt").unwrap().path, "src/a.txt");
+        assert_eq!(read_file_impl(root_str, "src/a.txt/").unwrap().path, "src/a.txt");
+        assert_eq!(
+            err_code(&read_file_impl(root_str, "/src/a.txt").unwrap_err()),
+            "fs/file-bad-path"
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// 逃逸、绝对路径、盘符段一律拒绝：根约束不能被绕过。
+    #[test]
+    fn rejects_path_escape() {
+        let root = scratch("escape");
+        std::fs::write(root.join("ok.txt"), "x").unwrap();
+        for bad in ["../secret.txt", "a/../../x", "/etc/passwd", "C:/Windows/win.ini"] {
+            let error = read_file_impl(root.to_str().unwrap(), bad).unwrap_err();
+            assert_eq!(err_code(&error), "fs/file-bad-path", "path {bad} 应当被拒");
+        }
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// 空路径、目录、缺失、二进制各自给不同码，前端据此分别提示。
+    #[test]
+    fn failure_modes_are_distinguishable() {
+        let root = scratch("fail");
+        std::fs::create_dir_all(root.join("sub")).unwrap();
+        std::fs::write(root.join("bin.dat"), [0x00, 0x01, 0x02, 0x03]).unwrap();
+        std::fs::write(root.join("latin.txt"), [0xff, 0xfe, 0x41]).unwrap();
+        let root_str = root.to_str().unwrap();
+
+        assert_eq!(err_code(&read_file_impl(root_str, "  ").unwrap_err()), "fs/file-bad-path");
+        assert_eq!(
+            err_code(&read_file_impl(root_str, "sub").unwrap_err()),
+            "fs/file-is-directory"
+        );
+        assert_eq!(
+            err_code(&read_file_impl(root_str, "nope.txt").unwrap_err()),
+            "fs/file-not-found"
+        );
+        // 含 NUL → 二进制；非法 UTF-8 → 非 UTF-8。两者都不当文本展示。
+        assert_eq!(
+            err_code(&read_file_impl(root_str, "bin.dat").unwrap_err()),
+            "fs/file-binary"
+        );
+        assert_eq!(
+            err_code(&read_file_impl(root_str, "latin.txt").unwrap_err()),
+            "fs/file-not-utf8"
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// 超限必须拒绝而不是把几十 MB 塞给浏览器。
+    #[test]
+    fn rejects_oversized_file() {
+        let root = scratch("big");
+        let big = root.join("big.txt");
+        std::fs::write(&big, vec![b'a'; (FILE_MAX_BYTES + 1) as usize]).unwrap();
+        let error = read_file_impl(root.to_str().unwrap(), "big.txt").unwrap_err();
+        assert_eq!(err_code(&error), "fs/file-too-large");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// 根不是目录 → 显式报错（fail loud，不静默回空）。
+    #[test]
+    fn non_directory_root_is_rejected() {
+        let root = scratch("rootfile");
+        let file = root.join("plain.txt");
+        std::fs::write(&file, "x").unwrap();
+        let error = read_file_impl(file.to_str().unwrap(), "plain.txt").unwrap_err();
+        assert_eq!(err_code(&error), "fs/file-not-a-directory");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// 扩展名推不出语言时为 None（前端按纯文本渲染，不报错）。
+    #[test]
+    fn unknown_extension_has_no_language_hint() {
+        let root = scratch("lang");
+        std::fs::write(root.join("notes.zzz"), "x").unwrap();
+        assert!(read_file_impl(root.to_str().unwrap(), "notes.zzz").unwrap().language.is_none());
+        std::fs::remove_dir_all(&root).ok();
+    }
 }
 
 #[cfg(test)]

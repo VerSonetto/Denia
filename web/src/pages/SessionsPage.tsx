@@ -1355,27 +1355,44 @@ export default function SessionsPage({
 
   // dsh: composer seat / 内容列 / 滚动口尺寸变化时,贴底读者保持视野。
   // 内容列观察兜住不伴随 nodes 变化的增高(展开工具卡、图片加载等)。
+  //
+  // 依赖必须带上 view:轨迹视图下输入区整体卸载,切回对话时拿到的是**另一个**
+  // DOM 节点。只依赖 phase 时 observer 会一直盯着已卸载的旧节点,而它对被
+  // 移除的元素仍会补发一次回调 —— 那次读到 offsetHeight 为 0,把
+  // --composer-height 写成 0px;新节点又从未被 observe,高度再也量不回来。
+  // 回底按钮靠这个变量定位,0px 会让它退到容器底部、压在状态栏上。
   useEffect(() => {
-    const seat = seatRef.current
     const scroller = scrollRef.current
     const view = viewRef.current
     const layout = layoutRef.current
-    if (seat === null || scroller === null || view === null || layout === null) return
-    const observer = new ResizeObserver(() => {
+    if (scroller === null || view === null || layout === null) return
+    const measure = () => {
       // 输入区高度要写到布局根上:回底按钮是滚动容器的兄弟节点,只有挂在
       // 共同祖先(session-layout)才继承得到 —— 挂在滚动容器上时按钮拿不到
       // 真实高度,只能用兜底值定位,于是被 sticky 输入区盖住,既看不见也
       // 点不到。滚动容器那份保留:对话轴与滚动口内部还按它算。
-      layout.style.setProperty('--composer-height', `${seat.offsetHeight}px`)
-      scroller.style.setProperty('--composer-height', `${seat.offsetHeight}px`)
+      const seat = seatRef.current
+      // 输入区不在(轨迹视图)或节点已脱离文档时不写:对已卸载的节点读
+      // offsetHeight 得 0,会把按钮按到底部。保留上一次的真实高度即可 ——
+      // 这两个消费者此刻本来也不渲染。
+      if (seat !== null && seat.isConnected) {
+        const height = `${seat.offsetHeight}px`
+        layout.style.setProperty('--composer-height', height)
+        scroller.style.setProperty('--composer-height', height)
+      }
       scroller.style.setProperty('--conversation-viewport-height', `${scroller.clientHeight}px`)
       follow()
-    })
-    observer.observe(seat)
+    }
+    const observer = new ResizeObserver(() => measure())
+    const seat = seatRef.current
+    if (seat !== null) observer.observe(seat)
     observer.observe(scroller)
     observer.observe(view)
+    // 立即量一次:observe() 的首次回调要等下一帧,而切回对话视图时变量
+    // 可能还留着上一轮的 0px,按钮会在那一帧里错位。
+    measure()
     return () => observer.disconnect()
-  }, [phase])
+  }, [phase, view])
 
   /**
    * 乐观行协调:
