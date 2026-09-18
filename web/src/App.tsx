@@ -61,6 +61,7 @@ import { DirPicker } from './components/DirPicker'
 import { ConfirmDialog } from './components/ConfirmDialog'
 import { RemoteGate, shouldShowGate } from './components/RemoteGate'
 import { RemoteBanner } from './components/RemoteBanner'
+import { DesktopTitleBar } from './components/DesktopTitleBar'
 
 // 设置/浏览器面板按需加载,减少首屏主包体积。
 const LazySettingsModal = lazy(() =>
@@ -713,8 +714,9 @@ export default function App() {
   }
 
   return (
-    <div
-      className="shell"
+    <div className="app-frame">
+      <div
+        className="shell"
       data-collapsed={sidebarCollapsed || undefined}
       data-mobile={isMobile || undefined}
       data-drawer={isMobile && drawerOpen ? 'open' : undefined}
@@ -747,7 +749,10 @@ export default function App() {
           <div
             className={`sidebar-wide${wideFadeOut ? ' fade-out' : ''}${wideEnter ? ' wide-in' : ''}`}
           >
-            <div className="sidebar-logo">
+            {/* 品牌行兼作窗口顶带的左段:整条顶带(左段品牌行 + 右段主列
+                窗口条)都能拖窗口。子元素里的收起按钮是 clickable element,
+                drag.js 会自动让它们阻断拖拽,不会与收起操作冲突。 */}
+            <div className="sidebar-logo" data-tauri-drag-region="deep">
               <span className="brand-text">Denia</span>
               <button
                 type="button"
@@ -831,15 +836,19 @@ export default function App() {
         )}
         {railMounted && (
           <div className={`sidebar-rail${railEnter ? ' enter' : ''}`}>
-            <button
-              type="button"
-              className="rail-btn"
-              title={t('sidebarExpand')}
-              aria-label={t('sidebarExpand')}
-              onClick={() => setSidebarCollapsed(false)}
-            >
-              <IconPanelOpen size={18} />
-            </button>
+            {/* 收起态顶带:与展开态的品牌行、主列的窗口条同高同底线,
+                三段连成一条完整的顶带;它同样可拖窗口。 */}
+            <div className="sidebar-rail-top" data-tauri-drag-region="deep">
+              <button
+                type="button"
+                className="rail-btn"
+                title={t('sidebarExpand')}
+                aria-label={t('sidebarExpand')}
+                onClick={() => setSidebarCollapsed(false)}
+              >
+                <IconPanelOpen size={18} />
+              </button>
+            </div>
             <button
               type="button"
               className="rail-btn accent"
@@ -883,6 +892,10 @@ export default function App() {
         )}
       </aside>
       <main className="main">
+        {/* 桌面壳的窗口条:只占**主列**宽度,不横穿侧栏。这样侧栏能从窗口
+            最顶端一直贯到底、品牌 logo 留在原地,而窗口按钮与主列左边界对齐。
+            浏览器形态下组件自己返回 null。 */}
+        <DesktopTitleBar />
         {/* 手机端顶栏:抽屉开关 + 品牌。桌面端由 CSS 隐藏 —— 桌面有常驻
             侧栏,不需要这个入口。 */}
         {isMobile && (
@@ -1013,6 +1026,7 @@ export default function App() {
         }}
         onCancel={() => setConfirmReq(null)}
       />
+      </div>
     </div>
   )
 }

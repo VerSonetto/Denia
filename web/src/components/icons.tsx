@@ -247,6 +247,31 @@ export function IconClose(props: IconProps) {
   )
 }
 
+export function IconWindowMinimize(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <path d="M3 11.5h10" stroke="currentColor" strokeWidth="1.25" strokeLinecap="round" />
+    </Svg>
+  )
+}
+
+export function IconWindowMaximize(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <rect x="3.4" y="3.4" width="9.2" height="9.2" rx="1" stroke="currentColor" strokeWidth="1.2" />
+    </Svg>
+  )
+}
+
+export function IconWindowRestore(props: IconProps) {
+  return (
+    <Svg {...props}>
+      <path d="M5.4 5.4V3.8c0-.44.36-.8.8-.8h6c.44 0 .8.36.8.8v6c0 .44-.36.8-.8.8h-1.6" stroke="currentColor" strokeWidth="1.15" strokeLinejoin="round" />
+      <rect x="3" y="5.4" width="7.6" height="7.6" rx=".9" stroke="currentColor" strokeWidth="1.2" />
+    </Svg>
+  )
+}
+
 export function IconMenu(props: IconProps) {
   return (
     <Svg {...props} viewBox="0 0 20 20">

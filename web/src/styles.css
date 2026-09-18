@@ -180,6 +180,14 @@ body,
   margin: 0;
 }
 
+.app-frame {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  background: var(--bg-base);
+}
+
 body {
   background: var(--bg-base);
   color: var(--label-primary);
@@ -444,10 +452,91 @@ button {
   }
 }
 
+/* ---------- 桌面端窗口条(只占主列,不横穿侧栏) ----------
+ *
+ * 这条带子**不是通栏标题栏**:它住在 `.main` 里,宽度就是主列宽度。
+ * 早期版本把它做成通栏,结果是侧栏被从顶部截断、且与侧栏顶部品牌形成两个
+ * Denia。现在侧栏从窗口顶端贯到底(logo 在它自己的左上角),窗口按钮落在
+ * 主列上沿 —— 拖拽/双击最大化的区域也只在主列上方,侧栏顶部的品牌区
+ * 保持可点。
+ *
+ * 浏览器形态不渲染(组件返回 null),窄屏也不渲染(手机端有自己的顶栏)。
+ */
+.desktop-titlebar {
+  display: none;
+}
+
+@media (min-width: 821px) {
+  .desktop-titlebar {
+    display: flex;
+    align-items: stretch;
+    flex: none;
+    height: 38px;
+    /* 与主列头部同一底色:它是主列的顶边,不是侧栏的邻居。 */
+    background: var(--sidebar-fill);
+    border-bottom: 1px solid var(--border-l1);
+    color: var(--label-secondary);
+    user-select: none;
+  }
+
+  /* 拖动区:吃掉除窗口按钮以外的全部宽度。不放文字 —— 品牌在侧栏顶部,
+     会话标题在下方 session-header,这里再写一遍就是重复。 */
+  .desktop-titlebar-drag {
+    display: flex;
+    align-items: center;
+    flex: 1;
+    min-width: 0;
+    padding-left: 16px;
+    cursor: default;
+  }
+
+  .desktop-titlebar-actions {
+    display: flex;
+    flex: none;
+    align-items: stretch;
+  }
+
+  .desktop-window-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 46px;
+    height: 38px;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    color: var(--label-secondary);
+    cursor: pointer;
+    transition: background-color 150ms var(--ease), color 150ms var(--ease);
+  }
+
+  .desktop-window-btn:hover {
+    background: var(--hover-fill);
+    color: var(--label-primary);
+  }
+
+  .desktop-window-btn:active {
+    background: var(--active-fill);
+  }
+
+  .desktop-window-btn.close:hover {
+    background: #c93c3c;
+    color: #fff;
+  }
+
+  .desktop-window-btn:focus-visible {
+    position: relative;
+    z-index: 1;
+    outline: 2px solid var(--accent);
+    outline-offset: -3px;
+  }
+}
+
 /* ---------- shell: sidebar + center column (dsh AppFrame) ---------- */.shell {
   display: grid;
+  flex: 1;
+  min-height: 0;
   grid-template-columns: var(--sidebar-w) minmax(0, 1fr);
-  height: 100%;
   background: var(--bg-base);
   /* 列宽滑动过渡:收起/展开共用(dsh 侧栏曲线);拖拽/无动画偏好下由下述规则关闭 */
   transition: grid-template-columns 260ms var(--ease);
@@ -498,6 +587,15 @@ button {
   from {
     opacity: 0;
   }
+}
+
+/* 收起态顶带:桌面端与展开态品牌行、主列窗口条等高同底线。 */
+.sidebar-rail-top {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
 }
 
 /* 收起态控制栏:与展开态一一对应的图标控件(开关/新建/添加/搜索 + 设置) */
@@ -598,6 +696,43 @@ button {
   padding: 6px 6px 2px;
   margin-bottom: 4px;
   color: var(--label-primary);
+}
+
+/* ---- 桌面端:侧栏顶带与主列窗口条对齐 ----
+ *
+ * 侧栏的品牌行(展开态)/ 展开开关行(收起态)与主列的窗口条同高(38px)、
+ * 同底线,两者合起来是横跨窗口的一条顶带:左段是侧栏品牌,右段是窗口
+ * 按钮 —— 品牌只此一处,不再与窗口条重复。
+ *
+ * 位置:必须写在 `.sidebar-logo` 基础规则**之后**。两者特异性相同,CSS
+ * 靠后出现者胜;放到前面的窗口条媒体查询里会被下面的基础规则反过来覆盖
+ * (实测:顶带还是 52px,底线对不上)。
+ *
+ * 下边框要横贯整列:侧栏有 10px 左右内边距,靠负 margin 把线拉到列边界,
+ * 再用等量 padding 把内容推回去。
+ *
+ * 只在桌面生效:手机端侧栏是覆盖式抽屉,顶部尺寸要按触控来(≥44px)。
+ */
+@media (min-width: 821px) {
+  .sidebar {
+    padding-top: 0;
+  }
+
+  .sidebar-logo,
+  .sidebar-rail-top {
+    height: 38px;
+    margin-bottom: 8px;
+    border-bottom: 1px solid var(--border-l1);
+    margin-left: -10px;
+    margin-right: -10px;
+    padding-left: 10px;
+    padding-right: 10px;
+  }
+
+  .sidebar-logo {
+    padding-top: 0;
+    padding-bottom: 0;
+  }
 }
 
 .brand-text {

@@ -45,6 +45,11 @@ const zh = {
   runtimeBackParent: "返回父会话",
 
   appName: 'Denia 控制台',
+  titleBarLabel: '窗口标题栏',
+  titleBarMinimize: '最小化',
+  titleBarMaximize: '最大化',
+  titleBarRestore: '还原',
+  titleBarClose: '关闭窗口',
   navSessions: '会话',
   navModels: '模型配置',
   navSettings: '设置',
@@ -1101,6 +1106,11 @@ const en: typeof zh = {
   runtimeBackParent: "Return to parent",
 
   appName: 'Denia console',
+  titleBarLabel: 'Window title bar',
+  titleBarMinimize: 'Minimize',
+  titleBarMaximize: 'Maximize',
+  titleBarRestore: 'Restore',
+  titleBarClose: 'Close window',
   navSessions: 'Sessions',
   navModels: 'Models',
   navSettings: 'Settings',
