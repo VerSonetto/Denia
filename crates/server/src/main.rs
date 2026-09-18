@@ -1,55 +1,11 @@
-//! axum HTTP API + SSE push + console hosting. Binary: `denia`.
+//! Binary `denia`:纯服务宿主 —— 起 HTTP 服务,控制台由浏览器访问。
+//!
+//! 桌面端(`denia-desktop`)进程内起的是同一份服务(见 [`denia_server::host`]),
+//! 这里只是它的一个薄壳:解析参数、装日志、把 ctrl_c 接到优雅停机。
 
-mod agent_runtime;
-mod agent_presets;
-mod api;
-mod error;
-mod event_pulse;
-mod file_history;
-mod jobs;
-mod mcp_runtime;
-mod mcp_settings;
-mod native_folder_picker;
-mod open_in_app;
-mod preset_tool;
-mod project_memory;
-mod remote;
-mod session_title;
-mod skills;
-mod state;
-mod system_prompt_store;
-mod web_assets;
-mod workspace;
-mod workspace_instructions;
-
-use std::net::SocketAddr;
-use std::path::PathBuf;
-use std::sync::Arc;
-
-use axum::serve::{ListenerExt, TapIo};
-use state::build_state;
+use denia_server::host::{CliArgs, HostOptions, prepare, resolve_home};
+use denia_server::native_folder_picker;
 use tracing_subscriber::EnvFilter;
-
-/// 给每个 accept 出来的连接关掉 Nagle。
-///
-/// 控制台的交互形态决定了这很值钱:打字机式的 SSE 是一连串几十到几百字节的
-/// 小帧,而手机走蜂窝网络时,对端往往不会立刻回 ACK —— Nagle 会把小帧攒住
-/// 等前一帧确认,每一跳白付几十毫秒。keepalive 长连接越多,这个开关的收益越大。
-///
-/// 返回具体的 `TapIo<…>` 而不是 `impl Listener`:axum 的 `Connected` 实现是
-/// 按 `IncomingStream<'_, TapIo<L, F>>` 这个形状写的,类型一旦被抹掉,
-/// `into_make_service_with_connect_info::<SocketAddr>()` 就找不到自己的实现。
-fn nodelay(
-    listener: tokio::net::TcpListener,
-) -> TapIo<tokio::net::TcpListener, fn(&mut tokio::net::TcpStream)> {
-    listener.tap_io(set_nodelay as fn(&mut tokio::net::TcpStream))
-}
-
-fn set_nodelay(stream: &mut tokio::net::TcpStream) {
-    if let Err(error) = stream.set_nodelay(true) {
-        tracing::debug!(%error, "could not set TCP_NODELAY");
-    }
-}
 
 fn main() {
     // Exclusive CLI mode: native folder picker as this process's first window.
@@ -76,182 +32,32 @@ fn main() {
     let runtime = tokio::runtime::Runtime::new().expect("tokio runtime starts");
     runtime.block_on(async move {
         let home = resolve_home(args.home.as_deref());
-        let bound_remote = !matches!(args.host.as_str(), "127.0.0.1" | "localhost" | "::1");
-        let state = match build_state(&home, bound_remote, args.port).await {
-            Ok(state) => Arc::new(state),
+        let host = match prepare(HostOptions {
+            home: home.clone(),
+            host: args.host.clone(),
+            port: args.port,
+            web_dir: args.web.clone(),
+        })
+        .await
+        {
+            Ok(host) => host,
             Err(error) => {
                 tracing::error!(%error, "failed to initialize");
                 std::process::exit(1);
             }
         };
+        let addr = host.addr;
 
-        let web_dir = args
-            .web
-            .clone()
-            .filter(|dir| dir.join("index.html").is_file());
-        // 业务 Router:两条 listener 共用同一份路由与 state。
-        let business = axum::Router::new()
-            .merge(api::router())
-            .with_state(state.clone())
-            .fallback({
-                let dir = web_dir.clone();
-                move |uri: axum::http::Uri, headers: axum::http::HeaderMap| {
-                    let dir = dir.clone();
-                    async move {
-                        // 静态资源走"构建期预压缩 + 按 Accept-Encoding 选实体":
-                        // 经公网隧道发到手机时,字节数就是延迟。
-                        let accept_encoding = headers
-                            .get(axum::http::header::ACCEPT_ENCODING)
-                            .and_then(|value| value.to_str().ok())
-                            .unwrap_or("");
-                        web_assets::response_for(&uri, dir.as_deref(), accept_encoding)
-                    }
-                }
-            });
-        // API 响应压缩在 api::router() 内部挂载:它只包裹注册时已有的路由,
-        // 上面这个 fallback 因此不被压缩层碰 —— 静态资源自己按
-        // Accept-Encoding 挑构建期预压缩好的实体,运行时零 CPU。
-        // 主 listener:只做来源标注(本机 UI 要看得到 PIN 与票据链接,而
-        // 以 `--host 0.0.0.0` 启动时局域网来客必须被标成 Lan 而不是本机)。
-        let router = business.clone().layer(axum::middleware::from_fn_with_state(
-            state.remote.clone(),
-            remote::guard::annotate,
-        ));
-        // 远程 listener:同一份业务路由,外面再套一层「远程门」。
-        state
-            .remote
-            .attach_router(business.layer(axum::middleware::from_fn_with_state(
-                state.remote.clone(),
-                remote::guard::gate,
-            )));
-        match &web_dir {
-            Some(dist) => tracing::info!(dist = %dist.display(), "serving console from directory"),
-            None => tracing::info!("serving embedded console"),
-        }
-
-        let addr: SocketAddr = format!("{}:{}", args.host, args.port)
-            .parse()
-            .unwrap_or_else(|_| panic!("valid bind address {}:{}", args.host, args.port));
         tracing::info!(home = %home.display(), %addr, "denia starting");
         println!();
         println!("  denia console:  http://{addr}");
         println!("  home:            {}", home.display());
         println!();
 
-        let listener = tokio::net::TcpListener::bind(addr)
-            .await
-            .unwrap_or_else(|error| panic!("bind {addr}: {error}"));
-        // 优雅停机:ctrl_c 后停止接收新请求,等待在跑的后台任务收尾,然后退出。
-        // 远程连接必须在退出前显式收尾(杀隧道、清票据与会话、关远程 listener)。
-        let shutdown_remote = state.remote.clone();
-        axum::serve(
-            nodelay(listener),
-            router.into_make_service_with_connect_info::<SocketAddr>(),
-        )
-        .with_graceful_shutdown(async move {
+        host.serve(async {
             let _ = tokio::signal::ctrl_c().await;
-            tracing::info!("shutdown signal received");
-            shutdown_remote.shutdown().await;
         })
         .await
         .expect("server runs");
     });
-}
-
-struct CliArgs {
-    home: Option<PathBuf>,
-    host: String,
-    port: u16,
-    web: Option<PathBuf>,
-}
-
-impl CliArgs {
-    fn parse(args: impl Iterator<Item = String>) -> Result<Self, String> {
-        let mut parsed = Self {
-            home: None,
-            host: "127.0.0.1".to_string(),
-            port: 3600,
-            web: None,
-        };
-        let mut args = args.peekable();
-        while let Some(arg) = args.next() {
-            let value = |args: &mut std::iter::Peekable<_>, flag: &str| {
-                args.next()
-                    .ok_or_else(|| format!("missing value for {flag}"))
-            };
-            match arg.as_str() {
-                "--home" => parsed.home = Some(PathBuf::from(value(&mut args, "--home")?)),
-                "--host" => parsed.host = value(&mut args, "--host")?,
-                "--port" => {
-                    parsed.port = value(&mut args, "--port")?
-                        .parse()
-                        .map_err(|_| "--port must be a number".to_string())?;
-                }
-                "--web" => parsed.web = Some(PathBuf::from(value(&mut args, "--web")?)),
-                "--help" | "-h" => return Err("help requested".to_string()),
-                other => return Err(format!("unknown argument: {other}")),
-            }
-        }
-        Ok(parsed)
-    }
-}
-
-fn resolve_home(explicit: Option<&std::path::Path>) -> PathBuf {
-    if let Some(home) = explicit {
-        return home.to_path_buf();
-    }
-    if let Some(home) = std::env::var_os("DENIA_HOME").map(PathBuf::from) {
-        return home;
-    }
-    // 品牌改名前的旧环境变量:仍认,但提示迁移。
-    if let Some(home) = std::env::var_os("DSH_RS_HOME").map(PathBuf::from) {
-        eprintln!("note: DSH_RS_HOME is deprecated, rename it to DENIA_HOME");
-        return home;
-    }
-    let mut home = std::env::temp_dir();
-    if let Some(dir) = dirs_home() {
-        home = dir;
-    }
-    let next = home.join(".denia");
-    // 老用户的 ~/.dsh-rs:首次落到 ~/.denia 时整体迁移(一次性目录搬移,
-    // 会话/配置/凭据/工作区全保留);之后 ~/.dsh-rs 不再被读取。
-    let legacy = home.join(".dsh-rs");
-    if legacy.is_dir() {
-        migrate_legacy_home(&legacy, &next);
-    }
-    next
-}
-
-/// 把旧品牌目录 `~/.dsh-rs` 整体搬到 `~/.denia`。只在 `~/.denia` 不存在时执行
-/// (绝不覆盖新目录里的数据);搬移成功后旧目录留作备份,不再参与解析。
-/// 任一步失败仅告警,下次启动重试——绝不让一次搬移失败挡住启动。
-fn migrate_legacy_home(legacy: &std::path::Path, next: &std::path::Path) {
-    if next.exists() {
-        return;
-    }
-    // 正式实例可能还开着旧目录里的文件:Windows 上被占用的目录 rename 会
-    // 失败,此时留给下次启动重试。
-    match std::fs::rename(legacy, next) {
-        Ok(()) => {
-            tracing::info!(
-                from = %legacy.display(),
-                to = %next.display(),
-                "migrated legacy data directory to ~/.denia"
-            );
-        }
-        Err(error) => {
-            tracing::warn!(
-                from = %legacy.display(),
-                to = %next.display(),
-                %error,
-                "could not migrate legacy data directory now; will retry on next start"
-            );
-        }
-    }
-}
-
-fn dirs_home() -> Option<PathBuf> {
-    std::env::var_os("USERPROFILE")
-        .or_else(|| std::env::var_os("HOME"))
-        .map(PathBuf::from)
 }

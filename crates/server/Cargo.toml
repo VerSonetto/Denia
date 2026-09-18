@@ -1,9 +1,13 @@
 [package]
 name = "denia-server"
-description = "axum HTTP API + SSE push + console hosting (bin: denia)"
+description = "axum HTTP API + SSE push + console hosting (lib + bin: denia)"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+
+[lib]
+name = "denia_server"
+path = "src/lib.rs"
 
 [[bin]]
 name = "denia"

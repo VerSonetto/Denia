@@ -887,7 +887,7 @@ pub async fn build_state(
     home: &Path,
     bound_remote: bool,
     api_port: u16,
-) -> Result<AppState, Box<dyn std::error::Error>> {
+) -> Result<AppState, Box<dyn std::error::Error + Send + Sync>> {
     let events = broadcast::channel::<ServerEvent>(64).0;
     // 环由这一个订阅者喂:22 个既有发送点不必改签名。
     let pulse = crate::event_pulse::EventPulse::spawn(events.clone());
@@ -1094,7 +1094,9 @@ pub async fn build_state(
     Ok(state)
 }
 
-fn register_namespaces(settings: &SettingsStore) -> Result<(), Box<dyn std::error::Error>> {
+fn register_namespaces(
+    settings: &SettingsStore,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     settings.register(
         "runtime",
         NamespaceSpec {

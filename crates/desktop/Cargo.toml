@@ -1,0 +1,31 @@
+[package]
+name = "denia-desktop"
+description = "denia 桌面端:Tauri 壳 + 进程内 axum 服务"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "denia-desktop"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+denia-server = { path = "../server" }
+tauri = { version = "2", features = [] }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+rfd = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+# 桌面端自己持有一个隐藏控制台(见 src/console.rs),让所有子进程继承它。
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_System_Console",
+    "Win32_UI_WindowsAndMessaging",
+] }
