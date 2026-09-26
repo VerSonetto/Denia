@@ -94,7 +94,7 @@ export function SessionView({
   /** 全会话用户消息锚点变化时通知父级(轮次轴刻度,不受分页窗口限制)。 */
   onAnchorsChange?: (anchors: api.SessionAnchor[]) => void
   /** 轮次轴跳转请求:锚点未加载时自动向上翻页直至覆盖后定位。 */
-  jumpRequest?: { seq: number; nonce: number } | null
+  jumpRequest?: { seq: number; nonce: number; behavior?: ScrollBehavior } | null
   /** 跳转请求已处理(定位完成或无法覆盖),父级据此清空请求。 */
   onJumpSettled?: () => void
   /** 用户消息回退按钮触发。 */
@@ -291,7 +291,7 @@ export function SessionView({
     if (!jumpRequest) return
     let cancelled = false
     void (async () => {
-      const { seq } = jumpRequest
+      const { seq, behavior = 'smooth' } = jumpRequest
       while (!cancelled && !accRef.current.some((envelope) => envelope.seq === seq)) {
         const oldest = accRef.current[0]?.seq
         const progressed = await loadOlder()
@@ -303,12 +303,12 @@ export function SessionView({
         }
       }
       if (cancelled) return
-      // 等 React 提交新行后再定位,smooth 滚动到可视带中央。
+      // 等 React 提交新行后再定位。对齐用户消息顶缘,与轴内直接跳转一致。
       requestAnimationFrame(() => {
         const target = paneRef.current?.querySelector<HTMLElement>(
           `[data-user-anchor="${seq}"]`,
         )
-        target?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+        target?.scrollIntoView({ behavior, block: 'start' })
         jumpSettledRef.current?.()
       })
     })()

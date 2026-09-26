@@ -1491,116 +1491,213 @@ button {
   flex-direction: column;
 }
 
-/* ---- 对话轴:抄 dsh TurnNavigator,聊天区左侧紧凑轨道 ---- */
+/* ---- 对话轴:对齐 Codex floating navigation rail ---- */
 
-/* 零高 sticky 槽:轨道浮在 transcript 左侧装订线,不撑高 scrollHeight。 */
+/* 零高 sticky 槽:轨道浮在滚动口左侧,不撑高 scrollHeight。 */
 .conversation-axis {
   position: sticky;
   top: 0;
-  z-index: 6;
+  z-index: 20;
   height: 0;
   align-self: stretch;
   pointer-events: none;
 }
 
 .axis-rail {
-  /* 读者真正看到的带:滚动口高减去底部 sticky composer 遮挡。 */
-  --axis-band: calc(
-    var(--conversation-viewport-height, 100dvh) - var(--composer-height, 152px)
-  );
-  --axis-preview-height: 84px;
-
   position: absolute;
-  left: 14px;
-  top: calc(var(--axis-band) / 2);
-  width: 28px;
-  /* 不超过它居中的带:窗口矮时轨道收缩,标记不会顶出滚动口或压到 composer。 */
-  height: min(
-    var(--rail-natural-height),
-    max(0px, calc(var(--axis-band) - 64px)),
-    420px
-  );
+  left: 16px;
+  top: calc(var(--axis-band, 100dvh) / 2);
+  z-index: 20;
   transform: translateY(-50%);
-  cursor: pointer;
-  pointer-events: auto;
-  transition: height 220ms cubic-bezier(0.2, 0.8, 0.2, 1);
+  pointer-events: none;
+  animation: axis-rail-in 150ms cubic-bezier(0.23, 1, 0.32, 1);
 }
 
-.axis-marks {
-  position: absolute;
-  inset: var(--rail-inset) 0;
+@keyframes axis-rail-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+.axis-list {
+  --edge-fade-distance: 2.5rem;
+  display: flex;
+  flex-direction: column;
+  max-height: min(70vh, 40rem);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: none;
+  pointer-events: auto;
+  cursor: pointer;
+  -webkit-mask-image: linear-gradient(
+    to bottom,
+    transparent 0,
+    #000 var(--edge-fade-distance),
+    #000 calc(100% - var(--edge-fade-distance)),
+    transparent 100%
+  );
+  mask-image: linear-gradient(
+    to bottom,
+    transparent 0,
+    #000 var(--edge-fade-distance),
+    #000 calc(100% - var(--edge-fade-distance)),
+    transparent 100%
+  );
+}
+
+.axis-list::-webkit-scrollbar {
+  display: none;
 }
 
 .axis-mark {
-  position: absolute;
-  /* 自然间距与等比位置取小:轨道在自然高度时标记 10px 一簇,压缩时才等比铺。 */
-  top: min(var(--mark-natural), var(--mark-percent));
-  left: 0;
-  right: 0;
+  --marker-progress: 0;
+  display: flex;
+  align-items: center;
+  flex: none;
+  width: 36px;
   height: 10px;
-  transform: translateY(-50%);
-  transition: top 220ms cubic-bezier(0.2, 0.8, 0.2, 1);
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--label-caption);
+  cursor: pointer;
+  outline: none;
 }
 
-/* tick:短横线,左对齐。 */
-.axis-mark::before {
-  content: '';
-  position: absolute;
-  top: 50%;
-  left: 0;
-  width: 12px;
+.axis-mark-line {
+  width: 26px;
   height: 2px;
-  border-radius: 2px;
-  background: var(--label-caption);
-  transform: translateY(-50%);
-  transition: width 140ms ease, background-color 140ms ease;
+  border-radius: 1px;
+  background: currentColor;
+  opacity: 0.4;
+  transform: scaleX(calc(0.2308 + 0.7692 * var(--marker-progress)));
+  transform-origin: left center;
+  transition: transform 160ms linear(0, 0.398 10%, 0.682 20%, 0.843 30%, 0.925 40%, 0.972 50%, 1.004 60%, 1.008 70%, 1.003 80%, 1);
 }
 
-.axis-mark-preview::before {
-  width: 18px;
-  background: var(--label-tertiary);
+.axis-mark-current {
+  color: var(--label-primary);
 }
 
-.axis-mark-active::before {
-  width: 20px;
-  background: var(--label-primary);
+.axis-mark-current .axis-mark-line {
+  opacity: 0.6;
+}
+
+.axis-list:not([data-scrubbing]):hover .axis-mark:has(+ .axis-mark:hover) .axis-mark-line,
+.axis-list:not([data-scrubbing]):hover .axis-mark:hover + .axis-mark .axis-mark-line,
+.axis-list[data-scrubbing] .axis-mark:has(+ .axis-mark.is-scrub) .axis-mark-line,
+.axis-list[data-scrubbing] .axis-mark.is-scrub + .axis-mark .axis-mark-line {
+  --marker-progress: 0.7;
+}
+
+.axis-list:not([data-scrubbing]):hover .axis-mark:has(+ .axis-mark + .axis-mark:hover) .axis-mark-line,
+.axis-list:not([data-scrubbing]):hover .axis-mark:hover + .axis-mark + .axis-mark .axis-mark-line,
+.axis-list[data-scrubbing] .axis-mark:has(+ .axis-mark + .axis-mark.is-scrub) .axis-mark-line,
+.axis-list[data-scrubbing] .axis-mark.is-scrub + .axis-mark + .axis-mark .axis-mark-line {
+  --marker-progress: 0.4;
+}
+
+.axis-list:not([data-scrubbing]):hover .axis-mark:has(+ .axis-mark + .axis-mark + .axis-mark:hover) .axis-mark-line,
+.axis-list:not([data-scrubbing]):hover .axis-mark:hover + .axis-mark + .axis-mark + .axis-mark .axis-mark-line,
+.axis-list[data-scrubbing] .axis-mark:has(+ .axis-mark + .axis-mark + .axis-mark.is-scrub) .axis-mark-line,
+.axis-list[data-scrubbing] .axis-mark.is-scrub + .axis-mark + .axis-mark + .axis-mark .axis-mark-line {
+  --marker-progress: 0.2;
+}
+
+.axis-list:not([data-scrubbing]):hover .axis-mark:hover,
+.axis-mark:focus-visible,
+.axis-mark.is-scrub {
+  color: var(--label-primary);
+}
+
+.axis-list:not([data-scrubbing]):hover .axis-mark:hover .axis-mark-line,
+.axis-mark:focus-visible .axis-mark-line,
+.axis-mark.is-scrub .axis-mark-line {
+  --marker-progress: 1;
+  opacity: 1;
+}
+
+.axis-list:hover .axis-mark-current:not(:hover):not(:focus-visible):not(.is-scrub),
+.axis-list[data-scrubbing] .axis-mark-current:not(.is-scrub) {
+  color: var(--label-caption);
+}
+
+.axis-list:hover .axis-mark-current:not(:hover):not(:focus-visible):not(.is-scrub) .axis-mark-line,
+.axis-list[data-scrubbing] .axis-mark-current:not(.is-scrub) .axis-mark-line {
+  opacity: 0.4;
+}
+
+.axis-list[data-scrubbing] .axis-mark-line {
+  transition-duration: 0s;
 }
 
 .axis-preview {
-  position: absolute;
-  /* 对齐到它的 tick(位置按轨道内量),再夹在轨道两端之内。 */
-  top: clamp(
-    0px,
-    calc(
-      min(var(--mark-natural), var(--mark-percent))
-      + var(--rail-inset) - var(--axis-preview-height) / 2
-    ),
-    calc(100% - var(--axis-preview-height))
-  );
-  left: calc(100% + 10px);
+  position: fixed;
+  z-index: 30;
   box-sizing: border-box;
-  width: min(280px, 60vw);
-  max-height: var(--axis-preview-height);
+  max-height: 84px;
   overflow: hidden;
-  padding: 10px 12px;
-  border: 1px solid var(--border-l2);
-  border-radius: 10px;
+  padding: 8px;
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--bg-layer-2) 95%, transparent);
   color: var(--label-primary);
-  background: var(--bg-layer-1);
-  box-shadow: var(--shadow-lv2);
+  box-shadow:
+    0 0 0 0.5px var(--border-l2),
+    0 8px 16px -4px rgba(0, 0, 0, 0.12);
+  backdrop-filter: blur(8px);
   pointer-events: none;
-  transition: top 140ms cubic-bezier(0.2, 0.8, 0.2, 1);
 }
 
-.axis-preview-text {
+.axis-preview-title {
+  overflow: hidden;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 20px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.axis-preview-response {
   display: -webkit-box;
   overflow: hidden;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 3;
-  font-size: 13px;
-  line-height: 19px;
+  margin-top: 4px;
+  color: var(--label-caption);
+  font-size: 12px;
+  line-height: 20px;
   white-space: pre-wrap;
   word-break: break-word;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+}
+
+.axis-preview-outputs {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+  margin-top: 8px;
+  color: var(--label-caption);
+  font-size: 12px;
+  line-height: 16px;
+}
+
+.axis-preview-output {
+  overflow: hidden;
+  max-width: 144px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.axis-preview-more {
+  flex: none;
+  font-variant-numeric: tabular-nums;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .axis-rail,
+  .axis-mark-line {
+    animation: none;
+    transition: none;
+  }
 }
 
 .session-layout[data-phase='hero'] .conversation-scroll {
