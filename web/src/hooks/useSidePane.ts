@@ -103,7 +103,7 @@ export interface SidePaneController {
   openFile(path: string): boolean
   /** 切换文件读取标签页内的激活条目。 */
   activateFile(path: string): void
-  /** 关掉文件读取标签页里的一个条目（最后一条会连带关掉标签页）。 */
+  /** 关掉文件读取标签页里的一个条目（最后一条会连带关掉标签页并收起面板）。 */
   closeFile(path: string): void
   closeTab(id: string): void
   rememberClosed(tabs: SidePaneTab[]): void
@@ -173,9 +173,24 @@ export function useSidePaneController(
     [sessionId, workspacePath],
   )
 
-  const closeTabById = useCallback(
-    (id: string) => updateSidePane(sessionId, (current) => closeTab(current, id)),
+  /**
+   * 写入一份新的标签状态,并在标签被清空时连带收起面板。
+   *
+   * "用户把标签删光了"在标签栏(见 `SidePane` 的 `applyClose`)与这里各有一条
+   * 路径(文件读取标签页的最后一条没有手动入口,只能从这里关掉)。两条都走
+   * 同一个收尾动作:展开着的空面板只剩引导页,却仍占着对话区的宽度。
+   */
+  const commitTabs = useCallback(
+    (next: SidePaneState) => {
+      updateSidePane(sessionId, () => next)
+      if (next.tabs.length === 0) setSidePaneCollapsed(sessionId, true)
+    },
     [sessionId],
+  )
+
+  const closeTabById = useCallback(
+    (id: string) => commitTabs(closeTab(peekSidePane(sessionId), id)),
+    [sessionId, commitTabs],
   )
 
   /**
@@ -207,8 +222,8 @@ export function useSidePaneController(
   )
 
   const closeFileEntry = useCallback(
-    (path: string) => updateSidePane(sessionId, (current) => closeFile(current, path)),
-    [sessionId],
+    (path: string) => commitTabs(closeFile(peekSidePane(sessionId), path)),
+    [sessionId, commitTabs],
   )
 
   const rememberClosed = useCallback((tabs: SidePaneTab[]) => {
