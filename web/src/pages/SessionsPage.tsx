@@ -359,7 +359,7 @@ export default function SessionsPage({
   // 全会话用户消息锚点(轮次轴刻度,来自分页响应,不受窗口限制)。
   const [axisAnchors, setAxisAnchors] = useState<api.SessionAnchor[]>([])
   // 轮次轴跳转请求:点击未加载刻度时递增 nonce 触发视图翻页定位。
-  const [axisJump, setAxisJump] = useState<{ seq: number; nonce: number } | null>(null)
+  const [axisJump, setAxisJump] = useState<{ seq: number; nonce: number; behavior?: ScrollBehavior } | null>(null)
   const [todos, setTodos] = useState<TodoItem[]>([])
   // 当前会话的目标视图(goal 模式);服务端权威,goal/turn-end 事件触发重拉。
   const [goalView, setGoalView] = useState<api.GoalView | null>(null)
@@ -2679,13 +2679,18 @@ export default function SessionsPage({
         {phase === 'active' && view === 'chat' && (
           <ConversationAxis
             anchors={axisAnchors}
+            nodes={transcriptNodes}
             scrollRef={scrollRef}
             onJump={releaseFollow}
-            onJumpMiss={(seq) => {
+            onJumpMiss={(seq, behavior) => {
               // 锚点在分页窗口外:先脱跟,翻页补齐后 SessionView 再定位,
               // 否则每来一页内容都会被心跳拉回底部。
               releaseFollow()
-              setAxisJump((prev) => ({ seq, nonce: (prev?.nonce ?? 0) + 1 }))
+              setAxisJump((prev) => ({
+                seq,
+                nonce: (prev?.nonce ?? 0) + 1,
+                behavior,
+              }))
             }}
           />
         )}

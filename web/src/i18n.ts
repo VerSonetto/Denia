@@ -317,7 +317,9 @@ const zh = {
   queueDeleteTitle: '删除这条队列消息',
   queueSentHint: 'AI 本轮结束后自动发送',
   queueSendFailed: 'AI 未能在 5 秒内停止，已保留在输入框，请重试',
-  axisLabel: '对话导航',
+  axisLabel: '用户消息',
+  axisJumpLabel: '跳到第 {n} 条用户消息',
+  axisEmpty: '（无内容）',
 
   statsTurns: '{turns} 轮 · {steps} 步',
   statsTurnsHint: '{turns} 轮对话 · {steps} 步推理 · {tools} 次工具调用',
@@ -1379,7 +1381,9 @@ const en: typeof zh = {
   queueDeleteTitle: 'Delete this queued message',
   queueSentHint: 'Sent automatically when this turn ends',
   queueSendFailed: 'AI did not stop within 5s; message kept in the input box, please retry',
-  axisLabel: 'Conversation navigation',
+  axisLabel: 'User messages',
+  axisJumpLabel: 'Jump to user message {n}',
+  axisEmpty: '(No content)',
 
   statsTurns: '{turns} turns · {steps} steps',
   statsTurnsHint: '{turns} turns · {steps} steps · {tools} tool calls',
