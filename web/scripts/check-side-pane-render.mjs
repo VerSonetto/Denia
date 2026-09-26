@@ -4,9 +4,14 @@
  * `check-side-pane.mjs` 只测纯函数;这条补上"组件真的能挂载并按交互改变 DOM"
  * —— 静态扫描发现不了"点 `+` 菜单没反应"这类问题。
  *
+ * 另两条外显行为也在这里守:
+ * - 清空标签 → 收起面板(且不卸载内容);
+ * - 宽度由**内联样式**驱动 —— 这是展开/收起过渡的前提(`width:0` 写死在
+ *   CSS 里就永远不会有终点,过渡直接失效)。
+ *
  *   node scripts/check-side-pane-render.mjs
  */
-import { mkdirSync, writeFileSync } from 'node:fs'
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { build } from 'esbuild'
@@ -129,6 +134,51 @@ const baseProps = {
   onRememberClosed: () => {},
   onForgetClosed: () => {},
   onOpenPanel: () => {},
+}
+
+/**
+ * 受控外壳:把 `onChange` / `onCollapsedChange` 接到真实的 React state 上。
+ *
+ * 行为类断言必须用它 —— 给 SidePane 传一组固定 props 是测不出"关标签 →
+ * 状态变化 → 收起"这条因果链的:不重渲染就看不到结果。
+ */
+function Harness({ initial, collapsedCalls }) {
+  const [state, setState] = React.useState(initial)
+  const [collapsed, setCollapsed] = React.useState(false)
+  return H(SidePane, {
+    ...baseProps,
+    state,
+    collapsed,
+    onChange: (updater) => setState((current) => updater(current)),
+    onCollapsedChange: (value) => {
+      collapsedCalls.push(value)
+      setCollapsed(value)
+    },
+  })
+}
+
+/** 挂一个受控外壳,返回容器 / root / 收起回调记录。 */
+async function mountHarness(initial) {
+  const collapsedCalls = []
+  const container = g.document.createElement('div')
+  g.document.body.appendChild(container)
+  const root = createRoot(container)
+  root.render(H(Harness, { initial, collapsedCalls }))
+  await tick(90)
+  return { container, root, collapsedCalls }
+}
+
+/** 在容器里点一下(找不到元素返回 false)。 */
+function clickIn(container, selector) {
+  const node = container.querySelector(selector)
+  if (!node) return false
+  node.dispatchEvent(new g.MouseEvent('click', { bubbles: true }))
+  return true
+}
+
+/** 造一个终端标签(只填断言关心的字段)。 */
+function tab(id, type = 'terminal') {
+  return { id, type, openedAt: Date.now() }
 }
 
 /* 1) 空态:应渲染引导页与三个面板按钮 */
@@ -324,6 +374,129 @@ const baseProps = {
   }
   root.unmount()
   await tick(30)
+}
+
+/* 8) 关掉最后一个标签 → 收起面板(只关掉其中一个则不动) */
+{
+  const { container, root, collapsedCalls } = await mountHarness({
+    tabs: [tab('t1'), tab('t2')],
+    activeTabId: 't1',
+  })
+
+  const closedOne = clickIn(container, '[data-tab-id="t2"] .pane-tab-close')
+  await tick(90)
+  const left = container.querySelectorAll('[data-tab-id]').length
+
+  if (!closedOne) fail('清空即收起', '找不到第二个标签的关闭按钮')
+  else if (left !== 1) fail('清空即收起', `关掉一个后应剩 1 个标签,实际 ${left}`)
+  else if (collapsedCalls.length !== 0) {
+    fail('清空即收起', `还有标签却被收起了:${JSON.stringify(collapsedCalls)}`)
+  } else ok('清空即收起:关掉其中一个标签不动面板')
+
+  clickIn(container, '[data-tab-id="t1"] .pane-tab-close')
+  await tick(90)
+  const aside = container.querySelector('.side-pane')
+  const keptAlive = container.querySelector('.pane-open-shell') !== null
+
+  if (collapsedCalls.length !== 1 || collapsedCalls[0] !== true) {
+    fail('清空即收起', `应调用 onCollapsedChange(true),实际 ${JSON.stringify(collapsedCalls)}`)
+  } else if (container.querySelectorAll('[data-tab-id]').length !== 0) {
+    fail('清空即收起', '标签没有清空')
+  } else if (!aside.className.includes('collapsed')) {
+    fail('清空即收起', '面板没有进入折叠态')
+  } else if (!keptAlive) {
+    fail('清空即收起', '收起后内容被卸载了(应该保活)')
+  } else {
+    ok('清空即收起:关掉最后一个标签后面板折叠,且内容仍在 DOM(保活)')
+  }
+
+  root.unmount()
+  await tick(30)
+}
+
+/* 9) 关闭全部标签:同样收起(按钮在 jsdom 里一定溢出可见) */
+{
+  const { container, root, collapsedCalls } = await mountHarness({
+    tabs: [tab('a', 'review'), tab('b')],
+    activeTabId: 'a',
+  })
+
+  const clicked = clickIn(container, '.pane-close-all')
+  await tick(90)
+
+  if (!clicked) fail('关闭全部即收起', '找不到「关闭全部」按钮')
+  else if (collapsedCalls.length !== 1 || collapsedCalls[0] !== true) {
+    fail('关闭全部即收起', `应调用 onCollapsedChange(true),实际 ${JSON.stringify(collapsedCalls)}`)
+  } else if (container.querySelectorAll('[data-tab-id]').length !== 0) {
+    fail('关闭全部即收起', '标签没有清空')
+  } else {
+    ok('关闭全部即收起:标签清空后收起面板')
+  }
+
+  root.unmount()
+  await tick(30)
+}
+
+/* 10) 过渡的前提:宽度由内联样式驱动(0 ↔ 记忆宽度)+ 裁切层 + 常驻把手 */
+{
+  const state = { tabs: [tab('t1')], activeTabId: 't1' }
+  const container = g.document.createElement('div')
+  g.document.body.appendChild(container)
+  const root = createRoot(container)
+  const paint = (collapsed) => root.render(H(SidePane, { ...baseProps, state, collapsed }))
+
+  paint(false)
+  await tick(90)
+  const expandedPane = container.querySelector('.side-pane')
+  const expandedStyle = expandedPane?.getAttribute('style') ?? ''
+  const clipLayer = container.querySelector('.side-pane > .side-pane-clip > .side-pane-inner')
+  const handle = container.querySelector('.side-pane-expand')
+
+  // jsdom 里父容器量到宽度 0 → 回落到 MIN_PANE_WIDTH(240px)。
+  if (!/width:\s*240px/.test(expandedStyle)) {
+    fail('宽度内联驱动', `展开态宽度应写在内联样式里(240px),实际:${expandedStyle}`)
+  } else if (!clipLayer) {
+    fail('宽度内联驱动', '缺少裁切层 .side-pane-clip > .side-pane-inner')
+  } else if (!handle) {
+    fail('宽度内联驱动', '展开把手应常驻 DOM(新挂载的元素跑不了过渡)')
+  } else if (handle.getAttribute('aria-hidden') !== 'true' || handle.getAttribute('tabindex') !== '-1') {
+    fail('宽度内联驱动', '展开态下把手应从无障碍树隐藏且不可聚焦')
+  } else ok('过渡前提:展开态宽度内联 + 裁切层 + 把手常驻且已隐藏')
+
+  paint(true)
+  await tick(90)
+  const collapsedStyle = container.querySelector('.side-pane')?.getAttribute('style') ?? ''
+  const collapsedHandle = container.querySelector('.side-pane-expand')
+
+  if (!/width:\s*0px/.test(collapsedStyle)) {
+    // 写死 `width:0` 在 CSS 里就没有过渡终点可言 —— 这条守的就是它。
+    fail('宽度内联驱动', `收起态宽度应为内联的 0px,实际:${collapsedStyle}`)
+  } else if (collapsedHandle?.getAttribute('aria-hidden') === 'true') {
+    fail('宽度内联驱动', '收起后把手应可被点击与聚焦')
+  } else {
+    ok('过渡前提:收起态宽度内联为 0px,把手恢复可点')
+  }
+
+  root.unmount()
+  await tick(30)
+}
+
+/* 11) 过渡的载体在 CSS 里(组件测不到样式表,只能静态断言三条机制) */
+{
+  const css = readFileSync(new URL('../src/components/SidePane.css', import.meta.url), 'utf8')
+  if (!/transition:\s*width var\(--side-pane-dur\)/.test(css)) {
+    fail('过渡样式', '缺少 .side-pane 的 width 过渡')
+  } else if (!/\.side-pane-clip\s*\{[^}]*overflow:\s*hidden/.test(css)) {
+    fail('过渡样式', '.side-pane-clip 缺少 overflow:hidden(冻结宽度无处裁切)')
+  } else if (!/\.side-pane-inner\s*\{[^}]*--side-pane-content-w/.test(css)) {
+    fail('过渡样式', '.side-pane-inner 没有用冻结宽度变量')
+  } else if (!/\.side-pane\.collapsed\s*\.side-pane-expand/.test(css)) {
+    fail('过渡样式', '展开把手缺少两态样式(折叠末尾淡入)')
+  } else if (!/@media \(prefers-reduced-motion: reduce\)/.test(css)) {
+    fail('过渡样式', '缺少 prefers-reduced-motion 兜底')
+  } else {
+    ok('过渡样式:宽度过渡 + 裁切层 + 冻结宽度 + 把手淡入 + reduced-motion')
+  }
 }
 
 /* 汇总 */

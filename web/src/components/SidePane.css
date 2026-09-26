@@ -1,25 +1,56 @@
 /* 右侧面板:标签栏 + 内容区 + 空态引导页。
  *
  * 尺寸与间距抄 ZCode 的实测值(标签 h-7=28px、基准宽 156px、间距 8px),
- * 颜色走 denia 自己的语义 token。 */
+ * 颜色走 denia 自己的语义 token。
+ *
+ * # 展开 / 收起的过渡
+ *
+ * 折叠是"宽度归零",不是 `display:none` —— 终端与浏览器要保活。宽度**由组件
+ * 写入内联样式**(0 ↔ 记忆宽度),所以这里只声明时长与缓动:把 `width:0`
+ * 写死在 `.collapsed` 里,过渡就没有终点可言。
+ *
+ * 做法与左侧会话栏(styles.css 的 `grid-template-columns`)同一套:
+ * 列宽滑动 + 内容冻结宽度只被裁切 + 原地淡出。滑动途中内容不重排 ——
+ * 标签栏不会因为容器变窄而改判溢出,终端也不会被反复 fit。
+ */
 
 .side-pane {
+  /* 左边框宽:内容冻结宽度要减掉它(全局 `box-sizing: border-box`) */
+  --side-pane-rule: 1px;
+  /* 内容冻结宽度(px),由组件按当前展开宽度写入内联样式 */
+  --side-pane-content-w: 100%;
+  /* 与左侧会话栏同一时长:styles.css 的 260ms 列宽过渡 */
+  --side-pane-dur: 260ms;
+
   position: relative;
   display: flex;
   flex: 0 0 auto;
   flex-direction: column;
   min-width: 0;
   height: 100%;
-  border-left: 1px solid var(--border-l1);
+  border-left: var(--side-pane-rule) solid var(--border-l1);
   background: var(--bg-base);
-  transition: opacity 0.16s var(--ease);
+  transition: width var(--side-pane-dur) var(--ease),
+    border-left-color var(--side-pane-dur) var(--ease);
 }
 
 .side-pane.collapsed {
-  /* 折叠时宽度归零、不占位;内容仍在 DOM 里(终端/浏览器保活)。 */
-  width: 0 !important;
+  /* 折叠时不占位;内容仍在 DOM 里(终端/浏览器保活)。
+   * 宽度归零写在组件的内联样式里,这里不能重复声明 —— 会盖掉过渡。
+   * 本元素也**不能**加 `overflow:hidden`:拖拽柄(-3px)与展开把手要露在
+   * 边缘外,裁切交给内层的 `.side-pane-clip`。 */
   border-left-color: transparent;
-  overflow: visible;
+}
+
+/* 裁切层:收起时把冻结宽度的内容裁掉,但不裁拖拽柄与展开把手(它们是它的
+ * 兄弟节点,不在这棵子树里)。 */
+.side-pane-clip {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-height: 0;
+  min-width: 0;
+  overflow: hidden;
 }
 
 /* 拖拽中禁用 transition:否则宽度会跟随动画滞后于鼠标。 */
@@ -40,6 +71,19 @@
   min-height: 0;
   min-width: 0;
   overflow: hidden;
+  /* 内容按「展开宽度」排版,不跟着动画中的容器收缩:
+   * 滑动期间它只是被 `.side-pane-clip` 裁掉,不重排。
+   * 减边框是因为这个值来自 `getBoundingClientRect()`(含边框),而全局是
+   * border-box;`max()` 兜住"还没量过宽度"(变量为 0)的那一帧。 */
+  width: max(0px, calc(var(--side-pane-content-w) - var(--side-pane-rule)));
+  /* 展开时内容比面板晚一点出现(先让出空间再显内容),收起时先快速淡出。 */
+  opacity: 1;
+  transition: opacity 150ms var(--ease) 110ms;
+}
+
+.side-pane.collapsed .side-pane-inner {
+  opacity: 0;
+  transition: opacity 120ms var(--ease);
 }
 
 /* ---- 拖拽把手 ---- */
@@ -63,7 +107,12 @@
   outline: none;
 }
 
-/* ---- 折叠后的展开把手 ---- */
+/* ---- 折叠后的展开把手 ----
+ *
+ * 常驻 DOM(见 SidePane.tsx 的注释):它必须在**收起动画的末尾**才出现,
+ * 而新挂载的元素不会跑过渡,所以只能靠两态之间的 opacity 过渡实现。
+ * 展开态保留占位但透明且不可点(把手压在面板内容上会挡住点击)。
+ */
 
 .side-pane-expand {
   position: absolute;
@@ -83,7 +132,18 @@
   color: var(--label-tertiary);
   cursor: pointer;
   transform: translateY(-50%);
-  transition: background 0.12s var(--ease), color 0.12s var(--ease);
+  opacity: 0;
+  pointer-events: none;
+  transition: background 0.12s var(--ease), color 0.12s var(--ease),
+    opacity 100ms var(--ease);
+}
+
+.side-pane.collapsed .side-pane-expand {
+  opacity: 1;
+  pointer-events: auto;
+  /* 延迟到面板基本让出空间之后再淡入,避免动画中途悬在内容上。 */
+  transition: background 0.12s var(--ease), color 0.12s var(--ease),
+    opacity 140ms var(--ease) 120ms;
 }
 
 .side-pane-expand:hover {
@@ -692,10 +752,11 @@
 
 @media (prefers-reduced-motion: reduce) {
   .side-pane,
+  .side-pane-inner,
+  .side-pane-expand,
   .pane-tab,
   .pane-tab-chevron,
-  .side-pane-resizer,
-  .side-pane-expand {
+  .side-pane-resizer {
     transition: none;
   }
 }
