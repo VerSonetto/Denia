@@ -200,6 +200,7 @@ mod tests {
 
     fn ctx_with_sink(collected: Arc<Mutex<Vec<SessionEvent>>>) -> ToolContext {
         ToolContext {
+            output_store: None,
             session_id: None,
             selection: None,
             cwd: std::env::temp_dir(),
@@ -220,6 +221,7 @@ mod tests {
 
     fn ctx_without_sink() -> ToolContext {
         ToolContext {
+            output_store: None,
             session_id: None,
             selection: None,
             cwd: std::env::temp_dir(),

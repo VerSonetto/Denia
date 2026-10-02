@@ -95,6 +95,7 @@ mod tests {
 
     fn ctx() -> ToolContext {
         ToolContext {
+            output_store: None,
             session_id: None,
             selection: None,
             cwd: PathBuf::from("."),

@@ -452,8 +452,7 @@ mod tests {
                 blocks: vec![denia_core::stream::ContentBlock::ToolCall {
                     id: "call_9".into(),
                     name: "bash".into(),
-                    arguments: "{}".into(),
-                }],
+                    arguments: "{}".into(), incomplete: false }],
                 usage: None,
                 interrupted: false,
                 source_event_seqs: Vec::new(),
@@ -551,10 +550,13 @@ impl crate::SessionDriver {
         selection: &ModelSelection,
         framed_system: &str,
         tools: &[ToolSchema],
-        _turn: u32,
-        _step: u32,
+        turn: u32,
+        step: u32,
         cancel: &CancellationToken,
+        replay: Option<&denia_llm::ReplayPolicy>,
     ) -> Result<Option<CompactOutcome>, LlmFailure> {
+        let fallback_replay = denia_llm::ReplayPolicy::default();
+        let replay = replay.unwrap_or(&fallback_replay);
         let settings = self.compaction.clone();
         let events = session.events();
         // 压缩输入即当前模型可见 surface(与主请求同视角,原文直出)。
@@ -588,7 +590,11 @@ impl crate::SessionDriver {
                 max_tokens: Some(settings.summary_max_tokens),
                 stop: Vec::new(),
             };
-            let stream = match self.registry.stream(&selection.provider, &request, None).await {
+            let retry_sink: denia_llm::RetrySink = std::sync::Arc::new({
+                let session = session.clone();
+                move |retry| { let _ = session.append(denia_core::session::SessionEvent::RetryAttempt { turn, step, attempt: retry.attempt, code: retry.code.clone(), message: retry.message.clone(), delay_ms: retry.delay_ms }); }
+            });
+            let stream = match self.registry.stream_with_replay(&selection.provider, &request, Some(retry_sink), replay).await {
                 Ok(stream) => stream,
                 Err(error) => {
                     tracing::warn!(
@@ -619,6 +625,10 @@ impl crate::SessionDriver {
                     Some(Ok(StreamChunk::TextDelta { text: delta, .. })) => {
                         text.push_str(&delta);
                     }
+                    Some(Ok(StreamChunk::Finish { reason: denia_core::stream::FinishReason::Error { failure } | denia_core::stream::FinishReason::Aborted { failure } })) => {
+                        stream_error = Some(failure);
+                        break;
+                    }
                     Some(Ok(_)) => {}
                     Some(Err(failure)) => {
                         stream_error = Some(failure);
@@ -628,6 +638,12 @@ impl crate::SessionDriver {
                 }
             }
             if let Some(failure) = stream_error {
+                let route = self.registry.route_identity(&selection.provider, &request.model);
+                if replay.downgrade(&route, &request, &failure) {
+                    let _ = session.append(denia_core::session::SessionEvent::RetryAttempt { turn, step, attempt: 1, code: denia_llm::REASONING_REJECTED.into(), message: format!("摘要接口拒绝历史思考，仅本 turn 移除思考重试：{}", failure.message), delay_ms: 0 });
+                    attempt -= 1;
+                    continue;
+                }
                 tracing::warn!(
                     session_id = session.id(),
                     error_code = %failure.code,

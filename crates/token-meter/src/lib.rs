@@ -145,6 +145,11 @@ pub fn estimate_message(message: &ChatMessage) -> u64 {
             .saturating_add(BLOCK_OVERHEAD)
             .saturating_add(estimate_text(reasoning));
     }
+    for replay in &message.reasoning_replay {
+        let mut metadata = replay.payload.clone();
+        if let Some(object) = metadata.as_object_mut() { object.remove("thinking"); object.remove("summary"); }
+        tokens = tokens.saturating_add(BLOCK_OVERHEAD).saturating_add(estimate_text(&metadata.to_string()));
+    }
     tokens = tokens.saturating_add(estimate_tool_calls(&message.tool_calls));
     for image in &message.images {
         tokens = tokens
@@ -156,35 +161,7 @@ pub fn estimate_message(message: &ChatMessage) -> u64 {
 }
 
 fn extract_assistant_message(blocks: &[ContentBlock]) -> Option<ChatMessage> {
-    let text: String = blocks
-        .iter()
-        .filter_map(|block| match block {
-            ContentBlock::Text { text } => Some(text.as_str()),
-            _ => None,
-        })
-        .collect();
-    let calls: Vec<ToolCallRef> = blocks
-        .iter()
-        .filter_map(|block| match block {
-            ContentBlock::ToolCall {
-                id,
-                name,
-                arguments,
-            } => Some(ToolCallRef {
-                id: id.clone(),
-                name: name.clone(),
-                arguments: arguments.clone(),
-            }),
-            _ => None,
-        })
-        .collect();
-    if text.is_empty() && calls.is_empty() {
-        None
-    } else {
-        // 与 derive_messages 一致:模型历史剥离 reasoning_content,表面估算
-        // 也只按实际回传的 assistant 消息计价。
-        Some(ChatMessage::assistant(text, None, calls))
-    }
+    denia_core::message::assistant_from_blocks(blocks)
 }
 
 /// 输入为 "input + cache_read + cache_write",等价于 provider 的 prompt 计费桶。

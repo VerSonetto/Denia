@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use denia_core::error::{LlmFailure, codes};
 use denia_core::message::ToolCallRef;
 use denia_core::session::{SessionEvent, TurnEndReason};
-use denia_core::stream::{ContentBlock, FinishReason};
+use denia_core::stream::FinishReason;
 use denia_session::Session;
 use denia_system_prompt::{
     AssembleContext, PromptAssembly, frame_system_prompt_for_model, render_prompt,
@@ -84,6 +84,8 @@ pub(crate) async fn run_turn_inner(
         // —— 背景注入(工作区指令/能力上下文/技能目录),失败不阻断 ——
         refresh_background_injections(driver, state, &mut assembly.baselines, &assembly.touched)
             .await?;
+        let real_input = state.session.with_events(|events| events.iter().rev().find_map(|event| matches!(&event.event, SessionEvent::UserMessage { injected: false, .. }).then_some(event.seq)).unwrap_or(0));
+        if real_input != state.last_real_input { state.loop_guard.reset(); state.last_real_input = real_input; }
         let step = state.turn_step_next();
         append(
             &state.session,
@@ -216,60 +218,7 @@ pub(crate) async fn run_turn_inner(
             crate::request::RequestOutcome::TurnEnded(reason) => return Ok(reason),
             crate::request::RequestOutcome::RestartStep => continue 'step_loop,
             crate::request::RequestOutcome::Step { blocks, finish } => {
-                // —— 死循环检测:两级处置(先提醒、后中断)——
-                // 连续第 3 次相同 → 注入提醒让模型自纠(工作继续);
-                // 连续第 4 次相同 → 强制中断本轮(提醒无效时的兜底)。
-                match state.loop_guard.observe(&blocks) {
-                    crate::loop_guard::LoopVerdict::Continue => {}
-                    crate::loop_guard::LoopVerdict::Warn { .. } => {
-                        append(
-                            &state.session,
-                            &state.emit,
-                            SessionEvent::UserMessage {
-                                text: crate::loop_guard::LOOP_WARN_TEXT.to_string(),
-                                injected: true,
-                                channel: Some("loop-warning".into()),
-                                images: Vec::new(),
-                            },
-                        )?;
-                    }
-                    crate::loop_guard::LoopVerdict::Block { repeats } => {
-                        append(
-                            &state.session,
-                            &state.emit,
-                            SessionEvent::StepEnd {
-                                turn: state.turn,
-                                step,
-                            },
-                        )?;
-                        let reason = TurnEndReason::LoopDetected { repeats };
-                        append(
-                            &state.session,
-                            &state.emit,
-                            SessionEvent::TurnEnd {
-                                turn: state.turn,
-                                reason: reason.clone(),
-                            },
-                        )?;
-                        return Ok(reason);
-                    }
-                }
-
-                let mut calls: Vec<ToolCallRef> = blocks
-                    .iter()
-                    .filter_map(|block| match block {
-                        ContentBlock::ToolCall {
-                            id,
-                            name,
-                            arguments,
-                        } => Some(ToolCallRef {
-                            id: id.clone(),
-                            name: name.clone(),
-                            arguments: arguments.clone(),
-                        }),
-                        _ => None,
-                    })
-                    .collect();
+                let mut calls = denia_core::message::assistant_from_blocks(&blocks).map(|message| message.tool_calls).unwrap_or_default();
                 let hit_max_tokens = matches!(finish, Some(FinishReason::MaxTokens));
 
                 if calls.is_empty() && !hit_max_tokens {
@@ -315,7 +264,14 @@ pub(crate) async fn run_turn_inner(
                     }
                 }
 
-                if calls.is_empty() || hit_max_tokens {
+                if calls.is_empty() && hit_max_tokens && state.continuations < 3 {
+                    state.continuations += 1;
+                    append(&state.session, &state.emit, SessionEvent::StepEnd { turn: state.turn, step })?;
+                    append(&state.session, &state.emit, SessionEvent::RetryAttempt { turn: state.turn, step, attempt: state.continuations, code: "MAX_TOKENS_CONTINUATION".into(), message: "输出达到预算，已保存部分响应，继续生成；最多三次。".into(), delay_ms: 0 })?;
+                    append(&state.session, &state.emit, SessionEvent::UserMessage { text: "上次响应因输出预算截断。请从已有内容继续，不要重复已完成操作。截断或不完整的工具调用未执行，如仍需要该动作，请重新生成完整合法的调用。".into(), injected: true, channel: Some("output-continuation".into()), images: Vec::new() })?;
+                    continue 'step_loop;
+                }
+                if calls.is_empty() {
                     append(
                         &state.session,
                         &state.emit,
@@ -343,6 +299,46 @@ pub(crate) async fn run_turn_inner(
                 // —— 工具并行执行(滚动池;升权串行;结果兜底截断)——
                 crate::exec::execute_calls(driver, state, step, &calls, &mut assembly.touched)
                     .await?;
+                let results = state.session.with_events(|events| calls.iter().filter_map(|call| events.iter().rev().find_map(|event| match &event.event {
+                    SessionEvent::ToolResult { call_id, content, is_error, meta, replaces: None, .. } if call_id == &call.id => Some((content.clone(), *is_error, meta.clone())),
+                    _ => None,
+                })).collect::<Vec<_>>());
+                match state.loop_guard.observe(&calls, &results) {
+                    crate::loop_guard::LoopVerdict::Continue => {}
+                    crate::loop_guard::LoopVerdict::Warn { .. } => {
+                        append(
+                            &state.session,
+                            &state.emit,
+                            SessionEvent::UserMessage {
+                                text: crate::loop_guard::LOOP_WARN_TEXT.to_string(),
+                                injected: true,
+                                channel: Some("loop-warning".into()),
+                                images: Vec::new(),
+                            },
+                        )?;
+                    }
+                    crate::loop_guard::LoopVerdict::Block { repeats } => {
+                        append(
+                            &state.session,
+                            &state.emit,
+                            SessionEvent::StepEnd {
+                                turn: state.turn,
+                                step,
+                            },
+                        )?;
+                        let reason = TurnEndReason::LoopDetected { repeats };
+                        append(
+                            &state.session,
+                            &state.emit,
+                            SessionEvent::TurnEnd {
+                                turn: state.turn,
+                                reason: reason.clone(),
+                            },
+                        )?;
+                        return Ok(reason);
+                    }
+                }
+
                 // 计一次工具轮次:rapid-refill 断路器靠它判断"压缩后多久又满"。
                 driver
                     .tool_turns_since_compact
@@ -587,6 +583,7 @@ fn extract_system_update(message: &str) -> Option<&str> {
 pub(crate) fn section_tools(section: &str) -> Option<&'static [&'static str]> {
     Some(match section {
         "tool:bash" => &["bash"],
+        "tool:output" => &["read_tool_output"],
         "tool:ls" => &["ls"],
         "tool:read" => &["read_file"],
         "tool:write" | "tool:todo" => &["write_file", "todo_write"],

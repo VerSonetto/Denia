@@ -8,8 +8,9 @@ import { attach, type SessionPageMeta } from '../sessionStreams'
 import type { AskAnswer, SessionEnvelope, TodoItem, UserMessageImage } from '../types'
 import type { TrajectoryQuote } from '../trajectory'
 import { Transcript } from './transcript'
+import { appendSessionEvents, liveWindowStart, SESSION_PAGE_LIMIT } from '../sessionMemory'
 
-const OLDER_PAGE_LIMIT = 500
+const OLDER_PAGE_LIMIT = SESSION_PAGE_LIMIT
 
 // 轨迹台账体积不小(拖入大量历史事件),按需加载,不挤占对话首屏。
 const LazyTrajectoryView = lazy(() =>
@@ -124,6 +125,7 @@ export function SessionView({
   const [events, setEvents] = useState<SessionEnvelope[]>([])
   const [pageMeta, setPageMeta] = useState<SessionPageMeta>({ total: 0, hasMoreBefore: false, anchors: [] })
   const [loadingOlder, setLoadingOlder] = useState(false)
+  const olderRequestRef = useRef<AbortController | null>(null)
   const [loading, setLoading] = useState(true)
   const eventsRef = useRef<SessionEnvelope[]>([])
   const pageMetaRef = useRef(pageMeta)
@@ -156,8 +158,9 @@ export function SessionView({
   // rAF 批处理:流式帧入队,每帧最多一次渲染。
   const queueRef = useRef<SessionEnvelope[]>([])
   const rafRef = useRef<number | undefined>(undefined)
+  const backgroundFlushRef = useRef<number | undefined>(undefined)
   /**
-   * 事件累加器:整份历史 + 已到达的增量。就地 push,不每帧重建数组 ——
+   * 事件累加器:当前历史窗口 + 已到达的增量。就地 push,不每帧重建数组 ——
    * 长会话里 `[...previous, ...batch]` 是 O(总事件数) 的复制,而流式帧
    * 每秒几十条,这些复制不产出任何 UI。只有真正需要 events state 时
    * (轨迹视图 / todo / 用户消息)才切一份快照交给 React。
@@ -180,21 +183,67 @@ export function SessionView({
   }, [events])
 
   useEffect(() => {
+    if (view === 'trajectory') publishEvents()
+  }, [view, publishEvents])
+
+  useEffect(() => {
     const flush = () => {
       rafRef.current = undefined
+      if (backgroundFlushRef.current !== undefined) window.clearTimeout(backgroundFlushRef.current)
+      backgroundFlushRef.current = undefined
       const batch = queueRef.current
       queueRef.current = []
       if (batch.length === 0) return
       // 就地累加,不复制整份历史(见 accRef 注释)。
-      accRef.current.push(...batch)
-      // events state 只服务于轨迹视图与 todo 台账;纯输出帧(全部是
-      // assistant-chunk)不触发 setEvents,省掉一帧一次的全量数组拷贝。
+      appendSessionEvents(accRef.current, batch)
+      const durableCount = batch.filter((envelope) => envelope.type !== 'assistant-chunk').length
+      const scroller = paneRef.current?.closest('.conversation-scroll')
+      const atBottom = scroller !== null && scroller !== undefined &&
+        scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 64
+      const windowStart = viewRef.current === 'chat' && atBottom && !olderRequestRef.current &&
+        batch.some((envelope) => envelope.type === 'turn-end')
+        ? liveWindowStart(accRef.current) : 0
+      if (windowStart > 0) accRef.current = accRef.current.slice(windowStart)
+      const addedAnchors = batch.flatMap((envelope) =>
+        envelope.type === 'user-message' && !envelope.injected
+          ? [{ seq: envelope.seq, text: envelope.text.slice(0, 160) }] : [],
+      )
+      if (durableCount > 0) {
+        const pageInfo = {
+          ...pageMetaRef.current,
+          total: pageMetaRef.current.total + durableCount,
+          hasMoreBefore: pageMetaRef.current.hasMoreBefore || windowStart > 0,
+          anchors: addedAnchors.length > 0
+            ? [...pageMetaRef.current.anchors, ...addedAnchors] : pageMetaRef.current.anchors,
+        }
+        pageMetaRef.current = pageInfo
+        setPageMeta(pageInfo)
+      }
+      // 结算/持久事件更新快照,释放已完成的 chunk;纯输出帧不复制历史。
       const needsEvents =
-        viewRef.current === 'trajectory' ||
-        batch.some((env) => env.type === 'todo-write' || env.type === 'user-message')
+        viewRef.current === 'trajectory' || windowStart > 0 ||
+        batch.some((env) => env.type !== 'assistant-chunk')
       if (needsEvents) publishEvents()
-      setNodes((previous) => applyEnvelopes(previous, batch))
+      if (windowStart > 0) setNodes(foldEvents(accRef.current))
+      else setNodes((previous) => applyEnvelopes(previous, batch))
     }
+    const scheduleFlush = () => {
+      if (document.hidden) {
+        if (rafRef.current !== undefined) window.cancelAnimationFrame(rafRef.current)
+        rafRef.current = undefined
+        if (backgroundFlushRef.current === undefined) {
+          backgroundFlushRef.current = window.setTimeout(flush, 100)
+        }
+      } else if (rafRef.current === undefined) {
+        if (backgroundFlushRef.current !== undefined) window.clearTimeout(backgroundFlushRef.current)
+        backgroundFlushRef.current = undefined
+        rafRef.current = window.requestAnimationFrame(flush)
+      }
+    }
+    const visibilityChanged = () => {
+      if (queueRef.current.length > 0) scheduleFlush()
+    }
+    document.addEventListener('visibilitychange', visibilityChanged)
     const settlePending = (events: SessionEnvelope[]) => {
       for (const event of events) {
         if (event.type === 'user-message' && !event.injected) {
@@ -204,12 +253,16 @@ export function SessionView({
     }
     const unsubscribe = attach(id, {
       onSnapshot: (header, snapshot, meta) => {
+        olderRequestRef.current?.abort()
+        olderRequestRef.current = null
+        setLoadingOlder(false)
         queueRef.current = []
         const pageInfo = meta ?? { total: snapshot.length, hasMoreBefore: false, anchors: [] }
-        accRef.current = snapshot
+        accRef.current = snapshot.slice()
         eventsRef.current = snapshot
         setEvents(snapshot)
         setPageMeta(pageInfo)
+        pageMetaRef.current = pageInfo
         setNodes(foldEvents(snapshot))
         // 会话头 cwd 不可变,产物 chip 的相对路径锚点取它(不依赖侧栏会话摘要)。
         setCwd(header.cwd)
@@ -231,9 +284,7 @@ export function SessionView({
         if (envelope.type === 'goal' || envelope.type === 'turn-end') {
           goalTouchRef.current?.()
         }
-        if (rafRef.current === undefined) {
-          rafRef.current = window.requestAnimationFrame(flush)
-        }
+        scheduleFlush()
       },
       onNotFound: () => {
         onNotFound?.()
@@ -241,10 +292,16 @@ export function SessionView({
     })
     return () => {
       unsubscribe()
+      olderRequestRef.current?.abort()
+      olderRequestRef.current = null
       if (rafRef.current !== undefined) window.cancelAnimationFrame(rafRef.current)
+      if (backgroundFlushRef.current !== undefined) window.clearTimeout(backgroundFlushRef.current)
+      backgroundFlushRef.current = undefined
+      document.removeEventListener('visibilitychange', visibilityChanged)
       rafRef.current = undefined
       queueRef.current = []
       accRef.current = []
+      eventsRef.current = []
       setEvents([])
     }
     // 仅依赖 id:监听回调经 ref 透传,避免每次渲染重挂流。
@@ -267,24 +324,37 @@ export function SessionView({
   const loadOlder = useCallback(async (): Promise<boolean> => {
     const current = accRef.current
     const oldest = current[0]?.seq
-    if (!oldest || loadingOlder || !pageMetaRef.current.hasMoreBefore) return false
+    if (!oldest || olderRequestRef.current || !pageMetaRef.current.hasMoreBefore) return false
+    const controller = new AbortController()
+    olderRequestRef.current = controller
     setLoadingOlder(true)
     try {
-      const page = await api.getSessionPage(id, { before: oldest, limit: OLDER_PAGE_LIMIT })
+      const page = await api.getSessionPage(id, { before: oldest, limit: OLDER_PAGE_LIMIT }, controller.signal)
+      if (controller.signal.aborted || olderRequestRef.current !== controller) return false
       const merged = [...page.events, ...accRef.current]
       accRef.current = merged
       publishEvents()
       setNodes(foldEvents(merged))
-      setPageMeta({ total: page.total, hasMoreBefore: page.hasMoreBefore, anchors: page.anchors ?? [] })
+      const pageInfo = {
+        total: Math.max(pageMetaRef.current.total, page.total),
+        hasMoreBefore: page.hasMoreBefore,
+        anchors: [...new Map([...(page.anchors ?? []), ...pageMetaRef.current.anchors]
+          .map((anchor) => [anchor.seq, anchor])).values()].sort((left, right) => left.seq - right.seq),
+      }
+      pageMetaRef.current = pageInfo
+      setPageMeta(pageInfo)
       publishTodos(merged)
       return page.events.length > 0
     } catch {
       /* 翻页失败不打断已有内容;按钮保持可重试 */
       return false
     } finally {
-      setLoadingOlder(false)
+      if (olderRequestRef.current === controller) {
+        olderRequestRef.current = null
+        setLoadingOlder(false)
+      }
     }
-  }, [id, loadingOlder, publishTodos, publishEvents])
+  }, [id, publishTodos, publishEvents])
 
   // 轮次轴跳转:锚点在窗口内直接定位;不在则向上翻页直至覆盖(或到头放弃)。
   useEffect(() => {

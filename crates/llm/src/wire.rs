@@ -504,7 +504,7 @@ impl StreamTranslator {
         if let Some(block) = self.reasoning.take() {
             out.push(StreamChunk::BlockEnd {
                 index: block.index,
-                block: ContentBlock::Reasoning { text: block.text },
+                block: ContentBlock::Reasoning { text: block.text, replay: None },
             });
         }
         if let Some(block) = self.text.take() {
@@ -519,8 +519,7 @@ impl StreamTranslator {
                 block: ContentBlock::ToolCall {
                     id: call.id,
                     name: call.name,
-                    arguments: call.arguments,
-                },
+                    arguments: call.arguments, incomplete: false },
             });
         }
         if let Some(usage) = self.usage.take() {
@@ -804,8 +803,7 @@ mod tests {
             denia_core::stream::ContentBlock::ToolCall {
                 id,
                 name,
-                arguments,
-            } => {
+                arguments, .. } => {
                 assert_eq!(id, "call_1");
                 assert_eq!(name, "bash");
                 assert_eq!(arguments, r#"{"command":"ls"}"#);

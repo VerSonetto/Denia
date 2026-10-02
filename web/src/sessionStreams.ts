@@ -3,6 +3,7 @@ import type { SessionAnchor } from './api'
 import type { SessionEnvelope, SessionHeader } from './types'
 import { isPushDead, setPushDead } from './pushChannel'
 import { POLL_HOLD_SEC, pollSessionFollow } from './pushTransport'
+import { SESSION_PAGE_LIMIT } from './sessionMemory'
 
 /**
  * 会话事件流引擎(每会话一个状态机)。
@@ -75,7 +76,7 @@ interface StreamState {
 }
 
 /** 初始快照只拉尾部这么多事件,避免长会话一次全量进前端。 */
-const INITIAL_PAGE_LIMIT = 500
+const INITIAL_PAGE_LIMIT = SESSION_PAGE_LIMIT
 
 const streams = new Map<string, StreamState>()
 

@@ -588,6 +588,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("denia-tools-{}", uuid_like()));
         std::fs::create_dir_all(&dir).unwrap();
         let context = ToolContext {
+            output_store: None,
             session_id: None,
             selection: None,
             cwd: dir.clone(),
@@ -773,6 +774,7 @@ mod tests {
         {
             let emitted = emitted.clone();
             let ctx = ToolContext {
+                output_store: None,
                 session_id: None,
                 selection: None,
                 cwd: dir.clone(),
@@ -812,6 +814,7 @@ mod tests {
 
         // 不识图:明确报错,不注入。
         let ctx = ToolContext {
+            output_store: None,
             session_id: None,
             selection: None,
             cwd: dir.clone(),

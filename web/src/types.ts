@@ -148,8 +148,8 @@ export interface OpenAiProfile {
 
 export type ContentBlock =
   | { type: 'text'; text: string }
-  | { type: 'reasoning'; text: string }
-  | { type: 'tool-call'; id: string; name: string; arguments: string }
+  | { type: 'reasoning'; text: string; replay?: { protocol: string; payload: unknown } }
+  | { type: 'tool-call'; id: string; name: string; arguments: string; incomplete?: boolean }
 
 export type TurnEndReason =
   | { kind: 'completed' }

@@ -139,7 +139,7 @@ pub struct SessionDriver {
     /// 死循环检测状态(按会话):跨 turn 记忆——"用户手动继续后模型又
     /// 重复同样内容"的场景只能靠跨轮记忆抓住。同一会话的轮次由 server
     /// 的 running 位串行化,锁只保护跨会话的并发访问。
-    loop_guards: std::sync::Mutex<std::collections::HashMap<String, loop_guard::LoopGuard>>,
+
     /// 文件读取状态(按会话):重复读取去重 + 写前新鲜度校验。
     /// 同一会话的工具调用共享一张表。
     read_states: std::sync::Mutex<
@@ -177,7 +177,7 @@ impl SessionDriver {
             rapid_refills: AtomicU32::new(0),
             tool_turns_since_compact: AtomicU32::new(0),
             parallel: ParallelSettings::default(),
-            loop_guards: std::sync::Mutex::new(std::collections::HashMap::new()),
+
             read_states: std::sync::Mutex::new(std::collections::HashMap::new()),
             ask_grants: std::sync::Mutex::new(std::collections::HashMap::new()),
             mcp_loads: std::sync::Mutex::new(std::collections::HashMap::new()),
@@ -394,6 +394,7 @@ impl SessionDriver {
             turn,
             0,
             &cancel,
+            None,
         )
         .await
     }
@@ -421,12 +422,7 @@ impl SessionDriver {
         emit: Arc<dyn Fn(&SessionEnvelope) + Send + Sync>,
     ) -> TurnEndReason {
         // 死循环检测记忆跨 turn 保留:轮次开始借出,结束(含错误路径)归还。
-        let loop_guard = self
-            .loop_guards
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner())
-            .remove(session.id())
-            .unwrap_or_default();
+        let loop_guard = loop_guard::LoopGuard::default();
         // 文件读取状态同样按会话持有:跨 turn 保留(同一会话的下一轮里,
         // "上一轮读过的文件"依然算读过,不该要求重读)。
         let read_state = self.read_state_for(session.id());
@@ -439,12 +435,8 @@ impl SessionDriver {
             loop_guard,
             read_state,
         );
+        state.output_store = denia_tools::output::OutputStore::open(session.directory().join("tool-output")).await.ok();
         let result = turn::run_turn_inner(self, &mut state, prompt, images, files, quoted).await;
-        let guard = std::mem::take(&mut state.loop_guard);
-        self.loop_guards
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner())
-            .insert(session.id().to_string(), guard);
         match result {
             Ok(reason) => reason,
             // Append or dispatch failure: the turn stays open in the log and
@@ -620,6 +612,11 @@ pub(crate) struct TurnState {
     pub loop_guard: loop_guard::LoopGuard,
     /// 文件读取状态表(按会话共享):重复读取去重 + 写前新鲜度校验。
     pub read_state: denia_tools::read_state::SharedReadState,
+    pub output_store: Option<Arc<denia_tools::output::OutputStore>>,
+    pub replay: denia_llm::ReplayPolicy,
+    pub output_budget: u64,
+    pub continuations: u32,
+    pub last_real_input: u64,
     /// dsh 对齐:请求头按需落盘的基准(最近快照即重建)。
     pub last_header: Option<RequestHeaderSnapshot>,
     /// 路由元数据(仅在变化时写 request-context)。
@@ -654,6 +651,11 @@ impl TurnState {
             feedback: 0,
             loop_guard,
             read_state,
+            output_store: None,
+            replay: denia_llm::ReplayPolicy::default(),
+            output_budget: 32_768,
+            continuations: 0,
+            last_real_input: 0,
             last_header: None,
             last_context: None,
             has_request_header: false,

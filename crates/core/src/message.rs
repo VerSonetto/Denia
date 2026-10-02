@@ -1,5 +1,25 @@
 //! The chat vocabulary used by request construction and session projection.
 
+pub fn assistant_from_blocks(blocks: &[crate::stream::ContentBlock]) -> Option<ChatMessage> {
+    use crate::stream::ContentBlock;
+    let mut message = ChatMessage::assistant("", None, Vec::new());
+    for block in blocks {
+        match block {
+            ContentBlock::Text { text } => message.content.push_str(text),
+            ContentBlock::Reasoning { text, replay } => {
+                message.reasoning_content.get_or_insert_with(String::new).push_str(text);
+                if let Some(replay) = replay { message.reasoning_replay.push(replay.clone()); }
+            }
+            ContentBlock::ToolCall { id, name, arguments, incomplete } => {
+                if !incomplete && !id.is_empty() && !name.is_empty() && serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(arguments).is_ok() {
+                    message.tool_calls.push(ToolCallRef { id: id.clone(), name: name.clone(), arguments: arguments.clone() });
+                }
+            }
+        }
+    }
+    if message.content.is_empty() && message.tool_calls.is_empty() && message.reasoning_content.is_none() && message.reasoning_replay.is_empty() { None } else { Some(message) }
+}
+
 use serde::{Deserialize, Serialize};
 
 /// Wire role of a chat message.
@@ -56,6 +76,8 @@ pub struct ChatMessage {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_content: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reasoning_replay: Vec<crate::stream::ReasoningReplay>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tool_calls: Vec<ToolCallRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
@@ -68,6 +90,7 @@ impl ChatMessage {
             content: content.into(),
             images: Vec::new(),
             reasoning_content: None,
+            reasoning_replay: Vec::new(),
             tool_calls: Vec::new(),
             tool_call_id: None,
         }
@@ -79,6 +102,7 @@ impl ChatMessage {
             content: content.into(),
             images,
             reasoning_content: None,
+            reasoning_replay: Vec::new(),
             tool_calls: Vec::new(),
             tool_call_id: None,
         }
@@ -94,6 +118,7 @@ impl ChatMessage {
             content: content.into(),
             images: Vec::new(),
             reasoning_content,
+            reasoning_replay: Vec::new(),
             tool_calls,
             tool_call_id: None,
         }
@@ -105,6 +130,7 @@ impl ChatMessage {
             content: content.into(),
             images: Vec::new(),
             reasoning_content: None,
+            reasoning_replay: Vec::new(),
             tool_calls: Vec::new(),
             tool_call_id: Some(call_id.into()),
         }

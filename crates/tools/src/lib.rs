@@ -23,6 +23,7 @@ pub mod read_state;
 pub mod shell;
 pub mod shell_session;
 pub mod support;
+pub mod output;
 mod todo;
 mod web_fetch;
 
@@ -85,7 +86,7 @@ pub type SessionEventSink = Arc<dyn Fn(SessionEvent) + Send + Sync>;
 /// 这里在授予层直接收口,子代理拿不到交互/写类工具,也就不存在"子代理
 /// 提问没人应答"的问题。
 pub const SUBAGENT_READ_ONLY_TOOLS: &[&str] =
-    &["read_file", "ls", "glob", "grep", "skill", "browser", "web_fetch"];
+    &["read_file", "read_tool_output", "ls", "glob", "grep", "skill", "browser", "web_fetch"];
 
 /// 提问通道:宿主实现,把 `ask` 工具的提问挂到会话的挂起表并等待用户应答。
 ///
@@ -149,12 +150,14 @@ pub struct ToolContext {
     /// "读过且新鲜"校验。`None` 表示当前调用不参与去重(独立工具调用、
     /// 测试场景),此时行为与引入该机制之前完全一致。
     pub read_state: Option<read_state::SharedReadState>,
+    pub output_store: Option<Arc<output::OutputStore>>,
 }
 
 /// One model-facing tool outcome.
 pub struct ToolOutput {
     pub content: String,
     pub is_error: bool,
+    pub artifact: Option<output::OutputArtifact>,
 }
 
 impl ToolOutput {
@@ -163,6 +166,7 @@ impl ToolOutput {
         Self {
             content: content.into(),
             is_error: false,
+            artifact: None,
         }
     }
 
@@ -171,6 +175,7 @@ impl ToolOutput {
         Self {
             content: content.into(),
             is_error: true,
+            artifact: None,
         }
     }
 }
@@ -239,6 +244,7 @@ pub fn default_registry() -> ToolRegistry {
     let mut registry = ToolRegistry::default();
     registry.register(Arc::new(BashTool::default()));
     registry.register(Arc::new(ReadFileTool::default()));
+    registry.register(Arc::new(output::ReadToolOutput::default()));
     registry.register(Arc::new(WriteFileTool::default()));
     registry.register(Arc::new(TodoWriteTool::default()));
     registry.register(Arc::new(LsTool::default()));

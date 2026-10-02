@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::LlmCallConfig;
 use crate::error::LlmFailure;
-use crate::message::{ChatMessage, ToolCallRef};
+use crate::message::ChatMessage;
 use crate::stream::{ContentBlock, StreamChunk, TokenUsage};
 use crate::tool::ToolSchema;
 
@@ -977,40 +977,9 @@ fn derive_surface_inner(events: &[SessionEnvelope]) -> Vec<SurfaceMessage> {
                 });
             }
             SessionEvent::AssistantMessage { blocks, .. } => {
-                let text: String = blocks
-                    .iter()
-                    .filter_map(|block| match block {
-                        ContentBlock::Text { text } => Some(text.as_str()),
-                        _ => None,
-                    })
-                    .collect();
-                let calls: Vec<ToolCallRef> = blocks
-                    .iter()
-                    .filter_map(|block| match block {
-                        ContentBlock::ToolCall {
-                            id,
-                            name,
-                            arguments,
-                        } => Some(ToolCallRef {
-                            id: id.clone(),
-                            name: name.clone(),
-                            arguments: arguments.clone(),
-                        }),
-                        _ => None,
-                    })
-                    .collect();
-                if text.is_empty() && calls.is_empty() {
-                    continue;
-                }
-                for call in &calls {
-                    unanswered.push(call.id.clone());
-                }
-                surface.push(plain(
-                    seq,
-                    // 模型历史剥离 reasoning_content:思考过程不回传 provider,
-                    // 省 token 且不影响后续决策;UI/日志仍保留完整 blocks。
-                    ChatMessage::assistant(text, None, calls),
-                    ));
+                let Some(message) = crate::message::assistant_from_blocks(blocks) else { continue; };
+                for call in &message.tool_calls { unanswered.push(call.id.clone()); }
+                surface.push(plain(seq, message));
             }
             SessionEvent::ToolResult {
                 call_id,
@@ -1185,8 +1154,7 @@ mod tests {
                     blocks: vec![ContentBlock::ToolCall {
                         id: "c1".into(),
                         name: "browser".into(),
-                        arguments: "{}".into(),
-                    }],
+                        arguments: "{}".into(), incomplete: false }],
                     usage: None,
                     interrupted: false,
                     source_event_seqs: Vec::new(),
@@ -1363,15 +1331,14 @@ mod tests {
                     turn: 1,
                     step: 1,
                     blocks: vec![
-                        ContentBlock::Reasoning { text: "hmm".into() },
+                        ContentBlock::Reasoning { text: "hmm".into(), replay: None },
                         ContentBlock::Text {
                             text: "running".into(),
                         },
                         ContentBlock::ToolCall {
                             id: "c1".into(),
                             name: "bash".into(),
-                            arguments: "{}".into(),
-                        },
+                            arguments: "{}".into(), incomplete: false },
                     ],
                     usage: None,
                     interrupted: false,
@@ -1436,7 +1403,7 @@ mod tests {
         assert_eq!(messages[0], ChatMessage::user("hi"));
         let assistant = &messages[1];
         assert_eq!(assistant.content, "running");
-        assert_eq!(assistant.reasoning_content.as_deref(), None);
+        assert_eq!(assistant.reasoning_content.as_deref(), Some("hmm"));
         assert_eq!(assistant.tool_calls.len(), 1);
         assert_eq!(messages[2], ChatMessage::tool_result("c1", "exit code: 0"));
         assert_eq!(messages[3].content, "done");
@@ -1463,8 +1430,7 @@ mod tests {
                     blocks: vec![ContentBlock::ToolCall {
                         id: "c1".into(),
                         name: "bash".into(),
-                        arguments: "{}".into(),
-                    }],
+                        arguments: "{}".into(), incomplete: false }],
                     usage: None,
                     interrupted: false,
                     source_event_seqs: Vec::new(),
@@ -1549,8 +1515,7 @@ mod tests {
                     blocks: vec![ContentBlock::ToolCall {
                         id: "cX".into(),
                         name: "bash".into(),
-                        arguments: "{}".into(),
-                    }],
+                        arguments: "{}".into(), incomplete: false }],
                     usage: None,
                     interrupted: true,
                     source_event_seqs: Vec::new(),

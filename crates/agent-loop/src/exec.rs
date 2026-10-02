@@ -135,7 +135,7 @@ async fn commit_result(
     state: &TurnState,
     step: u32,
     call: &ToolCallRef,
-    output: ToolOutput,
+    mut output: ToolOutput,
     touched: &mut Vec<PathBuf>,
     cwd: &Path,
 ) -> Result<(), denia_core::error::LlmFailure> {
@@ -144,6 +144,25 @@ async fn commit_result(
             touched.push(path);
         }
     }
+    let original_chars = output.content.chars().count();
+    let mut preview_truncation = None;
+    if output.artifact.is_none() && call.name != "read_tool_output"
+        && output.content.chars().count() > denia_tools::support::OUTPUT_BUDGET_CHARS {
+        if let Some(store) = &state.output_store {
+            let capture = store.start(&["text"]).await;
+            for chunk in output.content.as_bytes().chunks(8192) { capture.append("text", chunk).await; }
+            output.artifact = Some(capture.finish(true).await);
+        }
+        let mut preview = denia_tools::output::Preview::default();
+        preview.push(output.content.as_bytes());
+        output.content = preview.render(8_000, 16_000);
+        preview_truncation = Some(denia_core::session::TruncationInfo {
+            total_chars: original_chars as u64,
+            shown_chars: output.content.chars().count() as u64,
+        });
+        output.content.push_str(&denia_tools::output::artifact_notice(output.artifact.as_ref()));
+    }
+    let meta = output.artifact.as_ref().map(|artifact| serde_json::json!({ "outputArtifact": artifact }));
     let (content, truncation) = denia_tools::support::apply_output_budget(&output.content);
     append(
         &state.session,
@@ -156,8 +175,8 @@ async fn commit_result(
             is_error: output.is_error,
             error: None,
             error_identity: None,
-            meta: None,
-            truncation,
+            meta,
+            truncation: preview_truncation.or(truncation),
             replaces: None,
         },
     )?;
@@ -402,6 +421,7 @@ fn dispatch_tool_call(
     let file_history = state.file_history.clone();
     let vision_supported = state.vision_supported;
     let read_state = state.read_state.clone();
+    let output_store = state.output_store.clone();
     let ask = driver.ask.clone();
     let call_id = call.id.clone();
     // 记忆域沙箱豁免:锚定记忆目录的读写不受 confined 限制,否则默认
@@ -441,6 +461,7 @@ fn dispatch_tool_call(
         let sink_emit = emit.clone();
         let goal_session = session.clone();
         let context = denia_tools::ToolContext {
+            output_store,
             session_id: Some(session.id().to_string()),
             selection: Some(selection),
             cwd: cwd.clone(),
@@ -464,6 +485,7 @@ fn dispatch_tool_call(
             read_state: Some(read_state),
         };
         let execute = tool.execute(&call.arguments, &context);
+        if call.name == "bash" { return execute.await; }
         tokio::pin!(execute);
         tokio::select! {
             biased;

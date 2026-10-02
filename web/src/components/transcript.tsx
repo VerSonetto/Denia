@@ -34,6 +34,7 @@ import type { AskAnswer, UserMessageImage } from '../types'
 import { UserMessageBubble } from './UserMessageImages'
 import { BranchMessageButton, CopyMessageButton } from './CopyMessageButton'
 import { AskCard } from './AskCard'
+import { ViewportRow } from './ViewportRow'
 import { fetchApps } from './OpenInApp'
 import {
   IconChevron,
@@ -117,8 +118,8 @@ export function Transcript({
   }
   return (
     <>
-      {rows.map((row, index) =>
-        row.kind === 'node' ? (
+      {rows.map((row, index) => {
+        const content = row.kind === 'node' ? (
           <NodeView
             key={index}
             node={row.node}
@@ -136,8 +137,11 @@ export function Transcript({
           />
         ) : (
           <TurnOverview key={index} row={row} />
-        ),
-      )}
+        )
+        return row.kind === 'node' && (row.node.kind === 'user' || row.node.kind === 'turn-start') ? content : (
+          <ViewportRow key={index} eager={index >= rows.length - 12}>{content}</ViewportRow>
+        )
+      })}
       {pendingMessages.map((message, index) => (
         <div className="user-row" key={`pending-${index}`} data-user-anchor="pending">
           <UserMessageBubble text={message.text} images={message.images} pending />

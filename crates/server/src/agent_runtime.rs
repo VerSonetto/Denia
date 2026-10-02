@@ -1536,8 +1536,7 @@ mod tests {
                             block: ContentBlock::ToolCall {
                                 id: format!("call-{}", results.len()),
                                 name: name.into(),
-                                arguments: args.to_string(),
-                            },
+                                arguments: args.to_string(), incomplete: false },
                         }),
                         Ok(StreamChunk::Finish {
                             reason: FinishReason::ToolCalls,
@@ -1577,6 +1576,7 @@ mod tests {
         let live = state.live.get_or_load(&state.sessions, &id).unwrap();
         live.running.store(true, Ordering::SeqCst); // 父轮次由测试控制，通知先排队。
         let ctx = ToolContext {
+            output_store: None,
             session_id: Some(id),
             selection: Some(ModelSelection {
                 provider: "runtime-test".into(),

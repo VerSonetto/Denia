@@ -51,6 +51,13 @@ pub fn register_shipped_prompt(
         audience: SectionAudience::Model,
     })?;
     prompt.section(PromptSection {
+        name: "tool:output".to_string(),
+        order: SectionOrder::ToolBash.value() + 1,
+        text: PromptText::Static("工具输出有 32,000 字符预算。截断时使用 read_tool_output 按 output_id 回读本会话产物，bash 可选择 stdout/stderr；offset 为从 1 开始的行号，默认 400 行、最多 1,000 行。保存不完整时不要假设产物包含全部证据。".to_string()),
+        complete: false,
+        audience: SectionAudience::Model,
+    })?;
+    prompt.section(PromptSection {
         name: "tool:ls".to_string(),
         order: SectionOrder::ToolLs.value(),
         text: PromptText::Static(
@@ -989,7 +996,8 @@ mod tests {
         );
         assert!(!render_context_snapshot(&assembly).is_empty());
         // bash/read/write/todo/ls/glob/grep/edit/exit_plan/get_goal/update_goal/web_fetch。
-        assert_eq!(assembly.tools.len(), 12);
+        assert_eq!(assembly.tools.len(), 13);
+        assert!(assembly.tools.iter().any(|tool| tool.name == "read_tool_output"));
     }
 
     /// 全量兜底:出厂提示词里**任何一处**都不许把探索动作推给 bash。
@@ -1310,6 +1318,7 @@ mod browser_prompt_tests {
         use tokio_util::sync::CancellationToken;
 
         let ctx = crate::ToolContext {
+            output_store: None,
             session_id: None,
             selection: None,
             cwd: std::env::temp_dir(),

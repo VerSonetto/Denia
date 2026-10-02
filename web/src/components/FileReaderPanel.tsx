@@ -17,8 +17,8 @@
  *
  * # 三态
  *
- * 加载中 / 加载失败 / 已加载,失败时**只影响当前文件** —— 每个条目各持
- * 自己的请求状态,一个文件读失败不会把别的已打开文件一起弄没。
+ * 加载中 / 加载失败 / 已加载。只保留当前文件正文,切换时取消旧请求并
+ * 回收正文;文件标签保留,再次激活时重新读取,失败只影响当前文件。
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
@@ -29,7 +29,7 @@ import { CodeBlock } from '../markdown/CodeBlock'
 import { IconClose, IconFile, IconRefresh, IconSpinner } from './icons'
 import './FileReaderPanel.css'
 
-/** 一个条目的加载状态(按条目各持一份)。 */
+/** 当前文件的加载状态。 */
 type FileState =
   | { kind: 'loading' }
   | { kind: 'ready'; view: api.WorkspaceFileView }
@@ -56,20 +56,14 @@ export function FileReaderPanel({
   onCloseFile,
 }: FileReaderPanelProps) {
   /**
-   * 每个条目的加载状态表。
-   *
-   * 用**路径**作键而不是数组:同一路径在条目列表里只会有一条,而重试时
-   * 只需覆盖这一个键,别的文件的状态原封不动 —— 这正是"失败不破坏其他
-   * 已打开文件"的落点。
+   * 只驻留当前文件的正文;后台标签仅保留路径与名称。
    */
   const [states, setStates] = useState<Record<string, FileState>>({})
   /**
-   * 每个路径一个请求代号:防止慢响应覆盖新状态。
-   *
-   * 与文件树的 `revisionsRef` 同一套做法(见 FileTreePanel 注释):快速切换
-   * 条目或重试时,先发的请求可能后到,不记代号就会把新结果覆盖成旧的。
+   * 单调递增的请求代号:快速切换和重试时,慢响应不能覆盖新状态。
    */
-  const revisionsRef = useRef<Map<string, number>>(new Map())
+  const revisionRef = useRef(0)
+  const requestRef = useRef<AbortController | null>(null)
   const tabsRef = useRef<HTMLDivElement | null>(null)
   const aliveRef = useRef(true)
 
@@ -77,25 +71,28 @@ export function FileReaderPanel({
     aliveRef.current = true
     return () => {
       aliveRef.current = false
+      requestRef.current?.abort()
     }
   }, [])
 
   const load = useCallback(
     (path: string) => {
-      const revision = (revisionsRef.current.get(path) ?? 0) + 1
-      revisionsRef.current.set(path, revision)
-      setStates((current) => ({ ...current, [path]: { kind: 'loading' } }))
+      const revision = ++revisionRef.current
+      requestRef.current?.abort()
+      const controller = new AbortController()
+      requestRef.current = controller
+      setStates({ [path]: { kind: 'loading' } })
       api
-        .fetchWorkspaceFile(workspacePath, path)
+        .fetchWorkspaceFile(workspacePath, path, controller.signal)
         .then((view) => {
-          if (!aliveRef.current || revisionsRef.current.get(path) !== revision) return
-          setStates((current) => ({ ...current, [path]: { kind: 'ready', view } }))
+          if (!aliveRef.current || controller.signal.aborted || revisionRef.current !== revision) return
+          setStates({ [path]: { kind: 'ready', view } })
         })
         .catch((cause: unknown) => {
-          if (!aliveRef.current || revisionsRef.current.get(path) !== revision) return
+          if (!aliveRef.current || controller.signal.aborted || revisionRef.current !== revision) return
           const message = cause instanceof Error ? cause.message : String(cause)
           const code = cause instanceof api.ApiError ? cause.code : ''
-          setStates((current) => ({ ...current, [path]: { kind: 'error', message, code } }))
+          setStates({ [path]: { kind: 'error', message, code } })
         })
     },
     [workspacePath],
@@ -103,19 +100,28 @@ export function FileReaderPanel({
 
   // 工作区换了(切会话):整批状态作废 —— 旧根的路径在新根下毫无意义。
   useEffect(() => {
-    revisionsRef.current.clear()
+    requestRef.current?.abort()
     setStates({})
   }, [workspacePath])
 
   // 按需加载:只为"还没有状态"的条目发请求。已加载/加载中/失败的都不重发
   // (失败要重试由用户点重试按钮,不自动重试)。
-  useEffect(() => {
-    for (const file of files) {
-      if (states[file.path] === undefined) load(file.path)
-    }
-  }, [files, states, load])
-
   const active = activeFile ?? files[files.length - 1]?.path ?? ''
+  useEffect(() => {
+    requestRef.current?.abort()
+    setStates((current) => {
+      const next: Record<string, FileState> = {}
+      for (const file of files) {
+        const state = current[file.path]
+        if (file.path === active && state) next[file.path] = state
+      }
+      return Object.keys(current).every((path) => next[path] === current[path]) ? current : next
+    })
+  }, [active])
+  useEffect(() => {
+    if (active && (states[active] === undefined ||
+      (states[active].kind === 'loading' && requestRef.current?.signal.aborted))) load(active)
+  }, [active, states, load])
   const state = states[active]
   const activeEntry = useMemo(
     () => files.find((file) => file.path === active) ?? null,

@@ -1747,6 +1747,12 @@ button {
   flex-shrink: 0;
 }
 
+.transcript-viewport-row {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
 .composer-seat {
   flex: none;
   display: flex;

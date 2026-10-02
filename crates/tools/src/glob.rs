@@ -361,6 +361,7 @@ mod tests {
 
     fn context(cwd: PathBuf) -> ToolContext {
         ToolContext {
+            output_store: None,
             session_id: None,
             selection: None,
             cwd,

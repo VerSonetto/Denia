@@ -116,8 +116,8 @@ struct SessionInner {
     last_system_prompt: Option<String>,
     /// token-meter 增量 fold:上下文 token 组成的 O(1) 投影。
     meter: ContextMeter,
-    /// 当前正在进行的 turn 的 envelope 缓冲;`turn-end` 到来时交给
-    /// `meter.fold_turn`,fold 成功则并入精确 usage 累计并更新 anchor。
+    /// 当前 turn 的轻量计费事件,不含消息正文/工具输出;`turn-end` 时
+    /// 交给 `meter.fold_turn`,随后释放缓冲容量。
     pending_turn: Vec<SessionEnvelope>,
     /// 当前权限模式(由 permission-mode 事件 fold;新会话默认 auto-edit)。
     permission_mode: PermissionMode,
@@ -161,6 +161,7 @@ struct SessionInner {
     resident_bytes: u64,
     /// 其中属于 transient(chunk)的部分;`turn-end` 清扫时按此扣减。
     transient_bytes: u64,
+    first_prompt_excerpt: Option<String>,
 }
 
 /// One live session: header, in-memory log, and its append handle. The log is
@@ -238,6 +239,7 @@ impl Session {
                     last_seq: 0,
                     resident_bytes: 0,
                     transient_bytes: 0,
+                    first_prompt_excerpt: None,
                 }),
             });
         }
@@ -312,6 +314,7 @@ impl Session {
         let mut meter = ContextMeter::new();
         let mut pending_turn: Vec<SessionEnvelope> = Vec::new();
         let mut last_seq = 0u64;
+        let mut first_prompt_excerpt = None;
         // 驻留事件的内存近似:逐行累计(chunk 只在打开的轮次里驻留,
         // 加载时日志里的旧 chunk 一律不进内存,故此处只记非 chunk 行)。
         let mut resident_bytes = 0u64;
@@ -341,6 +344,9 @@ impl Session {
                         SessionEvent::PermissionMode { mode } => permission_mode = *mode,
                         SessionEvent::AgentPreset { preset } => agent_preset = Some(preset.clone()),
                         SessionEvent::SessionTitle { title: t } => title = Some(t.clone()),
+                        SessionEvent::UserMessage { text, .. } if first_prompt_excerpt.is_none() => {
+                            first_prompt_excerpt = Some(excerpt_text(text, 80));
+                        }
                         _ => {}
                     }
                     // meter/goal 的聚合折叠冷热一致;chunk 不进任何折叠
@@ -348,11 +354,11 @@ impl Session {
                     if matches!(envelope.event, SessionEvent::TurnStart { .. }) {
                         pending_turn.clear();
                     }
-                    if !transient {
-                        pending_turn.push(envelope.clone());
+                    if let Some(sample) = usage_envelope(&envelope) {
+                        pending_turn.push(sample);
                     }
                     if matches!(envelope.event, SessionEvent::TurnEnd { .. }) {
-                        let slice: Vec<SessionEnvelope> = pending_turn.drain(..).collect();
+                        let slice = std::mem::take(&mut pending_turn);
                         meter.fold_turn(&slice);
                     }
                     meter.apply_one(&envelope);
@@ -409,12 +415,17 @@ impl Session {
             // 热态的事件内存近似 = 驻留各行的字节之和(与 append 同口径)。
             resident_bytes,
             transient_bytes: 0,
+            first_prompt_excerpt,
         };
         Ok((header, inner))
     }
 
     pub fn id(&self) -> &str {
         &self.header.id
+    }
+
+    pub fn directory(&self) -> &Path {
+        self.file.parent().expect("session file has a directory")
     }
 
     pub fn header(&self) -> &SessionHeader {
@@ -498,12 +509,42 @@ impl Session {
             .inner
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
+        if !inner.cold {
+            return Ok(());
+        }
         let mut hot_inner = hot
             .inner
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
         std::mem::swap(&mut *inner, &mut *hot_inner);
         Ok(())
+    }
+
+    pub fn cool(&self) -> Result<bool, SessionError> {
+        let mut inner = self.inner.lock().unwrap_or_else(|poison| poison.into_inner());
+        if inner.cold {
+            return Ok(false);
+        }
+        let mut open_turn = false;
+        for envelope in &inner.events {
+            match envelope.event {
+                SessionEvent::TurnStart { .. } => open_turn = true,
+                SessionEvent::TurnEnd { .. } => open_turn = false,
+                _ => {}
+            }
+        }
+        if open_turn {
+            return Ok(false);
+        }
+        inner.writer.flush()?;
+        inner.events = Vec::new();
+        inner.offsets = Vec::new();
+        inner.pending_turn = Vec::new();
+        inner.derived_surface = None;
+        inner.resident_bytes = 0;
+        inner.transient_bytes = 0;
+        inner.cold = true;
+        Ok(true)
     }
 
     /// 在日志锁内只读地跑一段闭包,不克隆日志。
@@ -608,6 +649,9 @@ impl Session {
             SessionEvent::SessionTitle { title } => {
                 inner.title = Some(title.clone());
             }
+            SessionEvent::UserMessage { text, .. } if inner.first_prompt_excerpt.is_none() => {
+                inner.first_prompt_excerpt = Some(excerpt_text(text, 80));
+            }
             _ => {}
         }
         // 维护 token-meter:
@@ -619,11 +663,11 @@ impl Session {
         if matches!(&envelope.event, SessionEvent::TurnStart { .. }) {
             inner.pending_turn.clear();
         }
-        if !transient {
-            inner.pending_turn.push(envelope.clone());
+        if let Some(sample) = usage_envelope(&envelope) {
+            inner.pending_turn.push(sample);
         }
         if matches!(&envelope.event, SessionEvent::TurnEnd { .. }) {
-            let slice: Vec<SessionEnvelope> = inner.pending_turn.drain(..).collect();
+            let slice = std::mem::take(&mut inner.pending_turn);
             inner.meter.fold_turn(&slice);
         }
         inner.meter.apply_one(&envelope);
@@ -661,16 +705,16 @@ impl Session {
                 }
             }
         }
-        // chunk 驻留到轮次闭合:打开轮次的实时回放需要它(刷新页面恢复
-        // 流式视图);turn-end 落盘即清扫,闭环轮次只留结算消息。
+        // 当前步骤的 chunk 支持实时回放;消息结算或轮次闭合后只保留终稿。
         let line_bytes = line.len() as u64 + 1;
         inner.events.push(envelope.clone());
         inner.resident_bytes += line_bytes;
         if transient {
             inner.transient_bytes += line_bytes;
         }
-        if matches!(&envelope.event, SessionEvent::TurnEnd { .. }) {
+        if matches!(&envelope.event, SessionEvent::AssistantMessage { .. } | SessionEvent::TurnEnd { .. }) {
             inner.events.retain(|item| !is_transient_event(&item.event));
+            inner.events.shrink_to_fit();
             // 清扫的正是本轮的 chunk,按记账扣减(饱和,防历史回退遗留的偏差)。
             inner.resident_bytes = inner.resident_bytes.saturating_sub(inner.transient_bytes);
             inner.transient_bytes = 0;
@@ -741,7 +785,9 @@ impl Session {
 
         // 内存与派生状态回退。
         inner.events.truncate(target_idx);
+        inner.events.shrink_to_fit();
         inner.offsets.truncate(target_idx);
+        inner.offsets.shrink_to_fit();
         inner.next_offset = truncate_offset;
         // 驻留字节随截断重算:offsets 只登记非 chunk 事件的行尾偏移,
         // 差值即这些事件在内存里的近似体积。chunk 在轮次闭合时已清扫,
@@ -767,6 +813,7 @@ impl Session {
         inner.goal = None;
         inner.meter = ContextMeter::new();
         inner.pending_turn.clear();
+        inner.first_prompt_excerpt = None;
         // 取出日志就地回放(而不是克隆一份):29MB 级的长会话下,这份副本
         // 是回退时峰值内存的主要来源。回放完放回原位。
         let kept = std::mem::take(&mut inner.events);
@@ -787,9 +834,16 @@ impl Session {
             if matches!(&envelope.event, SessionEvent::TurnStart { .. }) {
                 inner.pending_turn.clear();
             }
-            inner.pending_turn.push(envelope.clone());
+            if let SessionEvent::UserMessage { text, .. } = &envelope.event {
+                if inner.first_prompt_excerpt.is_none() {
+                    inner.first_prompt_excerpt = Some(excerpt_text(text, 80));
+                }
+            }
+            if let Some(sample) = usage_envelope(envelope) {
+                inner.pending_turn.push(sample);
+            }
             if matches!(&envelope.event, SessionEvent::TurnEnd { .. }) {
-                let slice: Vec<SessionEnvelope> = inner.pending_turn.drain(..).collect();
+                let slice = std::mem::take(&mut inner.pending_turn);
                 inner.meter.fold_turn(&slice);
             }
             inner.meter.apply_one(envelope);
@@ -858,11 +912,15 @@ impl Session {
             pending_turn,
             ..
         } = &mut *inner;
+        *meter = ContextMeter::new();
+        pending_turn.clear();
         for envelope in events.iter() {
             if matches!(&envelope.event, SessionEvent::TurnStart { .. }) {
                 pending_turn.clear();
             }
-            pending_turn.push(envelope.clone());
+            if let Some(sample) = usage_envelope(envelope) {
+                pending_turn.push(sample);
+            }
             if matches!(&envelope.event, SessionEvent::TurnEnd { .. }) {
                 meter.fold_turn(pending_turn);
                 pending_turn.clear();
@@ -1059,6 +1117,9 @@ impl Session {
             .inner
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
+        if inner.cold {
+            return inner.first_prompt_excerpt.as_ref().map(|text| excerpt_text(text, max_chars));
+        }
         let text = inner
             .events
             .iter()
@@ -1232,10 +1293,28 @@ fn anchor_preview(text: &str) -> String {
 /// 内存事件表**不驻留已闭合轮次的 chunk** —— 派生面(token-meter 与
 /// `derive_surface`)只折叠 user/assistant/tool-result,闭环轮次的历史
 /// 重建只依赖结算的 `assistant-message`(与分页端点的展示粒度同口径),
-/// chunk 只在“当前打开的轮次”里驻留,`turn-end` 落盘时清扫。日志文件
+/// chunk 只在当前未结算步骤里驻留,消息结算或 `turn-end` 时清扫。日志文件
 /// 仍完整记录每一条(append-only 不变)。
 fn is_transient_event(event: &SessionEvent) -> bool {
     matches!(event, SessionEvent::AssistantChunk { .. })
+}
+
+fn usage_envelope(envelope: &SessionEnvelope) -> Option<SessionEnvelope> {
+    let event = match &envelope.event {
+        SessionEvent::TurnStart { .. } | SessionEvent::TurnEnd { .. }
+        | SessionEvent::StepStart { .. } | SessionEvent::StepEnd { .. } => envelope.event.clone(),
+        SessionEvent::AssistantMessage { turn, step, usage, .. } => SessionEvent::AssistantMessage {
+            turn: *turn,
+            step: *step,
+            blocks: Vec::new(),
+            usage: *usage,
+            interrupted: false,
+            source_event_seqs: Vec::new(),
+            first_token_time: None,
+        },
+        _ => return None,
+    };
+    Some(SessionEnvelope { seq: envelope.seq, time: envelope.time, event })
 }
 
 /// 逐行读下一条可解析的日志事件:首个非空行产出会话头(存入 `header`,
@@ -2956,6 +3035,123 @@ mod tests {
             "轮次 usage 冷热一致"
         );
         assert_eq!(hot.next_turn_number(), cold.next_turn_number());
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn cooling_releases_history_and_preserves_summary_and_replay() {
+        let root = temp_root();
+        let cwd = root.join("work");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let store = SessionStore::open(&root).unwrap();
+        let session = Arc::new(store.create(&cwd, true).unwrap());
+        session.append(SessionEvent::UserMessage {
+            text: "keep this summary".into(), injected: false, channel: None, images: Vec::new(),
+        }).unwrap();
+        session.append(SessionEvent::TurnStart { turn: 1 }).unwrap();
+        session.append(SessionEvent::StepStart { turn: 1, step: 1 }).unwrap();
+        session.append(SessionEvent::AssistantMessage {
+            turn: 1, step: 1,
+            blocks: vec![ContentBlock::Text { text: "large answer".repeat(10_000) }],
+            usage: Some(denia_core::stream::TokenUsage { input_tokens: 20, output_tokens: 10,
+                cache_read_tokens: Some(5), reasoning_tokens: Some(3) }),
+            interrupted: false, source_event_seqs: Vec::new(), first_token_time: None,
+        }).unwrap();
+        session.append(SessionEvent::StepEnd { turn: 1, step: 1 }).unwrap();
+        assert!(!session.cool().unwrap());
+        session.append(SessionEvent::TurnEnd { turn: 1, reason: TurnEndReason::Completed }).unwrap();
+        store.track_session(&session);
+        let surface = session.derive_surface();
+        let weak_surface = Arc::downgrade(&surface);
+        drop(surface);
+        let meter = session.turn_token_usage();
+        let pressure = session.context_pressure();
+        let count = session.events().len();
+        assert!(session.cool().unwrap());
+        assert!(!session.cool().unwrap());
+        assert!(weak_surface.upgrade().is_none());
+        assert_eq!(session.resident_bytes(), 0);
+        assert_eq!(session.turn_token_usage(), meter);
+        assert_eq!(session.context_pressure(), pressure);
+        assert_eq!(session.events_after(0).len(), count);
+        assert_eq!(session.first_prompt_excerpt(80).as_deref(), Some("keep this summary"));
+        assert_eq!(store.list().unwrap()[0].excerpt.as_deref(), Some("keep this summary"));
+        {
+            let inner = session.inner.lock().unwrap();
+            assert_eq!(inner.events.capacity(), 0);
+            assert_eq!(inner.offsets.capacity(), 0);
+            assert_eq!(inner.pending_turn.capacity(), 0);
+        }
+        session.ensure_hot().unwrap();
+        assert_eq!(session.events().len(), count);
+        assert_eq!(session.turn_token_usage(), meter);
+        assert!(session.resident_bytes() > 0);
+        let appended = session.append(SessionEvent::UserMessage {
+            text: "next".into(), injected: false, channel: None, images: Vec::new(),
+        }).unwrap();
+        assert_eq!(appended.seq, count as u64 + 1);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn usage_buffer_does_not_clone_message_bodies() {
+        let root = temp_root();
+        let cwd = root.join("work");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let session = Session::create(&root.join("s"), "s".into(), &cwd, true, None).unwrap();
+        session.append(SessionEvent::TurnStart { turn: 1 }).unwrap();
+        session.append(SessionEvent::StepStart { turn: 1, step: 1 }).unwrap();
+        session.append(SessionEvent::AssistantMessage {
+            turn: 1, step: 1, blocks: vec![ContentBlock::Text { text: "x".repeat(1_000_000) }],
+            usage: Some(denia_core::stream::TokenUsage { input_tokens: 10, output_tokens: 5,
+                cache_read_tokens: None, reasoning_tokens: None }),
+            interrupted: false, source_event_seqs: (1..1000).collect(), first_token_time: None,
+        }).unwrap();
+        session.with_events(|events| assert_eq!(events.len(), 3));
+        {
+            let inner = session.inner.lock().unwrap();
+            assert_eq!(inner.pending_turn.len(), 3);
+            for envelope in &inner.pending_turn {
+                if let SessionEvent::AssistantMessage { blocks, source_event_seqs, .. } = &envelope.event {
+                    assert!(blocks.is_empty());
+                    assert!(source_event_seqs.is_empty());
+                }
+            }
+        }
+        session.append(SessionEvent::StepEnd { turn: 1, step: 1 }).unwrap();
+        session.append(SessionEvent::TurnEnd { turn: 1, reason: TurnEndReason::Completed }).unwrap();
+        assert_eq!(session.turn_token_usage().output_tokens, 5);
+        assert_eq!(session.inner.lock().unwrap().pending_turn.capacity(), 0);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn settled_step_releases_chunks_before_turn_end() {
+        let root = temp_root();
+        let cwd = root.join("work");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let session = Session::create(&root.join("s"), "s".into(), &cwd, true, None).unwrap();
+        session.append(SessionEvent::TurnStart { turn: 1 }).unwrap();
+        for _ in 0..1000 {
+            session.append(SessionEvent::AssistantChunk { turn: 1, step: 1,
+                chunk: denia_core::stream::StreamChunk::TextDelta { index: 0, text: "fragment".into() },
+            }).unwrap();
+        }
+        assert_eq!(session.events().len(), 1001);
+        session.append(SessionEvent::AssistantMessage {
+            turn: 1, step: 1, blocks: vec![ContentBlock::Text { text: "settled".into() }],
+            usage: None, interrupted: false, source_event_seqs: Vec::new(), first_token_time: None,
+        }).unwrap();
+        assert_eq!(session.events().len(), 2);
+        let inner = session.inner.lock().unwrap();
+        assert_eq!(inner.transient_bytes, 0);
+        assert_eq!(inner.events.capacity(), 2);
+        drop(inner);
+        assert!(!session.cool().unwrap());
+        session.append(SessionEvent::AssistantChunk { turn: 1, step: 2,
+            chunk: denia_core::stream::StreamChunk::TextDelta { index: 0, text: "next step".into() },
+        }).unwrap();
+        assert_eq!(session.events_after(1002).len(), 1);
         std::fs::remove_dir_all(&root).unwrap();
     }
 
