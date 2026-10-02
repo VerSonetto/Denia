@@ -230,13 +230,13 @@ function tab(id, type = 'terminal') {
   const { html } = await render({ ...baseProps, state, collapsed: true })
   if (!html.includes('side-pane collapsed') && !html.includes('collapsed')) {
     fail('折叠渲染', '没有 collapsed 标记')
-  } else if (!html.includes('side-pane-expand')) {
-    fail('折叠渲染', '折叠后应有展开把手')
+  } else if (html.includes('side-pane-expand')) {
+    fail('折叠渲染', '不应渲染对话区边缘的加号入口')
   } else if (!html.includes('pane-tabs')) {
     // 折叠时标签栏仍在 DOM 里(只是宽度归零),这是保活的关键。
     fail('折叠渲染', '折叠后内容不应被卸载(保活)')
   } else {
-    ok('折叠渲染:宽度归零但内容保留(保活)+ 展开把手')
+    ok('折叠渲染:宽度归零但内容保留(保活)，无边缘加号')
   }
 }
 
@@ -437,7 +437,7 @@ function tab(id, type = 'terminal') {
   await tick(30)
 }
 
-/* 10) 过渡的前提:宽度由内联样式驱动(0 ↔ 记忆宽度)+ 裁切层 + 常驻把手 */
+/* 10) 过渡的前提:宽度由内联样式驱动(0 ↔ 记忆宽度)+ 裁切层 ，无边缘加号 */
 {
   const state = { tabs: [tab('t1')], activeTabId: 't1' }
   const container = g.document.createElement('div')
@@ -457,11 +457,9 @@ function tab(id, type = 'terminal') {
     fail('宽度内联驱动', `展开态宽度应写在内联样式里(240px),实际:${expandedStyle}`)
   } else if (!clipLayer) {
     fail('宽度内联驱动', '缺少裁切层 .side-pane-clip > .side-pane-inner')
-  } else if (!handle) {
-    fail('宽度内联驱动', '展开把手应常驻 DOM(新挂载的元素跑不了过渡)')
-  } else if (handle.getAttribute('aria-hidden') !== 'true' || handle.getAttribute('tabindex') !== '-1') {
-    fail('宽度内联驱动', '展开态下把手应从无障碍树隐藏且不可聚焦')
-  } else ok('过渡前提:展开态宽度内联 + 裁切层 + 把手常驻且已隐藏')
+  } else if (handle) {
+    fail('宽度内联驱动', '不应渲染边缘加号')
+  } else ok('过渡前提:展开态宽度内联 + 裁切层')
 
   paint(true)
   await tick(90)
@@ -471,10 +469,10 @@ function tab(id, type = 'terminal') {
   if (!/width:\s*0px/.test(collapsedStyle)) {
     // 写死 `width:0` 在 CSS 里就没有过渡终点可言 —— 这条守的就是它。
     fail('宽度内联驱动', `收起态宽度应为内联的 0px,实际:${collapsedStyle}`)
-  } else if (collapsedHandle?.getAttribute('aria-hidden') === 'true') {
-    fail('宽度内联驱动', '收起后把手应可被点击与聚焦')
+  } else if (collapsedHandle) {
+    fail('宽度内联驱动', '收起后不应出现边缘加号')
   } else {
-    ok('过渡前提:收起态宽度内联为 0px,把手恢复可点')
+    ok('过渡前提:收起态宽度内联为 0px，无边缘加号')
   }
 
   root.unmount()
@@ -490,12 +488,10 @@ function tab(id, type = 'terminal') {
     fail('过渡样式', '.side-pane-clip 缺少 overflow:hidden(冻结宽度无处裁切)')
   } else if (!/\.side-pane-inner\s*\{[^}]*--side-pane-content-w/.test(css)) {
     fail('过渡样式', '.side-pane-inner 没有用冻结宽度变量')
-  } else if (!/\.side-pane\.collapsed\s*\.side-pane-expand/.test(css)) {
-    fail('过渡样式', '展开把手缺少两态样式(折叠末尾淡入)')
   } else if (!/@media \(prefers-reduced-motion: reduce\)/.test(css)) {
     fail('过渡样式', '缺少 prefers-reduced-motion 兜底')
   } else {
-    ok('过渡样式:宽度过渡 + 裁切层 + 冻结宽度 + 把手淡入 + reduced-motion')
+    ok('过渡样式:宽度过渡 + 裁切层 + 冻结宽度 + reduced-motion')
   }
 }
 

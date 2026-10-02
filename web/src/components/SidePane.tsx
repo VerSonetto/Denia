@@ -49,7 +49,7 @@ import {
 } from '../sidePane'
 import { availablePanels } from '../panelRegistry'
 import { SidePaneTabs, TabIcon, tabTypeLabel } from './SidePaneTabs'
-import { IconChevronDown, IconPlus } from './icons'
+import { IconChevronDown } from './icons'
 import './SidePane.css'
 
 export interface SidePaneProps {
@@ -459,21 +459,6 @@ export function SidePane({
         </div>
       </div>
 
-      {/* 展开把手:细条贴在右边缘。
-          **常驻 DOM**:新挂载的元素跑不了 CSS 过渡,而它需要在收起动画的末尾
-          才淡入(动画刚开始时面板还很宽,把手会压在内容上)。展开态由 CSS
-          隐掉并禁用点击,这里同步补上无障碍语义。 */}
-      <button
-        type="button"
-        className="side-pane-expand"
-        title={t('sidePaneExpand')}
-        aria-label={t('sidePaneExpand')}
-        aria-hidden={collapsed ? undefined : true}
-        tabIndex={collapsed ? 0 : -1}
-        onClick={() => onCollapsedChange(false)}
-      >
-        <IconPlus size={13} />
-      </button>
     </aside>
   )
 }
