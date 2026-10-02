@@ -31,13 +31,15 @@ pub fn apply_output_budget(text: &str) -> (String, Option<TruncationInfo>) {
     if total <= OUTPUT_BUDGET_CHARS {
         return (text.to_string(), None);
     }
-    let shown: String = text.chars().take(OUTPUT_BUDGET_CHARS).collect();
-    let notice = truncation_notice(total, OUTPUT_BUDGET_CHARS);
+    let reserved = truncation_notice(total, OUTPUT_BUDGET_CHARS).chars().count();
+    let shown_chars = OUTPUT_BUDGET_CHARS.saturating_sub(reserved);
+    let shown: String = text.chars().take(shown_chars).collect();
+    let notice = truncation_notice(total, shown_chars);
     (
         format!("{shown}{notice}"),
         Some(TruncationInfo {
             total_chars: total as u64,
-            shown_chars: OUTPUT_BUDGET_CHARS as u64,
+            shown_chars: shown_chars as u64,
         }),
     )
 }
@@ -115,6 +117,7 @@ pub fn parse_tool_args<T: serde::de::DeserializeOwned>(raw: &str) -> Result<T, S
 /// 建议必须可执行,模型据此修正下一次调用。
 pub fn tool_error(reason: impl std::fmt::Display, hint: impl std::fmt::Display) -> ToolOutput {
     ToolOutput {
+        artifact: None,
         content: format!("[工具错误] {reason}\n建议:{hint}"),
         is_error: true,
     }
@@ -137,15 +140,11 @@ mod tests {
         let (out, info) = apply_output_budget(&text);
         let info = info.expect("must truncate");
         assert_eq!(info.total_chars, (OUTPUT_BUDGET_CHARS + 100) as u64);
-        assert_eq!(info.shown_chars, OUTPUT_BUDGET_CHARS as u64);
+        assert!(info.shown_chars < OUTPUT_BUDGET_CHARS as u64);
         assert!(out.contains("输出已截断"));
         assert!(out.contains(&format!("共 {} 字符", OUTPUT_BUDGET_CHARS + 100)));
-        // 截断按字符计,不撕多字节 UTF-8:主体 + 提示正好是预算 + 提示长度。
-        let notice = truncation_notice(OUTPUT_BUDGET_CHARS + 100, OUTPUT_BUDGET_CHARS);
-        assert_eq!(
-            out.chars().count(),
-            OUTPUT_BUDGET_CHARS + notice.chars().count()
-        );
+        // 提示也必须包含在模型可见预算内。
+        assert!(out.chars().count() <= OUTPUT_BUDGET_CHARS);
         assert!(out.starts_with(&"字".repeat(100)));
     }
 

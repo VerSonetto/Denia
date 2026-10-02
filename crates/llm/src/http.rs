@@ -35,7 +35,7 @@ pub fn http_error_failure(status: StatusCode, body: &str, headers: &HeaderMap) -
         }
         400 => {
             let lower = message.to_lowercase();
-            if lower.contains("context") || lower.contains("length") || lower.contains("tokens") {
+            if super::replay::explicit_context_overflow(&lower) || serde_json::from_str::<serde_json::Value>(body).ok().is_some_and(|value| value["error"]["code"] == "context_length_exceeded") {
                 codes::CONTEXT_WINDOW_EXCEEDED
             } else {
                 codes::INVALID_REQUEST
@@ -46,6 +46,7 @@ pub fn http_error_failure(status: StatusCode, body: &str, headers: &HeaderMap) -
         _ => codes::INVALID_REQUEST,
     };
     let mut failure = LlmFailure::new(code, message).with_status(status.as_u16());
+    if super::replay::explicit_reasoning_rejection(&failure) { failure.code = super::replay::REASONING_REJECTED.into(); }
     if let Some(ms) = retry_after_ms(headers) {
         failure = failure.with_retry_after_ms(ms);
     }

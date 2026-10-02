@@ -225,6 +225,7 @@ mod tests {
 
     fn test_ctx() -> ToolContext {
         ToolContext {
+            output_store: None,
             session_id: None,
             selection: None,
             cwd: std::env::temp_dir(),

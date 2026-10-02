@@ -67,6 +67,7 @@ async fn context7_tool_is_dispatchable_through_registry() {
         .get("mcp__context7__resolve_library_id")
         .expect("tool present");
     let ctx = denia_tools::ToolContext {
+        output_store: None,
         session_id: None,
         selection: None,
         cwd: std::env::current_dir().unwrap_or_default(),

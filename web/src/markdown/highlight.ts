@@ -164,7 +164,7 @@ function createHighlighter(): HighlighterCore {
   return instance
 }
 
-/** The synchronous highlighter (one instance per document); pre-warmed below, lazy as the fallback. */
+/** The synchronous highlighter, created only when highlighted code is requested. */
 function highlighter(): HighlighterCore {
   singleton ??= createHighlighter()
   return singleton
@@ -224,14 +224,6 @@ function ensureGrammar(resolved: string): boolean {
   }
   return false
 }
-
-// Engine + grammar construction costs a long task (~120-175ms); building it
-// during the first finalized fence's render would jank exactly when a stream
-// completes. Warm the singleton in a deferred task at module load instead;
-// the lazy path above stays as the correctness fallback for a fence that
-// renders before the timer fires.
-const warmupTimer = setTimeout(() => { highlighter() }, 0)
-;(warmupTimer as { unref?: () => void }).unref?.()
 
 /**
  * Highlight `code` into shiki's HTML (a single `<pre class="shiki">` tree)

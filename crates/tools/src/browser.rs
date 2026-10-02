@@ -193,6 +193,7 @@ fn render_outcome(outcome: CommandOutcome, ctx: &ToolContext, screenshot: bool) 
         }
     }
     ToolOutput {
+        artifact: None,
         content: text,
         is_error: !outcome.ok,
     }
@@ -210,6 +211,7 @@ impl Tool for BrowserTool {
             Ok(value) => value,
             Err(error) => {
                 return ToolOutput {
+                    artifact: None,
                     content: format!("invalid arguments: {error}"),
                     is_error: true,
                 };
@@ -219,6 +221,7 @@ impl Tool for BrowserTool {
             Ok(command) => command,
             Err(error) => {
                 return ToolOutput {
+                    artifact: None,
                     content: format!(
                         "invalid browser command: {error};命令面:navigate/back/forward/reload/getState/snapshot/screenshot/click/fill/type/press/scroll/hover/select/check/drag/elementInfo/evaluate/waitFor/getDialog/handleDialog/newTab/list/activate/close/viewportSet/viewportReset"
                     ),

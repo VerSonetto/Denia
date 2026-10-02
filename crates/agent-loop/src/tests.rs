@@ -17,6 +17,9 @@ use futures::StreamExt;
 use std::collections::VecDeque;
 use std::sync::Mutex;
 
+#[path = "harness_tests.rs"]
+mod harness_tests;
+
 #[test]
 fn system_prompt_frames_runtime_authority() {
     let (prompt, _) = denia_tools::default_shipped();
@@ -197,6 +200,7 @@ impl denia_tools::Tool for EchoTool {
 
     async fn execute(&self, arguments: &str, _ctx: &denia_tools::ToolContext) -> denia_tools::ToolOutput {
         denia_tools::ToolOutput {
+            artifact: None,
             content: format!("echo:{arguments}"),
             is_error: false,
         }
@@ -218,6 +222,7 @@ impl denia_tools::Tool for BulkyTool {
 
     async fn execute(&self, _arguments: &str, _ctx: &denia_tools::ToolContext) -> denia_tools::ToolOutput {
         denia_tools::ToolOutput {
+            artifact: None,
             content: "x".repeat(denia_tools::support::OUTPUT_BUDGET_CHARS + 500),
             is_error: false,
         }
@@ -283,8 +288,7 @@ fn tool_script() -> Vec<StreamChunk> {
             block: ContentBlock::ToolCall {
                 id: "call_1".to_string(),
                 name: "echo".to_string(),
-                arguments: "{\"text\":\"hi\"}".to_string(),
-            },
+                arguments: "{\"text\":\"hi\"}".to_string(), incomplete: false },
         },
         StreamChunk::Finish {
             reason: FinishReason::ToolCalls,
@@ -695,8 +699,7 @@ async fn parallel_tool_calls_emit_one_result_each_in_order() {
                 block: ContentBlock::ToolCall {
                     id: id.to_string(),
                     name: "echo".to_string(),
-                    arguments: format!("{{\"text\":\"{id}\"}}"),
-                },
+                    arguments: format!("{{\"text\":\"{id}\"}}"), incomplete: false },
             });
         }
         chunks.push(StreamChunk::Finish {
@@ -752,8 +755,7 @@ async fn unknown_tool_yields_error_result_and_continues() {
         *block = ContentBlock::ToolCall {
             id: "call_x".to_string(),
             name: "nope".to_string(),
-            arguments: "{}".to_string(),
-        };
+            arguments: "{}".to_string(), incomplete: false };
     }
     let (driver, _registry) = driver(vec![
         MockScript::Chunks(unknown),
@@ -1093,8 +1095,8 @@ async fn fake_tool_call_quota_exhausts_then_completes() {
         "feedback quota must cap at MAX_FEEDBACK"
     );
     assert_eq!(
-        loop_warnings, 1,
-        "第 3 次重复应当给出一次死循环提醒(提醒线 3,中断线 4)"
+        loop_warnings, 0,
+        "文本重复不能单独触发无进展提醒"
     );
     let calls = session
         .events()
@@ -1454,7 +1456,7 @@ async fn request_header_and_context_are_logged() {
 
 // —— 死循环检测(LoopGuard 端到端)——
 
-/// 文本相同但工具调用不同:文本线在第 4 次触发(与工具线独立)。
+/// 文本重复但工具证据改变，允许继续。
 fn mixed_script(text: &str, call_id: &str, arg: &str) -> Vec<StreamChunk> {
     vec![
         StreamChunk::BlockStart { index: 0, block_type: BlockType::Text },
@@ -1472,22 +1474,21 @@ fn mixed_script(text: &str, call_id: &str, arg: &str) -> Vec<StreamChunk> {
             block: ContentBlock::ToolCall {
                 id: call_id.to_string(),
                 name: "echo".to_string(),
-                arguments: format!(r#"{{"text":"{arg}"}}"#),
-            },
+                arguments: format!(r#"{{"text":"{arg}"}}"#), incomplete: false },
         },
         StreamChunk::Finish { reason: FinishReason::ToolCalls },
     ]
 }
 
 #[tokio::test]
-async fn identical_text_fourth_time_forces_loop_abort() {
-    // 模型连续输出完全相同的文本(工具调用不同,工具线不计):前 3 次
-    // 都正常处理,第 4 次出现才触发死循环保护("三次以上"语义)。
+async fn identical_text_with_new_tool_evidence_completes() {
+    // 相同文本伴随新的工具证据，不能触发停止。
     let (driver, _registry) = driver(vec![
         MockScript::Chunks(mixed_script("我在重复", "c1", "a")),
         MockScript::Chunks(mixed_script("我在重复", "c2", "b")),
         MockScript::Chunks(mixed_script("我在重复", "c3", "c")),
         MockScript::Chunks(mixed_script("我在重复", "c4", "d")),
+        MockScript::Chunks(text_script("done")),
     ]);
     let session = temp_session();
     let reason = driver
@@ -1503,22 +1504,22 @@ async fn identical_text_fourth_time_forces_loop_abort() {
             noop_emit(),
         )
         .await;
-    assert_eq!(reason, TurnEndReason::LoopDetected { repeats: 4 });
-    // 第 4 条重复消息已落盘。
+    assert_eq!(reason, TurnEndReason::Completed);
+    // 四条工具消息与最终回复均落盘。
     let assistant_count = session
         .events()
         .iter()
         .filter(|e| matches!(e.event, SessionEvent::AssistantMessage { .. }))
         .count();
-    assert_eq!(assistant_count, 4);
-    // 前 3 条的工具调用都被完整执行(放行语义)。
+    assert_eq!(assistant_count, 5);
+    // 四条不同动作都执行。
     let executed = session
         .events()
         .iter()
         .filter(|e| matches!(e.event, SessionEvent::ToolCall { .. }))
         .count();
-    assert_eq!(executed, 3, "the first three identical calls must execute");
-    // turn-end 事件带 loop-detected 标记(前端据此渲染提示)。
+    assert_eq!(executed, 4, "all calls with new evidence must execute");
+    // 正常完成事件。
     let turn_end = session
         .events()
         .iter()
@@ -1527,7 +1528,7 @@ async fn identical_text_fourth_time_forces_loop_abort() {
             _ => None,
         })
         .expect("turn-end must exist");
-    assert_eq!(turn_end, TurnEndReason::LoopDetected { repeats: 4 });
+    assert_eq!(turn_end, TurnEndReason::Completed);
     // 日志平衡。
     let step_starts = session
         .events()
@@ -1543,15 +1544,10 @@ async fn identical_text_fourth_time_forces_loop_abort() {
 }
 
 #[tokio::test]
-async fn identical_tool_calls_fourth_time_forces_loop_abort() {
-    // 模型连续发起完全相同的工具调用(即使文本不同):前 3 次全部执行,
-    // 第 4 次出现才拦截("三次以上"语义)。
-    let (driver, _registry) = driver(vec![
-        MockScript::Chunks(tool_script()),
-        MockScript::Chunks(tool_script()),
-        MockScript::Chunks(tool_script()),
-        MockScript::Chunks(tool_script()),
-    ]);
+async fn identical_tool_results_tenth_time_forces_loop_abort() {
+    let (driver, _registry) = driver((0..10).map(|n| {
+        MockScript::Chunks(mixed_script("checking", &format!("c{n}"), "same"))
+    }).collect());
     let session = temp_session();
     let reason = driver
         .run_turn(
@@ -1566,14 +1562,14 @@ async fn identical_tool_calls_fourth_time_forces_loop_abort() {
             noop_emit(),
         )
         .await;
-    assert_eq!(reason, TurnEndReason::LoopDetected { repeats: 4 });
-    // 前 3 次的工具调用全部执行(第 4 条的调用不再执行)。
+    assert_eq!(reason, TurnEndReason::LoopDetected { repeats: 10 });
+    // 执行并观察十次结果后才停止。
     let executed = session
         .events()
         .iter()
         .filter(|e| matches!(e.event, SessionEvent::ToolCall { .. }))
         .count();
-    assert_eq!(executed, 3, "the fourth identical call must not execute");
+    assert_eq!(executed, 10, "judge progress after observing the tenth result");
 }
 
 #[tokio::test]
@@ -1671,23 +1667,22 @@ async fn oversized_tool_result_is_truncated_with_notice() {
         .expect("tool result must exist");
     let (content, truncation) = result;
     assert!(
-        content.contains("输出已截断"),
+        content.contains("输出预览"),
         "truncation notice must be model-visible"
     );
-    assert!(
-        content.contains(&format!(
-            "共 {} 字符",
-            denia_tools::support::OUTPUT_BUDGET_CHARS + 500
-        )),
-        "{}",
-        &content[content.len() - 300..]
-    );
+    assert!(content.contains("read_tool_output"));
+    assert!(content.chars().count() <= denia_tools::support::OUTPUT_BUDGET_CHARS);
     let truncation = truncation.expect("truncation info must be recorded");
-    assert_eq!(
-        truncation.total_chars,
-        (denia_tools::support::OUTPUT_BUDGET_CHARS + 500) as u64
-    );
-    assert_eq!(truncation.shown_chars, denia_tools::support::OUTPUT_BUDGET_CHARS as u64);
+    assert_eq!(truncation.total_chars, (denia_tools::support::OUTPUT_BUDGET_CHARS + 500) as u64);
+    assert!(truncation.shown_chars < truncation.total_chars);
+    let artifact = session.events().iter().find_map(|e| match &e.event {
+        SessionEvent::ToolResult { meta: Some(meta), .. } => Some(meta["outputArtifact"].clone()),
+        _ => None,
+    }).unwrap();
+    assert_eq!(artifact["complete"], true);
+    let store = denia_tools::output::OutputStore::open(session.directory().join("tool-output")).await.unwrap();
+    assert!(store.read(artifact["output_id"].as_str().unwrap(), None, 1, 400).await.unwrap().contains("xxx"));
+
 }
 
 fn tool_script_with(name: &str, id: &str) -> Vec<StreamChunk> {
@@ -1707,8 +1702,7 @@ fn tool_script_with(name: &str, id: &str) -> Vec<StreamChunk> {
             block: ContentBlock::ToolCall {
                 id: id.to_string(),
                 name: name.to_string(),
-                arguments: "{}".to_string(),
-            },
+                arguments: "{}".to_string(), incomplete: false },
         },
         StreamChunk::Finish {
             reason: FinishReason::ToolCalls,
@@ -1947,8 +1941,7 @@ fn tool_calls_script(calls: &[(&str, &str, &str)]) -> Vec<StreamChunk> {
             block: ContentBlock::ToolCall {
                 id: id.to_string(),
                 name: name.to_string(),
-                arguments: arguments.to_string(),
-            },
+                arguments: arguments.to_string(), incomplete: false },
         });
     }
     chunks.push(StreamChunk::Finish {
@@ -2553,6 +2546,7 @@ impl denia_tools::Tool for CountingMcpTool {
     async fn execute(&self, arguments: &str, _ctx: &denia_tools::ToolContext) -> denia_tools::ToolOutput {
         self.executes.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         denia_tools::ToolOutput {
+            artifact: None,
             content: format!("echo:{arguments}"),
             is_error: false,
         }
@@ -2570,8 +2564,7 @@ fn mcp_call_script(name: &str, arguments: &str) -> Vec<StreamChunk> {
             block: ContentBlock::ToolCall {
                 id: "call_m1".to_string(),
                 name: name.to_string(),
-                arguments: arguments.to_string(),
-            },
+                arguments: arguments.to_string(), incomplete: false },
         },
         StreamChunk::Finish {
             reason: FinishReason::ToolCalls,

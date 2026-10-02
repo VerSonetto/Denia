@@ -38,6 +38,7 @@ struct Record {
     waiters: usize,
     cancel: CancellationToken,
     changes: watch::Sender<bool>,
+    artifact: Option<denia_tools::output::OutputArtifact>,
 }
 pub struct Jobs {
     records: Mutex<BTreeMap<String, Record>>,
@@ -116,14 +117,14 @@ impl Jobs {
         if terminal {
             r.snapshot.reported = true;
         }
-        Ok(serde_json::json!({"job":r.snapshot,"output":output}))
+        Ok(serde_json::json!({"job":r.snapshot,"output":output,"outputArtifact":r.artifact}))
     }
 
     /// GUI 预览不消耗模型的输出游标或通知领取状态。
     pub fn peek(&self, id: &str, owner: &str) -> Result<serde_json::Value, String> {
         let mut records = self.records.lock().unwrap();
         let r = Self::owned(&mut records, id, owner)?;
-        Ok(serde_json::json!({"job":r.snapshot,"output":r.output}))
+        Ok(serde_json::json!({"job":r.snapshot,"output":r.output,"outputArtifact":r.artifact}))
     }
     pub fn release_notice(&self, id: &str, owner: &str) {
         let mut records = self.records.lock().unwrap();
@@ -138,7 +139,7 @@ impl Jobs {
             return None;
         }
         r.snapshot.reported = true;
-        Some(serde_json::json!({"job":r.snapshot,"output":r.output}))
+        Some(serde_json::json!({"job":r.snapshot,"output":r.output,"outputArtifact":r.artifact}))
     }
     pub fn kill(&self, id: &str, owner: &str) -> Result<(), String> {
         let mut records = self.records.lock().unwrap();
@@ -262,14 +263,19 @@ impl Jobs {
                 waiters: 0,
                 cancel: cancel.clone(),
                 changes: watch::channel(false).0,
+                artifact: None,
             },
         );
         drop(records);
         let jobs = self.clone();
         let id = snapshot.id.clone();
+        let output_store = ctx.output_store.clone();
         tokio::spawn(async move {
-            let out = tokio::spawn(pump(stdout, jobs.clone(), id.clone(), cap));
-            let err = tokio::spawn(pump(stderr, jobs.clone(), id.clone(), cap));
+            let capture = match output_store { Some(store) => Some(store.start(&["stdout", "stderr"]).await), None => None };
+            let stdout_preview = Arc::new(tokio::sync::Mutex::new(denia_tools::output::Preview::default()));
+            let stderr_preview = Arc::new(tokio::sync::Mutex::new(denia_tools::output::Preview::default()));
+            let out = tokio::spawn(pump(stdout, jobs.clone(), id.clone(), cap, capture.clone(), "stdout", stdout_preview.clone()));
+            let err = tokio::spawn(pump(stderr, jobs.clone(), id.clone(), cap, capture.clone(), "stderr", stderr_preview.clone()));
             let pid = child.id();
             let (status, exit) = tokio::select! {
                 result=child.wait()=>match result {Ok(s)=>(if s.success(){"completed"}else{"failed"},s.code()),Err(_)=>("failed",None)},
@@ -279,19 +285,22 @@ impl Jobs {
             // 后代持有管道时不能无限等待；结果读取不会阻塞注册表锁。
             let out_abort = out.abort_handle();
             let err_abort = err.abort_handle();
-            if tokio::time::timeout(Duration::from_secs(2), async {
-                let _ = out.await;
-                let _ = err.await;
-            })
-            .await
-            .is_err()
-            {
+            let drained = matches!(tokio::time::timeout(Duration::from_secs(2), async { (out.await, err.await) }).await, Ok((Ok(true), Ok(true))));
+            if !drained {
                 out_abort.abort();
                 err_abort.abort();
             }
+            let artifact = match capture { Some(capture) => Some(capture.finish(drained).await), None => None };
+            let notice = denia_tools::output::artifact_notice(artifact.as_ref());
+            // cap is bytes; allow four bytes per Unicode character plus framing.
+            let per_stream = (cap.saturating_sub(notice.len() + 32) / 8).min(12_000);
+            let preview = format!("{}\n--- stderr ---\n{}{}", stdout_preview.lock().await.render(per_stream / 3, per_stream * 2 / 3), stderr_preview.lock().await.render(per_stream / 3, per_stream * 2 / 3), notice);
             let settled = {
                 let mut records = jobs.records.lock().unwrap();
                 if let Some(r) = records.get_mut(&id) {
+                    r.output = preview;
+                    r.cursor = 0;
+                    r.artifact = artifact;
                     r.snapshot.status = status.into();
                     r.snapshot.exit_code = exit;
                     r.snapshot.finished_at = Some(now());
@@ -321,13 +330,15 @@ impl Jobs {
         }
     }
 }
-async fn pump<R: AsyncRead + Unpin>(mut stream: R, jobs: Arc<Jobs>, id: String, cap: usize) {
+async fn pump<R: AsyncRead + Unpin>(mut stream: R, jobs: Arc<Jobs>, id: String, cap: usize, capture: Option<denia_tools::output::Capture>, name: &str, preview: Arc<tokio::sync::Mutex<denia_tools::output::Preview>>) -> bool {
     let mut bytes = [0u8; 4096];
     let mut pending = Vec::new();
     loop {
         match stream.read(&mut bytes).await {
             Ok(0) => break,
             Ok(n) => {
+                preview.lock().await.push(&bytes[..n]);
+                if let Some(capture) = &capture { capture.append(name, &bytes[..n]).await; }
                 pending.extend_from_slice(&bytes[..n]);
                 let valid = match std::str::from_utf8(&pending) {
                     Ok(_) => pending.len(),
@@ -339,13 +350,14 @@ async fn pump<R: AsyncRead + Unpin>(mut stream: R, jobs: Arc<Jobs>, id: String, 
             }
             Err(e) => {
                 jobs.push(&id, &format!("\n读取任务输出失败：{e}"), cap);
-                break;
+                return false;
             }
         }
     }
     if !pending.is_empty() {
         jobs.push(&id, &String::from_utf8_lossy(&pending), cap);
     }
+    true
 }
 async fn kill_tree(pid: Option<u32>, child: &mut tokio::process::Child) {
     #[cfg(windows)]
@@ -368,6 +380,7 @@ mod tests {
     async fn ownership_wait_and_output() {
         let jobs = Jobs::new();
         let ctx = ToolContext {
+            output_store: None,
             session_id: Some("owner".into()),
             selection: None,
             cwd: std::env::temp_dir(),
@@ -403,7 +416,10 @@ mod tests {
     #[tokio::test]
     async fn large_unicode_output_does_not_block_and_wait_does_not_cancel() {
         let jobs = Jobs::new();
+        let root = std::env::temp_dir().join(format!("denia-job-output-{}", uuid::Uuid::new_v4()));
+        let store = denia_tools::output::OutputStore::open(root.clone()).await.unwrap();
         let ctx = ToolContext {
+            output_store: Some(store.clone()),
             session_id: Some("bounded".into()),
             selection: None,
             cwd: std::env::temp_dir(),
@@ -447,9 +463,13 @@ mod tests {
         assert!(output.len() <= 4096);
         assert!(output.contains('界'));
         assert!(!output.contains('\u{fffd}'));
+        let artifact = &preview["outputArtifact"];
+        assert_eq!(artifact["complete"], true);
+        assert!(store.read(artifact["output_id"].as_str().unwrap(), Some("stdout"), 1, 400).await.unwrap().contains('界'));
         assert_eq!(
             jobs.read(&job.id, "bounded").unwrap()["output"],
             preview["output"]
         );
+        tokio::fs::remove_dir_all(root).await.unwrap();
     }
 }

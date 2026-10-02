@@ -16,6 +16,22 @@ use crate::shell_session::ShellHub;
 use crate::support::{parse_tool_args, tool_error};
 use crate::{Tool, ToolContext, ToolOutput, shell};
 
+async fn consume_output(
+    mut reader: impl tokio::io::AsyncRead + Unpin,
+    preview: Arc<tokio::sync::Mutex<crate::output::Preview>>,
+    capture: Option<crate::output::Capture>,
+    stream: &str,
+) -> std::io::Result<()> {
+    use tokio::io::AsyncReadExt;
+    let mut buffer = [0u8; 8192];
+    loop {
+        let count = reader.read(&mut buffer).await?;
+        if count == 0 { return Ok(()); }
+        preview.lock().await.push(&buffer[..count]);
+        if let Some(capture) = &capture { capture.append(stream, &buffer[..count]).await; }
+    }
+}
+
 const DEFAULT_TIMEOUT_MS: u64 = 120_000;
 const MAX_TIMEOUT_MS: u64 = 600_000;
 
@@ -227,48 +243,39 @@ impl Tool for BashTool {
             }
         };
 
-        let call_cancel = ctx.cancel.child_token();
-        let waited = tokio::select! {
-            biased;
-            _ = call_cancel.cancelled() => {
-                let _ = child.kill().await;
-                return tool_error(
-                    "命令被用户中断",
-                    "中断后命令已终止;需要继续时重新发起调用",
-                );
-            }
-            waited = tokio::time::timeout(timeout, child.wait()) => waited,
+        let capture = match &ctx.output_store {
+            Some(store) => Some(store.start(&["stdout", "stderr"]).await),
+            None => None,
         };
-        match waited {
-            // Drop kills the child via kill_on_drop.
-            Err(_) => tool_error(
-                format!("命令超时({} ms 未结束)", requested_ms),
-                format!(
-                    "拆小命令分步执行、提高 timeout_ms(上限 {MAX_TIMEOUT_MS}),或用 run_in_background 后台运行"
-                ),
-            ),
-            Ok(Err(error)) => tool_error(
-                format!("等待命令结束失败:{error}"),
-                "请重试一次;持续失败请报告",
-            ),
-            Ok(Ok(_)) => match child.wait_with_output().await {
-                Err(error) => tool_error(
-                    format!("输出捕获失败:{error}"),
-                    "请重试一次",
-                ),
-                Ok(output) => {
-                    // A non-zero exit code is data, not a tool failure.
-                    let code = output.status.code().unwrap_or(-1);
-                    let stdout = String::from_utf8_lossy(&output.stdout);
-                    let stderr = String::from_utf8_lossy(&output.stderr);
-                    let mut content = format!("退出码: {code}\n{stdout}");
-                    if !stderr.trim().is_empty() {
-                        content.push_str(&format!("\n--- stderr ---\n{stderr}"));
-                    }
-                    ToolOutput::text(content)
-                }
-            },
-        }
+        let stdout_preview = Arc::new(tokio::sync::Mutex::new(crate::output::Preview::default()));
+        let stderr_preview = Arc::new(tokio::sync::Mutex::new(crate::output::Preview::default()));
+        let mut stdout_task = tokio::spawn(consume_output(child.stdout.take().unwrap(), stdout_preview.clone(), capture.clone(), "stdout"));
+        let mut stderr_task = tokio::spawn(consume_output(child.stderr.take().unwrap(), stderr_preview.clone(), capture.clone(), "stderr"));
+        let mut error = None;
+        let code = tokio::select! {
+            biased;
+            _ = ctx.cancel.cancelled() => { error = Some("命令被用户中断".to_string()); -1 }
+            _ = tokio::time::sleep(timeout) => { error = Some(format!("命令超时({requested_ms} ms 未结束)；可拆小命令或使用 run_in_background 后台运行")); -1 }
+            result = child.wait() => match result {
+                Ok(status) => status.code().unwrap_or(-1),
+                Err(failure) => { error = Some(format!("等待命令结束失败:{failure}")); -1 }
+            }
+        };
+        if error.is_some() { let _ = child.kill().await; }
+        let drained = matches!(tokio::time::timeout(Duration::from_secs(2), async {
+            let stdout = (&mut stdout_task).await;
+            let stderr = (&mut stderr_task).await;
+            (stdout, stderr)
+        }).await, Ok((Ok(Ok(())), Ok(Ok(())))));
+        if !drained { stdout_task.abort(); stderr_task.abort(); }
+        let artifact = match capture { Some(capture) => Some(capture.finish(drained).await), None => None };
+        let mut content = format!("退出码: {code}\n{}", stdout_preview.lock().await.render(4_000, 8_000));
+        let stderr = stderr_preview.lock().await.render(4_000, 8_000);
+        if !stderr.is_empty() { content.push_str(&format!("\n--- stderr ---\n{stderr}")); }
+        if let Some(message) = &error { content.insert_str(0, &format!("[工具错误] {message}\n")); }
+        if !drained { content.push_str("\n[输出消费未完整结束，产物可能不完整]"); }
+        content.push_str(&crate::output::artifact_notice(artifact.as_ref()));
+        ToolOutput { content, is_error: error.is_some(), artifact }
     }
 }
 
@@ -280,6 +287,7 @@ mod tests {
 
     fn ctx(dir: &std::path::Path) -> ToolContext {
         ToolContext {
+            output_store: None,
             session_id: None,
             selection: None,
             cwd: dir.to_path_buf(),
@@ -356,6 +364,34 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn megabyte_streams_do_not_deadlock_and_tail_is_readable() {
+        let root = std::env::temp_dir().join(format!("denia-bash-{}", uuid::Uuid::new_v4()));
+        let storage = crate::output::OutputStore::open(root.clone()).await.unwrap();
+        let mut context = ctx(&std::env::temp_dir());
+        context.output_store = Some(storage.clone());
+        for streams in ["stdout", "stderr", "both"] {
+            let command = if cfg!(windows) {
+                let output = if streams == "stderr" { "[Console]::Error" } else { "[Console]::Out" };
+                let extra = if streams == "both" { "; [Console]::Error.Write(('e' * 1048576)); [Console]::Error.WriteLine('tail-error')" } else { "" };
+                format!("{output}.Write(('x' * 1048576)); {output}.WriteLine('tail-error'){extra}")
+            } else {
+                let redirect = if streams == "stderr" { " >&2" } else { "" };
+                let extra = if streams == "both" { "; head -c 1048576 /dev/zero >&2; echo tail-error >&2" } else { "" };
+                format!("head -c 1048576 /dev/zero{redirect}; echo tail-error{redirect}{extra}")
+            };
+            let arguments = serde_json::json!({"command":command,"timeout_ms":15000}).to_string();
+            let result = tokio::time::timeout(Duration::from_secs(20), BashTool::new().execute(&arguments, &context)).await.unwrap();
+            assert!(!result.is_error, "{}", result.content);
+            assert!(result.content.chars().count() < 32000);
+            let artifact = result.artifact.unwrap();
+            assert!(artifact.complete);
+            let stream = if streams == "stdout" { "stdout" } else { "stderr" };
+            assert!(storage.read(&artifact.output_id, Some(stream), 1, 400).await.unwrap().contains("tail-error"));
+        }
+        tokio::fs::remove_dir_all(root).await.unwrap();
+    }
+
+    #[tokio::test]
     async fn bad_arguments_are_errors() {
         let dir = std::env::temp_dir();
         let tool = BashTool::new();
@@ -369,6 +405,7 @@ mod tests {
         let tool = BashTool::new();
         let cancel = CancellationToken::new();
         let context = ToolContext {
+            output_store: None,
             session_id: None,
             selection: None,
             cwd: dir.clone(),

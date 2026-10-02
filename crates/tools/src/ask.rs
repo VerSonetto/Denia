@@ -324,6 +324,7 @@ impl Tool for AskTool {
             };
             let (text, is_error) = render_resolution(&resolution);
             return ToolOutput {
+                artifact: None,
                 content: text,
                 is_error,
             };
@@ -336,6 +337,7 @@ impl Tool for AskTool {
             };
             let (text, is_error) = render_resolution(&resolution);
             return ToolOutput {
+                artifact: None,
                 content: text,
                 is_error,
             };
@@ -357,6 +359,7 @@ impl Tool for AskTool {
             .await;
         let (text, is_error) = render_resolution(&resolution);
         ToolOutput {
+            artifact: None,
             content: text,
             is_error,
         }
@@ -398,6 +401,7 @@ mod tests {
 
     fn ctx_with(bridge: Option<Arc<dyn crate::AskBridge>>) -> ToolContext {
         ToolContext {
+            output_store: None,
             session_id: Some("s1".to_string()),
             selection: None,
             cwd: std::env::temp_dir(),

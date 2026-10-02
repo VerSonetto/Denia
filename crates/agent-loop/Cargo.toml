@@ -20,3 +20,7 @@ async-trait = { workspace = true }
 uuid = { workspace = true }
 arc-swap = { workspace = true }
 tracing = { workspace = true }
+
+[dev-dependencies]
+denia-settings = { workspace = true }
+denia-credentials = { workspace = true }

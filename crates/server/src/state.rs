@@ -555,6 +555,13 @@ impl LiveSessions {
         {
             let map = self.inner.lock().unwrap();
             for (id, live) in map.iter() {
+                if !live.running.load(Ordering::SeqCst)
+                    && Arc::strong_count(live) == 1 && Arc::strong_count(&live.session) == 1
+                {
+                    if let Err(error) = live.session.cool() {
+                        tracing::warn!(session = %id, %error, "could not release idle session history");
+                    }
+                }
                 let idle = now
                     .saturating_sub(live.last_touch.load(std::sync::atomic::Ordering::Relaxed))
                     >= idle_ms;
@@ -1289,6 +1296,43 @@ mod tests {
         ids.sort();
         assert_eq!(ids, vec![active.id().to_string()]);
         drop(idle_live);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn idle_history_cools_even_with_a_connected_follower() {
+        let root = temp_root();
+        let cwd = root.join("work");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let store = SessionStore::open(&root).unwrap();
+        let session = store.create(&cwd, true).unwrap();
+        session.append(denia_core::session::SessionEvent::UserMessage {
+            text: "preserved".into(), injected: false, channel: None, images: Vec::new(),
+        }).unwrap();
+        session.flush().unwrap();
+        let live = LiveSessions::new(8, u64::MAX);
+        let handle = live.get_or_load(&store, session.id()).unwrap();
+        live.ensure_hot(&handle).unwrap();
+        let follower = handle.followers.subscribe();
+        assert!(live.evict_idle(300).is_empty());
+        assert!(handle.session.is_hot(), "in-use handle must not cool");
+        handle.running.store(true, Ordering::SeqCst);
+        let id = session.id().to_string();
+        drop(handle);
+        assert!(live.evict_idle(300).is_empty());
+        let handle = live.get(&id).unwrap();
+        assert!(handle.session.is_hot(), "running history must not cool");
+        handle.running.store(false, Ordering::SeqCst);
+        drop(handle);
+        assert!(live.evict_idle(300).is_empty());
+        let handle = live.get(&id).unwrap();
+        assert!(!handle.session.is_hot());
+        assert_eq!(handle.session.resident_bytes(), 0);
+        assert_eq!(handle.followers.receiver_count(), 1);
+        live.ensure_hot(&handle).unwrap();
+        assert!(handle.session.is_hot());
+        assert_eq!(handle.session.events().len(), 1);
+        drop(follower);
         std::fs::remove_dir_all(&root).unwrap();
     }
 

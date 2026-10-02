@@ -467,6 +467,8 @@ export function foldEvents(events: SessionEnvelope[]): TranscriptNode[] {
   // 可能因与旧会话文本相同而被误吞,todo 也会比对出假变化。
   incrementalLastTodos = lastTodos
   incrementalLastSystemPrompt = lastSystemPrompt
+  incrementalStepStarts.clear()
+  for (const [key, time] of stepStarts) incrementalStepStarts.set(key, time)
   return nodes
 }
 
@@ -609,6 +611,7 @@ function applyEnvelopeStep(
         { kind: 'command-echo', name: event.name, text: event.text, seq: event.seq },
       ]
     case 'turn-start':
+      incrementalStepStarts.clear()
       return [...nodes, { kind: 'turn-start', turn: event.turn, time: event.time }]
     case 'user-message':
       if (event.injected) {
@@ -800,6 +803,7 @@ function applyEnvelopeStep(
       ]
     }
     case 'turn-end': {
+      incrementalStepStarts.clear()
       // 与冷启动路径共用 mergeUsage:反向扫本轮 assistant 步,四字段全累加。
       // 先前这里只加 input/output,缓存读与推理实时恒为 0、刷新后才有值。
       let usage: TokenUsage | null = null

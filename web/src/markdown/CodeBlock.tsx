@@ -1,9 +1,9 @@
 import { Fragment, useCallback, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import type { ReactNode } from 'react'
 import {
-  StreamingHighlightSession, grammarLoadCount, highlightToHtml, subscribeGrammarLoaded,
-} from './highlight'
-import type { HighlightSpan } from './highlight'
+  getHighlightModule, highlightRevision, subscribeHighlightLoaded,
+} from './highlightLoader'
+import type { HighlightSpan, StreamingHighlightSession } from './highlight'
 
 export interface CodeBlockProps {
   /** The source text, rendered verbatim (trailing newline trimmed for display). */
@@ -45,9 +45,9 @@ export function CodeBlock({ code, lang, streaming, copyLabel, copiedLabel }: Cod
   const trimmed = code.endsWith('\n') ? code.slice(0, -1) : code
   // Re-render when a lazy grammar finishes loading, so a fence that showed plain
   // text while its language's grammar imported picks up highlighting.
-  const loaded = useSyncExternalStore(subscribeGrammarLoaded, grammarLoadCount, grammarLoadCount)
+  const loaded = useSyncExternalStore(subscribeHighlightLoaded, highlightRevision, highlightRevision)
   const html = useMemo(
-    () => (streaming === true ? undefined : highlightToHtml(trimmed, lang)),
+    () => (streaming === true ? undefined : getHighlightModule(lang)?.highlightToHtml(trimmed, lang)),
     [streaming, trimmed, lang, loaded],
   )
   // Streaming state lives in refs mutated inside the memo: the session's caches
@@ -60,7 +60,13 @@ export function CodeBlock({ code, lang, streaming, copyLabel, copiedLabel }: Cod
       lineCacheRef.current = null
       return undefined
     }
-    sessionRef.current ??= new StreamingHighlightSession()
+    const highlighter = getHighlightModule(lang)
+    if (!highlighter) {
+      sessionRef.current = null
+      lineCacheRef.current = null
+      return undefined
+    }
+    sessionRef.current ??= new highlighter.StreamingHighlightSession()
     const lines = sessionRef.current.update(trimmed, lang)
     if (lines === undefined) {
       lineCacheRef.current = null

@@ -25,12 +25,23 @@ pub enum ContentBlock {
     },
     Reasoning {
         text: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        replay: Option<ReasoningReplay>,
     },
     ToolCall {
         id: String,
         name: String,
         arguments: String,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        incomplete: bool,
     },
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReasoningReplay {
+    pub protocol: String,
+    pub payload: serde_json::Value,
 }
 
 /// Token accounting; cache reads are disjoint from `input_tokens`.
