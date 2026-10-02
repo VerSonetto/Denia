@@ -56,7 +56,7 @@ export function BranchMessageButton({
       aria-label={label}
       onClick={onBranch}
     >
-      <IconBranch size={15} />
+      <IconBranch size={16} />
     </button>
   )
 }

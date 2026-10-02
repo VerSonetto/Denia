@@ -37,6 +37,17 @@ import { AskCard } from './AskCard'
 import { ViewportRow } from './ViewportRow'
 import { fetchApps } from './OpenInApp'
 import {
+  IconAgentSpawn,
+  IconAgentFork,
+  IconAgentList,
+  IconToolMessage,
+  IconToolInterrupt,
+  IconToolWait,
+  IconJobStart,
+  IconJobList,
+  IconJobOutput,
+  IconToolSkill,
+  IconToolAsk,
   IconChevron,
   IconCode,
   IconEdit,
@@ -46,7 +57,7 @@ import {
   IconImage,
   IconPrompt,
   IconRead,
-  IconSearch,
+  IconGrep,
   IconSlashCommand,
   IconTerminal,
   IconThink,
@@ -596,17 +607,18 @@ function ThinkRow({
 
 function toolMeta(name: string): { title: string; icon: ReactNode } {
   switch (name) {
-    case 'spawn_agent':
-    case 'fork_agent': return { title: t('runtimeAgents'), icon: <IconTool size={14} /> }
-    case 'send_message': return { title: t('runtimeMessage'), icon: <IconTool size={14} /> }
-    case 'interrupt_agent':
-    case 'job_kill': return { title: t('runtimeInterrupt'), icon: <IconTool size={14} /> }
-    case 'list_agents':
-    case 'wait_agent': return { title: t('runtimeAgents'), icon: <IconTool size={14} /> }
-    case 'job_start':
-    case 'job_list': return { title: t('runtimeJobs'), icon: <IconTool size={14} /> }
-    case 'job_output': return { title: t('runtimeOutput'), icon: <IconTool size={14} /> }
-    case 'skill': return { title: t('runtimeSkills'), icon: <IconTool size={14} /> }
+    case 'spawn_agent': return { title: t('runtimeAgents'), icon: <IconAgentSpawn size={14} /> }
+    case 'fork_agent': return { title: t('runtimeAgents'), icon: <IconAgentFork size={14} /> }
+    case 'send_message': return { title: t('runtimeMessage'), icon: <IconToolMessage size={14} /> }
+    case 'interrupt_agent': return { title: t('runtimeInterrupt'), icon: <IconToolInterrupt size={14} /> }
+    case 'job_kill': return { title: t('runtimeInterrupt'), icon: <IconToolInterrupt size={14} /> }
+    case 'list_agents': return { title: t('runtimeAgents'), icon: <IconAgentList size={14} /> }
+    case 'wait_agent': return { title: t('runtimeAgents'), icon: <IconToolWait size={14} /> }
+    case 'job_start': return { title: t('runtimeJobs'), icon: <IconJobStart size={14} /> }
+    case 'job_list': return { title: t('runtimeJobs'), icon: <IconJobList size={14} /> }
+    case 'job_output': return { title: t('runtimeOutput'), icon: <IconJobOutput size={14} /> }
+    case 'skill': return { title: t('runtimeSkills'), icon: <IconToolSkill size={14} /> }
+    case 'ask': return { title: t('askTitle'), icon: <IconToolAsk size={14} /> }
 
     case 'bash':
       return { title: 'Bash', icon: <IconTerminal size={14} /> }
@@ -615,7 +627,7 @@ function toolMeta(name: string): { title: string; icon: ReactNode } {
     case 'write_file':
       return { title: 'Write', icon: <IconWrite size={14} /> }
     case 'grep':
-      return { title: 'Grep', icon: <IconSearch size={14} /> }
+      return { title: 'Grep', icon: <IconGrep size={14} /> }
     case 'glob':
       return { title: 'Glob', icon: <IconGlob size={14} /> }
     case 'ls':
@@ -810,7 +822,7 @@ function ToolRow({
     return (
       <div className="ask-row">
         <div className="ask-row-head">
-          <span className="glyph"><IconTool size={14} /></span>
+          <span className="glyph"><IconToolAsk size={14} /></span>
           <span className="title">{t('askTitle')}</span>
         </div>
         <AskCard

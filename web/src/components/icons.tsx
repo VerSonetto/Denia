@@ -56,11 +56,23 @@ export function IconStop(props: IconProps) {
   )
 }
 
-export function IconTerminal(props: IconProps) {
+/** 工具与导航图标共用 16px 网格、1.25px 圆角描边。 */
+function StrokeSvg({ children, ...props }: IconProps & { children: ReactNode }) {
   return (
     <Svg {...props}>
-      <path d="m3 4.5 3 3-3 3M8 11.5h5" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
+      <g stroke="currentColor" strokeWidth="1.25" strokeLinecap="round" strokeLinejoin="round">
+        {children}
+      </g>
     </Svg>
+  )
+}
+
+export function IconTerminal(props: IconProps) {
+  return (
+    <StrokeSvg {...props}>
+      <rect x="2" y="3" width="12" height="10" rx="1.75" />
+      <path d="m4.5 6 2 2-2 2M9 10h2.5" />
+    </StrokeSvg>
   )
 }
 
@@ -89,44 +101,31 @@ export function IconSlashCommand({ name, size = 13 }: IconProps & { name: string
 
 export function IconRead(props: IconProps) {
   return (
-    <Svg {...props}>
-      <path d="M8 3.5c-1.6-1-3.8-1.2-5.5-.6v9.6c1.7-.6 3.9-.4 5.5.6 1.6-1 3.8-1.2 5.5-.6V2.9c-1.7-.6-3.9-.4-5.5.6Zm0 0v9.6" stroke="currentColor" strokeWidth="1.3" strokeLinejoin="round" />
-    </Svg>
+    <StrokeSvg {...props}>
+      <path d="M8 4c-1.6-1.1-3.7-1.5-6-1v9c2.3-.5 4.4-.1 6 1 1.6-1.1 3.7-1.5 6-1V3c-2.3-.5-4.4-.1-6 1Zm0 0v9M4.25 6h1.25M10.5 6h1.25" />
+    </StrokeSvg>
   )
 }
 
 export function IconWrite(props: IconProps) {
   return (
-    <Svg {...props}>
-      <path d="m9.8 3.2 3 3L6 13H3v-3l6.8-6.8ZM8.8 4.2l3 3" stroke="currentColor" strokeWidth="1.4" strokeLinejoin="round" />
-    </Svg>
+    <StrokeSvg {...props}>
+      <path d="M9 2H4a1.5 1.5 0 0 0-1.5 1.5v9A1.5 1.5 0 0 0 4 14h8a1.5 1.5 0 0 0 1.5-1.5V6L9 2Zm0 0v4h4.5M8 8v4M6 10h4" />
+    </StrokeSvg>
   )
 }
 
-/** 思考强度:灯泡(思考/点子的通用符号)。
-    刻意不用星芒 —— 提示词优化(IconSparkles)已是星芒,同屏会混淆。 */
+/** 思考：对称脑形轮廓与两处内折，减少小尺寸下的零碎细节。 */
 export function IconThink(props: IconProps) {
   return (
-    <Svg {...props}>
-      {/* 灯泡轮廓:上圆下收,底部灯座 */}
-      <path
-        d="M8 2.2a3.9 3.9 0 0 0-2.35 7.02c.3.24.5.58.55.96l.06.52h3.48l.06-.52c.05-.38.25-.72.55-.96A3.9 3.9 0 0 0 8 2.2Z"
-        stroke="currentColor"
-        strokeWidth="1.2"
-        strokeLinejoin="round"
-      />
-      {/* 灯座横线 */}
-      <path
-        d="M6.6 12.4h2.8M7 14.1h2"
-        stroke="currentColor"
-        strokeWidth="1.2"
-        strokeLinecap="round"
-      />
-    </Svg>
+    <StrokeSvg {...props}>
+      <path d="M8 4a2 2 0 0 0-3.9-.6 2.5 2.5 0 0 0-1.8 3.9 2.75 2.75 0 0 0 1.2 4.8A2.25 2.25 0 0 0 8 12V4Zm0 0a2 2 0 0 1 3.9-.6 2.5 2.5 0 0 1 1.8 3.9 2.75 2.75 0 0 1-1.2 4.8A2.25 2.25 0 0 1 8 12" />
+      <path d="M4 6.5c1.1 0 1.75.65 1.75 1.75M12 6.5c-1.1 0-1.75.65-1.75 1.75" />
+    </StrokeSvg>
   )
 }
 
-/** 计划模式专属:剪贴板清单(与 IconThink 星形区分开)。 */
+/** 计划模式专属：剪贴板清单。 */
 export function IconPlan(props: IconProps) {
   return (
     <Svg {...props}>
@@ -139,50 +138,61 @@ export function IconPlan(props: IconProps) {
 
 export function IconTool(props: IconProps) {
   return (
-    <Svg {...props}>
-      <path d="M10.5 2.5a3 3 0 0 0-3.9 3.9L2.5 10.5a1.4 1.4 0 0 0 2 2l4.1-4.1a3 3 0 0 0 3.9-3.9l-1.8 1.8-1.9-.6-.6-1.9 1.8-1.8a3 3 0 0 0 .5.5Z" stroke="currentColor" strokeWidth="1.3" strokeLinejoin="round" />
-    </Svg>
+    <StrokeSvg {...props}>
+      <path d="M9 2.5a3.5 3.5 0 0 0-3.5 4.6L2.7 9.9a2.4 2.4 0 0 0 3.4 3.4l2.8-2.8A3.5 3.5 0 0 0 13.5 7L11 8l-2-1-1-2 1-2.5Z" />
+    </StrokeSvg>
   )
 }
 
-export function IconSearch(props: IconProps) {
+export function IconGrep(props: IconProps) {
   return (
-    <Svg {...props}>
-      <circle cx="6.5" cy="6.5" r="4" stroke="currentColor" strokeWidth="1.4" />
-      <path d="m9.5 9.5 3.5 3.5" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
-    </Svg>
+    <StrokeSvg {...props}>
+      <circle cx="6.75" cy="6.75" r="4.25" />
+      <path d="m10 10 3.5 3.5M5 6.75h3.5" />
+    </StrokeSvg>
   )
 }
 
 export function IconGlob(props: IconProps) {
   return (
-    <Svg {...props}>
-      <circle cx="4.5" cy="4.5" r="1.6" stroke="currentColor" strokeWidth="1.2" />
-      <circle cx="9.5" cy="4.5" r="1.6" stroke="currentColor" strokeWidth="1.2" />
-      <circle cx="4.5" cy="9.5" r="1.6" stroke="currentColor" strokeWidth="1.2" />
-      <circle cx="9.5" cy="9.5" r="1.6" stroke="currentColor" strokeWidth="1.2" />
-      <path d="M1 12.5h12" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeDasharray="1.6 1.6" />
-    </Svg>
+    <StrokeSvg {...props}>
+      <path d="M8 2H4a1.5 1.5 0 0 0-1.5 1.5v9A1.5 1.5 0 0 0 4 14h7.5M10.75 3.5v7M7.72 5.25l6.06 3.5M7.72 8.75l6.06-3.5" />
+    </StrokeSvg>
   )
 }
 
+/** 文件编辑：留白的文档轮廓与斜向铅笔，保证 14px 下笔尖仍清晰。 */
 export function IconEdit(props: IconProps) {
   return (
     <Svg {...props}>
-      <path d="M5 3.2h6.2a1 1 0 0 1 1 1v5.6M11 5.5l2 2v1.2M6.2 12.8H4.2a1 1 0 0 1-1-1V4.2a1 1 0 0 1 1-1" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round" />
-      <path d="M8.4 9.6 9 8l1.6-.6.6 1.6-1.6.6-1.2-.0Z" stroke="currentColor" strokeWidth="1" strokeLinejoin="round" fill="none" />
+      <path
+        d="M8.5 2.5H3.75A1.25 1.25 0 0 0 2.5 3.75v8.5c0 .69.56 1.25 1.25 1.25H8.5"
+        stroke="currentColor"
+        strokeWidth="1.25"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+      <path d="M5 5.25h2.5M5 7.75h1" stroke="currentColor" strokeWidth="1.25" strokeLinecap="round" />
+      <path
+        d="m8 11 .5-2.5 4.75-4.75a.71.71 0 0 1 1 0l1 1a.71.71 0 0 1 0 1L10.5 10.5 8 11Z"
+        stroke="currentColor"
+        strokeWidth="1.25"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+      <path d="m12 5 2 2" stroke="currentColor" strokeWidth="1.25" strokeLinecap="round" />
     </Svg>
   )
 }
 
-/** 眼睛:只读权限(可看不可改)。 */
-/** 清单图标:三条横线 + 两个对勾(与 TodoPanel 的 ChecklistIcon 同源)。 */
+/** 清单：已完成的勾选与两项待办。 */
 export function IconTodo(props: IconProps) {
   return (
-    <Svg {...props}>
-      <path d="M6.4 3.6h6.2M6.4 7.4h6.2M6.4 11.2h6.2" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
-      <path d="M1.5 3.1l.9.9L4 2.4M1.5 6.9l.9.9L4 6.2M1.5 10.7l.9.9 1.6-1.6" stroke="currentColor" strokeWidth="1.1" strokeLinecap="round" strokeLinejoin="round" />
-    </Svg>
+    <StrokeSvg {...props}>
+      <path d="m2 4 1 1 2-2M7.5 4h6M7.5 8h6M7.5 12h6" />
+      <rect x="2.25" y="7.25" width="1.5" height="1.5" rx=".4" />
+      <rect x="2.25" y="11.25" width="1.5" height="1.5" rx=".4" />
+    </StrokeSvg>
   )
 }
 
@@ -241,9 +251,9 @@ export function IconImage(props: IconProps) {
 
 export function IconClose(props: IconProps) {
   return (
-    <Svg {...props}>
-      <path d="m5 5 6 6M11 5l-6 6" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
-    </Svg>
+    <StrokeSvg {...props}>
+      <path d="m4.5 4.5 7 7m0-7-7 7" />
+    </StrokeSvg>
   )
 }
 
@@ -274,24 +284,19 @@ export function IconWindowRestore(props: IconProps) {
 
 export function IconMenu(props: IconProps) {
   return (
-    <Svg {...props} viewBox="0 0 20 20">
-      <path
-        d="M3.5 5.5h13M3.5 10h13M3.5 14.5h13"
-        stroke="currentColor"
-        strokeWidth="1.5"
-        strokeLinecap="round"
-      />
-    </Svg>
+    <StrokeSvg {...props}>
+      <path d="M3 4.5h10M3 8h10M3 11.5h7" />
+    </StrokeSvg>
   )
 }
 
+/** 复制：错位叠页，后页只保留外露边缘，避免重叠描边。 */
 export function IconCopy(props: IconProps) {
   return (
-    <Svg {...props} viewBox="0 0 18 18">
-      <rect x="5.5" y="5.5" width="8" height="8" rx="1.4" stroke="currentColor" strokeWidth="1.4" />
-      <path d="M12.5 3.5h-4A2.2 2.2 0 0 0 6.3 5.7v0" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
-      <path d="M9.3 3.5h-1.4A1.8 1.8 0 0 0 6.1 5.3V5.5" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
-    </Svg>
+    <StrokeSvg {...props}>
+      <rect x="5.5" y="5.5" width="8" height="8" rx="1.5" />
+      <path d="M10.5 3V2.5A1 1 0 0 0 9.5 1.5h-7a1 1 0 0 0-1 1v7a1 1 0 0 0 1 1H3" />
+    </StrokeSvg>
   )
 }
 
@@ -347,19 +352,15 @@ export function IconUndo(props: IconProps) {
   )
 }
 
+/** 分叉：连续主线与弧形支路，三个端点表达一条对话分为两路。 */
 export function IconBranch(props: IconProps) {
   return (
-    <Svg {...props} viewBox="0 0 18 18">
-      <path
-        d="M5 5.6v4.2a4 4 0 0 0 4 4h3.4"
-        stroke="currentColor"
-        strokeWidth="1.4"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      />
-      <circle cx="5" cy="3.6" r="1.4" stroke="currentColor" strokeWidth="1.4" />
-      <circle cx="12.4" cy="13.8" r="1.4" stroke="currentColor" strokeWidth="1.4" />
-    </Svg>
+    <StrokeSvg {...props}>
+      <path d="M4 5v6M4 9h4a4 4 0 0 0 4-4" />
+      <circle cx="4" cy="3.5" r="1.5" />
+      <circle cx="4" cy="12.5" r="1.5" />
+      <circle cx="12" cy="3.5" r="1.5" />
+    </StrokeSvg>
   )
 }
 
@@ -404,30 +405,18 @@ export function IconPlus(props: IconProps) {
 
 export function IconTrash(props: IconProps) {
   return (
-    <Svg {...props}>
-      <path
-        d="M2 4h12M5.3 4V2.7c0-.7.7-1.4 1.4-1.4h2.6c.7 0 1.4.7 1.4 1.4V4M12.7 4v9.3c0 .7-.7 1.4-1.4 1.4H4.7c-.7 0-1.4-.7-1.4-1.4V4M6.7 7.3v4M9.3 7.3v4"
-        stroke="currentColor"
-        strokeWidth="1.3"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      />
-    </Svg>
+    <StrokeSvg {...props}>
+      <path d="M2.75 4.5h10.5M6 4.5V3.25c0-.41.34-.75.75-.75h2.5c.41 0 .75.34.75.75V4.5M4 4.5l.5 8c.04.56.48 1 1.04 1h4.92c.56 0 1-.44 1.04-1l.5-8M6.5 7.25v3.5M9.5 7.25v3.5" />
+    </StrokeSvg>
   )
 }
 
 /** 树形折叠指示:默认朝右(收起),展开时由 CSS 旋转朝下。 */
 export function IconCaretRight(props: IconProps) {
   return (
-    <Svg {...props}>
-      <path
-        d="M6.1 4.1 10.9 8l-4.8 3.9Z"
-        fill="currentColor"
-        stroke="currentColor"
-        strokeWidth="1"
-        strokeLinejoin="round"
-      />
-    </Svg>
+    <StrokeSvg {...props}>
+      <path d="m6 4 4 4-4 4" />
+    </StrokeSvg>
   )
 }
 
@@ -451,38 +440,17 @@ export function IconSliders(props: IconProps) {
 
 export function IconGear(props: IconProps) {
   return (
-    <Svg {...props}>
-      {/* 经典六齿齿轮:外轮廓 + 中心孔 */}
-      <path
-        d="M6.4 1.75h3.2l.28 1.42c.48.13.92.35 1.31.64l1.38-.52 2.26 2.26-.52 1.38c.29.39.51.83.64 1.31L15.25 6.4v3.2l-1.42.28c-.13.48-.35.92-.64 1.31l.52 1.38-2.26 2.26-1.38-.52c-.39.29-.83.51-1.31.64L9.6 15.25H6.4l-.28-1.42a5.1 5.1 0 0 1-1.31-.64l-1.38.52-2.26-2.26.52-1.38a5.1 5.1 0 0 1-.64-1.31L.75 9.6V6.4l1.42-.28c.13-.48.35-.92.64-1.31l-.52-1.38L4.55 1.17l1.38.52c.39-.29.83-.51 1.31-.64L6.4 1.75Z"
-        stroke="currentColor"
-        strokeWidth="1.15"
-        strokeLinejoin="round"
-      />
-      <circle cx="8" cy="8" r="2.2" stroke="currentColor" strokeWidth="1.2" />
-    </Svg>
+    <StrokeSvg {...props}>
+      <path d="m6.5 2-.4 1.6-1.6.9-1.6-.4-1.4 2.4 1.2 1.1v1.8l-1.2 1.1 1.4 2.4 1.6-.4 1.6.9.4 1.6h3l.4-1.6 1.6-.9 1.6.4 1.4-2.4-1.2-1.1V7.6l1.2-1.1-1.4-2.4-1.6.4-1.6-.9L9.5 2h-3Z" /><circle cx="8" cy="8" r="2.1" />
+    </StrokeSvg>
   )
 }
 
 export function IconFolder(props: IconProps) {
   return (
-    <Svg {...props}>
-      <path
-        d="M2.2 5.2c0-.77.62-1.4 1.4-1.4h2.55c.3 0 .58.12.78.34l.72.78c.2.22.48.34.78.34h4.95c.77 0 1.4.63 1.4 1.4v5.74c0 .77-.63 1.4-1.4 1.4H3.6c-.78 0-1.4-.63-1.4-1.4V5.2Z"
-        fill="currentColor"
-        fillOpacity="0.14"
-        stroke="currentColor"
-        strokeWidth="1.15"
-        strokeLinejoin="round"
-      />
-      <path
-        d="M2.35 7.1h11.3"
-        stroke="currentColor"
-        strokeWidth="1.1"
-        strokeLinecap="round"
-        opacity="0.45"
-      />
-    </Svg>
+    <StrokeSvg {...props}>
+      <path d="M2 6V4.25C2 3.56 2.56 3 3.25 3h2.5l1.5 1.5h5.5c.69 0 1.25.56 1.25 1.25V6M2 6h12v5.75c0 .69-.56 1.25-1.25 1.25h-9.5C2.56 13 2 12.44 2 11.75V6Z" />
+    </StrokeSvg>
   )
 }
 
@@ -553,87 +521,48 @@ export function IconCode(props: IconProps) {
   )
 }
 
-/** 收起侧栏:面板左收(lucide panel-left-close)。 */
+/** 收起侧栏：分栏面板与左向箭头。 */
 export function IconPanelClose(props: IconProps) {
   return (
-    <Svg {...props} viewBox="0 0 24 24">
-      <rect width="18" height="18" x="3" y="3" rx="2" stroke="currentColor" strokeWidth="2" />
-      <path d="M9 3v18" stroke="currentColor" strokeWidth="2" />
-      <path
-        d="m16 15-3-3 3-3"
-        stroke="currentColor"
-        strokeWidth="2"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      />
-    </Svg>
+    <StrokeSvg {...props}>
+      <rect x="2" y="2.5" width="12" height="11" rx="1.75" /><path d="M6 2.5v11m5.5-8-2 2.5 2 2.5" />
+    </StrokeSvg>
   )
 }
 
-/** 展开侧栏:面板左开(lucide panel-left-open)。 */
+/** 展开侧栏：分栏面板与右向箭头。 */
 export function IconPanelOpen(props: IconProps) {
   return (
-    <Svg {...props} viewBox="0 0 24 24">
-      <rect width="18" height="18" x="3" y="3" rx="2" stroke="currentColor" strokeWidth="2" />
-      <path d="M9 3v18" stroke="currentColor" strokeWidth="2" />
-      <path
-        d="m14 9 3 3-3 3"
-        stroke="currentColor"
-        strokeWidth="2"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      />
-    </Svg>
+    <StrokeSvg {...props}>
+      <rect x="2" y="2.5" width="12" height="11" rx="1.75" /><path d="M6 2.5v11M9 5.5l2 2.5-2 2.5" />
+    </StrokeSvg>
   )
 }
 
-/** 添加工作区:带加号的文件夹(lucide folder-plus)。 */
+/** 添加工作区：文件夹与独立加号。 */
 export function IconFolderPlus(props: IconProps) {
   return (
-    <Svg {...props} viewBox="0 0 24 24">
-      <path
-        d="M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"
-        stroke="currentColor"
-        strokeWidth="2"
-        strokeLinejoin="round"
-      />
-      <path
-        d="M12 10v6M9 13h6"
-        stroke="currentColor"
-        strokeWidth="2"
-        strokeLinecap="round"
-      />
-    </Svg>
+    <StrokeSvg {...props}>
+      <path d="M14 8V5.75c0-.69-.56-1.25-1.25-1.25h-5.5L5.75 3h-2.5C2.56 3 2 3.56 2 4.25v7.5c0 .69.56 1.25 1.25 1.25h4M2 6h12M11.5 9v5M9 11.5h5" />
+    </StrokeSvg>
   )
 }
 
 /** 展开全部工作区(多层折线张开)。 */
 export function IconExpandAll(props: IconProps) {
   return (
-    <Svg {...props}>
-      <path
-        d="M3.5 6.2 8 2.8l4.5 3.4M3.5 9.8 8 13.2l4.5-3.4"
-        stroke="currentColor"
-        strokeWidth="1.35"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      />
-    </Svg>
+    <StrokeSvg {...props}>
+      <path d="m4.5 5.5 3.5-3 3.5 3M4.5 10.5l3.5 3 3.5-3M5 8h6" />
+    </StrokeSvg>
   )
 }
 
 /** 收起全部工作区(多层折线合拢)。 */
 export function IconCollapseAll(props: IconProps) {
   return (
-    <Svg {...props}>
-      <path
-        d="M3.5 3.8 8 7.2l4.5-3.4M3.5 12.2 8 8.8l4.5 3.4"
-        stroke="currentColor"
-        strokeWidth="1.35"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      />
-    </Svg>
+    <StrokeSvg {...props}>
+      <path d="m4.5 2.5 3.5 3 3.5-3M4.5 13.5l3.5-3 3.5 3M5 8h6" />
+    </StrokeSvg>
   )
 }
 
@@ -916,5 +845,150 @@ export function IconKeyboard(props: IconProps) {
         strokeLinecap="round"
       />
     </Svg>
+  )
+}
+
+
+export function IconAgentSpawn(props: IconProps) {
+  return (
+    <StrokeSvg {...props}>
+      <circle cx="6" cy="5" r="2.5" />
+      <path d="M1.75 13v-1a4.25 4.25 0 0 1 8.5 0v1M12.5 4v5M10 6.5h5" />
+    </StrokeSvg>
+  )
+}
+
+
+export function IconAgentFork(props: IconProps) {
+  return (
+    <StrokeSvg {...props}>
+      <path d="M4 11V5M5.5 11H8a4 4 0 0 0 4-4V5" />
+      <circle cx="4" cy="3.5" r="1.5" />
+      <circle cx="12" cy="3.5" r="1.5" />
+      <circle cx="4" cy="12.5" r="1.5" />
+    </StrokeSvg>
+  )
+}
+
+
+export function IconAgentList(props: IconProps) {
+  return (
+    <StrokeSvg {...props}>
+      <circle cx="5.75" cy="5" r="2.25" />
+      <path d="M1.75 13v-1a4 4 0 0 1 8 0v1M10.5 2.75a2.25 2.25 0 0 1 0 4.5M11.5 9a3.25 3.25 0 0 1 2.75 3.25V13" />
+    </StrokeSvg>
+  )
+}
+
+
+export function IconToolMessage(props: IconProps) {
+  return (
+    <StrokeSvg {...props}>
+      <path d="M12.5 2.5h-9A1.5 1.5 0 0 0 2 4v6a1.5 1.5 0 0 0 1.5 1.5H5V14l3-2.5h4.5A1.5 1.5 0 0 0 14 10V4a1.5 1.5 0 0 0-1.5-1.5ZM5 7h6M8.5 4.5 11 7 8.5 9.5" />
+    </StrokeSvg>
+  )
+}
+
+
+export function IconToolInterrupt(props: IconProps) {
+  return (
+    <StrokeSvg {...props}>
+      <rect x="2.5" y="2.5" width="11" height="11" rx="3" />
+      <path d="M6.25 5.5v5M9.75 5.5v5" />
+    </StrokeSvg>
+  )
+}
+
+
+export function IconToolWait(props: IconProps) {
+  return (
+    <StrokeSvg {...props}>
+      <circle cx="8" cy="8" r="5.5" />
+      <path d="M8 4.5V8l2.5 1.5" />
+    </StrokeSvg>
+  )
+}
+
+
+export function IconJobStart(props: IconProps) {
+  return (
+    <StrokeSvg {...props}>
+      <rect x="2" y="3" width="12" height="10" rx="1.75" />
+      <path d="m6.5 5.5 4 2.5-4 2.5v-5Z" />
+    </StrokeSvg>
+  )
+}
+
+
+export function IconJobList(props: IconProps) {
+  return (
+    <StrokeSvg {...props}>
+      <rect x="2" y="3" width="12" height="10" rx="1.75" />
+      <path d="M7 6.5h4M7 9.5h4M4.5 6.5h.01M4.5 9.5h.01" />
+    </StrokeSvg>
+  )
+}
+
+
+export function IconJobOutput(props: IconProps) {
+  return (
+    <StrokeSvg {...props}>
+      <path d="M3 2.5v9A1.5 1.5 0 0 0 4.5 13H14M6 4h7M6 7h5M9 10h4m-2-2 2 2-2 2" />
+    </StrokeSvg>
+  )
+}
+
+
+export function IconToolSkill(props: IconProps) {
+  return (
+    <StrokeSvg {...props}>
+      <path d="M8 2 2.5 5v6L8 14l5.5-3V5L8 2Zm0 0v6m-5.5 3L8 8l5.5 3" />
+    </StrokeSvg>
+  )
+}
+
+
+export function IconToolAsk(props: IconProps) {
+  return (
+    <StrokeSvg {...props}>
+      <path d="M12.5 2.5h-9A1.5 1.5 0 0 0 2 4v6a1.5 1.5 0 0 0 1.5 1.5H5V14l3-2.5h4.5A1.5 1.5 0 0 0 14 10V4a1.5 1.5 0 0 0-1.5-1.5ZM6.25 5.5a1.75 1.75 0 0 1 3.5 0C9.75 6.75 8 6.75 8 8" />
+      <circle cx="8" cy="9.5" r=".65" fill="currentColor" stroke="none" />
+    </StrokeSvg>
+  )
+}
+
+
+export function IconSearch(props: IconProps) {
+  return (
+    <StrokeSvg {...props}>
+      <circle cx="6.75" cy="6.75" r="4.25" /><path d="m10 10 3.5 3.5" />
+    </StrokeSvg>
+  )
+}
+
+
+export function IconSessionSearch(props: IconProps) {
+  return (
+    <StrokeSvg {...props}>
+      <path d="M8.5 2.5h-5A1.5 1.5 0 0 0 2 4v6a1.5 1.5 0 0 0 1.5 1.5H5V14l3-2.5" /><circle cx="11" cy="5.5" r="2.5" /><path d="m12.8 7.3 2 2M4.5 6h1.25" />
+    </StrokeSvg>
+  )
+}
+
+
+export function IconNewSession(props: IconProps) {
+  return (
+    <StrokeSvg {...props}>
+      <path d="M7.5 2.5h-4A1.5 1.5 0 0 0 2 4v6a1.5 1.5 0 0 0 1.5 1.5H5V14l3-2.5h4.5A1.5 1.5 0 0 0 14 10V8.5M12 2v5M9.5 4.5h5" />
+    </StrokeSvg>
+  )
+}
+
+
+export function IconWorkspace(props: IconProps) {
+  return (
+    <StrokeSvg {...props}>
+      <path d="M2 6V4.25C2 3.56 2.56 3 3.25 3h2.5l1.5 1.5h5.5c.69 0 1.25.56 1.25 1.25V6M2 6h12v5.75c0 .69-.56 1.25-1.25 1.25h-9.5C2.56 13 2 12.44 2 11.75V6ZM6 9h4" />
+    </StrokeSvg>
   )
 }
