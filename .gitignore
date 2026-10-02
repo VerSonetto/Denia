@@ -35,3 +35,7 @@
 
 # 本地 denia 运行环境的启动脚本(仅本机)
 /.denia/
+
+# 本地图标预览页，不纳入版本库
+/web/public/tool-icons.html
+/web/public/sidebar-icons.html
