@@ -47,14 +47,14 @@ import {
   IconClose,
   IconCollapseAll,
   IconExpandAll,
-  IconFolder,
+  IconWorkspace,
   IconFolderPlus,
   IconGear,
   IconMenu,
   IconPanelClose,
   IconPanelOpen,
-  IconPlus,
-  IconSearch,
+  IconNewSession,
+  IconSessionSearch,
   IconTrash,
 } from './components/icons'
 import { DirPicker } from './components/DirPicker'
@@ -769,7 +769,7 @@ export default function App() {
               className="sidebar-new-btn"
               onClick={() => void startSession()}
             >
-              <IconPlus size={14} />
+              <IconNewSession size={14} />
               {t('newSession')}
             </button>
             <div className="sidebar-region">
@@ -784,7 +784,7 @@ export default function App() {
                     aria-pressed={sidebarSearchOpen}
                     onClick={() => setSidebarSearchOpen((open) => !open)}
                   >
-                    <IconSearch size={14} />
+                    <IconSessionSearch size={14} />
                   </button>
                   <button
                     type="button"
@@ -802,7 +802,7 @@ export default function App() {
                     aria-label={t('addWorkspace')}
                     onClick={openDirectoryFlow}
                   >
-                    <IconPlus size={14} />
+                    <IconFolderPlus size={14} />
                   </button>
                 </div>
               </div>
@@ -856,7 +856,7 @@ export default function App() {
               aria-label={t('newSession')}
               onClick={() => void startSession()}
             >
-              <IconPlus size={16} />
+              <IconNewSession size={16} />
             </button>
             <button
               type="button"
@@ -874,7 +874,7 @@ export default function App() {
               aria-label={t('searchSessions')}
               onClick={expandSidebarWithSearch}
             >
-              <IconSearch size={16} />
+              <IconSessionSearch size={16} />
             </button>
             <div className="rail-spacer" />
             <div className="rail-foot">
@@ -1304,7 +1304,7 @@ function SidebarWorkspaces({
     <div className="sidebar-section">
       {searchOpen && (
         <div className="sidebar-search">
-          <IconSearch size={13} />
+          <IconSessionSearch size={13} />
           <input
             ref={searchInputRef}
             type="search"
@@ -1368,7 +1368,7 @@ function SidebarWorkspaces({
                   }}
                 >
                   <span className="ws-folder">
-                    <IconFolder size={14} />
+                    <IconWorkspace size={14} />
                   </span>
                   <span className="name">{ws.title}</span>
                   <span className="count">{members.length}</span>
@@ -1380,7 +1380,7 @@ function SidebarWorkspaces({
                     title={t('newSessionIn', { name: ws.title })}
                     onClick={() => onNewSession(ws.id)}
                   >
-                    <IconPlus size={12} />
+                    <IconNewSession size={12} />
                   </button>
                   <button
                     type="button"
@@ -1450,7 +1450,7 @@ function SidebarWorkspaces({
                 }
               >
                 <span className="ws-folder muted">
-                  <IconFolder size={14} />
+                  <IconWorkspace size={14} />
                 </span>
                 <span className="name">{t('ungrouped')}</span>
                 <span className="count">{filteredUngrouped.length}</span>
