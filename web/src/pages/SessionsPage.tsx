@@ -2478,21 +2478,25 @@ export default function SessionsPage({
             onChange={requestPermissionChange}
             disabled={inert || permissionBusy}
           />
-          {catalog && selection && (
-            <ComposerModelMenu
-              catalog={catalog}
-              selection={selection}
-              disabled={inert || optimizing}
-              onChange={applySelection}
-            />
-          )}
-          {selection && activeEffort && effortLevels.length > 0 && (
-            <ComposerEffortControl
-              efforts={effortLevels}
-              value={activeEffort}
-              disabled={inert || optimizing}
-              onChange={(effort) => applySelection({ ...selection, reasoningEffort: effort })}
-            />
+          {selection && (
+            <div className="composer-model-group">
+              {catalog && selection && (
+                <ComposerModelMenu
+                  catalog={catalog}
+                  selection={selection}
+                  disabled={inert || optimizing}
+                  onChange={applySelection}
+                />
+              )}
+              {selection && activeEffort && effortLevels.length > 0 && (
+                <ComposerEffortControl
+                  efforts={effortLevels}
+                  value={activeEffort}
+                  disabled={inert || optimizing}
+                  onChange={(effort) => applySelection({ ...selection, reasoningEffort: effort })}
+                />
+              )}
+            </div>
           )}
         </div>
         <div className="composer-right">
@@ -2507,6 +2511,7 @@ export default function SessionsPage({
             type="button"
             className="icon-btn composer-upload-btn"
             title={t('uploadFile')}
+            aria-label={t('uploadFile')}
             disabled={inert || optimizing}
             onClick={() => fileInputRef.current?.click()}
           >
@@ -2551,6 +2556,7 @@ export default function SessionsPage({
               className="btn-send stop"
               onClick={() => void stop()}
               title={t('stop')}
+              aria-label={t('stop')}
             >
               <IconStop size={14} />
             </button>
@@ -2561,6 +2567,7 @@ export default function SessionsPage({
               disabled={promptEmpty || sending || optimizing || inert}
               onClick={() => void send()}
               title={t('run')}
+              aria-label={t('run')}
             >
               <IconSend size={16} />
             </button>
