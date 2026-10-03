@@ -179,7 +179,7 @@ pub fn register_capability_prompt_sections(prompt: &mut SystemPrompt) -> Result<
         name: "tool:agents".to_string(),
         order: SectionOrder::ToolAgents.value(),
         text: PromptText::Static(
-            "独立任务用 spawn_agent/fork_agent 委派给子代理;send_message 只能在直接父子代理之间收发消息。把可以独立进行的子任务拆给子代理分工合作,不要全部自己做;需要立即拿到结果的前台委派用 run_in_background=false 阻塞等结果,可以并行推进的后台委派保持默认后台运行,子代理完成时会通知父会话。子代理默认只有只读工具(read_file/glob/grep/skill/browser):它不写文件、不跑命令、不向用户提问、也不再委派——需要落盘改动或与用户确认的任务留在父代理做,或让子代理只做调查并把结论与待办交回。子代理用 browser 抓取网页同样受浏览器收尾纪律约束(任务完成 list 确认无 tab)。"
+            "独立任务用 spawn_agent/fork_agent 委派给子代理;send_message 只能在直接父子代理之间收发消息。把可以独立进行的子任务拆给子代理分工合作,不要全部自己做。所有委派都在后台执行并立即返回;wait_agent 只查看当前结果,不会前台等待。收到 pending 后不要轮询、重复等待或用 sleep 拖住当前轮次;可以继续独立工作,或先向用户回复当前进度并结束本轮,结果到达后会自动接收并继续回复。pending 不代表成功,ready 只表示结果可读取。子代理默认只有只读工具(read_file/glob/grep/skill/browser):它不写文件、不跑命令、不向用户提问、也不再委派——需要落盘改动或与用户确认的任务留在父代理做,或让子代理只做调查并把结论与待办交回。子代理用 browser 抓取网页同样受浏览器收尾纪律约束(任务完成 list 确认无 tab)。"
                 .to_string(),
         ),
         complete: false,
@@ -189,7 +189,7 @@ pub fn register_capability_prompt_sections(prompt: &mut SystemPrompt) -> Result<
         name: "tool:jobs".to_string(),
         order: SectionOrder::ToolJobs.value(),
         text: PromptText::Static(
-            "长时间命令用 job_start 后台运行,job_output 领取输出,job_kill 停止;等待子代理结果用 wait_agent。"
+            "长时间命令用 job_start 后台运行,job_output 立即领取当前输出,job_kill 停止。job_output 的 wait=true 也不前台等待;未完成返回 pending,完成结果会自动送达。不要循环轮询或用 sleep 等结果;可以继续独立工作,或先向用户回复当前进度并结束本轮。结果到达后再检查状态与输出并继续回复,不要把 pending 或 ready 当作执行成功。"
                 .to_string(),
         ),
         complete: false,

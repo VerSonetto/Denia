@@ -7,7 +7,7 @@ import styles from './RuntimeSettings.module.css'
 const fields = [
   ['maxAgents', 'runtimeMaxAgents'], ['maxDepth', 'runtimeMaxDepth'],
   ['maxJobs', 'runtimeMaxJobs'], ['retainedJobs', 'runtimeRetainedJobs'],
-  ['outputBytes', 'runtimeOutputBytes'], ['maxWaitMs', 'runtimeMaxWait'],
+  ['outputBytes', 'runtimeOutputBytes'],
   ['jobTimeoutMs', 'runtimeJobTimeout'], ['maxPendingMessages', 'runtimePending'],
   ['maxConsecutiveWakes', 'runtimeWakes'],
 ] as const

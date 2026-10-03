@@ -1166,20 +1166,10 @@ impl Runtime {
         };
         let _ = self.inner.events.send(ServerEvent::SessionsUpdated);
         drop(_admission);
-        if args["run_in_background"].as_bool() == Some(false) {
-            // 初始准入后后台执行由管理器持有；调用方只取消自己的等待。
-
-            loop {
-                let live = self.live(&id).await?;
-                if !self.is_active(&id) {
-                    return Ok(
-                        json!({"childId":id,"messageId":message_id,"messages":live.session.derive_messages().into_iter().rev().take(1).collect::<Vec<_>>()}),
-                    );
-                }
-                tokio::select! {_=ctx.cancel.cancelled()=>return Err(format!("等待中断，子代理 {id} 继续运行")),_=tokio::time::sleep(std::time::Duration::from_millis(100))=>{}}
-            }
-        }
-        Ok(json!({"childId":id,"messageId":message_id}))
+        Ok(background_result(
+            json!({"childId":id,"messageId":message_id}),
+            true,
+        ))
     }
     pub async fn skills(&self, cwd: PathBuf) -> Result<Vec<crate::skills::Skill>, String> {
         let home = self.inner.home.clone();
@@ -1207,15 +1197,26 @@ fn string(args: &Value, key: &str) -> Result<String, String> {
         .map(str::to_string)
         .ok_or_else(|| format!("缺少非空参数：{key}"))
 }
-fn wait_ms(args: &Value, config: &RuntimeConfig) -> Result<u64, String> {
-    match args.get("timeout_ms") {
-        None => Ok(30_000.min(config.max_wait_ms)),
-        Some(v) => v
-            .as_u64()
-            .filter(|v| *v > 0)
-            .map(|v| v.min(config.max_wait_ms))
-            .ok_or_else(|| "timeout_ms 必须为正整数".into()),
+fn validate_wait_timeout(args: &Value) -> Result<(), String> {
+    if args
+        .get("timeout_ms")
+        .is_some_and(|value| value.as_u64().is_none_or(|timeout| timeout == 0))
+    {
+        return Err("timeout_ms 必须为正整数".into());
     }
+    Ok(())
+}
+
+fn background_result(mut result: Value, pending: bool) -> Value {
+    result["status"] = json!(if pending { "pending" } else { "ready" });
+    result["pending"] = json!(pending);
+    if pending {
+        result["notification"] = json!("automatic");
+        result["next_action"] = json!(
+            "后台仍在执行，完成结果会自动送达本会话。不要轮询或重复等待；可以继续独立工作，或先向用户回复当前进度并结束本轮。pending 不代表执行成功。"
+        );
+    }
+    result
 }
 
 #[async_trait]
@@ -1276,15 +1277,11 @@ impl AgentRuntime for Runtime {
             "job_list" => Ok(json!(self.inner.jobs.list(owner))),
             "job_output" => {
                 let id = string(&args, "id")?;
-                // 等待者拥有本次结果领取；完成监听器不会同时再注入一份通知。
+                validate_wait_timeout(&args)?;
                 let _lease = self.inner.jobs.wait_lease(&id, owner)?;
-                if args["wait"].as_bool().unwrap_or(false) {
-                    self.inner
-                        .jobs
-                        .wait(&id, owner, wait_ms(&args, &config)?, &ctx.cancel)
-                        .await?;
-                }
-                self.inner.jobs.read(&id, owner)
+                let result = self.inner.jobs.read(&id, owner)?;
+                let pending = result["job"]["finishedAt"].is_null();
+                Ok(background_result(result, pending))
             }
             "job_kill" => {
                 self.inner.jobs.kill(&string(&args, "id")?, owner)?;
@@ -1311,12 +1308,23 @@ impl AgentRuntime for Runtime {
             "wait_agent" => {
                 let target = string(&args, "target")?;
                 self.authorize(owner, &target, true)?;
-                let duration = std::time::Duration::from_millis(wait_ms(&args, &config)?);
-                tokio::select! {_=ctx.cancel.cancelled()=>return Err("等待已中断，子代理继续运行".into()),_=tokio::time::timeout(duration,async{loop {if !self.is_active(&target){break;}tokio::time::sleep(std::time::Duration::from_millis(100)).await;}})=>{}}
+                validate_wait_timeout(&args)?;
                 let live = self.live(&target).await?;
-                Ok(
-                    json!({"id":target,"running":live.running.load(Ordering::SeqCst),"messages":live.session.derive_messages().into_iter().rev().take(1).collect::<Vec<_>>()}),
-                )
+                let pending = self.is_active(&target);
+                let messages = if pending {
+                    Vec::new()
+                } else {
+                    live.session
+                        .derive_messages()
+                        .into_iter()
+                        .rev()
+                        .take(1)
+                        .collect::<Vec<_>>()
+                };
+                Ok(background_result(
+                    json!({"id":target,"running":pending,"messages":messages}),
+                    pending,
+                ))
             }
             "spawn_agent" | "fork_agent" => {
                 let runtime = self.clone();
@@ -1507,6 +1515,60 @@ mod tests {
             if request.model == "hold" {
                 return Ok(Box::pin(futures::stream::pending()));
             }
+            if request.model == "background-agent-parent" {
+                let results: Vec<_> = request
+                    .messages
+                    .iter()
+                    .filter(|message| message.role == denia_core::message::ChatRole::Tool)
+                    .collect();
+                let call = match results.len() {
+                    0 => Some((
+                        "spawn_agent",
+                        json!({"prompt":"继续后台调查","model":"hold","run_in_background":false}),
+                    )),
+                    1 => Some((
+                        "wait_agent",
+                        json!({"target":serde_json::from_str::<Value>(&results[0].content).unwrap()["childId"],"timeout_ms":600_000}),
+                    )),
+                    _ => None,
+                };
+                if let Some((name, args)) = call {
+                    return Ok(Box::pin(futures::stream::iter(vec![
+                        Ok(StreamChunk::BlockEnd {
+                            index: 0,
+                            block: ContentBlock::ToolCall {
+                                id: format!("background-call-{}", results.len()),
+                                name: name.into(),
+                                arguments: args.to_string(),
+                                incomplete: false,
+                            },
+                        }),
+                        Ok(StreamChunk::Finish {
+                            reason: FinishReason::ToolCalls,
+                        }),
+                    ])));
+                }
+                let completed = request
+                    .messages
+                    .iter()
+                    .any(|message| message.content.contains("[子代理执行结束]"));
+                return Ok(Box::pin(futures::stream::iter(vec![
+                    Ok(StreamChunk::BlockEnd {
+                        index: 0,
+                        block: ContentBlock::Text {
+                            text: if completed {
+                                "后台结果已自动返回"
+                            } else {
+                                "任务仍在后台运行，我先回复当前进度"
+                            }
+                            .into(),
+                        },
+                    }),
+                    Ok(StreamChunk::Finish {
+                        reason: FinishReason::Stop,
+                    }),
+                ])));
+            }
             if request.model == "orchestrator" {
                 let results: Vec<_> = request
                     .messages
@@ -1606,6 +1668,189 @@ mod tests {
         .await
         .expect("子代理应在测试时限内结束");
     }
+
+    #[test]
+    fn background_waits_keep_legacy_timeout_validation() {
+        assert!(validate_wait_timeout(&json!({})).is_ok());
+        assert!(validate_wait_timeout(&json!({"timeout_ms":600_000})).is_ok());
+        for timeout in [json!(0), json!(-1), json!("30000")] {
+            assert!(validate_wait_timeout(&json!({"timeout_ms":timeout})).is_err());
+        }
+        let pending = background_result(json!({"output":"partial"}), true);
+        assert_eq!(pending["status"], "pending");
+        assert_eq!(pending["notification"], "automatic");
+        assert_eq!(pending["output"], "partial");
+        let ready = background_result(json!({"job":{"status":"failed"}}), false);
+        assert_eq!(ready["status"], "ready");
+        assert_eq!(ready["job"]["status"], "failed");
+        assert!(ready.get("next_action").is_none());
+    }
+
+    #[tokio::test]
+    async fn background_agent_wait_allows_parent_reply_and_automatic_followup() {
+        use tower::ServiceExt;
+
+        let (state, ctx) = setup().await;
+        let owner = ctx.session_id.as_deref().unwrap().to_string();
+        let live = state.live.get(&owner).unwrap();
+        live.running.store(false, Ordering::SeqCst);
+        let state = Arc::new(state);
+        let response = crate::api::router()
+            .with_state(state.clone())
+            .oneshot(
+                axum::http::Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/sessions/{owner}/prompt"))
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(
+                        json!({"prompt":"后台调查并先回复进度","provider":"runtime-test","model":"background-agent-parent"}).to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), axum::http::StatusCode::ACCEPTED);
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            loop {
+                let replied = live.session.events().iter().any(|event| {
+                    matches!(&event.event, SessionEvent::AssistantMessage { blocks, .. }
+                        if blocks.iter().any(|block| matches!(block, ContentBlock::Text { text } if text.contains("我先回复当前进度"))))
+                });
+                if replied && !live.running.load(Ordering::SeqCst) {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("等待子代理不得阻止父会话先回复");
+        let children = state.runtime.list(&owner);
+        let child = children[0]["id"].as_str().unwrap();
+        assert!(state.runtime.is_active(child));
+        let results: Vec<_> = live
+            .session
+            .events()
+            .into_iter()
+            .filter_map(|event| match event.event {
+                SessionEvent::ToolResult { content, is_error: false, .. } => {
+                    Some(serde_json::from_str::<Value>(&content).unwrap())
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(results.len(), 2);
+        assert!(results.iter().all(|result| result["status"] == "pending"));
+        assert_eq!(results[1]["messages"], json!([]));
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            while state.live.get(child).unwrap().cancel.lock().unwrap().is_none() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        state.runtime.interrupt(&owner, child).await.unwrap();
+        settle(&state.runtime, child).await;
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let replied = live.session.events().iter().any(|event| {
+                    matches!(&event.event, SessionEvent::AssistantMessage { blocks, .. }
+                        if blocks.iter().any(|block| matches!(block, ContentBlock::Text { text } if text.contains("后台结果已自动返回"))))
+                });
+                if replied && !live.running.load(Ordering::SeqCst) {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("子代理结束后应自动唤醒父会话回复");
+        let delivered = live
+            .session
+            .events()
+            .iter()
+            .filter(|event| matches!(&event.event, SessionEvent::AgentDelivery { source, .. } if source == "subagent-settled"))
+            .count();
+        assert_eq!(delivered, 1);
+        let ready = state
+            .runtime
+            .execute("wait_agent", json!({"target":child}), &ctx)
+            .await
+            .unwrap();
+        assert_eq!(ready["status"], "ready");
+        assert_eq!(ready["running"], false);
+    }
+
+    #[tokio::test]
+    async fn background_job_output_returns_pending_and_resumes_idle_parent() {
+        let (state, ctx) = setup().await;
+        let owner = ctx.session_id.as_deref().unwrap();
+        state.runtime.human_turn(owner, ctx.selection.as_ref().unwrap());
+        let command = if cfg!(windows) {
+            "Start-Sleep -Seconds 2; Write-Output background-job-result"
+        } else {
+            "sleep 2; printf background-job-result"
+        };
+        let started = state
+            .runtime
+            .execute("job_start", json!({"command":command}), &ctx)
+            .await
+            .unwrap();
+        let job = started["id"].as_str().unwrap();
+        let pending = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            state.runtime.execute(
+                "job_output",
+                json!({"id":job,"wait":true,"timeout_ms":600_000}),
+                &ctx,
+            ),
+        )
+        .await
+        .expect("读取后台输出不得等待任务结束")
+        .unwrap();
+        assert_eq!(pending["status"], "pending");
+        assert!(pending["job"]["finishedAt"].is_null());
+        let live = state.live.get(owner).unwrap();
+        live.running.store(false, Ordering::SeqCst);
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                let events = live.session.events();
+                let delivered = events.iter().any(|event| {
+                    matches!(&event.event, SessionEvent::AgentDelivery { source, text, .. }
+                        if source == "job-completed" && text.contains("background-job-result"))
+                });
+                let replied = events.iter().any(|event| {
+                    matches!(event.event, SessionEvent::AssistantMessage { .. })
+                });
+                if delivered && replied && !live.running.load(Ordering::SeqCst) {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("后台完成结果应自动唤醒父会话");
+        let ready = state
+            .runtime
+            .execute("job_output", json!({"id":job,"wait":true}), &ctx)
+            .await
+            .unwrap();
+        assert_eq!(ready["status"], "ready");
+        assert_eq!(ready["job"]["exitCode"], 0);
+        assert!(ready["output"].as_str().unwrap().contains("background-job-result"));
+        assert_eq!(ready, state.runtime.execute("job_output", json!({"id":job}), &ctx).await.unwrap());
+        assert_eq!(live.session.events().iter().filter(|event| {
+            matches!(&event.event, SessionEvent::AgentDelivery { source, .. } if source == "job-completed")
+        }).count(), 1);
+        state.runtime.inner.paused.lock().unwrap().insert(owner.into());
+        let turns = live.session.next_turn_number();
+        state.runtime.enqueue(owner, "paused-completion".into(), "后台结果已保存".into(), "job-completed".into()).await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert_eq!(live.session.next_turn_number(), turns);
+        assert!(!live.session.events().iter().any(|event| {
+            matches!(&event.event, SessionEvent::AgentDelivery { id, .. } if id == "paused-completion")
+        }));
+    }
+
     #[tokio::test]
     async fn spawn_resume_lineage_and_exactly_once_delivery() {
         let (state, ctx) = setup().await;
@@ -2173,6 +2418,12 @@ mod tests {
             .await
             .unwrap();
         let job = jobs["jobs"][0]["id"].as_str().unwrap();
+        state
+            .runtime
+            .jobs()
+            .wait(job, id, 10_000, &CancellationToken::new())
+            .await
+            .unwrap();
         let output: Value = client
             .get(format!("{base}/api/sessions/{id}/jobs/{job}/output"))
             .send()
