@@ -32,7 +32,7 @@ function observeRow(root: Element, target: Element, listener: (visible: boolean)
 
 export function ViewportRow({ children, eager = false }: { children: ReactNode; eager?: boolean }) {
   const rootRef = useRef<HTMLDivElement>(null)
-  const heightRef = useRef(96)
+  const heightRef = useRef<number | null>(null)
   const [visible, setVisible] = useState(eager || typeof IntersectionObserver === 'undefined')
   useLayoutEffect(() => {
     const target = rootRef.current
@@ -47,6 +47,7 @@ export function ViewportRow({ children, eager = false }: { children: ReactNode; 
         (!selection?.isCollapsed && (target.contains(selection?.anchorNode ?? null) ||
           target.contains(selection?.focusNode ?? null))) ||
         target.querySelector('.process-body, .disc-body, .ask-card, [aria-expanded="true"]'))) return
+      if (!intersects) heightRef.current = target.getBoundingClientRect().height
       setVisible(intersects)
     })
   }, [])
@@ -54,8 +55,7 @@ export function ViewportRow({ children, eager = false }: { children: ReactNode; 
     const target = rootRef.current
     if (!visible || !target) return
     const measure = () => {
-      const height = target.getBoundingClientRect().height
-      if (height > 0) heightRef.current = height
+      heightRef.current = target.getBoundingClientRect().height
     }
     measure()
     if (typeof ResizeObserver === 'undefined') return
@@ -64,7 +64,7 @@ export function ViewportRow({ children, eager = false }: { children: ReactNode; 
     return () => observer.disconnect()
   }, [visible])
   return <div ref={rootRef} className="transcript-viewport-row"
-    style={visible ? undefined : { height: heightRef.current }}>
+    style={visible ? undefined : { height: heightRef.current ?? 96 }}>
     {visible ? children : null}
   </div>
 }

@@ -1029,6 +1029,11 @@ function closedTurnRows(
   return rows
 }
 
+export function assistantHasContent(node: Extract<TranscriptNode, { kind: 'assistant' }>): boolean {
+  return node.interrupted || node.blocks.some((block) =>
+    block.kind !== 'tool-call' && block.text.trim().length > 0)
+}
+
 /** Whether a hidden node would paint anything when expanded. */
 function rendersContent(node: TranscriptNode): boolean {
   if (
@@ -1041,11 +1046,7 @@ function rendersContent(node: TranscriptNode): boolean {
     return true
   }
   if (node.kind === 'assistant') {
-    return (
-      node.streaming ||
-      node.interrupted ||
-      node.blocks.some((block) => block.kind !== 'tool-call')
-    )
+    return assistantHasContent(node)
   }
   return false
 }

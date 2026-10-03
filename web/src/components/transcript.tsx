@@ -2,6 +2,7 @@ import { memo, useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import { localeRevision, t } from '../i18n'
 import {
+  assistantHasContent,
   groupTranscript,
   openTurnStartedAt,
   withCompacting,
@@ -66,6 +67,32 @@ import {
   IconWrite,
 } from './icons'
 
+const localNodeKeys = new WeakMap<TranscriptNode, number>()
+let nextLocalNodeKey = 0
+
+function transcriptNodeKey(node: TranscriptNode): string {
+  if (node.kind === 'assistant') return `assistant:${node.turn}:${node.step}`
+  if (node.kind === 'tool') return `tool:${node.callId}`
+  if (node.kind === 'user' && node.anchor !== undefined) return `user:${node.anchor}`
+  if (node.kind === 'turn-start' || node.kind === 'turn-end') return `${node.kind}:${node.turn}`
+  if (node.kind === 'compacting') return `compacting:${node.startedAt}`
+  if ('seq' in node && node.seq !== undefined) return `${node.kind}:${node.seq}`
+  let key = localNodeKeys.get(node)
+  if (key === undefined) {
+    key = nextLocalNodeKey++
+    localNodeKeys.set(node, key)
+  }
+  return `${node.kind}:local:${key}`
+}
+
+function assistantHasActions(
+  node: Extract<TranscriptNode, { kind: 'assistant' }>,
+  onFork?: (seq: number) => void,
+): boolean {
+  return node.blocks.some((block) => block.kind === 'text' && block.text.trim().length > 0) ||
+    (onFork !== undefined && node.seq !== undefined)
+}
+
 export function Transcript({
   nodes,
   cwd = null,
@@ -109,10 +136,6 @@ export function Transcript({
   // hook 数量变化,React 抛 #310(Rendered more hooks than during the
   // previous render),异常冒泡到根 →整页白屏。
   const workStartedAt = useMemo(() => openTurnStartedAt(nodes), [nodes])
-  // 分组与轮次索引都按引用缓存:流式帧每帧产生新 nodes 数组,但历史节点的
-  // 对象引用不变 —— 重跑这两遍全量遍历(含 groupTranscript 内的 slice 与
-  // row 对象分配)不会产出任何新结果,只是每帧白付一次 O(n)。
-  const rows = useMemo(() => groupTranscript(viewNodes), [viewNodes])
   // 每个已完成轮次的最后一条助手消息挂复制/分支按钮;运行中/中间 step 不显示。
   // dsh 语义:任意已完成轮次都可分支,不再限制"仅 transcript 尾部"。
   const turnIndex = useMemo(() => {
@@ -124,15 +147,26 @@ export function Transcript({
     }
     return { lastStep, ended }
   }, [nodes])
+  const rows = useMemo(() => groupTranscript(viewNodes).flatMap((row) => {
+    const showActions = row.kind === 'node' && row.node.kind === 'assistant' &&
+      turnIndex.ended.has(row.node.turn) &&
+      row.node.step === turnIndex.lastStep.get(row.node.turn) &&
+      assistantHasActions(row.node, onFork)
+    if (row.kind === 'node' && (row.node.kind === 'turn-start' ||
+      (row.node.kind === 'assistant' && !assistantHasContent(row.node) && !showActions))) return []
+    return [{ row, showActions }]
+  }), [viewNodes, turnIndex, onFork])
   if (nodes.length === 0 && pendingMessages.length === 0 && !compactingAt) {
     return <div className="empty-hint">{t('emptyTranscript')}</div>
   }
   return (
     <>
-      {rows.map((row, index) => {
+      {rows.map(({ row, showActions }, index) => {
+        const key = row.kind === 'node' ? transcriptNodeKey(row.node) :
+          `overview:${transcriptNodeKey(row.hidden[0])}`
         const content = row.kind === 'node' ? (
           <NodeView
-            key={index}
+            key={key}
             node={row.node}
             cwd={cwd}
             onRewind={onRewind}
@@ -140,17 +174,13 @@ export function Transcript({
             onLoopContinue={onLoopContinue}
             onAskAnswer={onAskAnswer}
             onAskCancel={onAskCancel}
-            showActions={
-              row.node.kind === 'assistant' &&
-              turnIndex.ended.has(row.node.turn) &&
-              row.node.step === turnIndex.lastStep.get(row.node.turn)
-            }
+            showActions={showActions}
           />
         ) : (
-          <TurnOverview key={index} row={row} />
+          <TurnOverview key={key} row={row} />
         )
-        return row.kind === 'node' && (row.node.kind === 'user' || row.node.kind === 'turn-start') ? content : (
-          <ViewportRow key={index} eager={index >= rows.length - 12}>{content}</ViewportRow>
+        return row.kind === 'node' && row.node.kind === 'user' ? content : (
+          <ViewportRow key={key} eager={index >= rows.length - 12}>{content}</ViewportRow>
         )
       })}
       {pendingMessages.map((message, index) => (
@@ -219,8 +249,8 @@ function TurnOverview({ row }: { row: OverviewRow }) {
       </button>
       {open && (
         <div className="process-body">
-          {row.hidden.map((node, index) => (
-            <NodeView key={index} node={node} />
+          {row.hidden.map((node) => (
+            <NodeView key={transcriptNodeKey(node)} node={node} />
           ))}
         </div>
       )}
@@ -388,11 +418,7 @@ function AssistantNode({
     }),
     [localeRevision()],
   )
-  const hasVisible =
-    node.streaming ||
-    node.interrupted ||
-    node.blocks.some((b) => b.kind !== 'tool-call')
-  if (!hasVisible && !showActions) return null
+  if (!assistantHasContent(node) && !showActions) return null
   const copyText = node.blocks
     .filter((block) => block.kind === 'text')
     .map((block) => (block.kind === 'text' ? block.text : ''))
@@ -400,15 +426,12 @@ function AssistantNode({
   return (
     <div className="msg-assistant msg-copy-anchor">
       {node.blocks.map((block, index) => {
+        if (block.kind === 'tool-call' || block.text.trim().length === 0) return null
         if (block.kind === 'reasoning') {
           // 思考是否仍在输出:节点在流式,且该块是最后一块(正文块出现即视为
           // 思考完毕,立刻自动折叠)。
           const thinking = node.streaming && index === node.blocks.length - 1
           return <ThinkRow key={index} text={block.text} streaming={thinking} />
-        }
-        if (block.kind === 'tool-call') {
-          // Rendered by the correlated tool node below.
-          return null
         }
         return (
           <div key={index} className={`prose${node.streaming ? ' streaming-block' : ''}`}>
@@ -419,7 +442,7 @@ function AssistantNode({
       {node.interrupted && <span className="badge warn">{t('interrupted')}</span>}
       {showActions && (
         <div className="message-actions always-visible">
-          {copyText && <CopyMessageButton text={copyText} />}
+          {copyText.trim() && <CopyMessageButton text={copyText} />}
           {onFork && node.seq !== undefined && (
             <BranchMessageButton onBranch={() => onFork(node.seq!)} />
           )}
