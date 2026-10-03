@@ -72,14 +72,14 @@ pub fn schemas() -> Vec<ToolSchema> {
     let specs = [
         (
             "spawn_agent",
-            "创建独立子代理会话，继承工作目录、权限与模型。默认后台返回 childId；完成后通知父会话。子代理默认只有只读工具（read_file/ls/glob/grep/skill/browser），写文件、命令、提问、再委派都留在父代理；allowed_tools 只能在这个集合内缩小。",
-            json!({"prompt":{"type":"string"},"description":{"type":"string"},"provider":{"type":"string"},"model":{"type":"string"},"reasoning_effort":{"type":"string"},"run_in_background":{"type":"boolean"},"persona":{"type":"string"},"allowed_tools":{"type":"array","items":{"type":"string"},"description":"子代理可用工具；缺省 read_file/ls/glob/grep/skill/browser，只能缩小不能扩大。"},"max_depth":{"type":"integer","minimum":1}}),
+            "创建独立子代理会话，继承工作目录、权限与模型。始终后台执行，立即返回 childId 和 pending；完成结果自动通知父会话。pending 后不要循环等待，可以继续独立工作或先回复用户进度并结束本轮。子代理默认只有只读工具（read_file/ls/glob/grep/skill/browser），写文件、命令、提问、再委派都留在父代理；allowed_tools 只能在这个集合内缩小。",
+            json!({"prompt":{"type":"string"},"description":{"type":"string"},"provider":{"type":"string"},"model":{"type":"string"},"reasoning_effort":{"type":"string"},"run_in_background":{"type":"boolean","description":"兼容旧请求；无论 true 或 false 都立即返回并在后台执行。"},"persona":{"type":"string"},"allowed_tools":{"type":"array","items":{"type":"string"},"description":"子代理可用工具；缺省 read_file/ls/glob/grep/skill/browser，只能缩小不能扩大。"},"max_depth":{"type":"integer","minimum":1}}),
             vec!["prompt"],
         ),
         (
             "fork_agent",
-            "以父会话已完成的历史为种子创建子代理；其余行为同 spawn_agent。",
-            json!({"prompt":{"type":"string"},"description":{"type":"string"},"run_in_background":{"type":"boolean"},"persona":{"type":"string"},"allowed_tools":{"type":"array","items":{"type":"string"},"description":"子代理可用工具；缺省 read_file/ls/glob/grep/skill，只能缩小不能扩大。"},"max_depth":{"type":"integer","minimum":1}}),
+            "以父会话已完成的历史为种子创建子代理；始终后台执行并立即返回 pending，完成结果自动通知父会话，其余行为同 spawn_agent。",
+            json!({"prompt":{"type":"string"},"description":{"type":"string"},"run_in_background":{"type":"boolean","description":"兼容旧请求；无论 true 或 false 都立即返回并在后台执行。"},"persona":{"type":"string"},"allowed_tools":{"type":"array","items":{"type":"string"},"description":"子代理可用工具；缺省 read_file/ls/glob/grep/skill，只能缩小不能扩大。"},"max_depth":{"type":"integer","minimum":1}}),
             vec!["prompt"],
         ),
         (
@@ -102,8 +102,8 @@ pub fn schemas() -> Vec<ToolSchema> {
         ),
         (
             "wait_agent",
-            "等待子代理当前执行完成；超时或停止等待不会取消后台代理。",
-            json!({"target":{"type":"string"},"timeout_ms":{"type":"integer","minimum":1}}),
+            "立即查看子代理结果，不在前台等待。未完成返回 pending，完成结果会自动送达父会话；不要循环调用，可以继续独立工作或先回复用户进度并结束本轮。已结束则直接返回结果；ready 只表示结果可读取，不代表执行成功。",
+            json!({"target":{"type":"string"},"timeout_ms":{"type":"integer","minimum":1,"description":"兼容旧请求；不再前台等待，也不改变子代理执行期限。"}}),
             vec!["target"],
         ),
         (
@@ -120,8 +120,8 @@ pub fn schemas() -> Vec<ToolSchema> {
         ),
         (
             "job_output",
-            "读取任务增量输出；结束后重复读取返回完整保留结果。wait 可等待结束。",
-            json!({"id":{"type":"string"},"wait":{"type":"boolean"},"timeout_ms":{"type":"integer","minimum":1}}),
+            "立即读取任务当前增量输出，不在前台等待。未完成返回 pending，结束后结果自动送达当前会话；不要反复轮询，可以继续独立工作或先回复用户进度并结束本轮。结束后重复读取返回完整保留结果；ready 只表示结果可读取，执行成败见 job.status 和 exitCode。",
+            json!({"id":{"type":"string"},"wait":{"type":"boolean","description":"兼容旧请求；true 也立即返回当前输出，未完成时由后台完成通知回传结果。"},"timeout_ms":{"type":"integer","minimum":1,"description":"兼容旧请求；不再前台等待，也不改变后台命令的执行超时。"}}),
             vec!["id"],
         ),
         (
