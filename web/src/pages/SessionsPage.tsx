@@ -2490,6 +2490,7 @@ export default function SessionsPage({
               )}
               {selection && activeEffort && effortLevels.length > 0 && (
                 <ComposerEffortControl
+                  key={`${activeId}:${selection.provider}:${selection.model}`}
                   efforts={effortLevels}
                   value={activeEffort}
                   disabled={inert || optimizing}

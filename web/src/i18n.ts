@@ -342,6 +342,7 @@ const zh = {
   effortControlHint: '调节推理强度',
   effortControlOffHint: '思考已关闭',
   effortSliderAria: '推理强度滑块',
+  effortSliderStatus: '{value}，第 {position} 档，共 {total} 档',
   catalogFailure: '目录加载失败',
   noModels: '该提供方暂无可用模型',
 
@@ -1406,6 +1407,7 @@ const en: typeof zh = {
   effortControlHint: 'Adjust reasoning effort',
   effortControlOffHint: 'Thinking is off',
   effortSliderAria: 'Reasoning effort slider',
+  effortSliderStatus: '{value}, {position} of {total}',
   catalogFailure: 'Catalog failed to load',
   noModels: 'No models available from this provider',
 

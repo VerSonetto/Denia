@@ -1,244 +1,257 @@
-import {
-  useEffect,
-  useRef,
-  useState,
-  type CSSProperties,
-  type KeyboardEvent as ReactKeyboardEvent,
-} from 'react'
+import { useEffect, useId, useRef, useState, type CSSProperties } from 'react'
+import * as Slider from '@radix-ui/react-slider'
+import { AnimatePresence, animate, motion, useMotionValue, useReducedMotion, useTransform } from 'motion/react'
 import { t } from '../i18n'
 import { REASONING_EFFORT_OFF } from '../modelCatalog'
 import { reasoningEffortLabel } from '../reasoningEffort'
 import type { ReasoningEffortInfo } from '../types'
 import { IconThink } from './icons'
-/** 滑块连续位置 → 最近档位:拖动时的吸附预览,松手后落到该档位。 */
-function snap(position: number, maxIndex: number): number {
-  return Math.min(maxIndex, Math.max(0, Math.round(position)))
-}
+import { EffortMaxFill } from './EffortMaxFill'
 
-/** 把手半径(px):与 CSS 的 --knob 同口径(直径 28px,与轨道等高)。
- *  既用于把把手夹在轨道内部,也决定填充段右端伸入的长度 —— 两者因此同心同径。 */
-const KNOB_RADIUS = 14
+const BURST_POINTS = [
+  [-3, -34], [15, -29], [30, -19], [34, -2], [30, 16], [15, 30],
+  [-5, 35], [-24, 27], [-34, 10], [-33, -13], [-22, -27], [7, -24],
+  [24, -9], [20, 10], [-9, 21], [-25, -5],
+]
 
-/**
- * 思考强度控件:模型选择器右侧的独立 chip,点击展开滑块浮层。
- *
- * 滑块视觉(对照 dsh 社区 reasoning-effort 插件):一条胶囊轨道,
- * 轨道内嵌一个白色圆形把手;原生 input 透明覆盖整条轨道承载全部交互。
- *
- * 交互是「自由滑动 + 松手吸附」:拖动期间位置连续(文案预览最近档位),
- * 松手才吸附到整数档位并回调上层。
- * 性能约定(叶子组件):拖动只改本组件内部状态,一次调节结束才提交,
- * 不把 composer 及以上层拖进每帧重渲染。
- */
-export function ComposerEffortControl({
-  efforts,
-  value,
-  disabled,
-  onChange,
-}: {
-  /** 当前模型提供的档位(至少一档;单档时控件退化为纯展示)。 */
+/** 档位保持模型目录的顺序；只有关闭浮层时才更新会话配置。 */
+export function ComposerEffortControl({ efforts, value, disabled, onChange }: {
   efforts: ReasoningEffortInfo[]
-  /** 会话实际档位(已按模型可用档位归一化)。 */
   value: string
   disabled?: boolean
   onChange: (effort: string) => void
 }) {
   const [open, setOpen] = useState(false)
-  // 滑块位置:拖动中连续(小数),松手吸附成整数档位。
-  const [position, setPosition] = useState(0)
-  // 拖动中:给把手加放大/高亮反馈。
+  const [preview, setPreview] = useState(value)
   const [dragging, setDragging] = useState(false)
-
-  const rootRef = useRef<HTMLDivElement | null>(null)
-  const chipRef = useRef<HTMLButtonElement | null>(null)
-  const rangeRef = useRef<HTMLInputElement | null>(null)
-  // 原生 change 监听只随开关挂载,读值走 ref,避免父组件每次渲染重挂监听。
-  const latestRef = useRef({ efforts, value, onChange })
-  latestRef.current = { efforts, value, onChange }
-
+  const [hovered, setHovered] = useState(false)
+  const [keyboardFocused, setKeyboardFocused] = useState(false)
+  const [burst, setBurst] = useState(0)
+  const rootRef = useRef<HTMLDivElement>(null)
+  const chipRef = useRef<HTMLButtonElement>(null)
+  const thumbRef = useRef<HTMLSpanElement>(null)
+  const draftRef = useRef(value)
+  const dragStartRef = useRef(value)
+  const wheelRef = useRef({ delta: 0, time: 0 })
+  const latestRef = useRef({ efforts, value, disabled, onChange })
+  latestRef.current = { efforts, value, disabled, onChange }
+  const dialogId = useId()
+  const descriptionId = useId()
+  const reduceMotion = useReducedMotion() ?? false
   const maxIndex = Math.max(0, efforts.length - 1)
-  const index = Math.max(0, efforts.findIndex((effort) => effort.id === value))
-  const shownIndex = snap(position, maxIndex)
-  const label = reasoningEffortLabel(efforts[shownIndex]?.id ?? '')
-  const ratio = maxIndex > 0 ? Math.min(1, Math.max(0, position / maxIndex)) : 1
+  const index = Math.max(0, efforts.findIndex((effort) => effort.id === (open ? preview : value)))
+  const shown = efforts[index]
+  const off = shown?.id === REASONING_EFFORT_OFF
+  const atMax = maxIndex > 0 && index === maxIndex && !off
+  const label = reasoningEffortLabel(shown?.id ?? value)
+  const description = shown?.description?.trim()
+  const effortIds = efforts.map((effort) => effort.id).join('\0')
+  const percentage = maxIndex > 0 ? index / maxIndex * 100 : 0
+  const progress = useMotionValue(percentage)
+  // 与原版一致的半径补偿：28px 滑块在轨道两端各超出 1px。
+  const thumbCenter = useTransform(progress, (percent) => `calc(${percent}% + ${13 - percent * 0.26}px)`)
 
-  // 外部档位变化(切模型 / 会话回放)时同步滑块位置。
-  useEffect(() => {
-    setPosition(index)
-  }, [index])
-
-  // 禁用态(无工作区 / 优化中)收起浮层。
-  useEffect(() => {
-    if (disabled) setOpen(false)
-  }, [disabled])
-
-  // 展开后焦点直接落在滑块上,方向键即可调档。
-  useEffect(() => {
-    if (!open) return
-    rangeRef.current?.focus({ preventScroll: true })
-  }, [open])
-
-  // 松手才提交:React 的 onChange 对应原生 input(拖动中持续触发),
-  // 原生 change 才表示"一次调节结束" —— 这时把连续位置吸附到档位。
-  useEffect(() => {
-    if (!open) return
-    const element = rangeRef.current
-    if (!element) return
-    const onNativeChange = () => {
-      setDragging(false)
-      const latest = latestRef.current
-      const at = snap(Number(element.value), Math.max(0, latest.efforts.length - 1))
-      setPosition(at)
-      const target = latest.efforts[at]
-      if (target && target.id !== latest.value) latest.onChange(target.id)
-    }
-    element.addEventListener('change', onNativeChange)
-    return () => element.removeEventListener('change', onNativeChange)
-  }, [open])
-
-  /** 按档位提交(键盘 / 点刻度):一步一档,不做自由滑动。 */
-  const commit = (next: number) => {
-    const at = snap(next, maxIndex)
-    setPosition(at)
-    const target = efforts[at]
-    if (target && target.id !== value) onChange(target.id)
-    rangeRef.current?.focus({ preventScroll: true })
+  const updatePreview = (id: string) => {
+    const latest = latestRef.current
+    const next = latest.efforts.findIndex((effort) => effort.id === id)
+    if (latest.disabled || next < 0 || id === draftRef.current) return
+    if (next === latest.efforts.length - 1 && id !== REASONING_EFFORT_OFF) setBurst((previous) => previous + 1)
+    draftRef.current = id
+    setPreview(id)
   }
 
-  const close = () => {
+  const close = (commit: boolean, restoreFocus = true) => {
+    const latest = latestRef.current
+    const candidate = latest.efforts.find((effort) => effort.id === draftRef.current)
     setOpen(false)
     setDragging(false)
-    // 拖动未落地的位置随关闭收回,保证 chip 文案等于真实档位。
-    setPosition(index)
-    chipRef.current?.focus({ preventScroll: true })
+    setHovered(false)
+    if (commit && !latest.disabled && candidate && candidate.id !== latest.value) latest.onChange(candidate.id)
+    else { draftRef.current = latest.value; setPreview(latest.value) }
+    if (restoreFocus) chipRef.current?.focus({ preventScroll: true })
   }
 
-  const toggle = () => {
-    if (open) {
-      close()
-      return
+  useEffect(() => {
+    draftRef.current = value
+    setPreview(value)
+    setDragging(false)
+  }, [value, effortIds])
+
+  useEffect(() => {
+    if (!disabled) return
+    setOpen(false)
+    draftRef.current = latestRef.current.value
+    setPreview(latestRef.current.value)
+    setDragging(false)
+    setHovered(false)
+  }, [disabled])
+
+  useEffect(() => {
+    wheelRef.current = { delta: 0, time: 0 }
+    if (!open) return
+    // 等 Radix 完成 Thumb 注册，再聚焦；否则首个方向键可能读到未注册的索引。
+    const frame = requestAnimationFrame(() => thumbRef.current?.focus({ preventScroll: true }))
+    return () => cancelAnimationFrame(frame)
+  }, [open])
+
+  useEffect(() => {
+    if (!open || reduceMotion) { progress.jump(percentage); return }
+    const animation = animate(progress, percentage, {
+      duration: dragging ? 0.15 : 0.3, ease: [0.23, 1, 0.32, 1],
+    })
+    return () => animation.stop()
+  }, [progress, percentage, dragging, open, reduceMotion])
+
+  // 非 passive 监听阻止浮层滚轮同时滚动聊天记录。
+  useEffect(() => {
+    if (!open) return
+    const slider = rootRef.current?.querySelector<HTMLElement>('.effort-slider')
+    if (!slider) return
+    const onWheel = (event: WheelEvent) => {
+      const latest = latestRef.current
+      if (event.ctrlKey || latest.disabled || latest.efforts.length < 2) return
+      event.preventDefault()
+      event.stopPropagation()
+      let delta = Math.abs(event.deltaX) > Math.abs(event.deltaY) ? event.deltaX : -event.deltaY
+      if ('webkitDirectionInvertedFromDevice' in event && event.webkitDirectionInvertedFromDevice) delta *= -1
+      if (event.deltaMode !== 0) delta = Math.sign(delta) * 30
+      if (!delta) return
+      const wheel = wheelRef.current
+      if (event.timeStamp - wheel.time > 160 || Math.sign(delta) !== Math.sign(wheel.delta)) wheel.delta = 0
+      wheel.time = event.timeStamp
+      wheel.delta += delta
+      if (Math.abs(wheel.delta) < 30) return
+      const direction = Math.sign(wheel.delta)
+      wheel.delta -= direction * 30
+      const current = Math.max(0, latest.efforts.findIndex((effort) => effort.id === draftRef.current))
+      const next = Math.min(latest.efforts.length - 1, Math.max(0, current + direction))
+      if (next === current) wheel.delta = 0
+      updatePreview(latest.efforts[next].id)
     }
-    setPosition(index)
-    setOpen(true)
-  }
+    slider.addEventListener('wheel', onWheel, { passive: false })
+    return () => slider.removeEventListener('wheel', onWheel)
+  }, [open])
 
-  const onKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
-    if (!open || event.key !== 'Escape') return
-    event.preventDefault()
-    // 输入区有自己的 Esc 语义(清空引用 / 关闭候选),不要串上去。
-    event.stopPropagation()
-    close()
-  }
-
-  // 滑块内方向键按档位走:滑块 step 是连续值(自由滑动),键盘自己吸附。
-  const onRangeKeyDown = (event: ReactKeyboardEvent<HTMLInputElement>) => {
-    let next: number | null = null
-    if (event.key === 'ArrowLeft' || event.key === 'ArrowDown') next = shownIndex - 1
-    else if (event.key === 'ArrowRight' || event.key === 'ArrowUp') next = shownIndex + 1
-    else if (event.key === 'Home' || event.key === 'PageDown') next = 0
-    else if (event.key === 'End' || event.key === 'PageUp') next = maxIndex
-    if (next === null) return
-    event.preventDefault()
-    commit(next)
-  }
-
-  const off = efforts[shownIndex]?.id === REASONING_EFFORT_OFF
-  const description = efforts[shownIndex]?.description?.trim()
-  // 档位分级:0=最弱(关/低),1=中间档,2=最高档。
-  // 只驱动静态视觉深浅(填充段颜色),不含任何动画/发光。
-  const tier: 0 | 1 | 2 = shownIndex >= maxIndex ? 2 : shownIndex === 0 ? 0 : 1
-
-  // 单档:没有可调空间 —— 控件保留占位(位置稳定),但不给展开行为。
   if (maxIndex === 0) {
-    return (
-      <div className="effort-control" ref={rootRef}>
-        <span
-          className={`effort-chip-static${off ? ' off' : ''}`}
-          title={off ? t('effortControlOffHint') : undefined}
-        >
-          <span className="effort-chip-icon" aria-hidden="true">
-            <IconThink size={12} />
-          </span>
-          {!off && <span className="effort-chip-label">{label}</span>}
-        </span>
-      </div>
-    )
+    return <div className="effort-control">
+      <span className={`effort-chip-static${off ? ' off' : ''}`} title={off ? t('effortControlOffHint') : label}>
+        <span className="effort-chip-icon" aria-hidden="true"><IconThink size={12} /></span>
+        {!off && <span className="effort-chip-label">{label}</span>}
+      </span>
+    </div>
   }
-
-  // 把手中心:夹在轨道内(两侧各留一个半径),填充段右端以它为圆心画等径半圆、被把手盖住。
-  const knobCenter = `clamp(${KNOB_RADIUS}px, ${ratio * 100}%, calc(100% - ${KNOB_RADIUS}px))`
 
   return (
-    <div className={`effort-control${open ? ' open' : ''}`} ref={rootRef} onKeyDown={onKeyDown}>
+    <div
+      className={`effort-control${open ? ' open' : ''}`} ref={rootRef}
+      onBlur={(event) => {
+        if (open && event.relatedTarget && !event.currentTarget.contains(event.relatedTarget)) close(true, false)
+      }}
+      onKeyDown={(event) => {
+        if (open && event.key === 'Escape') { event.preventDefault(); event.stopPropagation(); close(false) }
+      }}
+    >
       <button
-        ref={chipRef}
-        type="button"
+        ref={chipRef} type="button"
         className={`effort-chip${open ? ' open' : ''}${off ? ' off' : ''}`}
-        disabled={disabled}
-        aria-haspopup="dialog"
-        aria-expanded={open}
+        disabled={disabled} aria-haspopup="dialog" aria-expanded={open}
+        aria-controls={open ? dialogId : undefined}
+        aria-label={`${t('effortControlHint')}: ${label}`}
         title={off ? t('effortControlOffHint') : t('effortControlHint')}
-        onClick={toggle}
+        onClick={() => {
+          if (open) { close(true); return }
+          draftRef.current = value
+          setPreview(value)
+          setBurst(0)
+          setOpen(true)
+        }}
       >
-        <span className="effort-chip-icon" aria-hidden="true">
-          <IconThink size={12} />
-        </span>
+        <span className="effort-chip-icon" aria-hidden="true"><IconThink size={12} /></span>
         {!off && <span className="effort-chip-label">{label}</span>}
       </button>
-      {open && (
-        <>
-          <div className="menu-backdrop" onClick={close} />
-          <div className="effort-popover" role="dialog" aria-label={t('effortControlHint')}>
-            <div className="effort-popover-head">
-              <span className="effort-popover-title">{t('reasoningLabel')}</span>
-              <span className="effort-popover-value">{label}</span>
-            </div>
-            {/* 胶囊轨道 + 轨道内圆钮;原生 input 透明覆盖,承载拖动/键盘。
-                把手中心经 --knob-center 同时喂给圆钮位置与填充段宽度,两者恒同步。
-                data-tier 只驱动填充段的静态深浅分级,无动画。 */}
-            <div
-              className={`effort-slider${dragging ? ' dragging' : ''}`}
-              data-tier={tier}
-              style={{ '--knob-center': knobCenter } as CSSProperties}
-            >
-              <div className="effort-track" aria-hidden="true" />
-              <input
-                ref={rangeRef}
-                type="range"
-                className="effort-input"
-                min={0}
-                max={maxIndex}
-                step={0.01}
-                value={position}
-                aria-label={t('effortSliderAria')}
-                aria-valuetext={label}
-                onChange={(event) => setPosition(Number(event.target.value))}
-                onPointerDown={() => setDragging(true)}
-                onPointerUp={() => setDragging(false)}
-                onPointerCancel={() => setDragging(false)}
-                onKeyDown={onRangeKeyDown}
-              />
-              <span className="effort-knob" style={{ left: knobCenter }} aria-hidden="true" />
-            </div>
-            {/* 档位刻度:按整条轨道等分对齐,可直接点选 */}
-            <div className="effort-ticks">
-              {efforts.map((effort, at) => (
-                <button
-                  key={effort.id}
-                  type="button"
-                  className={`effort-tick${at === shownIndex ? ' active' : ''}`}
-                  style={{ left: `${(at / maxIndex) * 100}%` }}
-                  title={effort.description}
-                  onClick={() => commit(at)}
-                >
-                  {reasoningEffortLabel(effort.id)}
-                </button>
-              ))}
-            </div>
-            {description && <div className="effort-popover-desc">{description}</div>}
+      {open && <>
+        <div className="menu-backdrop" onClick={() => close(true)} />
+        <div className="effort-popover" id={dialogId} role="dialog" aria-label={t('effortControlHint')}>
+          <div className="effort-popover-head">
+            <span className="effort-popover-value">{label}</span>
+            <span className="effort-popover-title">{t('reasoningLabel')}</span>
           </div>
-        </>
-      )}
+          <div className="effort-slider-container" data-keyboard-focused={keyboardFocused}>
+            <Slider.Root
+              className="effort-slider" dir="ltr" min={0} max={maxIndex} step={1} value={[index]} disabled={disabled}
+              data-max={atMax} data-off={off} data-dragging={dragging} data-reduced-motion={reduceMotion}
+              onValueChange={([next]) => { if (efforts[next]) updatePreview(efforts[next].id) }}
+              onKeyDown={(event) => event.stopPropagation()}
+              onPointerDown={(event) => {
+                if (event.button !== 0 || disabled) { event.preventDefault(); return }
+                dragStartRef.current = draftRef.current
+                setKeyboardFocused(false)
+                setDragging(true)
+              }}
+              onPointerUp={() => setDragging(false)}
+              onLostPointerCapture={() => setDragging(false)}
+              onPointerCancel={() => {
+                draftRef.current = dragStartRef.current
+                setPreview(dragStartRef.current)
+                setDragging(false)
+              }}
+            >
+              <Slider.Track className="effort-track">
+                {/* 填充只到圆钮中心，直角端面始终由圆钮遮住；两者共用同一动画值。 */}
+                <motion.span className="effort-range" style={{ width: thumbCenter }}>
+                  <AnimatePresence>
+                    {atMax && <motion.span key="max-fill" className="effort-max-effects"
+                      initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
+                      transition={{ duration: reduceMotion ? 0 : 0.3 }}>
+                      <EffortMaxFill reducedMotion={reduceMotion} reveal={burst > 0} />
+                      {!reduceMotion && <span className="effort-particles" aria-hidden="true">
+                        {Array.from({ length: 8 }, (_, at) => <span key={at} style={{ '--particle-index': at } as CSSProperties} />)}
+                      </span>}
+                    </motion.span>}
+                  </AnimatePresence>
+                </motion.span>
+                <span className="effort-tick-rail" aria-hidden="true">
+                  {efforts.map((effort, at) => {
+                    const percent = at / maxIndex * 100
+                    return <span key={effort.id} className="effort-tick" data-selected={at <= index}
+                      title={reasoningEffortLabel(effort.id)}
+                      style={{ left: `calc(${percent}% + ${13 - percent * 0.26}px)` }} />
+                  })}
+                </span>
+              </Slider.Track>
+              <span className="effort-visual-rail" aria-hidden="true">
+                <motion.span className="effort-knob-position" style={{ left: thumbCenter }}>
+                  {atMax && burst > 0 && !reduceMotion && <span className="effort-max-burst" key={burst}>
+                    {BURST_POINTS.map(([x, y], at) => <span key={at} style={{ '--particle-x': `${x}px`, '--particle-y': `${y}px`, animationDelay: `${at % 4 * 4}ms` } as CSSProperties} />)}
+                  </span>}
+                  <motion.span className="effort-knob-spring" initial={false}
+                    animate={{ scale: !reduceMotion && (hovered || dragging) ? 32 / 28 : 1 }}
+                    transition={reduceMotion ? { duration: 0 } : { type: 'spring', stiffness: hovered || dragging ? 420 : 220, damping: hovered || dragging ? 38 : 26, mass: 1 }}>
+                    <span className="effort-knob" />
+                  </motion.span>
+                </motion.span>
+              </span>
+              <Slider.Thumb
+                ref={thumbRef} className="effort-input" aria-label={t('effortSliderAria')} aria-valuetext={label}
+                aria-describedby={description ? descriptionId : undefined}
+                onFocus={(event) => setKeyboardFocused(event.currentTarget.matches(':focus-visible'))}
+                onBlur={() => setKeyboardFocused(false)}
+                onPointerEnter={() => setHovered(true)} onPointerLeave={() => setHovered(false)}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter' || event.key === 'Escape') {
+                    event.preventDefault(); event.stopPropagation(); close(event.key === 'Enter')
+                  }
+                  if (event.key.startsWith('Arrow') || ['Home', 'End', 'PageUp', 'PageDown'].includes(event.key)) setKeyboardFocused(true)
+                }}
+              />
+            </Slider.Root>
+          </div>
+          <span className="effort-announcement" role="status" aria-live="polite">
+            {t('effortSliderStatus', { value: label, position: index + 1, total: efforts.length })}
+          </span>
+          {description && <div className="effort-popover-desc" id={descriptionId}>{description}</div>}
+        </div>
+      </>}
     </div>
   )
 }

@@ -192,6 +192,7 @@ export function PlanReviewPanel({
                 />
                 {planEffort && (
                   <ComposerEffortControl
+                    key={`${model.provider}:${model.model}`}
                     efforts={planEfforts}
                     value={planEffort}
                     disabled={submitting}
