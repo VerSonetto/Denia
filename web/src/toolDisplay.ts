@@ -387,6 +387,24 @@ export function todoSnapshot(
   return { todos, changes, unchanged, done, total: todos.length }
 }
 
+/**
+ * 从 edit 工具结果里抠出各行号锚点(形如"#1 第 42 行、#2 第 57 行"或单处
+ * 形式的"…首次替换发生在第 42 行"),按出现顺序返回;与 edits 数组一一对应。
+ * 拿不到就返回空数组:diff 退化为相对行号,不影响展示。
+ *
+ * 导出供两处共用:工具行的 diff(transcript)与轮次收尾的产物聚合(fold)——
+ * 后者要为每个产物文件重建同样的 diff,行号锚点口径必须一致。
+ */
+export function editStartLines(content?: string): number[] {
+  if (!content) return []
+  const out: number[] = []
+  for (const match of content.matchAll(/第\s*(\d+)\s*行/g)) {
+    const line = Number(match[1])
+    if (Number.isFinite(line) && line > 0) out.push(line)
+  }
+  return out
+}
+
 /** diff 的一行;`kind` 决定配色与前缀符号。 */
 export interface DiffLine {
   kind: 'context' | 'del' | 'add'

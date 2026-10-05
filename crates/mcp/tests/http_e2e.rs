@@ -70,7 +70,12 @@ async fn http_transport_lists_and_calls_tools() {
 
     let snapshot = manager.snapshot();
     let state = &snapshot.servers[0];
-    assert_eq!(state.status, McpServerStatus::Connected, "{:?}", state.error);
+    assert_eq!(
+        state.status,
+        McpServerStatus::Connected,
+        "{:?}",
+        state.error
+    );
     let names = snapshot.tool_names();
     assert!(names.contains(&"mcp__web__echo".to_string()), "{names:?}");
     assert!(names.contains(&"mcp__web__big".to_string()), "{names:?}");
@@ -90,7 +95,12 @@ async fn sse_transport_lists_and_calls_tools() {
 
     let snapshot = manager.snapshot();
     let state = &snapshot.servers[0];
-    assert_eq!(state.status, McpServerStatus::Connected, "{:?}", state.error);
+    assert_eq!(
+        state.status,
+        McpServerStatus::Connected,
+        "{:?}",
+        state.error
+    );
     let names = snapshot.tool_names();
     assert!(
         names.contains(&"mcp__stream__echo".to_string()),
@@ -139,16 +149,19 @@ async fn mixed_transports_coexist() {
     };
     let manager = McpManager::new(HashSet::new());
     manager
-        .reload(&[stdio, http_config("web", &base), sse_config("stream", &base)])
+        .reload(&[
+            stdio,
+            http_config("web", &base),
+            sse_config("stream", &base),
+        ])
         .await;
 
     let names = manager.snapshot().tool_names();
-    for expected in [
-        "mcp__local__echo",
-        "mcp__web__echo",
-        "mcp__stream__echo",
-    ] {
-        assert!(names.contains(&expected.to_string()), "{expected} 缺失:{names:?}");
+    for expected in ["mcp__local__echo", "mcp__web__echo", "mcp__stream__echo"] {
+        assert!(
+            names.contains(&expected.to_string()),
+            "{expected} 缺失:{names:?}"
+        );
     }
 }
 
@@ -157,10 +170,7 @@ async fn mixed_transports_coexist() {
 async fn unreachable_http_server_is_isolated() {
     let (_fixture, base) = spawn_http_fixture();
     // 换一个几乎不可能被占用的端口。
-    let dead = base.replace(
-        &base[base.rfind(':').unwrap()..],
-        ":1",
-    );
+    let dead = base.replace(&base[base.rfind(':').unwrap()..], ":1");
     let manager = McpManager::new(HashSet::new());
     manager
         .reload(&[http_config("dead", &dead), http_config("web", &base)])
@@ -174,7 +184,11 @@ async fn unreachable_http_server_is_isolated() {
     assert_eq!(dead_state.status, McpServerStatus::Error);
     assert!(dead_state.error.is_some());
     // 另一个照常可用。
-    assert!(snapshot.tool_names().contains(&"mcp__web__echo".to_string()));
+    assert!(
+        snapshot
+            .tool_names()
+            .contains(&"mcp__web__echo".to_string())
+    );
 }
 
 /// 不支持的传输:明确失败并给出可执行提示,而不是静默当 stdio 处理。
@@ -193,4 +207,3 @@ async fn unsupported_transport_is_reported() {
     let message = snapshot.servers[0].error.clone().unwrap_or_default();
     assert!(message.contains("不支持的传输方式"), "{message}");
 }
-

@@ -1,0 +1,239 @@
+/* ---------- 远程连接:警示条与门页 ---------- */
+
+/* 顶部状态条:跨整个主列。隧道态用警示色,局域网态保持低调 ——
+ * 两者都是"机器当前可从别处访问"的信号,但风险等级不同。 */
+.rbanner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 16px;
+  border-bottom: 1px solid var(--border-l1);
+  background: var(--bg-layer-2);
+  font-size: 12.5px;
+  color: var(--label-secondary);
+}
+
+.rbanner.danger {
+  border-bottom-color: var(--danger-border);
+  background: var(--danger-soft);
+}
+
+.rbanner-dot {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--danger);
+  box-shadow: 0 0 0 3px var(--danger-soft);
+}
+
+.rbanner-dot.ok {
+  background: var(--success-fg);
+  box-shadow: none;
+}
+
+.rbanner-text {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+}
+
+.rbanner-text strong {
+  font-weight: 600;
+  color: var(--label-primary);
+  white-space: nowrap;
+}
+
+.rbanner.danger .rbanner-text strong {
+  color: var(--danger);
+}
+
+.rbanner-sub {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--label-tertiary);
+}
+
+.rbanner-url {
+  margin-left: auto;
+  padding: 3px 8px;
+  border-radius: var(--r-xs);
+  background: var(--code-block);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--label-tertiary);
+  max-width: 260px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rbanner-meta {
+  flex: none;
+  font-size: 11.5px;
+  color: var(--label-caption);
+}
+
+.rbanner-btn {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 10px;
+  border: 1px solid var(--danger-border);
+  border-radius: var(--r-xs);
+  background: transparent;
+  color: var(--danger);
+  font-size: 12px;
+  font-weight: 550;
+  cursor: pointer;
+}
+
+.rbanner-btn.ghost {
+  border-color: var(--border-l2);
+  color: var(--label-secondary);
+}
+
+.rbanner-btn:hover:not(:disabled) {
+  background: var(--hover-fill);
+}
+
+.rbanner-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+@media (max-width: 820px) {
+  .rbanner {
+    flex-wrap: wrap;
+    gap: 6px 10px;
+    padding: 8px 12px;
+  }
+
+  .rbanner-sub {
+    display: none;
+  }
+
+  .rbanner-url {
+    margin-left: 0;
+    max-width: 100%;
+  }
+}
+
+/* 扫码落地页:整屏一屏,移动端优先(手机扫完直接看到)。 */
+.rgate {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 100vh;
+  min-height: 100dvh;
+  /* 刘海屏与安全区:扫码页往往整屏用,上下留出 env 内边距避免按钮被盖 */
+  padding: max(24px, env(safe-area-inset-top)) max(24px, env(safe-area-inset-right))
+    max(24px, env(safe-area-inset-bottom)) max(24px, env(safe-area-inset-left));
+  background: var(--bg-base);
+}
+
+.rgate-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 14px;
+  width: 100%;
+  max-width: 380px;
+  padding: 32px 24px;
+  border: 1px solid var(--border-l1);
+  border-radius: var(--r-lg);
+  background: var(--bg-layer-1);
+  box-shadow: var(--shadow-lv2);
+  text-align: center;
+}
+
+.rgate-brand {
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 3px;
+  text-transform: uppercase;
+  color: var(--label-caption);
+}
+
+.rgate-card h1 {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--label-primary);
+}
+
+.rgate-hint {
+  margin: 0;
+  font-size: 12.5px;
+  line-height: 1.65;
+  color: var(--label-tertiary);
+}
+
+.rgate-error {
+  margin: 0;
+  font-size: 12.5px;
+  line-height: 1.65;
+  color: var(--error-fg);
+}
+
+.rgate-pin {
+  width: 100%;
+  padding: 12px;
+  border: 1px solid var(--border-l2);
+  border-radius: var(--r-sm);
+  background: var(--input-major);
+  color: var(--label-primary);
+  font-family: var(--font-mono);
+  font-size: 26px;
+  font-weight: 600;
+  letter-spacing: 12px;
+  text-align: center;
+  text-indent: 12px;
+}
+
+.rgate-pin:focus {
+  outline: none;
+  border-color: var(--accent-tint);
+}
+
+.rgate-btn {
+  width: 100%;
+  padding: 10px;
+  border: none;
+  border-radius: var(--r-sm);
+  background: var(--accent);
+  color: var(--accent-on);
+  font-size: 13.5px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.rgate-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.rgate-spinner {
+  width: 20px;
+  height: 20px;
+  border: 2px solid var(--border-l2);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: rgate-spin 720ms linear infinite;
+}
+
+@keyframes rgate-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .rgate-spinner {
+    animation-duration: 2s;
+  }
+}
+

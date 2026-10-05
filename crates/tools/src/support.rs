@@ -31,7 +31,9 @@ pub fn apply_output_budget(text: &str) -> (String, Option<TruncationInfo>) {
     if total <= OUTPUT_BUDGET_CHARS {
         return (text.to_string(), None);
     }
-    let reserved = truncation_notice(total, OUTPUT_BUDGET_CHARS).chars().count();
+    let reserved = truncation_notice(total, OUTPUT_BUDGET_CHARS)
+        .chars()
+        .count();
     let shown_chars = OUTPUT_BUDGET_CHARS.saturating_sub(reserved);
     let shown: String = text.chars().take(shown_chars).collect();
     let notice = truncation_notice(total, shown_chars);
@@ -77,10 +79,9 @@ fn coerce_numeric_fields(value: &mut serde_json::Value) {
     for key in NUMERIC_FIELDS {
         if let Some(item) = object.get_mut(*key)
             && item.is_string()
+            && let Ok(number) = item.as_str().unwrap().trim().parse::<i64>()
         {
-            if let Ok(number) = item.as_str().unwrap().trim().parse::<i64>() {
-                *item = serde_json::json!(number);
-            }
+            *item = serde_json::json!(number);
         }
     }
 }

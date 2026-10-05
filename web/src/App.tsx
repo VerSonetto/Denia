@@ -36,6 +36,7 @@ import { useBrowserSidebar } from './hooks/useBrowserSidebar'
 import { useIsMobile } from './hooks/useIsMobile'
 import { useSidePaneController, useTerminalReconcile } from './hooks/useSidePane'
 import { registerOpenFile } from './fileOpen'
+import { registerOpenReview } from './reviewOpen'
 import { SidePane } from './components/SidePane'
 import { TerminalHost } from './components/TerminalHost'
 import { closeTerminal } from './terminalApi'
@@ -147,6 +148,19 @@ export default function App() {
    * 切会话时会重新注册，指向新的工作区。
    */
   useEffect(() => registerOpenFile(pane.openFile), [pane.openFile])
+
+  /**
+   * 收尾变更卡片的「查看变更」:打开审查面板。
+   *
+   * 走 `pane.openPanel('review')` 而不是新建标签 —— 审查是单例面板,里面
+   * 已经有工作区的全部改动与逐文件 diff,本轮文件是它们的子集,再开一个
+   * 面板只会让人对不上"哪份是权威"。
+   */
+  const openReviewPanel = useCallback(() => {
+    pane.openPanel('review')
+    return true
+  }, [pane.openPanel])
+  useEffect(() => registerOpenReview(openReviewPanel), [openReviewPanel])
 
   /** 终端进程退出:抄 ZCode 的 `lMt` —— 最后一个终端退出时连带收起面板。 */
   const handleTerminalExit = useCallback(

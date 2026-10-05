@@ -17,8 +17,8 @@ use serde_json::{Value, json};
 
 use crate::config::McpServerConfig;
 use crate::protocol::{
-    JsonRpcResponse, METHOD_INITIALIZE, METHOD_INITIALIZED, METHOD_TOOLS_CALL, METHOD_TOOLS_LIST,
-    McpCallResult, McpToolDef, InitializeParams, call_result_from, parse_tools_list,
+    InitializeParams, JsonRpcResponse, METHOD_INITIALIZE, METHOD_INITIALIZED, METHOD_TOOLS_CALL,
+    METHOD_TOOLS_LIST, McpCallResult, McpToolDef, call_result_from, parse_tools_list,
 };
 use crate::transport::McpTransport;
 use crate::transport::http::HttpTransport;
@@ -65,7 +65,11 @@ impl McpClient {
                     name.clone(),
                     &config.command,
                     &config.args,
-                    &config.env.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
+                    &config
+                        .env
+                        .iter()
+                        .map(|(k, v)| (k.clone(), v.clone()))
+                        .collect(),
                     config.cwd.as_deref(),
                 )
                 .await?,
@@ -75,18 +79,17 @@ impl McpClient {
                 config
                     .url
                     .clone()
-                    .ok_or_else(|| {
-                        McpClientError::Spawn("http 传输缺少 url".to_string())
-                    })?,
+                    .ok_or_else(|| McpClientError::Spawn("http 传输缺少 url".to_string()))?,
                 request_headers(config),
                 http_client()?,
             )),
             "sse" => Box::new(
                 SseTransport::connect(
                     name.clone(),
-                    config.url.clone().ok_or_else(|| {
-                        McpClientError::Spawn("sse 传输缺少 url".to_string())
-                    })?,
+                    config
+                        .url
+                        .clone()
+                        .ok_or_else(|| McpClientError::Spawn("sse 传输缺少 url".to_string()))?,
                     request_headers(config),
                     http_client()?,
                     ENDPOINT_WAIT,
@@ -96,7 +99,7 @@ impl McpClient {
             other => {
                 return Err(McpClientError::Spawn(format!(
                     "不支持的传输方式:{other}(可用:stdio / http / sse)"
-                )))
+                )));
             }
         };
         let client = Self {
@@ -120,11 +123,7 @@ impl McpClient {
             .map_err(|error| McpClientError::Handshake(error.to_string()))?;
         // `notifications/initialized` 是通知:无 id、无响应。stdio 与 http
         // 都可能因为服务器实现差异而失败,失败只记日志不阻断——握手已成功。
-        if let Err(error) = self
-            .transport
-            .notify(METHOD_INITIALIZED, None)
-            .await
-        {
+        if let Err(error) = self.transport.notify(METHOD_INITIALIZED, None).await {
             tracing::debug!(server = %self.name, %error, "initialized 通知未送达(忽略)");
         }
         Ok(())
@@ -134,7 +133,11 @@ impl McpClient {
     pub async fn list_tools(&self) -> Result<Vec<McpToolDef>, McpClientError> {
         let result = self
             .transport
-            .request(METHOD_TOOLS_LIST, None, self.call_timeout.unwrap_or(REQUEST_TIMEOUT))
+            .request(
+                METHOD_TOOLS_LIST,
+                None,
+                self.call_timeout.unwrap_or(REQUEST_TIMEOUT),
+            )
             .await?;
         Ok(parse_tools_list(&result))
     }

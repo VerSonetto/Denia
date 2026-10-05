@@ -83,15 +83,15 @@ fn reopen_std_handles() {
 
     // 这两个 `File` 必须活得比函数长:关掉它们等于关掉句柄,标准流又变成
     // 悬空的。泄漏一份是有意的(进程活多久它就用多久)。
-    if std_handle_is_empty(STD_OUTPUT_HANDLE) {
-        if let Ok(output) = OpenOptions::new().write(true).open("CONOUT$") {
-            let handle = output.as_raw_handle() as windows_sys::Win32::Foundation::HANDLE;
-            unsafe {
-                SetStdHandle(STD_OUTPUT_HANDLE, handle);
-                SetStdHandle(STD_ERROR_HANDLE, handle);
-            }
-            std::mem::forget(output);
+    if std_handle_is_empty(STD_OUTPUT_HANDLE)
+        && let Ok(output) = OpenOptions::new().write(true).open("CONOUT$")
+    {
+        let handle = output.as_raw_handle() as windows_sys::Win32::Foundation::HANDLE;
+        unsafe {
+            SetStdHandle(STD_OUTPUT_HANDLE, handle);
+            SetStdHandle(STD_ERROR_HANDLE, handle);
         }
+        std::mem::forget(output);
     }
     if std_handle_is_empty(STD_INPUT_HANDLE)
         && let Ok(input) = OpenOptions::new().read(true).open("CONIN$")

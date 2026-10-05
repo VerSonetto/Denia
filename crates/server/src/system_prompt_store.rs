@@ -175,121 +175,6 @@ fn read_file_text(home: &Path) -> Option<String> {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use denia_system_prompt::{AssembleContext, SectionAudience};
-
-    #[test]
-    fn preset_authoring_section_and_schema_travel_together() {
-        // server 部署传 schema:纪律段 + tools provider 同批注入,模型可见
-        // 即模型可执行。
-        let schema = crate::preset_tool::schema();
-        let prompt = build_prompt(None, None, Some(schema), None, None);
-        let assembly = prompt
-            .assemble(&AssembleContext::default())
-            .expect("assembly is valid");
-        let section = assembly
-            .sections
-            .iter()
-            .find(|section| section.name == "tool:preset")
-            .expect("server 部署必须注入 tool:preset 纪律段");
-        assert!(matches!(section.audience, SectionAudience::Model));
-        assert!(
-            assembly.tools.iter().any(|schema| schema.name == "create_preset"),
-            "纪律段进提示词的同时,schema 必须在请求工具列表里"
-        );
-        // 纪律段不进用户可见副本。
-        let user_copy = denia_system_prompt::render_prompt_for_user(&assembly);
-        assert!(!user_copy.contains("create_preset"));
-
-        // 无 schema(非 server 部署形态):两者都不出现。
-        let bare = build_prompt(None, None, None, None, None);
-        let assembly = bare.assemble(&AssembleContext::default()).unwrap();
-        assert!(!assembly.sections.iter().any(|section| section.name == "tool:preset"));
-        assert!(!assembly.tools.iter().any(|schema| schema.name == "create_preset"));
-    }
-
-    #[test]
-    fn mcp_section_and_provider_follow_the_manager() {
-        use std::collections::HashSet;
-
-        // 带 manager:纪律段注入,文本动态(无连接时目录为"(当前没有…)"、
-        // provider 无 MCP schema);装配一次 mcp_list 不重复堆积。
-        let manager = std::sync::Arc::new(denia_mcp::McpManager::new(HashSet::new()));
-        let prompt = build_prompt(None, None, None, Some(manager.clone()), None);
-        let assembly = prompt.assemble(&AssembleContext::default()).unwrap();
-        let section = assembly
-            .sections
-            .iter()
-            .find(|section| section.name == "tool:mcp")
-            .expect("有 MCP 管理器的部署必须注入 tool:mcp 纪律段");
-        assert!(matches!(section.audience, SectionAudience::Model));
-        assert!(section.text.contains("当前没有已连接"));
-        assert!(
-            !assembly.tools.iter().any(|schema| schema.name == denia_tools::MCP_LIST_TOOL),
-            "没有任何可用工具时,mcp_list 也不得暴露给模型"
-        );
-        // 纪律段不进用户可见副本。
-        let user_copy = denia_system_prompt::render_prompt_for_user(&assembly);
-        assert!(!user_copy.contains("mcp_list"));
-
-        // 无 manager(非 server 部署形态):段与 provider 都不注入。
-        let bare = build_prompt(None, None, None, None, None);
-        let assembly = bare.assemble(&AssembleContext::default()).unwrap();
-        assert!(!assembly.sections.iter().any(|section| section.name == "tool:mcp"));
-        assert!(!assembly.tools.iter().any(|schema| schema.name == denia_tools::MCP_LIST_TOOL));
-
-        // 重建幂等:同一 manager 连续 reload 不叠加 provider(schema 数量不变)。
-        let store = std::sync::Arc::new(SystemPromptState::load(
-            std::env::temp_dir().as_path(),
-            None,
-            None,
-            None,
-        ));
-        store.attach_mcp(manager.clone());
-        store.reload();
-        let assembly = store
-            .handle()
-            .load()
-            .assemble(&AssembleContext::default())
-            .unwrap();
-        let list_count = assembly
-            .tools
-            .iter()
-            .filter(|schema| schema.name == denia_tools::MCP_LIST_TOOL)
-            .count();
-        assert_eq!(list_count, 0, "空快照下 mcp_list 不暴露,且不得有重复条目");
-    }
-
-    /// 本实例 API 地址随 runtime-context 快照注入:模型改配置必须打自己
-    /// 所在的进程——数据目录共享时猜端口会把配置写进别的实例(实测缺陷:
-    /// 3601 会话接 MCP 却写了 3600,面板毫无变化)。
-    #[test]
-    fn instance_api_base_reaches_the_runtime_snapshot() {
-        let prompt = build_prompt(
-            None,
-            None,
-            None,
-            None,
-            Some("http://127.0.0.1:3601".to_string()),
-        );
-        let assembly = prompt.assemble(&AssembleContext::default()).unwrap();
-        let snapshot = denia_system_prompt::render_context_snapshot(&assembly);
-        assert!(
-            snapshot.contains("http://127.0.0.1:3601"),
-            "runtime-context 快照必须带本实例 API:{snapshot}"
-        );
-
-        let bare = build_prompt(None, None, None, None, None);
-        let assembly = bare.assemble(&AssembleContext::default()).unwrap();
-        assert!(
-            !denia_system_prompt::render_context_snapshot(&assembly).contains("本实例 API"),
-            "无 API 部署不得注入"
-        );
-    }
-}
-
 fn build_prompt(
     text: Option<String>,
     browser_hub: Option<denia_tools::BrowserHub>,
@@ -372,4 +257,145 @@ fn build_prompt(
         });
     }
     prompt
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use denia_system_prompt::{AssembleContext, SectionAudience};
+
+    #[test]
+    fn preset_authoring_section_and_schema_travel_together() {
+        // server 部署传 schema:纪律段 + tools provider 同批注入,模型可见
+        // 即模型可执行。
+        let schema = crate::preset_tool::schema();
+        let prompt = build_prompt(None, None, Some(schema), None, None);
+        let assembly = prompt
+            .assemble(&AssembleContext::default())
+            .expect("assembly is valid");
+        let section = assembly
+            .sections
+            .iter()
+            .find(|section| section.name == "tool:preset")
+            .expect("server 部署必须注入 tool:preset 纪律段");
+        assert!(matches!(section.audience, SectionAudience::Model));
+        assert!(
+            assembly
+                .tools
+                .iter()
+                .any(|schema| schema.name == "create_preset"),
+            "纪律段进提示词的同时,schema 必须在请求工具列表里"
+        );
+        // 纪律段不进用户可见副本。
+        let user_copy = denia_system_prompt::render_prompt_for_user(&assembly);
+        assert!(!user_copy.contains("create_preset"));
+
+        // 无 schema(非 server 部署形态):两者都不出现。
+        let bare = build_prompt(None, None, None, None, None);
+        let assembly = bare.assemble(&AssembleContext::default()).unwrap();
+        assert!(
+            !assembly
+                .sections
+                .iter()
+                .any(|section| section.name == "tool:preset")
+        );
+        assert!(
+            !assembly
+                .tools
+                .iter()
+                .any(|schema| schema.name == "create_preset")
+        );
+    }
+
+    #[test]
+    fn mcp_section_and_provider_follow_the_manager() {
+        use std::collections::HashSet;
+
+        // 带 manager:纪律段注入,文本动态(无连接时目录为"(当前没有…)"、
+        // provider 无 MCP schema);装配一次 mcp_list 不重复堆积。
+        let manager = std::sync::Arc::new(denia_mcp::McpManager::new(HashSet::new()));
+        let prompt = build_prompt(None, None, None, Some(manager.clone()), None);
+        let assembly = prompt.assemble(&AssembleContext::default()).unwrap();
+        let section = assembly
+            .sections
+            .iter()
+            .find(|section| section.name == "tool:mcp")
+            .expect("有 MCP 管理器的部署必须注入 tool:mcp 纪律段");
+        assert!(matches!(section.audience, SectionAudience::Model));
+        assert!(section.text.contains("当前没有已连接"));
+        assert!(
+            !assembly
+                .tools
+                .iter()
+                .any(|schema| schema.name == denia_tools::MCP_LIST_TOOL),
+            "没有任何可用工具时,mcp_list 也不得暴露给模型"
+        );
+        // 纪律段不进用户可见副本。
+        let user_copy = denia_system_prompt::render_prompt_for_user(&assembly);
+        assert!(!user_copy.contains("mcp_list"));
+
+        // 无 manager(非 server 部署形态):段与 provider 都不注入。
+        let bare = build_prompt(None, None, None, None, None);
+        let assembly = bare.assemble(&AssembleContext::default()).unwrap();
+        assert!(
+            !assembly
+                .sections
+                .iter()
+                .any(|section| section.name == "tool:mcp")
+        );
+        assert!(
+            !assembly
+                .tools
+                .iter()
+                .any(|schema| schema.name == denia_tools::MCP_LIST_TOOL)
+        );
+
+        // 重建幂等:同一 manager 连续 reload 不叠加 provider(schema 数量不变)。
+        let store = std::sync::Arc::new(SystemPromptState::load(
+            std::env::temp_dir().as_path(),
+            None,
+            None,
+            None,
+        ));
+        store.attach_mcp(manager.clone());
+        store.reload();
+        let assembly = store
+            .handle()
+            .load()
+            .assemble(&AssembleContext::default())
+            .unwrap();
+        let list_count = assembly
+            .tools
+            .iter()
+            .filter(|schema| schema.name == denia_tools::MCP_LIST_TOOL)
+            .count();
+        assert_eq!(list_count, 0, "空快照下 mcp_list 不暴露,且不得有重复条目");
+    }
+
+    /// 本实例 API 地址随 runtime-context 快照注入:模型改配置必须打自己
+    /// 所在的进程——数据目录共享时猜端口会把配置写进别的实例(实测缺陷:
+    /// 3601 会话接 MCP 却写了 3600,面板毫无变化)。
+    #[test]
+    fn instance_api_base_reaches_the_runtime_snapshot() {
+        let prompt = build_prompt(
+            None,
+            None,
+            None,
+            None,
+            Some("http://127.0.0.1:3601".to_string()),
+        );
+        let assembly = prompt.assemble(&AssembleContext::default()).unwrap();
+        let snapshot = denia_system_prompt::render_context_snapshot(&assembly);
+        assert!(
+            snapshot.contains("http://127.0.0.1:3601"),
+            "runtime-context 快照必须带本实例 API:{snapshot}"
+        );
+
+        let bare = build_prompt(None, None, None, None, None);
+        let assembly = bare.assemble(&AssembleContext::default()).unwrap();
+        assert!(
+            !denia_system_prompt::render_context_snapshot(&assembly).contains("本实例 API"),
+            "无 API 部署不得注入"
+        );
+    }
 }

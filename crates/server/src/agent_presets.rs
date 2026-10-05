@@ -21,8 +21,8 @@ use std::time::Duration;
 
 use arc_swap::ArcSwap;
 use denia_core::preset::{
-    builtin_presets, is_valid_preset_id, AgentPreset, PresetFeatures, PresetSpec, PresetTrust,
-    DEFAULT_PRESET_ID,
+    AgentPreset, DEFAULT_PRESET_ID, PresetFeatures, PresetSpec, PresetTrust, builtin_presets,
+    is_valid_preset_id,
 };
 use denia_settings::SettingsStore;
 use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher};
@@ -82,7 +82,12 @@ impl PresetRow {
     }
 
     /// 一条无法组装的记录:保留 id 与原因,让人看得见该修什么。
-    fn broken(id: &str, trust: PresetTrust, path: Option<&Path>, reason: impl Into<String>) -> Self {
+    fn broken(
+        id: &str,
+        trust: PresetTrust,
+        path: Option<&Path>,
+        reason: impl Into<String>,
+    ) -> Self {
         Self {
             def: None,
             id: id.to_string(),
@@ -190,16 +195,12 @@ impl PresetStore {
         if !self.mode_selection_enabled() {
             return DEFAULT_PRESET_ID.to_string();
         }
-        let configured = self
-            .settings
-            .resolved(SETTINGS_NS)
-            .ok()
-            .and_then(|value| {
-                value
-                    .get("default")
-                    .and_then(|value| value.as_str())
-                    .map(str::to_string)
-            });
+        let configured = self.settings.resolved(SETTINGS_NS).ok().and_then(|value| {
+            value
+                .get("default")
+                .and_then(|value| value.as_str())
+                .map(str::to_string)
+        });
         match configured {
             Some(id) if self.resolve(&id).is_some() => id,
             _ => DEFAULT_PRESET_ID.to_string(),
@@ -209,10 +210,7 @@ impl PresetStore {
     /// 重读磁盘:随附集合在前(同名 id 由随附集合赢得),用户行按 id 排序。
     pub fn refresh(&self) {
         let known_tools = self.known_tools.load_full();
-        let mut rows: Vec<PresetRow> = builtin_presets()
-            .iter()
-            .map(PresetRow::healthy)
-            .collect();
+        let mut rows: Vec<PresetRow> = builtin_presets().iter().map(PresetRow::healthy).collect();
         let mut user_rows: Vec<PresetRow> = Vec::new();
         if let Ok(entries) = std::fs::read_dir(&self.root) {
             for entry in entries.flatten() {
@@ -398,7 +396,8 @@ impl PresetStore {
         }
         let dir = self.root.join(id);
         if dir.exists() {
-            std::fs::remove_dir_all(&dir).map_err(|error| format!("删除 preset 目录失败:{error}"))?;
+            std::fs::remove_dir_all(&dir)
+                .map_err(|error| format!("删除 preset 目录失败:{error}"))?;
         }
         self.refresh();
         Ok(())
@@ -480,7 +479,7 @@ fn read_user_row(id: &str, dir: &Path, known_tools: Option<&BTreeSet<String>>) -
                 PresetTrust::User,
                 Some(dir),
                 format!("缺少可读的 {FILE_NAME}:{error}"),
-            )
+            );
         }
     };
     match parse_preset(id, &text, known_tools) {
@@ -607,7 +606,9 @@ fn render_preset_file(preset: &AgentPreset) -> String {
 /// YAML 标量:含特殊字符时用双引号包裹,避免写出解析不回来的文件。
 fn yaml_scalar(text: &str) -> String {
     let needs_quotes = text.is_empty()
-        || text.starts_with(['"', '\'', '[', '{', '-', '?', ':', '#', '&', '*', '!', '|', '>', '@', '%', '`'])
+        || text.starts_with([
+            '"', '\'', '[', '{', '-', '?', ':', '#', '&', '*', '!', '|', '>', '@', '%', '`',
+        ])
         || text.contains([':', '#', '\n'])
         || text.trim() != text;
     if !needs_quotes {
@@ -619,7 +620,8 @@ fn yaml_scalar(text: &str) -> String {
 /// 递归复制目录内容(符号链接一律拒绝:preset 必须自包含,而跟随链接
 /// 会把工作区之外的东西拖进用户目录)。
 fn copy_tree(from: &Path, to: &Path) -> Result<(), String> {
-    for entry in std::fs::read_dir(from).map_err(|error| format!("读取来源目录失败:{error}"))? {
+    for entry in std::fs::read_dir(from).map_err(|error| format!("读取来源目录失败:{error}"))?
+    {
         let entry = entry.map_err(|error| format!("读取来源目录项失败:{error}"))?;
         let path = entry.path();
         let file_type = entry
@@ -627,7 +629,10 @@ fn copy_tree(from: &Path, to: &Path) -> Result<(), String> {
             .map_err(|error| format!("读取来源目录项类型失败:{error}"))?;
         let target = to.join(entry.file_name());
         if file_type.is_symlink() {
-            return Err(format!("来源 preset 含符号链接,拒绝复制:{}", path.display()));
+            return Err(format!(
+                "来源 preset 含符号链接,拒绝复制:{}",
+                path.display()
+            ));
         }
         if file_type.is_dir() {
             std::fs::create_dir_all(&target).map_err(|error| format!("创建目录失败:{error}"))?;
@@ -700,7 +705,10 @@ mod tests {
         );
         let store = open_store(&home);
         let rows = store.rows();
-        let row = rows.iter().find(|row| row.id == "explore").expect("发现用户 preset");
+        let row = rows
+            .iter()
+            .find(|row| row.id == "explore")
+            .expect("发现用户 preset");
         assert!(row.writable);
         assert!(row.has_persona);
         assert_eq!(row.tools.as_ref().unwrap().len(), 2);
@@ -743,10 +751,8 @@ mod tests {
         write_user_preset(&home, "standard", "name: 假标准\n");
         let store = open_store(&home);
         let rows = store.rows();
-        let standard_rows: Vec<&PresetRow> = rows
-            .iter()
-            .filter(|row| row.id == "standard")
-            .collect();
+        let standard_rows: Vec<&PresetRow> =
+            rows.iter().filter(|row| row.id == "standard").collect();
         assert_eq!(standard_rows.len(), 2, "遮蔽事实必须可见,而不是静默丢弃");
         assert!(standard_rows[0].broken.is_none());
         assert!(standard_rows[1].broken.is_some());
@@ -757,7 +763,9 @@ mod tests {
     fn copy_creates_an_editable_preset_and_rejects_bad_targets() {
         let home = temp_home();
         let store = open_store(&home);
-        let row = store.copy("minimal", "my-minimal", Some("我的极简")).unwrap();
+        let row = store
+            .copy("minimal", "my-minimal", Some("我的极简"))
+            .unwrap();
         assert_eq!(row.name, "我的极简");
         assert!(row.writable);
         assert_eq!(row.tools.as_ref().unwrap().len(), 1);
@@ -812,12 +820,18 @@ mod tests {
     fn remove_only_touches_user_presets() {
         let home = temp_home();
         let store = open_store(&home);
-        assert!(store.remove(DEFAULT_PRESET_ID).is_err(), "随附 preset 不可删除");
+        assert!(
+            store.remove(DEFAULT_PRESET_ID).is_err(),
+            "随附 preset 不可删除"
+        );
         store.copy("minimal", "temp-one", None).unwrap();
         assert!(store.resolve("temp-one").is_some());
         store.remove("temp-one").unwrap();
         assert!(store.resolve("temp-one").is_none());
-        assert!(store.remove("temp-one").is_err(), "重复删除要报错而不是静默");
+        assert!(
+            store.remove("temp-one").is_err(),
+            "重复删除要报错而不是静默"
+        );
         std::fs::remove_dir_all(&home).unwrap();
     }
 
@@ -891,21 +905,13 @@ mod tests {
     #[test]
     fn unknown_feature_key_or_tool_name_marks_the_row_broken() {
         let home = temp_home();
-        write_user_preset(
-            &home,
-            "typo",
-            "features:\n  agentMd: false\n",
-        );
+        write_user_preset(&home, "typo", "features:\n  agentMd: false\n");
         write_user_preset(
             &home,
             "ghost-tool",
             "tools:\n  - bash\n  - not_a_real_tool\n",
         );
-        write_user_preset(
-            &home,
-            "mcp-ok",
-            "tools:\n  - mcp__some__tool\n",
-        );
+        write_user_preset(&home, "mcp-ok", "tools:\n  - mcp__some__tool\n");
         let store = open_store(&home);
         // 未知 features 键:fail loud 成 broken 行,不静默忽略。
         let typo = store
@@ -924,7 +930,10 @@ mod tests {
             .cloned()
             .unwrap();
         assert!(
-            ghost.broken.as_deref().is_some_and(|reason| reason.contains("not_a_real_tool")),
+            ghost
+                .broken
+                .as_deref()
+                .is_some_and(|reason| reason.contains("not_a_real_tool")),
             "broken 原因要点名工具:{:?}",
             ghost.broken
         );
@@ -979,10 +988,9 @@ mod tests {
         .unwrap();
         let store = open_store(&home);
         store.copy("rich", "rich-copy", None).unwrap();
-        let copied = std::fs::read_to_string(
-            home.join(DIR_NAME).join("rich-copy").join("notes.md"),
-        )
-        .unwrap();
+        let copied =
+            std::fs::read_to_string(home.join(DIR_NAME).join("rich-copy").join("notes.md"))
+                .unwrap();
         assert_eq!(copied, "附带资料");
         std::fs::remove_dir_all(&home).unwrap();
     }

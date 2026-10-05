@@ -53,7 +53,10 @@ async fn message(
     Json(body): Json<Message>,
 ) -> Result<Json<Value>, ApiError> {
     let live = ensure(&state, &id).await?;
-    state.live.ensure_hot(&live).map_err(ApiError::from_session)?;
+    state
+        .live
+        .ensure_hot(&live)
+        .map_err(ApiError::from_session)?;
     use denia_tools::capabilities::AgentRuntime;
     let ctx = denia_tools::ToolContext {
         output_store: None,
@@ -144,17 +147,25 @@ mod tests {
 
     #[tokio::test]
     async fn polling_runtime_keeps_session_history_cold() {
-        let home = std::env::temp_dir().join(format!("denia-runtime-memory-{}", uuid::Uuid::new_v4()));
+        let home =
+            std::env::temp_dir().join(format!("denia-runtime-memory-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&home).unwrap();
         let state = Arc::new(crate::state::build_state(&home, false, 0).await.unwrap());
         let session = state.sessions.create(&home, true).unwrap();
-        session.append(denia_core::session::SessionEvent::UserMessage {
-            text: "x".repeat(100_000), injected: false, channel: None, images: Vec::new(),
-        }).unwrap();
+        session
+            .append(denia_core::session::SessionEvent::UserMessage {
+                text: "x".repeat(100_000),
+                injected: false,
+                channel: None,
+                images: Vec::new(),
+            })
+            .unwrap();
         session.flush().unwrap();
         let id = session.id().to_string();
         drop(session);
-        let _ = agents(State(state.clone()), Path(id.clone())).await.unwrap();
+        let _ = agents(State(state.clone()), Path(id.clone()))
+            .await
+            .unwrap();
         let _ = jobs(State(state.clone()), Path(id.clone())).await.unwrap();
         let live = state.live.get(&id).unwrap();
         assert!(!live.session.is_hot());

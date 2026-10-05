@@ -271,8 +271,7 @@ pub fn plan(
                     .is_some_and(|id| cleared_ids.contains(id))
         })
         .map(|item| {
-            rough_tokens(&item.message.content)
-                .saturating_sub(rough_tokens(CLEARED_PLACEHOLDER))
+            rough_tokens(&item.message.content).saturating_sub(rough_tokens(CLEARED_PLACEHOLDER))
         })
         .sum();
 
@@ -355,7 +354,10 @@ mod tests {
     fn not_triggered_without_pressure() {
         let surface = surface_with_rounds(10, "small");
         let decision = plan(&surface, &settings(), None, Some(10), Some(500));
-        assert_eq!(decision, MicrocompactDecision::NotTriggered("not_triggered"));
+        assert_eq!(
+            decision,
+            MicrocompactDecision::NotTriggered("not_triggered")
+        );
     }
 
     #[test]

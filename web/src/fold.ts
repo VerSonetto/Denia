@@ -8,8 +8,8 @@ import type {
   TurnEndReason,
   UserMessageImage,
 } from './types'
-import { parseArgsObject } from './toolDisplay'
-import type { TodoSnapshotItem } from './toolDisplay'
+import { editDiff, editStartLines, parseArgsObject, writeDiff } from './toolDisplay'
+import type { EditDiff, TodoSnapshotItem } from './toolDisplay'
 
 /** `ask` 工具的问答载荷(挂在对应工具行上)。 */
 export interface AskCardData {
@@ -81,10 +81,10 @@ export type TranscriptNode =
       usage?: TokenUsage
       /**
        * 本轮成功落盘的文件产物:write_file/edit 调用且工具结果非 error 的
-       * path,按首次出现去重。仅 groupTranscript 在分组时填充,事件 fold
+       * 文件,按首次出现去重。仅 groupTranscript 在分组时填充,事件 fold
        * 不产此字段。
        */
-      produced?: string[]
+      produced?: TurnProducedFile[]
     }
   | {
       kind: 'compaction'
@@ -860,6 +860,24 @@ export type TranscriptRow =
 /* ---- 收尾轮次的文件产物 ---- */
 
 /**
+ * 收尾行展示的**一个**产物文件:本轮对它做过什么、改了多少、怎么改的。
+ *
+ * 三段信息是一张卡片的全部事实,缺一段都会让人回头去翻工具行:
+ * - `kind` 决定标题说"新建"还是"编辑"(先建后改的文件按新建计);
+ * - `added`/`removed` 是本轮累计行数,跨多次编辑累加;
+ * - `diffs` 是本轮各次调用的行级 diff(已各自折叠到 40 行内),供悬停预览
+ *   与单文件内联展示复用 —— 不用二次解析,也不用再拉一次 diff。
+ */
+export interface TurnProducedFile {
+  /** 工具参数里的原始路径(相对 cwd 或绝对,原样保留)。 */
+  path: string
+  kind: 'write' | 'edit'
+  added: number
+  removed: number
+  diffs: EditDiff[]
+}
+
+/**
  * 变更类工具调用参数里的目标文件路径;非变更调用、参数不完整或路径为空
  * 返回 null。只有 write_file 与 edit 是第一方文件变更工具。
  *
@@ -904,41 +922,97 @@ type ToolNode = Extract<TranscriptNode, { kind: 'tool' }>
 type TurnEndNode = Extract<TranscriptNode, { kind: 'turn-end' }>
 
 /**
- * 单个工具节点的产物路径缓存。分组在每次渲染都会重跑,而 write_file 的
- * 参数可能很大,不能每帧 JSON.parse;键是节点引用,结果到达(result 引用
- * 变化)时重算一次。
+ * 单个工具节点的产物信息缓存。分组在每次渲染都会重跑,而 write_file 的
+ * 参数可能很大,不能每帧 JSON.parse + diff;键是节点引用,结果到达
+ * (result 引用变化)时重算一次。
  */
-const producedPathCache = new WeakMap<ToolNode, { result: unknown; path: string | null }>()
+const producedPathCache = new WeakMap<
+  ToolNode,
+  { result: unknown; info: TurnProducedFile | null }
+>()
 
-function toolProducedPath(node: ToolNode): string | null {
+/**
+ * 单个成功变更调用的产物画像:path + 本次调用的增删行数 + 折叠后的 hunk。
+ *
+ * 行数口径:edit 是 old/new string 的行级 diff(`editDiff`);write_file 没有
+ * 旧内容可对照,按"纯新增"计(content 行数)——与工具行展开的 diff 同一口径,
+ * 两处数字不会打架。
+ */
+function toolProducedInfo(node: ToolNode): TurnProducedFile | null {
   const cached = producedPathCache.get(node)
-  if (cached && cached.result === node.result) return cached.path
-  const path =
-    node.result && !node.result.isError ? mutationPath(node.name, node.args) : null
-  producedPathCache.set(node, { result: node.result, path })
-  return path
+  if (cached && cached.result === node.result) return cached.info
+  let info: TurnProducedFile | null = null
+  if (node.result && !node.result.isError) {
+    const path = mutationPath(node.name, node.args)
+    if (path !== null) {
+      if (node.name === 'edit') {
+        const diffs = editDiff(node.name, node.args, editStartLines(node.result.content))
+        if (diffs) {
+          let added = 0
+          let removed = 0
+          for (const diff of diffs.diffs) {
+            added += diff.added
+            removed += diff.removed
+          }
+          info = { path, kind: 'edit', added, removed, diffs: diffs.diffs }
+        }
+      } else {
+        const diff = writeDiff(node.name, node.args)
+        if (diff) {
+          info = { path, kind: 'write', added: diff.added, removed: diff.removed, diffs: [diff] }
+        }
+      }
+    }
+  }
+  producedPathCache.set(node, { result: node.result, info })
+  return info
 }
+
+/** 每个产物文件最多保留的 hunk 帧数:预览浮层与收尾卡片都不该被一轮
+ *  超长编辑(比如连改十几处的大重构)撑爆;超出部分只计入 ±统计。 */
+const PRODUCED_DIFF_FRAMES = 8
 
 /**
  * 给收尾轮次挂上本轮文件产物;无产物时原节点返回(引用稳定,行 memo 不
  * 失效)。按收尾节点身份在首次分组时冻结:工具结果先于 turn-end 落盘,
  * 之后才到的结果不在口径内。
+ *
+ * 同一文件被多次编辑时合并:±行数累计,hunk 按调用顺序追加(封顶
+ * [`PRODUCED_DIFF_FRAMES`] 帧),操作类型记首次(write 优先于 edit ——
+ * "先建后改"的文件在本轮语义上是新建)。
  */
 const producedTurnCache = new WeakMap<TurnEndNode, TranscriptNode>()
 
 function withProduced(endNode: TurnEndNode, span: TranscriptNode[]): TranscriptNode {
   const cached = producedTurnCache.get(endNode)
   if (cached) return cached
-  const paths: string[] = []
-  const seen = new Set<string>()
+  const files: TurnProducedFile[] = []
+  const byPath = new Map<string, TurnProducedFile>()
   for (const node of span) {
     if (node.kind !== 'tool') continue
-    const path = toolProducedPath(node)
-    if (path === null || seen.has(path)) continue
-    seen.add(path)
-    paths.push(path)
+    const info = toolProducedInfo(node)
+    if (info === null) continue
+    const existing = byPath.get(info.path)
+    if (existing === undefined) {
+      const file: TurnProducedFile = {
+        path: info.path,
+        kind: info.kind,
+        added: info.added,
+        removed: info.removed,
+        diffs: info.diffs.slice(0, PRODUCED_DIFF_FRAMES),
+      }
+      byPath.set(info.path, file)
+      files.push(file)
+      continue
+    }
+    existing.added += info.added
+    existing.removed += info.removed
+    if (existing.diffs.length < PRODUCED_DIFF_FRAMES) {
+      existing.diffs.push(...info.diffs.slice(0, PRODUCED_DIFF_FRAMES - existing.diffs.length))
+    }
   }
-  const next: TranscriptNode = paths.length === 0 ? endNode : { ...endNode, produced: paths }
+  const next: TranscriptNode =
+    files.length === 0 ? endNode : { ...endNode, produced: files }
   producedTurnCache.set(endNode, next)
   return next
 }

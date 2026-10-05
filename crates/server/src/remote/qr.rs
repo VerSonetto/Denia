@@ -84,7 +84,11 @@ mod tests {
     #[test]
     fn renders_all_three_forms() {
         let rendered = render(SAMPLE).unwrap();
-        assert!(rendered.width >= 21, "最小版本宽度是 21,得到 {}", rendered.width);
+        assert!(
+            rendered.width >= 21,
+            "最小版本宽度是 21,得到 {}",
+            rendered.width
+        );
         assert_eq!(rendered.modules.len(), rendered.width * rendered.width);
         assert!(rendered.svg.starts_with("<?xml"), "SVG 头不对");
         assert!(rendered.svg.contains("<svg"));
@@ -93,7 +97,10 @@ mod tests {
         let width = svg_attr(&rendered.svg, "width");
         let height = svg_attr(&rendered.svg, "height");
         assert_eq!(width, height, "SVG 必须正方形");
-        assert!(width >= 240, "SVG 尺寸应当不小于请求的最小边长,得到 {width}");
+        assert!(
+            width >= 240,
+            "SVG 尺寸应当不小于请求的最小边长,得到 {width}"
+        );
     }
 
     /// 从 SVG 根元素取一个数值属性。
@@ -143,7 +150,12 @@ mod tests {
         let block = terminal_block(SAMPLE).unwrap();
         assert!(block.starts_with('\n'));
         assert!(block.ends_with("\n\n"));
-        assert!(block.lines().skip(1).all(|line| line.is_empty() || line.starts_with("  ")));
+        assert!(
+            block
+                .lines()
+                .skip(1)
+                .all(|line| line.is_empty() || line.starts_with("  "))
+        );
     }
 
     #[test]

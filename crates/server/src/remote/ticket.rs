@@ -197,7 +197,10 @@ mod tests {
     #[test]
     fn unknown_ticket_is_rejected() {
         let table = TicketTable::new();
-        assert_eq!(table.redeem("not-a-real-ticket", NOW), Err(TicketError::Unknown));
+        assert_eq!(
+            table.redeem("not-a-real-ticket", NOW),
+            Err(TicketError::Unknown)
+        );
     }
 
     #[test]

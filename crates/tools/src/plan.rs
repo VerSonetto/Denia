@@ -80,7 +80,8 @@ impl Tool for ExitPlanTool {
             );
         }
         ToolOutput::error(
-            "计划审批需要宿主审批通道;当前部署未接入 exit_plan 的审批编排,本次调用未生效。".to_string(),
+            "计划审批需要宿主审批通道;当前部署未接入 exit_plan 的审批编排,本次调用未生效。"
+                .to_string(),
         )
     }
 }
@@ -88,7 +89,7 @@ impl Tool for ExitPlanTool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::permission::{decide, ActionClass, Decision};
+    use crate::permission::{ActionClass, Decision, decide};
     use denia_core::session::PermissionMode;
     use std::path::PathBuf;
     use tokio_util::sync::CancellationToken;

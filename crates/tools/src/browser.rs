@@ -146,10 +146,10 @@ fn render_outcome(outcome: CommandOutcome, ctx: &ToolContext, screenshot: bool) 
     if let Some(state) = &outcome.state {
         text.push_str(&format!("\nstate: {state}"));
     }
-    if let Some(value) = &outcome.value {
-        if !value.is_null() {
-            text.push_str(&format!("\nvalue: {value}"));
-        }
+    if let Some(value) = &outcome.value
+        && !value.is_null()
+    {
+        text.push_str(&format!("\nvalue: {value}"));
     }
     if let Some(snapshot) = &outcome.snapshot {
         text.push_str(&format!("\nsnapshot: {snapshot}"));
@@ -166,31 +166,30 @@ fn render_outcome(outcome: CommandOutcome, ctx: &ToolContext, screenshot: bool) 
         text.push_str(&rendered);
     }
     // 截图 → 视觉注入(read_file 同款约定)。
-    if screenshot && outcome.ok {
-        if let Some(image) = &outcome.image {
-            if let Ok(data) =
-                base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &image.base64)
-            {
-                if ctx.vision_supported {
-                    if let Some(sink) = &ctx.emit_event {
-                        sink(denia_core::session::SessionEvent::UserMessage {
-                            text: "[harness] 浏览器截图已注入为视觉输入".to_string(),
-                            injected: true,
-                            images: vec![ImageData {
-                                mime: image.mime_type.clone(),
-                                data: image.base64.clone(),
-                                path: None,
-                            }],
-                            channel: None,
-                        });
-                    }
-                    text.push_str("\n(截图已注入会话,模型可直接看到)");
-                } else {
-                    text.push_str("\n(当前模型不支持视觉,截图未注入)");
-                }
-                let _ = data;
+    if screenshot
+        && outcome.ok
+        && let Some(image) = &outcome.image
+        && let Ok(data) =
+            base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &image.base64)
+    {
+        if ctx.vision_supported {
+            if let Some(sink) = &ctx.emit_event {
+                sink(denia_core::session::SessionEvent::UserMessage {
+                    text: "[harness] 浏览器截图已注入为视觉输入".to_string(),
+                    injected: true,
+                    images: vec![ImageData {
+                        mime: image.mime_type.clone(),
+                        data: image.base64.clone(),
+                        path: None,
+                    }],
+                    channel: None,
+                });
             }
+            text.push_str("\n(截图已注入会话,模型可直接看到)");
+        } else {
+            text.push_str("\n(当前模型不支持视觉,截图未注入)");
         }
+        let _ = data;
     }
     ToolOutput {
         artifact: None,

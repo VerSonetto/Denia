@@ -1,262 +1,49 @@
-import { RuntimePanel } from '../components/RuntimePanel'
-import { useCallback, useEffect, useMemo, useRef, useState, Fragment, type ClipboardEvent, type KeyboardEvent, type WheelEvent } from 'react'
-import * as api from '../api'
-import type { MentionCandidate } from '../api'
-import type { ApprovalDecisionPayload } from '../api'
-import { optimizePromptText } from '../promptOptimizer'
-import {
-  addSessionLocal,
-  ensureSession,
-  getActiveWorkspace,
-  markStarted,
-  notify,
-  refreshList,
-  markCompacting,
-  setActiveId,
-  setRunningStatus,
-  useCatalogTick,
-  useCompactingFor,
-  useRunningFor,
-  useSessions,
-  useWorkspaces,
-} from '../appStore'
-import { t } from '../i18n'
-import { attach, ensureFollowing, invalidateSession } from '../sessionStreams'
-import { sessionDisplayTitle } from '../sessionDisplay'
-import type { TranscriptNode } from '../fold'
-import type { TrajectoryQuote } from '../trajectory'
-import { SessionView } from '../components/SessionView'
-import { AgentPresetSelector } from '../components/AgentPresetSelector'
-import { SessionPresetLabel } from '../components/SessionPresetLabel'
-import { OpenInApp } from '../components/OpenInApp'
-import { ErrorBoundary } from '../components/ErrorBoundary'
-import { StatsBar } from '../components/StatsBar'
-import { ComposerModelMenu } from '../components/ComposerModelMenu'
-import { ComposerEffortControl } from '../components/ComposerEffortControl'
-import {
-  PermissionSelector,
-  loadPermission,
-  hasStoredPermission,
-} from '../components/PermissionSelector'
-import { PlanReviewPanel } from '../components/PlanReviewPanel'
-import { ApprovalDialog, type ApprovalDecision, type ApprovalRequest } from '../components/ApprovalDialog'
-import { ConfirmDialog } from '../components/ConfirmDialog'
-import { ContextRing } from '../components/ContextRing'
-import {
-  IconBranch,
-  IconArrowDown,
-  IconChevron,
-  IconClose,
-  IconDownload,
-  IconFile,
-  IconFolder,
-  IconImage,
-  IconPanelOpen,
-  IconPlus,
-  IconPaperclip,
-  IconSend,
-  IconSparkles,
-  IconUndo,
-  IconSpinner,
-  IconStop,
-  IconSlashCommand,
-} from '../components/icons'
-import { resolveSessionReasoningEffort } from '../modelCatalog'
-import { useStickToBottom } from '../hooks/useStickToBottom'
-import { activeAtToken, formatFileMention } from './mention'
-import { activeSlashToken, collectSkillTokens, parseLeadingCommand } from './slash'
-import {
-  caretOffsetAtPoint,
-  caretOffsetIn,
-  caretRightAfterChip,
-  createSlashChip,
-  renderDraft,
-  selectRange,
-  serializeEditor,
-  setCaretOffset,
-  type SlashChipKind,
-} from './editor'
-import {
-  REFERENCE_MIME,
-  decodeReference,
-  insertReferenceAt,
-  referenceText,
-} from '../fileTree'
-import { formatTokens } from '../stats'
-import { TodoPanel } from '../components/TodoPanel'
-import { GoalBar } from '../components/GoalBar'
-import { QueuedMessagePanel } from '../components/QueuedMessagePanel'
-import { ConversationAxis } from '../components/ConversationAxis'
-import {
-  downloadFile,
-  serializeSession,
-  type ExportFormat,
-} from '../lib/exportSession'
-import type {
-  AskAnswer,
-  CatalogModel,
-  ModelCatalog,
-  ModelSelection,
-  PermissionMode,
-  SessionEnvelope,
-  SessionSummary,
-  TodoItem,
-  QueuedMessage,
-  PastedImage,
-  PendingAttachment,
-  UserMessageImage,
-  WorkspaceRecord,
-} from '../types'
-import { normalizePermissionMode } from '../types'
-import { isGenericImageName } from '../userImages'
-import { setModelSelection as setSharedModelSelection } from '../modelSelectionStore'
+import { useSessionContext } from '../features/conversation/useSessionContext'
+import { useComposerMentions } from '../features/conversation/useComposerMentions';
+import { useComposerSlash } from '../features/conversation/useComposerSlash';
+import { normalizeSelection, LAST_MODEL_KEY, LAST_MODEL_KEY_LEGACY, NODES_THROTTLE_MS, firstAvailableSelection, queuedPayload, pendingMessageKey, latestPermissionMode, consoleDefaultPermission, latestRequestSelection, latestPendingApproval, type OutgoingPayload } from '../features/conversation/sessionState';
+import { RuntimePanel } from '../components/RuntimePanel';
+import { useCallback, useEffect, useMemo, useRef, useState, Fragment, type ClipboardEvent, type KeyboardEvent, type WheelEvent } from 'react';
+import * as api from '../api';
 
-function normalizeSelection(catalog: ModelCatalog, selection: ModelSelection): ModelSelection {
-  const group = catalog.groups.find((entry) => entry.id === selection.provider)
-  const model = group?.models.find((entry) => entry.id === selection.model)
-  const efforts = model?.reasoning?.efforts ?? []
-  return {
-    ...selection,
-    reasoningEffort: resolveSessionReasoningEffort(efforts, selection.reasoningEffort),
-  }
-}
+import type { ApprovalDecisionPayload } from '../api';
+import { optimizePromptText } from '../promptOptimizer';
+import { addSessionLocal, ensureSession, getActiveWorkspace, markStarted, notify, refreshList, markCompacting, setActiveId, setRunningStatus, useCatalogTick, useCompactingFor, useRunningFor, useSessions, useWorkspaces } from '../appStore';
+import { t } from '../i18n';
+import { attach, ensureFollowing, invalidateSession } from '../sessionStreams';
+import { sessionDisplayTitle } from '../sessionDisplay';
+import type { TranscriptNode } from '../fold';
+import type { TrajectoryQuote } from '../trajectory';
+import { SessionView } from '../components/SessionView';
+import { AgentPresetSelector } from '../components/AgentPresetSelector';
+import { SessionPresetLabel } from '../components/SessionPresetLabel';
+import { OpenInApp } from '../components/OpenInApp';
+import { ErrorBoundary } from '../components/ErrorBoundary';
+import { StatsBar } from '../components/StatsBar';
+import { ComposerModelMenu } from '../components/ComposerModelMenu';
+import { ComposerEffortControl } from '../components/ComposerEffortControl';
+import { PermissionSelector, loadPermission, hasStoredPermission } from '../components/PermissionSelector';
+import { PlanReviewPanel } from '../components/PlanReviewPanel';
+import { ApprovalDialog, type ApprovalDecision, type ApprovalRequest } from '../components/ApprovalDialog';
+import { ConfirmDialog } from '../components/ConfirmDialog';
+import { ContextRing } from '../components/ContextRing';
+import { IconBranch, IconArrowDown, IconChevron, IconClose, IconDownload, IconFile, IconFolder, IconImage, IconPanelOpen, IconPlus, IconPaperclip, IconSend, IconSparkles, IconUndo, IconSpinner, IconStop, IconSlashCommand } from '../components/icons';
+import { resolveSessionReasoningEffort } from '../modelCatalog';
+import { useStickToBottom } from '../hooks/useStickToBottom';
 
-const LAST_MODEL_KEY = 'denia.last-model'
-// 品牌改名前的旧 key 字面量,故意保留 dsh-rs:只用于读取并搬运老用户的选择。
-const LAST_MODEL_KEY_LEGACY = 'dsh-rs.last-model'
-/**
- * transcript nodes 落 state 的节流间隔(ms)。统计条等下游只需"跟得上",
- * 不需要 60Hz;真正的流式渲染发生在会话流子树内部(它自持 nodes)。
- */
-const NODES_THROTTLE_MS = 200
-
-/** 上下文占用轮询的响应是否与上一份等价(等价则沿用旧引用,不惊动渲染)。 */
-function sameBreakdown(
-  previous: api.ContextBreakdownResponse | null,
-  next: api.ContextBreakdownResponse,
-): boolean {
-  if (previous === null) return false
-  const a = previous.breakdown
-  const b = next.breakdown
-  const pa = previous.pressure
-  const pb = next.pressure
-  const ua = previous.usage
-  const ub = next.usage
-  return (
-    a.systemTokens === b.systemTokens &&
-    a.toolsTokens === b.toolsTokens &&
-    a.messageTokens === b.messageTokens &&
-    pa.contextWindow === pb.contextWindow &&
-    pa.pressureTokens === pb.pressureTokens &&
-    pa.projectedTokens === pb.projectedTokens &&
-    ua.uncachedInputTokens === ub.uncachedInputTokens &&
-    ua.outputTokens === ub.outputTokens &&
-    ua.cacheReadTokens === ub.cacheReadTokens &&
-    ua.cacheWriteTokens === ub.cacheWriteTokens &&
-    ua.reasoningTokens === ub.reasoningTokens
-  )
-}
-/**
- * 初始模型选择(默认模型功能已删,交互改为本地记忆):
- * 1. 上一次使用的模型(localStorage,跨进程持久)——从别的会话新建会话、
- *    或完全重新进入界面时,都默认落在它上面;
- * 2. 该模型已不在目录(网关删除/模型下架)时,回退目录里第一个可用模型;
- * 3. 目录为空返回 null(选择器隐藏,发送前必须先配好模型)。
- */
-function firstAvailableSelection(catalog: ModelCatalog): ModelSelection | null {
-  for (const group of catalog.groups) {
-    const model = group.models[0]
-    if (model) return { provider: group.id, model: model.id }
-  }
-  return null
-}
-
-/**
- * 一条待发送消息的完整载荷。省略时取输入区当前内容(手动发送路径);
- * 队列自动发送/立即发送把当时搬进队列的内容显式传回(那时输入区可能已经
- * 在写新消息,不能取现场状态)。
- */
-interface OutgoingPayload {
-  images: PastedImage[]
-  attachments: PendingAttachment[]
-  quotes: TrajectoryQuote[]
-}
-
-/** 把一条队列消息转回发送载荷(队列 → postMessage 的桥)。 */
-function queuedPayload(message: QueuedMessage): OutgoingPayload {
-  return {
-    images: message.images ?? [],
-    attachments: message.attachments ?? [],
-    quotes: (message.quotes ?? []) as TrajectoryQuote[],
-  }
-}
-
-/** 乐观行内容指纹:文本 + 内联图片都参与匹配,避免多条纯图片消息("图片")互相误删。 */
-function pendingMessageKey(message: { text: string; images?: UserMessageImage[] }): string {
-  const images = message.images ?? []
-  return `${message.text}\u0000${images.map((image) => `${image.mime}\u0000${image.data}`).join('\u0001')}`
-}
-
-/** 从事件流反向找最近一次 permission-mode(旧三档值映射到新四档)。 */
-function latestPermissionMode(events: SessionEnvelope[]): PermissionMode | null {
-  for (let index = events.length - 1; index >= 0; index -= 1) {
-    const event = events[index]
-    if (event.type === 'permission-mode') return normalizePermissionMode(event.mode)
-  }
-  return null
-}
-
-/**
- * 设置里的"默认权限模式":无本地显式记忆时的输入框初始档位。
- * 计划模式不出现在设置里,取到也回落自动编辑(与后端校验一致)。
- */
-async function consoleDefaultPermission(): Promise<PermissionMode> {
-  try {
-    const describe = await api.getSettings()
-    const console = describe.namespaces.find((ns) => ns.ns === 'console')
-    const raw = console?.value.defaultPermissionMode
-    const mode = typeof raw === 'string' ? normalizePermissionMode(raw) : 'auto-edit'
-    return mode === 'plan' ? 'auto-edit' : mode
-  } catch {
-    return 'auto-edit'
-  }
-}
-
-/** 从事件流反向找最近一次请求头,恢复该会话最后实际使用的模型。 */
-function latestRequestSelection(events: SessionEnvelope[]): ModelSelection | null {
-  for (let index = events.length - 1; index >= 0; index -= 1) {
-    const event = events[index]
-    if (event.type === 'request-header') {
-      const { provider, model, reasoningEffort } = event.header.config
-      if (!provider || !model) return null
-      return { provider, model, reasoningEffort }
-    }
-    if (event.type === 'request-context') {
-      // 老日志可能只有 request-context(路由元数据),无思考强度可恢复。
-      if (!event.provider || !event.model) return null
-      return { provider: event.provider, model: event.model }
-    }
-  }
-  return null
-}
-
-/** 从事件流恢复仍未结算的审批请求(approval-asked 未被对应 decided 关闭)。 */
-function latestPendingApproval(events: SessionEnvelope[]): ApprovalRequest | null {
-  let pending: ApprovalRequest | null = null
-  for (const event of events) {
-    if (event.type === 'approval-asked') {
-      pending = {
-        requestId: event.request_id,
-        toolName: event.tool,
-        argsPreview: event.args_preview,
-        reason: event.reason,
-      }
-    } else if (event.type === 'approval-decided' && pending?.requestId === event.request_id) {
-      pending = null
-    }
-  }
-  return pending
-}
+import { collectSkillTokens, parseLeadingCommand } from './slash';
+import { serializeEditor } from './editor';
+import { REFERENCE_MIME } from '../fileTree';
+import { formatTokens } from '../stats';
+import { TodoPanel } from '../components/TodoPanel';
+import { GoalBar } from '../components/GoalBar';
+import { QueuedMessagePanel } from '../components/QueuedMessagePanel';
+import { ConversationAxis } from '../components/ConversationAxis';
+import { downloadFile, serializeSession, type ExportFormat } from '../lib/exportSession';
+import type { AskAnswer, CatalogModel, ModelCatalog, ModelSelection, PermissionMode, SessionSummary, TodoItem, QueuedMessage, UserMessageImage, WorkspaceRecord } from '../types';
+import { normalizePermissionMode } from '../types';
+import { isGenericImageName } from '../userImages';
+import { setModelSelection as setSharedModelSelection } from '../modelSelectionStore';
 
 export default function SessionsPage({
   activeId,
@@ -396,117 +183,30 @@ export default function SessionsPage({
 
   const activeWs: WorkspaceRecord | null = getActiveWorkspace()
 
-  const syncPromptHeight = () => {
+  const syncPromptHeight = useCallback(() => {
     const el = promptRef.current
     if (!el) return
     el.style.height = 'auto'
     el.style.height = `${el.scrollHeight}px`
-  }
-
-  /* ---- 输入框 @ 文件/文件夹提及(对照 dsh file-reference:候选只含路径,内容留在 read 工具) ---- */
-
-  const [mentionOpen, setMentionOpen] = useState(false)
-  const [mentionItems, setMentionItems] = useState<MentionCandidate[]>([])
-  const [mentionLoading, setMentionLoading] = useState(false)
-  /** 当前查询串(空态提示区分"根目录为空"与"无匹配")。 */
-  const [mentionQuery, setMentionQuery] = useState('')
-  const [mentionActive, setMentionActive] = useState(0)
-  const mentionMenuRef = useRef<HTMLDivElement | null>(null)
-  const mentionDebounceRef = useRef<number | null>(null)
-  const mentionAbortRef = useRef<AbortController | null>(null)
-  // IME 组词阶段不触发检测/选择旁路(对照模型菜单的 isComposing 旁路)。
-  const composingRef = useRef(false)
-  // 候选范围 = 已存活会话的 cwd;无会话或 cwd 失效时不触发。
-  const mentionCwd = activeSession?.cwd_alive === false ? null : (activeSession?.cwd ?? null)
-  // 下钻时显示当前位置(query 含 / 时取目录前缀),对照 dsh 的面包屑头部。
-  const mentionDir = mentionQuery.includes('/')
-    ? mentionQuery.slice(0, mentionQuery.lastIndexOf('/') + 1)
-    : ''
-
-  const closeMention = useCallback(() => {
-    if (mentionDebounceRef.current !== null) {
-      window.clearTimeout(mentionDebounceRef.current)
-      mentionDebounceRef.current = null
-    }
-    mentionAbortRef.current?.abort()
-    mentionAbortRef.current = null
-    setMentionOpen(false)
-    setMentionItems([])
-    setMentionLoading(false)
   }, [])
 
-  /** 检测光标处 `@` token 并按 150ms 防抖拉候选;token 消失/无 cwd 时关闭。 */
-  const refreshMentions = useCallback(
-    (text: string, caret: number) => {
-      const cwd = mentionCwd
-      if (!cwd) {
-        closeMention()
-        return
-      }
-      const token = activeAtToken(text, caret)
-      if (!token) {
-        closeMention()
-        return
-      }
-      setMentionQuery(token.query)
-      setMentionOpen(true)
-      setMentionLoading(true)
-      if (mentionDebounceRef.current !== null) window.clearTimeout(mentionDebounceRef.current)
-      mentionDebounceRef.current = window.setTimeout(() => {
-        mentionDebounceRef.current = null
-        mentionAbortRef.current?.abort()
-        const controller = new AbortController()
-        mentionAbortRef.current = controller
-        api
-          .searchMentions(cwd, token.query, controller.signal)
-          .then(({ items }) => {
-            if (controller.signal.aborted) return
-            setMentionItems(items)
-            setMentionActive(0)
-            setMentionLoading(false)
-          })
-          .catch(() => {
-            // 后端 400(目录已死等):按无结果收起候选,不打断输入。
-            if (!controller.signal.aborted) {
-              setMentionItems([])
-              setMentionLoading(false)
-            }
-          })
-      }, 150)
-    },
-    [mentionCwd, closeMention],
-  )
-
-  /** 选中候选:用格式化文本替换当前 token,补空格,光标随插入内容其后。 */
-  const pickMention = useCallback(
-    (candidate: MentionCandidate) => {
-      const el = promptRef.current
-      if (!el || document.activeElement !== el) return
-      const text = serializeEditor(el)
-      const caret = caretOffsetIn(el)
-      const token = activeAtToken(text, caret)
-      if (!token) return
-      const mention = formatFileMention(candidate, token.quoted)
-      if (mention === undefined) return
-      const after = text.slice(caret)
-      const suffix = after.length === 0 || !/^\s/u.test(after) ? ' ' : ''
-      selectRange(el, caret - token.prefix.length, caret)
-      document.execCommand('insertText', false, `${mention}${suffix}`)
-      setPrompt(serializeEditor(el))
-      setOptimizedPrompt(null)
-      originalPromptRef.current = ''
-      closeMention()
-      syncPromptHeight()
-    },
-    [closeMention],
-  )
-
-  // 键盘高亮条目跟随滚动(与模型菜单同款 data-kb 标记)。
-  useEffect(() => {
-    if (!mentionOpen) return
-    mentionMenuRef.current?.querySelector('[data-kb="true"]')?.scrollIntoView({ block: 'nearest' })
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [mentionOpen, mentionActive, mentionItems])
+  const inert = !activeId && !activeWs
+  const composingRef = useRef(false)
+  const onDraftChange = useCallback((text: string) => {
+    setPrompt(text)
+    setOptimizedPrompt(null)
+    originalPromptRef.current = ''
+  }, [])
+  const mentionCwd = activeSession?.cwd_alive === false ? null : (activeSession?.cwd ?? null)
+  const { mentionOpen, mentionItems, mentionLoading, mentionQuery, mentionActive, setMentionActive,
+    mentionMenuRef, mentionDir, closeMention, refreshMentions, pickMention } = useComposerMentions({
+      mentionCwd, promptRef, onDraftChange, syncPromptHeight,
+    })
+  const { slashOpen, slashItems, slashActive, setSlashActive, slashMenuRef, skillEntries,
+    applyDraft, closeSlash, refreshMenus, pickSlash, onEditorDrop, runCompactRef } = useComposerSlash({
+      activeId, inert, prompt, promptRef, setPrompt, setOptimizedPrompt, originalPromptRef,
+      syncPromptHeight, closeMention, refreshMentions, composingRef,
+    })
 
   /* ---- 从侧栏「工作区文件」树拖入的引用 ---- */
 
@@ -515,19 +215,6 @@ export default function SessionsPage({
     if (!event.dataTransfer.types.includes(REFERENCE_MIME)) return
     event.preventDefault()
     event.dataTransfer.dropEffect = 'copy'
-  }, [])
-
-  // cwd 失效/会话切换时确保菜单关闭。
-  useEffect(() => {
-    if (!mentionCwd) closeMention()
-  }, [mentionCwd, closeMention])
-
-  // 卸载兜底:防抖与在途请求随组件销毁取消。
-  useEffect(() => {
-    return () => {
-      if (mentionDebounceRef.current !== null) window.clearTimeout(mentionDebounceRef.current)
-      mentionAbortRef.current?.abort()
-    }
   }, [])
 
   /* ---- 会话目标(goal 模式):服务端权威视图 + 事件触发的重拉 ---- */
@@ -684,7 +371,6 @@ export default function SessionsPage({
     }
   }, [running, sending])
 
-  const inert = !activeId && !activeWs
   const hasHistory = Boolean(activeSession?.excerpt)
   // 当前模型的思考强度档位:模型没提供档位时没有可调空间,控件不渲染。
   const effortLevels = useMemo(() => {
@@ -700,237 +386,6 @@ export default function SessionsPage({
     activeId && (hasStarted || sending || hasHistory || pendingMessages.length > 0),
   )
   const phase = showTranscript ? 'active' : 'hero'
-
-  /* ---- 输入框 `/` 斜杠命令/技能(对照 dsh input-trigger:命令认领行,技能直调注入) ---- */
-
-  /** 弹层候选(命令/技能统一结构,description 为已翻译文案)。 */
-  interface SlashCandidate {
-    name: string
-    kind: 'command' | 'skill'
-    description: string
-    /** 技能仅用户可直调(disable-model-invocation)。 */
-    userOnly: boolean
-  }
-
-  const [slashOpen, setSlashOpen] = useState(false)
-  const [slashItems, setSlashItems] = useState<SlashCandidate[]>([])
-  const [slashActive, setSlashActive] = useState(0)
-  const slashMenuRef = useRef<HTMLDivElement | null>(null)
-  // 技能直调词典(仅 user-invocable;仅模型的直调会被后端 400,不进候选)。
-  const [skillEntries, setSkillEntries] = useState<api.SkillSummary[]>([])
-  // token 词典(命令 + 技能):候选过滤、卡片重建、发送收集共用,kind 决定
-  // 卡片样式身份。
-  const slashKinds = useMemo(() => {
-    const map = new Map<string, SlashChipKind>()
-    map.set('plan', 'command')
-    map.set('compact', 'command')
-    for (const skill of skillEntries) map.set(skill.name, 'skill')
-    return map
-  }, [skillEntries])
-  const slashKindRef = useRef(slashKinds)
-  slashKindRef.current = slashKinds
-
-  /** 外部写路径:把草稿文本重建进编辑器 DOM(命中词典的 token 重建为卡片)。 */
-  const applyDraft = useCallback((text: string) => {
-    setPrompt(text)
-    setOptimizedPrompt(null)
-    originalPromptRef.current = ''
-    const el = promptRef.current
-    if (el) {
-      renderDraft(el, text, slashKindRef.current)
-      syncPromptHeight()
-    }
-  }, [])
-
-  const closeSlash = useCallback(() => {
-    setSlashOpen(false)
-    setSlashItems([])
-  }, [])
-
-  /**
-   * 从侧栏「工作区文件」树拖入的引用:在鼠标落点插入 `@路径`。
-   *
-   * 结果与手打 `@` 选中候选**完全一致**(共用 `formatFileMention` 的格式化),
-   * 所以模型侧看到的引用语法只有一种形态。落点用 `caretOffsetAtPoint` 解析;
-   * 解析不出来(拖到了输入框的空白边距、或浏览器不支持该 API)就插到**末尾**
-   * —— 那仍是用户期望的"加进这段草稿",而丢弃这次拖拽会让操作看起来失效。
-   */
-  const onEditorDrop = useCallback(
-    (event: React.DragEvent<HTMLDivElement>) => {
-      const raw = event.dataTransfer.getData(REFERENCE_MIME)
-      if (!raw) return
-      const payload = decodeReference(raw)
-      if (!payload) return
-      event.preventDefault()
-      const reference = referenceText(payload)
-      if (!reference) return
-      const el = promptRef.current
-      if (!el) return
-      const draft = serializeEditor(el)
-      const at = caretOffsetAtPoint(el, event.clientX, event.clientY) ?? draft.length
-      const { text, caret } = insertReferenceAt(draft, at, reference)
-      applyDraft(text)
-      setCaretOffset(el, caret)
-      closeMention()
-      closeSlash()
-      el.focus()
-    },
-    [applyDraft, closeMention, closeSlash],
-  )
-
-  /** 检测光标处 `/` token 并按词典出候选(同步,无网络);@ 提及优先,二者互斥。 */
-  const refreshSlash = useCallback(
-    (text: string, caret: number) => {
-      if (inert) {
-        closeSlash()
-        return
-      }
-      const el = promptRef.current
-      // 光标紧贴卡片之后时,序列化里的 `/name` 是卡片的一部分,不再触发弹层。
-      if (!el || caretRightAfterChip(el)) {
-        closeSlash()
-        return
-      }
-      const token = activeSlashToken(text, caret)
-      if (!token) {
-        closeSlash()
-        return
-      }
-      const query = token.query.toLowerCase()
-      const matches = (entry: SlashCandidate) => !query || entry.name.toLowerCase().includes(query)
-      // 组内前缀命中排在子串命中前;命令组恒在技能组前(命令优先于技能)。
-      const ordered = (list: SlashCandidate[]) => [
-        ...list.filter((entry) => !query || entry.name.toLowerCase().startsWith(query)),
-        ...list.filter((entry) => query && !entry.name.toLowerCase().startsWith(query)),
-      ]
-      const commands: SlashCandidate[] = [
-        { name: 'plan', kind: 'command', description: t('cmdPlanDesc'), userOnly: false },
-        { name: 'compact', kind: 'command', description: t('cmdCompactDesc'), userOnly: false },
-        { name: 'goal', kind: 'command', description: t('cmdGoalDesc'), userOnly: false },
-      ]
-      const skills: SlashCandidate[] = skillEntries.map((skill) => ({
-        name: skill.name,
-        kind: 'skill',
-        description: skill.description,
-        userOnly: !skill.modelInvocable,
-      }))
-      setSlashItems([...ordered(commands.filter(matches)), ...ordered(skills.filter(matches))])
-      setSlashActive(0)
-      setSlashOpen(true)
-    },
-    [inert, skillEntries, closeSlash],
-  )
-
-  /**
-   * 选中候选:先把 token 区间选中,insertHTML 换成卡片原子元素(原生 undo
-   * 可整体撤销)。Chromium 的 insertHTML 会把光标落在不可编辑元素之前,所以
-   * 插完显式钉到卡片之后再补空格,保证「卡片 + 空格」顺序与光标落点正确。
-   */
-  /**
-   * 手动压缩的转发 ref:`pickSlash` 定义在 `runCompact` 之前(菜单逻辑靠
-   * 前),用 ref 拿到最新实现,免得把整块压缩逻辑提前搬上来。
-   */
-  const runCompactRef = useRef<(id: string) => Promise<void>>(async () => {})
-
-  const pickSlash = useCallback(
-    (candidate: SlashCandidate) => {
-      // 压缩是"立即执行"型命令:点选即发起,不落回输入框再等一次回车
-      // (它不产生消息、不经过模型,插进编辑器只会多一次无谓的确认)。
-      if (candidate.name === 'compact' && candidate.kind === 'command') {
-        // 触发菜单的那个 `/` 必须一起删掉:否则命令执行了,输入框里还留
-        // 着半个斜杠(用户还得手动退格)。
-        const editor = promptRef.current
-        if (editor) {
-          const text = serializeEditor(editor)
-          const caret = caretOffsetIn(editor)
-          const token = activeSlashToken(text, caret)
-          if (token) {
-            selectRange(editor, caret - token.prefix.length, caret)
-            document.execCommand('delete')
-          }
-          setPrompt(serializeEditor(editor))
-          originalPromptRef.current = ''
-          syncPromptHeight()
-        }
-        closeSlash()
-        if (activeId) void runCompactRef.current(activeId)
-        return
-      }
-      const el = promptRef.current
-      if (!el || document.activeElement !== el) return
-      const text = serializeEditor(el)
-      const caret = caretOffsetIn(el)
-      const token = activeSlashToken(text, caret)
-      if (!token) return
-      const start = caret - token.prefix.length
-      const after = text.slice(caret)
-      const trailing = after.length === 0 || !/^\s/u.test(after) ? ' ' : ''
-      selectRange(el, start, caret)
-      document.execCommand('insertHTML', false, createSlashChip(candidate.name, candidate.kind).outerHTML)
-      setCaretOffset(el, start + candidate.name.length + 1)
-      if (trailing) {
-        document.execCommand('insertText', false, trailing)
-        setCaretOffset(el, start + candidate.name.length + 1 + trailing.length)
-      }
-      setPrompt(serializeEditor(el))
-      setOptimizedPrompt(null)
-      originalPromptRef.current = ''
-      closeSlash()
-      syncPromptHeight()
-    },
-    [closeSlash, runCompactRef],
-  )
-
-  /** input/selectionchange 共用的菜单触发检测:序列化草稿 + 光标偏移。 */
-  const refreshMenus = useCallback(() => {
-    const el = promptRef.current
-    if (!el) return
-    const text = serializeEditor(el)
-    const caret = caretOffsetIn(el)
-    refreshMentions(text, caret)
-    refreshSlash(text, caret)
-  }, [refreshMentions, refreshSlash])
-  const refreshMenusRef = useRef(refreshMenus)
-  refreshMenusRef.current = refreshMenus
-
-  // 光标移动(点击/方向键/Home/End)不产生 input 事件:用 selectionchange
-  // 驱动 @ 与 / 的触发检测。卡片原子性由 contenteditable=false 原生保证。
-  useEffect(() => {
-    const onSelectionChange = () => {
-      const el = promptRef.current
-      if (!el || document.activeElement !== el || composingRef.current) return
-      refreshMenusRef.current()
-    }
-    document.addEventListener('selectionchange', onSelectionChange)
-    return () => document.removeEventListener('selectionchange', onSelectionChange)
-  }, [])
-
-  // 键盘高亮条目跟随滚动(与 @ 提及菜单同款 data-kb 标记)。
-  useEffect(() => {
-    if (!slashOpen) return
-    slashMenuRef.current?.querySelector('[data-kb="true"]')?.scrollIntoView({ block: 'nearest' })
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [slashOpen, slashActive, slashItems])
-
-  // 发送后输入框被程序清空(不走 onChange):兜底收起弹层。
-  useEffect(() => {
-    if (slashOpen && !prompt) closeSlash()
-  }, [slashOpen, prompt, closeSlash])
-
-  // 会话切换时刷新技能词典(装饰与候选共用);失败静默,菜单仍有命令组。
-  useEffect(() => {
-    if (!activeId) {
-      setSkillEntries([])
-      return
-    }
-    const controller = new AbortController()
-    api
-      .listSkills(activeId, controller.signal)
-      .then(({ skills }) => setSkillEntries(skills.filter((skill) => skill.userInvocable)))
-      .catch(() => {})
-    return () => controller.abort()
-  }, [activeId])
-
 
   /* ---- 粘贴图片 / 附件上传 / 权限与审批 ---- */
 
@@ -1691,32 +1146,7 @@ export default function SessionsPage({
     }
   }, [activeId, rewindReq, rewindBusy])
 
-  /* ---- 上下文窗口占用:全部由服务端 token-meter fold(对齐 dsh contextPressure 投影) ---- */
-
-  const [context, setContext] = useState<api.ContextBreakdownResponse | null>(null)
-
-  const refreshContextBreakdown = () => {
-    // 后台标签页不做无谓轮询;服务端取不到不报错,面板仍显示旧值。
-    if (!activeId || document.hidden) return
-    api
-      .contextBreakdown(activeId)
-      .then((next) => {
-        // 数值未变就沿用旧对象:否则每次轮询都换引用,整页白重渲染一次。
-        setContext((previous) => (sameBreakdown(previous, next) ? previous : next))
-      })
-      .catch(() => {
-        /* 服务端取不到不报错,面板仍显示旧值 */
-      })
-  }
-
-  useEffect(() => {
-    refreshContextBreakdown()
-    // 会话流式追加后按节拍重拉(refetch-on-interval,与 dsh 后推语义一致),
-    // 比轮事件列表 O(新增) 更轻(schedule 短,值得)。
-    const id = setInterval(refreshContextBreakdown, 1500)
-    return () => clearInterval(id)
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeId])
+  const { context } = useSessionContext(activeId)
 
   const showAttachRow =
     pastedImages.length > 0 || attachments.length > 0 || trajQuotes.length > 0

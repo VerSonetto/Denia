@@ -74,10 +74,10 @@ fn redact_path(value: &mut Value, path: &[&str]) {
         return;
     }
     if path.len() == 1 {
-        if let Value::Object(map) = value {
-            if map.contains_key(path[0]) {
-                map.insert(path[0].to_string(), Value::Null);
-            }
+        if let Value::Object(map) = value
+            && map.contains_key(path[0])
+        {
+            map.insert(path[0].to_string(), Value::Null);
         }
         return;
     }

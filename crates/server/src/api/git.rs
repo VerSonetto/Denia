@@ -195,10 +195,7 @@ async fn status(
             })));
         }
         // 不是"非仓库"这一种已知情况 → fail loud,别把配置错误伪装成空态。
-        return Err(error(format!(
-            "git rev-parse 失败:{}",
-            rev_err.trim()
-        )));
+        return Err(error(format!("git rev-parse 失败:{}", rev_err.trim())));
     }
     let repo_root = top_level.trim().to_string();
 
@@ -487,7 +484,9 @@ async fn commit(
         let detail = commit_err.trim();
         // 没有配置 user.name/user.email 是最常见的失败:git 的原文很啰嗦,
         // 这里给一句能直接照做的提示(但仍然把原文附上,不吞细节)。
-        if detail.contains("Please tell me who you are") || detail.contains("unable to auto-detect email") {
+        if detail.contains("Please tell me who you are")
+            || detail.contains("unable to auto-detect email")
+        {
             return Err(ApiError::bad_request(
                 "git/identity-missing",
                 format!(
@@ -541,7 +540,12 @@ async fn push(
     // upstream:`@{upstream}` 解析失败 = 当前分支没有上游。
     let (has_upstream, upstream_raw, _) = run_git(
         &cwd,
-        &["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"],
+        &[
+            "rev-parse",
+            "--abbrev-ref",
+            "--symbolic-full-name",
+            "@{upstream}",
+        ],
     )
     .await
     .map_err(error)?;
@@ -733,15 +737,16 @@ async fn commit_message(
     // 2) 近期提交作为风格参考。
     let log = recent_commits(&cwd).await?;
 
-    let user = format!(
-        "近期提交历史(用于对齐风格与 scope):\n{log}\n\n当前未提交的改动:\n{context}"
-    );
+    let user =
+        format!("近期提交历史(用于对齐风格与 scope):\n{log}\n\n当前未提交的改动:\n{context}");
 
     // 3) 关思考:生成提交信息是短任务,低延迟优先。
     //    - 模型支持 `off` 档位 → 直接用 off(DeepSeek 线上会翻成 thinking disabled);
     //    - 只支持强度档位(如 low/medium/high)→ 取最低档;
     //    - 完全不支持思考 → 不传档位。
-    let effort = resolve_low_latency_effort(&state, &provider, &model, body.reasoning_effort.as_deref()).await;
+    let effort =
+        resolve_low_latency_effort(&state, &provider, &model, body.reasoning_effort.as_deref())
+            .await;
 
     state
         .registry
@@ -769,7 +774,9 @@ async fn commit_message(
     let mut text = String::new();
     while let Some(chunk) = chunks.next().await {
         match chunk {
-            Ok(denia_core::stream::StreamChunk::TextDelta { text: delta, .. }) => text.push_str(&delta),
+            Ok(denia_core::stream::StreamChunk::TextDelta { text: delta, .. }) => {
+                text.push_str(&delta)
+            }
             Ok(denia_core::stream::StreamChunk::Finish { reason }) => {
                 // 失败收尾必须以错误抛出,否则会拿半截文本当结果。
                 if let denia_core::stream::FinishReason::Error { failure }
@@ -823,7 +830,13 @@ async fn resolve_low_latency_effort(
         .find(|group| group.id == provider)
         .and_then(|group| group.models.iter().find(|item| item.id == model))
         .and_then(|item| item.reasoning.as_ref())
-        .map(|reasoning| reasoning.efforts.iter().map(|effort| effort.id.clone()).collect::<Vec<_>>());
+        .map(|reasoning| {
+            reasoning
+                .efforts
+                .iter()
+                .map(|effort| effort.id.clone())
+                .collect::<Vec<_>>()
+        });
     let Some(efforts) = efforts else {
         return requested.map(str::to_string);
     };
@@ -863,7 +876,9 @@ async fn build_commit_context(cwd: &Path) -> Result<String, ApiError> {
         .collect();
 
     // 已跟踪文件的改动(含已暂存与未暂存)。
-    let (ok, diff, diff_err) = run_git(cwd, &["diff", "HEAD", "--no-color"]).await.map_err(error)?;
+    let (ok, diff, diff_err) = run_git(cwd, &["diff", "HEAD", "--no-color"])
+        .await
+        .map_err(error)?;
     if !ok {
         return Err(error(format!("git diff 失败:{}", diff_err.trim())));
     }
@@ -909,7 +924,11 @@ async fn build_commit_context(cwd: &Path) -> Result<String, ApiError> {
 async fn recent_commits(cwd: &Path) -> Result<String, ApiError> {
     let (ok, log, log_err) = run_git(
         cwd,
-        &["log", &format!("-{MESSAGE_LOG_COUNT}"), "--pretty=format:%s"],
+        &[
+            "log",
+            &format!("-{MESSAGE_LOG_COUNT}"),
+            "--pretty=format:%s",
+        ],
     )
     .await
     .map_err(error)?;
@@ -944,17 +963,16 @@ fn sanitize_commit_message(raw: &str) -> String {
     let text = text
         .strip_prefix('"')
         .and_then(|inner| inner.strip_suffix('"'))
-        .or_else(|| text.strip_prefix('「').and_then(|inner| inner.strip_suffix('」')))
+        .or_else(|| {
+            text.strip_prefix('「')
+                .and_then(|inner| inner.strip_suffix('」'))
+        })
         .unwrap_or(text);
     text.trim().to_string()
 }
 
 /// 取文件改动前后的全文(拿不到就返回 null)。
-async fn read_before_after(
-    cwd: &Path,
-    file: &str,
-    source: &str,
-) -> (Value, Value) {
+async fn read_before_after(cwd: &Path, file: &str, source: &str) -> (Value, Value) {
     let repo_relative = format!(":/{}", file.trim_start_matches('/'));
     // 未暂存:HEAD 版本 → 工作区版本。
     // 已暂存:HEAD 版本 → 索引版本(`git show :file`)。
@@ -1116,7 +1134,7 @@ mod tests {
         std::fs::write(repo.join("a.txt"), "hello").unwrap();
 
         let message = "feat(server):测试提交\n\n- 第一点\n- 第二点";
-        let (ok, _, err) = run_git_with_stdin(
+        let (ok, _, _err) = run_git_with_stdin(
             &repo,
             &["commit", "-F", "-", "--cleanup=whitespace"],
             message.as_bytes(),
@@ -1139,7 +1157,9 @@ mod tests {
         assert!(ok, "提交应当成功:stdout={stdout:?} stderr={err:?}");
 
         // 提交信息完整落库(中文、空行、分点都在)。
-        let (_, log, _) = run_git(&repo, &["log", "-1", "--pretty=format:%B"]).await.unwrap();
+        let (_, log, _) = run_git(&repo, &["log", "-1", "--pretty=format:%B"])
+            .await
+            .unwrap();
         assert_eq!(log.trim_end(), message, "提交信息必须逐字节保真");
         let _ = std::fs::remove_dir_all(&repo);
     }
@@ -1162,13 +1182,21 @@ mod tests {
         assert!(remotes.trim().is_empty(), "新仓库不该有远程");
 
         // 加一个远程但不设 upstream:这时才走 no-upstream 分支。
-        let (ok, _, _) = run_git(&repo, &["remote", "add", "origin", "https://example.invalid/x.git"])
-            .await
-            .unwrap();
+        let (ok, _, _) = run_git(
+            &repo,
+            &["remote", "add", "origin", "https://example.invalid/x.git"],
+        )
+        .await
+        .unwrap();
         assert!(ok, "加远程应当成功");
         let (has_upstream, _, _) = run_git(
             &repo,
-            &["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"],
+            &[
+                "rev-parse",
+                "--abbrev-ref",
+                "--symbolic-full-name",
+                "@{upstream}",
+            ],
         )
         .await
         .unwrap();
@@ -1227,7 +1255,12 @@ mod tests {
         let other = std::env::temp_dir().join(format!("denia-git-{}-other", std::process::id()));
         let _ = std::fs::remove_dir_all(&other);
         let cloned = std::process::Command::new("git")
-            .args(["clone", "-q", remote_dir.to_str().unwrap(), other.to_str().unwrap()])
+            .args([
+                "clone",
+                "-q",
+                remote_dir.to_str().unwrap(),
+                other.to_str().unwrap(),
+            ])
             .output()
             .expect("git 应当能执行");
         assert!(cloned.status.success(), "clone 应当成功");
@@ -1242,7 +1275,11 @@ mod tests {
                 .expect("git 应当能执行");
         }
         std::fs::write(other.join("b.txt"), "two").unwrap();
-        for args in [vec!["add", "-A"], vec!["commit", "-q", "-m", "chore: second"], vec!["push", "-q"]] {
+        for args in [
+            vec!["add", "-A"],
+            vec!["commit", "-q", "-m", "chore: second"],
+            vec!["push", "-q"],
+        ] {
             std::process::Command::new("git")
                 .args(&args)
                 .current_dir(&other)
@@ -1364,7 +1401,10 @@ mod tests {
             .unwrap();
 
         let context = build_commit_context(&repo).await.expect("应当能取到上下文");
-        assert!(context.trim().is_empty(), "干净工作区应当没有上下文:{context:?}");
+        assert!(
+            context.trim().is_empty(),
+            "干净工作区应当没有上下文:{context:?}"
+        );
         let _ = std::fs::remove_dir_all(&repo);
     }
 
@@ -1374,9 +1414,13 @@ mod tests {
         let repo = scratch_repo("log");
         std::fs::write(repo.join("a.txt"), "a").unwrap();
         run_git(&repo, &["add", "-A"]).await.unwrap();
-        run_git_with_stdin(&repo, &["commit", "-F", "-"], "feat(core):第一条".as_bytes())
-            .await
-            .unwrap();
+        run_git_with_stdin(
+            &repo,
+            &["commit", "-F", "-"],
+            "feat(core):第一条".as_bytes(),
+        )
+        .await
+        .unwrap();
         std::fs::write(repo.join("b.txt"), "b").unwrap();
         run_git(&repo, &["add", "-A"]).await.unwrap();
         run_git_with_stdin(&repo, &["commit", "-F", "-"], "fix(web):第二条".as_bytes())
@@ -1398,10 +1442,7 @@ mod tests {
     async fn recent_commits_tolerates_empty_repository() {
         let repo = scratch_repo("empty-log");
         let log = recent_commits(&repo).await.expect("空仓库不该报错");
-        assert!(
-            log.contains("还没有提交历史"),
-            "空仓库应当给出说明:{log:?}"
-        );
+        assert!(log.contains("还没有提交历史"), "空仓库应当给出说明:{log:?}");
         let _ = std::fs::remove_dir_all(&repo);
     }
 }

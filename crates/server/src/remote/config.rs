@@ -280,7 +280,9 @@ pub fn validate_remote(value: Value) -> Result<Value, String> {
 
     for host in &parsed.allowed_hosts {
         if host.trim().is_empty() || host.contains('/') {
-            return Err(format!("allowedHosts 里的 '{host}' 不是合法的 host(不含协议与路径)"));
+            return Err(format!(
+                "allowedHosts 里的 '{host}' 不是合法的 host(不含协议与路径)"
+            ));
         }
     }
 
@@ -317,7 +319,10 @@ mod tests {
     fn tunnel_ticket_ttl_is_capped_at_write_time() {
         let value = json!({"tunnel": {"ticketTtlSeconds": 3600}});
         let error = validate_remote(value).unwrap_err();
-        assert!(error.contains("ticketTtlSeconds"), "错误信息要指出字段:{error}");
+        assert!(
+            error.contains("ticketTtlSeconds"),
+            "错误信息要指出字段:{error}"
+        );
     }
 
     #[test]

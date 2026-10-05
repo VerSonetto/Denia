@@ -11,7 +11,10 @@ use std::time::Duration;
 
 use axum::extract::{Query, State};
 use axum::http::{StatusCode, header};
-use axum::response::{IntoResponse, sse::{Event, KeepAlive, Sse}};
+use axum::response::{
+    IntoResponse,
+    sse::{Event, KeepAlive, Sse},
+};
 use axum::routing::get;
 use axum::{Json, Router};
 use futures::StreamExt;
@@ -121,7 +124,10 @@ fn reply(
     // 游标只能按**实际交付的最后一条序号**推进。用 after + 条数反推在断档时会
     // 算错(环里最旧序号可能远大于 after+1);取截断后的末位则是准的。
     let next = batch.last().map(|(seq, _)| *seq).unwrap_or(after);
-    let events = batch.into_iter().map(|(_, event)| event).collect::<Vec<_>>();
+    let events = batch
+        .into_iter()
+        .map(|(_, event)| event)
+        .collect::<Vec<_>>();
     // no-store:响应带 cookie、内容是"此刻的事件尾部",被中间层缓存下来会把
     // 陈旧事件发给后续请求。
     (

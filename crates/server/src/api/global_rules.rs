@@ -61,7 +61,9 @@ fn view_of(state: &AppState) -> Result<GlobalRulesView, ApiError> {
     })
 }
 
-async fn get_global_rules(State(state): State<Arc<AppState>>) -> Result<impl axum::response::IntoResponse, ApiError> {
+async fn get_global_rules(
+    State(state): State<Arc<AppState>>,
+) -> Result<impl axum::response::IntoResponse, ApiError> {
     Ok(Json(view_of(&state)?))
 }
 

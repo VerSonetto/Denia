@@ -24,13 +24,15 @@ async fn connects_lists_tools_and_calls_them() {
 
     let snapshot = manager.snapshot();
     let state = &snapshot.servers[0];
-    assert_eq!(state.status, McpServerStatus::Connected, "{:?}", state.error);
+    assert_eq!(
+        state.status,
+        McpServerStatus::Connected,
+        "{:?}",
+        state.error
+    );
     // 工具名带服务器前缀,模型写得出、派发认得回。
     let names = snapshot.tool_names();
-    assert!(
-        names.contains(&"mcp__fx__echo".to_string()),
-        "{names:?}"
-    );
+    assert!(names.contains(&"mcp__fx__echo".to_string()), "{names:?}");
     assert!(names.contains(&"mcp__fx__big".to_string()), "{names:?}");
 
     let result = manager
@@ -112,7 +114,9 @@ async fn disabled_server_never_spawns_and_failure_is_isolated() {
         ..Default::default()
     };
     broken.enabled = true;
-    manager.reload(&[disabled, broken, fixture_config("ok")]).await;
+    manager
+        .reload(&[disabled, broken, fixture_config("ok")])
+        .await;
 
     let snapshot = manager.snapshot();
     let by_id = |id: &str| {

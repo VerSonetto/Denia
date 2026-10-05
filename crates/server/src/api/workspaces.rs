@@ -70,14 +70,14 @@ async fn delete_workspace(
             .runtime
             .ensure_removable(session_id)
             .map_err(|e| ApiError::bad_request("runtime/active-child", e))?;
-        if let Ok(live) = state.live.get_or_load(&state.sessions, session_id) {
-            if live.running.load(std::sync::atomic::Ordering::SeqCst) {
-                return Err(ApiError::new(
-                    axum::http::StatusCode::CONFLICT,
-                    "workspace/running-session",
-                    "cancel running sessions in this workspace before deleting it",
-                ));
-            }
+        if let Ok(live) = state.live.get_or_load(&state.sessions, session_id)
+            && live.running.load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(ApiError::new(
+                axum::http::StatusCode::CONFLICT,
+                "workspace/running-session",
+                "cancel running sessions in this workspace before deleting it",
+            ));
         }
     }
 
@@ -98,6 +98,7 @@ async fn delete_workspace(
         // 不回收的话它们只增不减,长期运行下每个用过的会话都留一份。
         state.file_history.forget(session_id);
         state.driver.clear_read_state(session_id);
+        state.driver.clear_compaction_state(session_id);
         state.driver.clear_mcp_loads(session_id);
         // 会话附件目录一并回收(粘贴图片每次落盘一张,不清即只增不减)。
         if let Err(error) = crate::api::uploads::remove_session_uploads(&state.home, session_id) {

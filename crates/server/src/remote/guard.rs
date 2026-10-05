@@ -302,6 +302,9 @@ mod tests {
         assert_eq!(cookie_value(cookies, "missing"), None);
         assert_eq!(cookie_value("", SESSION_COOKIE), None);
         // 名字是前缀关系时不能误配。
-        assert_eq!(cookie_value("denia_remote_session_x=1", SESSION_COOKIE), None);
+        assert_eq!(
+            cookie_value("denia_remote_session_x=1", SESSION_COOKIE),
+            None
+        );
     }
 }

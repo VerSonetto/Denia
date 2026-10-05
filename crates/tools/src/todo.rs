@@ -33,7 +33,8 @@ const DESCRIPTION_HEAD: &str = "记录并更新当前工作的结构化任务清
 
 const DESCRIPTION_PARALLEL: &str = "正在做的任务标记 in_progress:工作真在并行时(并发子代理、后台命令)可以多条同时 in_progress;只要还有未完成的工作,至少保持一条 in_progress。";
 
-const DESCRIPTION_SINGLE: &str = "同一时间最多一条 todo 处于 in_progress;只要还有未完成的工作,应恰有一条进行中。";
+const DESCRIPTION_SINGLE: &str =
+    "同一时间最多一条 todo 处于 in_progress;只要还有未完成的工作,应恰有一条进行中。";
 
 const DESCRIPTION_TAIL: &str = "任务完成的当下就标记 completed(不要攒到最后批量标);全部工作完成才允许没有 in_progress 项。琐碎的单步任务不用建清单。状态:pending(未开始)、in_progress(进行中)、completed(已完成)。";
 
@@ -84,7 +85,7 @@ fn to_todo_list(raw: Vec<TodoArg>, allow_parallel: bool) -> Result<Vec<TodoItem>
             other => {
                 return Err(format!(
                     "todo 状态无效:{other:?}(可用:pending/in_progress/completed)"
-                ))
+                ));
             }
         };
         todos.push(TodoItem { content, status });

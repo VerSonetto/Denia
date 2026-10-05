@@ -54,7 +54,9 @@ pub enum Decision {
 /// - 只读:写类全拒;
 /// - 计划:调研 + exit_plan 审批,其余写类全拒。
 pub fn decide(mode: PermissionMode, class: ActionClass) -> Decision {
-    use ActionClass::{BashWrite, Delete, MemoryWrite, PlanSubmit, PresetCreate, Read, WriteInside, WriteOutside};
+    use ActionClass::{
+        BashWrite, Delete, MemoryWrite, PlanSubmit, PresetCreate, Read, WriteInside, WriteOutside,
+    };
     use Decision::{Allow, Ask, Deny};
     use PermissionMode::{AutoEdit, Full, Plan, ReadOnly};
     match (mode, class) {
@@ -245,17 +247,24 @@ mod tests {
         assert!(memory_path_is_sensitive(std::path::Path::new(
             "C:\\repo\\.git\\hooks\\post-commit"
         )));
-        assert!(memory_path_is_sensitive(std::path::Path::new("/a/node_modules/x/y.md")));
+        assert!(memory_path_is_sensitive(std::path::Path::new(
+            "/a/node_modules/x/y.md"
+        )));
         assert!(memory_path_is_sensitive(std::path::Path::new(
             "/home/u/.claude/skills/s.md"
         )));
-        assert!(memory_path_is_sensitive(std::path::Path::new("/repo/Hooks/x.md")), "大小写折叠");
+        assert!(
+            memory_path_is_sensitive(std::path::Path::new("/repo/Hooks/x.md")),
+            "大小写折叠"
+        );
         // 记忆目录本体不命中( home 目录名 .denia 不在名单)。
         assert!(!memory_path_is_sensitive(std::path::Path::new(
             "/home/u/.denia/memories/projects/x/memory/a.md"
         )));
         // 子串不算命中。
-        assert!(!memory_path_is_sensitive(std::path::Path::new("/ws/gitbook/notes.md")));
+        assert!(!memory_path_is_sensitive(std::path::Path::new(
+            "/ws/gitbook/notes.md"
+        )));
     }
 
     #[test]

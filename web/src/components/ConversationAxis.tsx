@@ -71,10 +71,10 @@ function previewsFor(anchors: readonly SessionAnchor[], nodes: readonly Transcri
         .trim()
       if (text) slot.response = text
     } else if (node.kind === 'turn-end' && node.produced) {
-      for (const path of node.produced) {
-        if (seen.has(path)) continue
-        seen.add(path)
-        slot.outputs.push(path)
+      for (const file of node.produced) {
+        if (seen.has(file.path)) continue
+        seen.add(file.path)
+        slot.outputs.push(file.path)
       }
     }
   }

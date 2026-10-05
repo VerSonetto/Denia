@@ -124,11 +124,7 @@ impl McpSnapshot {
             .tool_names()
             .into_iter()
             .map(|name| {
-                let description = self
-                    .descriptions
-                    .get(&name)
-                    .cloned()
-                    .unwrap_or_default();
+                let description = self.descriptions.get(&name).cloned().unwrap_or_default();
                 let schema = self
                     .schemas
                     .get(&name)
@@ -276,10 +272,10 @@ impl McpManager {
             let stale_connection = connected
                 .get(&config.id)
                 .is_some_and(|entry| entry.fingerprint != fingerprint_of(config));
-            if stale_connection || (!config.enabled && connected.contains_key(&config.id)) {
-                if let Some(entry) = connected.remove(&config.id) {
-                    entry.client.shutdown().await;
-                }
+            if (stale_connection || (!config.enabled && connected.contains_key(&config.id)))
+                && let Some(entry) = connected.remove(&config.id)
+            {
+                entry.client.shutdown().await;
             }
             if !config.enabled {
                 states.push(disabled_state(config));
@@ -309,8 +305,11 @@ impl McpManager {
             states.push(state);
         }
 
-        self.snapshot
-            .store(Arc::new(build_snapshot(&states, &schema_src, &self.builtin_names)));
+        self.snapshot.store(Arc::new(build_snapshot(
+            &states,
+            &schema_src,
+            &self.builtin_names,
+        )));
     }
 
     async fn spawn(&self, config: &McpServerConfig) -> Result<ConnectedServer, McpClientError> {
@@ -324,11 +323,7 @@ impl McpManager {
     }
 
     fn connected_state(&self, config: &McpServerConfig, entry: &ConnectedServer) -> McpServerState {
-        let disabled: HashSet<&str> = config
-            .disabled_tools
-            .iter()
-            .map(String::as_str)
-            .collect();
+        let disabled: HashSet<&str> = config.disabled_tools.iter().map(String::as_str).collect();
         let tools = entry
             .tools
             .iter()
@@ -462,8 +457,7 @@ impl McpManager {
             entry.client.shutdown().await;
         }
         self.last_results.lock().unwrap().clear();
-        self.snapshot
-            .store(Arc::new(McpSnapshot::empty()));
+        self.snapshot.store(Arc::new(McpSnapshot::empty()));
     }
 }
 
@@ -500,8 +494,8 @@ fn disabled_state(config: &McpServerConfig) -> McpServerState {
         command: config.command.clone(),
         args: config.args.clone(),
         env_keys: config.env.keys().cloned().collect(),
-            header_keys: config.headers.keys().cloned().collect(),
-            url: config.url.clone(),
+        header_keys: config.headers.keys().cloned().collect(),
+        url: config.url.clone(),
         cwd: config.cwd.as_ref().map(|path| path.display().to_string()),
         enabled: false,
         status: McpServerStatus::Disabled,
@@ -517,8 +511,8 @@ fn error_state(config: &McpServerConfig, error: String) -> McpServerState {
         command: config.command.clone(),
         args: config.args.clone(),
         env_keys: config.env.keys().cloned().collect(),
-            header_keys: config.headers.keys().cloned().collect(),
-            url: config.url.clone(),
+        header_keys: config.headers.keys().cloned().collect(),
+        url: config.url.clone(),
         cwd: config.cwd.as_ref().map(|path| path.display().to_string()),
         enabled: true,
         status: McpServerStatus::Error,
@@ -661,8 +655,7 @@ mod tests {
 
     #[test]
     fn routes_resolve_qualified_names() {
-        let state =
-            connected_state_with(vec![tool("read file", "mcp__fs__read_file", true, None)]);
+        let state = connected_state_with(vec![tool("read file", "mcp__fs__read_file", true, None)]);
         let snapshot = build_snapshot(&[state], &no_schemas(), &HashSet::new());
         assert_eq!(
             snapshot.route("mcp__fs__read_file"),
@@ -726,4 +719,3 @@ mod tests {
         assert_eq!(McpServerStatus::Error.as_str(), "error");
     }
 }
-

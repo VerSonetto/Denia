@@ -224,8 +224,8 @@ impl Runtime {
             loop {
                 match done.recv().await {
                     Ok(job) => {
-                        if let Some(result) = runtime.inner.jobs.claim_notice(&job.id, &job.owner) {
-                            if let Err(e) = runtime
+                        if let Some(result) = runtime.inner.jobs.claim_notice(&job.id, &job.owner)
+                            && let Err(e) = runtime
                                 .enqueue(
                                     &job.owner,
                                     format!("job:{}", job.id),
@@ -233,10 +233,9 @@ impl Runtime {
                                     "job-completed".into(),
                                 )
                                 .await
-                            {
-                                runtime.inner.jobs.release_notice(&job.id, &job.owner);
-                                tracing::error!(error=%e,"任务通知投递失败");
-                            }
+                        {
+                            runtime.inner.jobs.release_notice(&job.id, &job.owner);
+                            tracing::error!(error=%e,"任务通知投递失败");
                         }
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
@@ -350,10 +349,7 @@ impl Runtime {
         .map_err(|e| e.to_string())??;
         // 运行时参与路径(派生子代理/投递指令/收件箱同步)需要事件驻留。
         // 走 LiveSessions 的入口:热升级后立刻复核驻留预算。
-        inner
-            .live
-            .ensure_hot(&live)
-            .map_err(|e| e.to_string())?;
+        inner.live.ensure_hot(&live).map_err(|e| e.to_string())?;
         Ok(live)
     }
     fn sync_inbox(inbox: &mut Inbox, session: &denia_session::Session) {
@@ -609,10 +605,15 @@ impl Runtime {
         let config = self.goals_config();
 
         // 上一轮结局分类(设置 goal 后还没有任何 turn 视为正常,直接开跑)。
-        let last_reason = live.session.events().iter().rev().find_map(|e| match &e.event {
-            SessionEvent::TurnEnd { reason, .. } => Some(reason.clone()),
-            _ => None,
-        });
+        let last_reason = live
+            .session
+            .events()
+            .iter()
+            .rev()
+            .find_map(|e| match &e.event {
+                SessionEvent::TurnEnd { reason, .. } => Some(reason.clone()),
+                _ => None,
+            });
         match &last_reason {
             // 用户手动停止:目标自动暂停,等用户恢复——避免"停不下来"。
             Some(denia_core::session::TurnEndReason::Aborted { .. }) => {
@@ -653,9 +654,7 @@ impl Runtime {
         // 预算检查:耗尽 → budget_limited + 最后一轮收尾(收尾轮结束后
         // 状态非 active,自然停止;用户提高预算会回到 active)。
         let used = live.session.goal_tokens_used().unwrap_or(0);
-        let wrapup = goal
-            .token_budget
-            .is_some_and(|budget| used >= budget);
+        let wrapup = goal.token_budget.is_some_and(|budget| used >= budget);
         if wrapup {
             Self::publish_goal(&live, GoalOp::BudgetLimit).await?;
         } else if goal.rounds_started >= config.max_rounds {
@@ -796,82 +795,79 @@ impl Runtime {
         let id = id.to_string();
         tokio::spawn(async move {
             let current = id;
-            loop {
-                let child = runtime
-                    .inner
-                    .children
-                    .lock()
-                    .unwrap()
-                    .get(&current)
-                    .cloned();
-                let Some(child) = child else {
-                    break;
-                };
-                // 记忆提取子代理对用户与父代理都不可见:结束时静默清理,
-                // 不发"子代理执行结束"通知。
-                if child.descriptor.mode == "memory" {
-                    break;
-                }
-                if runtime
-                    .descendants(&current)
-                    .iter()
-                    .any(|c| runtime.is_active(&c.id))
-                {
-                    break;
-                }
-                if runtime.is_active(&current) {
-                    break;
-                }
-                if let Ok(live) = runtime.live(&current).await {
-                    let events = live.session.events();
-                    let last = events.iter().rev().find_map(|e| {
-                        if let SessionEvent::AssistantMessage { blocks, .. } = &e.event {
-                            Some(blocks.clone())
-                        } else {
-                            None
-                        }
-                    });
-                    let text = last
-                        .unwrap_or_default()
-                        .iter()
-                        .filter_map(|b| {
-                            if let denia_core::stream::ContentBlock::Text { text } = b {
-                                Some(text.as_str())
-                            } else {
-                                None
-                            }
-                        })
-                        .collect::<Vec<_>>()
-                        .join("\n");
-                    let reason = events.iter().rev().find_map(|e| {
-                        if let SessionEvent::TurnEnd { reason, .. } = &e.event {
-                            Some(reason)
-                        } else {
-                            None
-                        }
-                    });
-                    let summary = format!(
-                        "[子代理执行结束] {} ({})\n状态：{}\n{}",
-                        child.descriptor.label,
-                        current,
-                        serde_json::to_string(&reason).unwrap_or_default(),
-                        text.chars()
-                            .take(runtime.config().output_bytes / 4)
-                            .collect::<String>()
-                    );
-                    if let Err(error) = runtime
-                        .enqueue(
-                            &child.parent_id,
-                            format!("settled:{}:{}", current, live.session.next_turn_number()),
-                            summary,
-                            "subagent-settled".into(),
-                        )
-                        .await
-                    {
-                        tracing::error!(%error,"子代理结果通知失败");
+            let child = runtime
+                .inner
+                .children
+                .lock()
+                .unwrap()
+                .get(&current)
+                .cloned();
+            let Some(child) = child else {
+                return;
+            };
+            // 记忆提取子代理对用户与父代理都不可见:结束时静默清理,
+            // 不发"子代理执行结束"通知。
+            if child.descriptor.mode == "memory" {
+                return;
+            }
+            if runtime
+                .descendants(&current)
+                .iter()
+                .any(|c| runtime.is_active(&c.id))
+            {
+                return;
+            }
+            if runtime.is_active(&current) {
+                return;
+            }
+            if let Ok(live) = runtime.live(&current).await {
+                let events = live.session.events();
+                let last = events.iter().rev().find_map(|e| {
+                    if let SessionEvent::AssistantMessage { blocks, .. } = &e.event {
+                        Some(blocks.clone())
+                    } else {
+                        None
                     }
+                });
+                let text = last
+                    .unwrap_or_default()
+                    .iter()
+                    .filter_map(|b| {
+                        if let denia_core::stream::ContentBlock::Text { text } = b {
+                            Some(text.as_str())
+                        } else {
+                            None
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                let reason = events.iter().rev().find_map(|e| {
+                    if let SessionEvent::TurnEnd { reason, .. } = &e.event {
+                        Some(reason)
+                    } else {
+                        None
+                    }
+                });
+                let summary = format!(
+                    "[子代理执行结束] {} ({})\n状态：{}\n{}",
+                    child.descriptor.label,
+                    current,
+                    serde_json::to_string(&reason).unwrap_or_default(),
+                    text.chars()
+                        .take(runtime.config().output_bytes / 4)
+                        .collect::<String>()
+                );
+                if let Err(error) = runtime
+                    .enqueue(
+                        &child.parent_id,
+                        format!("settled:{}:{}", current, live.session.next_turn_number()),
+                        summary,
+                        "subagent-settled".into(),
+                    )
+                    .await
+                {
+                    tracing::error!(%error,"子代理结果通知失败");
                 }
-                break;
             }
         });
     }
@@ -887,10 +883,10 @@ impl Runtime {
         {
             self.inner.reserved.lock().unwrap().remove(target);
         }
-        if let Some(live) = self.inner.live.get(target) {
-            if let Some(token) = live.cancel.lock().unwrap().as_ref() {
-                token.cancel();
-            }
+        if let Some(live) = self.inner.live.get(target)
+            && let Some(token) = live.cancel.lock().unwrap().as_ref()
+        {
+            token.cancel();
         }
         Ok(())
     }
@@ -1063,9 +1059,7 @@ impl Runtime {
                 .subagent
                 .as_ref()
                 .and_then(|s| s.allowed_tools.as_ref())
-                && let Some(extra) = allowed
-                    .iter()
-                    .find(|name| !parent_allowed.contains(name))
+                && let Some(extra) = allowed.iter().find(|name| !parent_allowed.contains(name))
             {
                 return Err(format!("子代理不能扩大父代理的工具集合:{extra}"));
             }
@@ -1109,9 +1103,7 @@ impl Runtime {
                     .set_permission_mode(permission)
                     .map_err(|e| e.to_string())?;
                 if let Some(preset) = &parent_preset {
-                    child
-                        .set_agent_preset(preset)
-                        .map_err(|e| e.to_string())?;
+                    child.set_agent_preset(preset).map_err(|e| e.to_string())?;
                 }
                 child.flush().map_err(|e| e.to_string())?;
                 Ok(child.id().to_string())
@@ -1197,14 +1189,11 @@ fn string(args: &Value, key: &str) -> Result<String, String> {
         .map(str::to_string)
         .ok_or_else(|| format!("缺少非空参数：{key}"))
 }
+#[cfg(test)]
 fn validate_wait_timeout(args: &Value) -> Result<(), String> {
-    if args
-        .get("timeout_ms")
-        .is_some_and(|value| value.as_u64().is_none_or(|timeout| timeout == 0))
-    {
-        return Err("timeout_ms 必须为正整数".into());
-    }
-    Ok(())
+    let mut args = args.clone();
+    args["id"] = json!("test");
+    denia_tools::runtime_command::RuntimeCommand::parse("job_output", args).map(|_| ())
 }
 
 fn background_result(mut result: Value, pending: bool) -> Value {
@@ -1221,94 +1210,87 @@ fn background_result(mut result: Value, pending: bool) -> Value {
 
 #[async_trait]
 impl AgentRuntime for Runtime {
-    async fn execute(&self, name: &str, args: Value, ctx: &ToolContext) -> Result<Value, String> {
+    async fn execute_command(
+        &self,
+        command: denia_tools::runtime_command::RuntimeCommand,
+        ctx: &ToolContext,
+    ) -> Result<Value, String> {
         let owner = ctx.session_id.as_deref().ok_or("该能力需要会话身份")?;
         let config = self.config();
-        match name {
-            "skill" => match string(&args, "action")?.as_str() {
-                "list" => Ok(json!(
+        use denia_tools::runtime_command::{RuntimeCommand, SkillCommand};
+        match command {
+            RuntimeCommand::Skill(action) => match action {
+                SkillCommand::List => Ok(json!(
                     self.skills(ctx.cwd.clone())
                         .await?
                         .into_iter()
                         .filter(|s| s.model_invocable)
                         .collect::<Vec<_>>()
                 )),
-                "resource" => {
+                SkillCommand::Resource { name, path } => {
                     let skills = self.skills(ctx.cwd.clone()).await?;
-                    let name = string(&args, "name")?;
-                    let path = string(&args, "path")?;
                     tokio::task::spawn_blocking(move || {
                         crate::skills::resource(&skills, &name, &path)
                     })
                     .await
                     .map_err(|e| e.to_string())?
                 }
-                "load" => {
-                    let name = string(&args, "name")?;
+                SkillCommand::Load { name } => {
                     // dsh 对齐:SKILL.md 全文直接随工具结果返回,一次性进历史;
                     // load 前经 skills::load 校验 model_invocable(user=false),
                     // disable-model-invocation 技能只能走用户 /name 手势。
                     self.load_skill(ctx.cwd.clone(), name, false).await
                 }
-                _ => Err("未知技能操作".into()),
             },
-            "job_start" => {
-                let command = string(&args, "command")?;
+            RuntimeCommand::JobStart(args) => {
+                let command = args.command;
                 let timeout = args
-                    .get("timeout_ms")
-                    .map(|v| {
-                        v.as_u64()
-                            .filter(|n| *n > 0)
-                            .ok_or("timeout_ms 必须为正整数")
-                    })
-                    .transpose()?
+                    .timeout_ms
                     .unwrap_or(config.job_timeout_ms)
                     .min(config.job_timeout_ms);
                 Ok(json!(self.inner.jobs.start(
                     ctx,
                     &command,
-                    args["label"].as_str().unwrap_or(&command),
+                    args.label.as_deref().unwrap_or(&command),
                     timeout,
                     config.max_jobs,
                     config.retained_jobs,
                     config.output_bytes
                 )?))
             }
-            "job_list" => Ok(json!(self.inner.jobs.list(owner))),
-            "job_output" => {
-                let id = string(&args, "id")?;
-                validate_wait_timeout(&args)?;
+            RuntimeCommand::JobList(_) => Ok(json!(self.inner.jobs.list(owner))),
+            RuntimeCommand::JobOutput(args) => {
+                let id = args.id;
                 let _lease = self.inner.jobs.wait_lease(&id, owner)?;
                 let result = self.inner.jobs.read(&id, owner)?;
                 let pending = result["job"]["finishedAt"].is_null();
                 Ok(background_result(result, pending))
             }
-            "job_kill" => {
-                self.inner.jobs.kill(&string(&args, "id")?, owner)?;
+            RuntimeCommand::JobKill(args) => {
+                self.inner.jobs.kill(&args.id, owner)?;
                 Ok(json!({"ok":true}))
             }
-            "list_agents" => Ok(self.list(owner)),
-            "interrupt_agent" => {
-                self.interrupt(owner, &string(&args, "target")?).await?;
+            RuntimeCommand::ListAgents(_) => Ok(self.list(owner)),
+            RuntimeCommand::InterruptAgent(args) => {
+                self.interrupt(owner, &args.target).await?;
                 Ok(json!({"ok":true}))
             }
-            "send_message" => {
-                let target = string(&args, "target")?;
+            RuntimeCommand::SendMessage(args) => {
+                let target = args.target;
                 self.authorize(owner, &target, false)?;
                 let id = self
                     .enqueue(
                         &target,
                         uuid::Uuid::new_v4().to_string(),
-                        format!("[代理 {owner} 发来消息]\n{}", string(&args, "message")?),
+                        format!("[代理 {owner} 发来消息]\n{}", args.message),
                         format!("agent:{owner}"),
                     )
                     .await?;
                 Ok(json!({"messageId":id,"target":target}))
             }
-            "wait_agent" => {
-                let target = string(&args, "target")?;
+            RuntimeCommand::WaitAgent(args) => {
+                let target = args.target;
                 self.authorize(owner, &target, true)?;
-                validate_wait_timeout(&args)?;
                 let live = self.live(&target).await?;
                 let pending = self.is_active(&target);
                 let messages = if pending {
@@ -1326,15 +1308,14 @@ impl AgentRuntime for Runtime {
                     pending,
                 ))
             }
-            "spawn_agent" | "fork_agent" => {
+            RuntimeCommand::Delegate { fork, args } => {
                 let runtime = self.clone();
-                let name = name.to_string();
+                let name = if fork { "fork_agent" } else { "spawn_agent" }.to_owned();
                 let ctx = ctx.clone();
                 tokio::spawn(async move { runtime.delegate(&name, args, &ctx).await })
                     .await
                     .map_err(|e| format!("子代理启动任务失败：{e}"))?
             }
-            _ => Err(format!("未知宿主能力：{name}")),
         }
     }
     async fn context(&self, session: &str, cwd: &Path) -> Result<Vec<String>, String> {
@@ -1379,7 +1360,10 @@ impl AgentRuntime for Runtime {
         let _ = session;
         // load(user=true) 校验 user_invocable;找不到/不允许/解析失败一律 None,
         // 手势降级为普通文本(dsh:未知名字不是这条边界认识的声明)。
-        match self.load_skill(cwd.to_path_buf(), name.to_string(), true).await {
+        match self
+            .load_skill(cwd.to_path_buf(), name.to_string(), true)
+            .await
+        {
             Ok(value) => Ok(Some((
                 value["skill"]["source"].as_str().unwrap_or_default().into(),
                 value["body"].as_str().unwrap_or_default().into(),
@@ -1432,18 +1416,18 @@ impl AgentRuntime for Runtime {
         let max_bytes = config.project_memory_max_bytes as usize;
         // 索引非空才注入;空桶不注入——记忆目录路径已由 assemble 阶段
         // 内联进「# 项目记忆」段,模型任何 step 都可见。
-        let block = tokio::task::spawn_blocking(move || {
+
+        tokio::task::spawn_blocking(move || {
             let root = crate::project_memory::memory_root(&home, &cwd);
             match crate::project_memory::read_index(&root, max_bytes) {
-                Some(index) if !index.trim().is_empty() => {
-                    Ok(Some(crate::project_memory::render_index_block(&root, &index)))
-                }
+                Some(index) if !index.trim().is_empty() => Ok(Some(
+                    crate::project_memory::render_index_block(&root, &index),
+                )),
                 _ => Ok(None),
             }
         })
         .await
-        .map_err(|e| e.to_string())?;
-        block
+        .map_err(|e| e.to_string())?
     }
     async fn drain(&self, session: &str) -> Result<Vec<String>, String> {
         let live = self.live(session).await?;
@@ -1598,7 +1582,9 @@ mod tests {
                             block: ContentBlock::ToolCall {
                                 id: format!("call-{}", results.len()),
                                 name: name.into(),
-                                arguments: args.to_string(), incomplete: false },
+                                arguments: args.to_string(),
+                                incomplete: false,
+                            },
                         }),
                         Ok(StreamChunk::Finish {
                             reason: FinishReason::ToolCalls,
@@ -1732,9 +1718,11 @@ mod tests {
             .events()
             .into_iter()
             .filter_map(|event| match event.event {
-                SessionEvent::ToolResult { content, is_error: false, .. } => {
-                    Some(serde_json::from_str::<Value>(&content).unwrap())
-                }
+                SessionEvent::ToolResult {
+                    content,
+                    is_error: false,
+                    ..
+                } => Some(serde_json::from_str::<Value>(&content).unwrap()),
                 _ => None,
             })
             .collect();
@@ -1742,7 +1730,15 @@ mod tests {
         assert!(results.iter().all(|result| result["status"] == "pending"));
         assert_eq!(results[1]["messages"], json!([]));
         tokio::time::timeout(std::time::Duration::from_secs(3), async {
-            while state.live.get(child).unwrap().cancel.lock().unwrap().is_none() {
+            while state
+                .live
+                .get(child)
+                .unwrap()
+                .cancel
+                .lock()
+                .unwrap()
+                .is_none()
+            {
                 tokio::task::yield_now().await;
             }
         })
@@ -1784,7 +1780,9 @@ mod tests {
     async fn background_job_output_returns_pending_and_resumes_idle_parent() {
         let (state, ctx) = setup().await;
         let owner = ctx.session_id.as_deref().unwrap();
-        state.runtime.human_turn(owner, ctx.selection.as_ref().unwrap());
+        state
+            .runtime
+            .human_turn(owner, ctx.selection.as_ref().unwrap());
         let command = if cfg!(windows) {
             "Start-Sleep -Seconds 2; Write-Output background-job-result"
         } else {
@@ -1818,9 +1816,9 @@ mod tests {
                     matches!(&event.event, SessionEvent::AgentDelivery { source, text, .. }
                         if source == "job-completed" && text.contains("background-job-result"))
                 });
-                let replied = events.iter().any(|event| {
-                    matches!(event.event, SessionEvent::AssistantMessage { .. })
-                });
+                let replied = events
+                    .iter()
+                    .any(|event| matches!(event.event, SessionEvent::AssistantMessage { .. }));
                 if delivered && replied && !live.running.load(Ordering::SeqCst) {
                     break;
                 }
@@ -1836,14 +1834,41 @@ mod tests {
             .unwrap();
         assert_eq!(ready["status"], "ready");
         assert_eq!(ready["job"]["exitCode"], 0);
-        assert!(ready["output"].as_str().unwrap().contains("background-job-result"));
-        assert_eq!(ready, state.runtime.execute("job_output", json!({"id":job}), &ctx).await.unwrap());
+        assert!(
+            ready["output"]
+                .as_str()
+                .unwrap()
+                .contains("background-job-result")
+        );
+        assert_eq!(
+            ready,
+            state
+                .runtime
+                .execute("job_output", json!({"id":job}), &ctx)
+                .await
+                .unwrap()
+        );
         assert_eq!(live.session.events().iter().filter(|event| {
             matches!(&event.event, SessionEvent::AgentDelivery { source, .. } if source == "job-completed")
         }).count(), 1);
-        state.runtime.inner.paused.lock().unwrap().insert(owner.into());
+        state
+            .runtime
+            .inner
+            .paused
+            .lock()
+            .unwrap()
+            .insert(owner.into());
         let turns = live.session.next_turn_number();
-        state.runtime.enqueue(owner, "paused-completion".into(), "后台结果已保存".into(), "job-completed".into()).await.unwrap();
+        state
+            .runtime
+            .enqueue(
+                owner,
+                "paused-completion".into(),
+                "后台结果已保存".into(),
+                "job-completed".into(),
+            )
+            .await
+            .unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         assert_eq!(live.session.next_turn_number(), turns);
         assert!(!live.session.events().iter().any(|event| {
@@ -1977,7 +2002,10 @@ mod tests {
             .collect();
         expected.sort();
         assert_eq!(allowed, expected, "子代理默认工具集应为只读集合");
-        assert!(allowed.contains(&"browser".to_string()), "browser 是只读调查手段,应授予子代理");
+        assert!(
+            allowed.contains(&"browser".to_string()),
+            "browser 是只读调查手段,应授予子代理"
+        );
         for forbidden in [
             "ask",
             "write_file",
@@ -2039,7 +2067,10 @@ mod tests {
             )
             .await
             .unwrap();
-        let narrowed_live = state.live.get(narrowed["childId"].as_str().unwrap()).unwrap();
+        let narrowed_live = state
+            .live
+            .get(narrowed["childId"].as_str().unwrap())
+            .unwrap();
         assert_eq!(
             narrowed_live
                 .session
@@ -2150,9 +2181,7 @@ mod tests {
         tokio::time::timeout(std::time::Duration::from_secs(15), async {
             loop {
                 let live = state.live.get(&id).unwrap();
-                if !live.running.load(Ordering::SeqCst)
-                    && live.session.next_turn_number() > 1
-                {
+                if !live.running.load(Ordering::SeqCst) && live.session.next_turn_number() > 1 {
                     break;
                 }
                 tokio::time::sleep(std::time::Duration::from_millis(30)).await;
@@ -2162,7 +2191,14 @@ mod tests {
         .unwrap();
 
         // 初始:无目标;非法转换 fail loud。
-        let view: Value = client.get(&goal_url).send().await.unwrap().json().await.unwrap();
+        let view: Value = client
+            .get(&goal_url)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
         assert!(view["goal"].is_null());
         assert_eq!(
             client
@@ -2287,8 +2323,7 @@ mod tests {
             .await
             .unwrap()
             .error_for_status()
-            .err()
-            .expect("预算超上限必须失败");
+            .expect_err("预算超上限必须失败");
         server.abort();
     }
     #[tokio::test]

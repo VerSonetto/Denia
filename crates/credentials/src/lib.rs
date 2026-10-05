@@ -127,13 +127,13 @@ impl CredentialStore {
     /// next request.
     pub fn resolve(&self, reference: &str) -> Result<Option<ResolvedCredential>, CredentialError> {
         validate_ref_name(reference)?;
-        if let Ok(value) = std::env::var(reference) {
-            if !value.is_empty() {
-                return Ok(Some(ResolvedCredential {
-                    value,
-                    source: "env",
-                }));
-            }
+        if let Ok(value) = std::env::var(reference)
+            && !value.is_empty()
+        {
+            return Ok(Some(ResolvedCredential {
+                value,
+                source: "env",
+            }));
         }
         let stored = self.state.read().unwrap().refs.get(reference).cloned();
         if let Some(value) = stored.filter(|v| !v.is_empty()) {
@@ -147,12 +147,11 @@ impl CredentialStore {
             (Some(self.home.clone()), "user-env"),
         ];
         for (dir, source) in fallbacks {
-            if let Some(dir) = dir {
-                if let Some(value) = read_dotenv_key(&dir.join(".env"), reference)? {
-                    if !value.is_empty() {
-                        return Ok(Some(ResolvedCredential { value, source }));
-                    }
-                }
+            if let Some(dir) = dir
+                && let Some(value) = read_dotenv_key(&dir.join(".env"), reference)?
+                && !value.is_empty()
+            {
+                return Ok(Some(ResolvedCredential { value, source }));
             }
         }
         Ok(None)

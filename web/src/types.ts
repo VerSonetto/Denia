@@ -1,3 +1,7 @@
+// Shared wire types are generated from Rust/serde; UI-only types stay here.
+import type { ModelSelection, LlmFailure, TokenUsage, StreamChunk, FinishReason, ContentBlock, TurnEndReason, TodoItem, AskOption, AskQuestion, AskAnswer, AskOutcome, AskResolution, PermissionMode, GoalStatus, GoalOp, SessionEnvelope, PresetFeatures, SessionHeader as WireSessionHeader, ImageData as UserMessageImage } from './generated/core'
+export type { ModelSelection, LlmFailure, TokenUsage, StreamChunk, FinishReason, ContentBlock, TurnEndReason, TodoItem, AskOption, AskQuestion, AskAnswer, AskOutcome, AskResolution, PermissionMode, GoalStatus, GoalOp, SessionEnvelope, PresetFeatures, UserMessageImage }
+export type SessionHeader = WireSessionHeader & { agent_preset?: string }
 /** Wire types shared with the Rust backend. camelCase mirrors serde. */
 
 export interface ProviderInfo {
@@ -36,12 +40,6 @@ export interface ModelCatalogFailure {
   id: string
   name: string
   message: string
-}
-
-export interface ModelSelection {
-  provider: string
-  model: string
-  reasoningEffort?: string
 }
 
 /** 网关路由的线上协议(与 Rust `WireProtocol` 的 serde 标识对齐)。 */
@@ -85,43 +83,6 @@ export interface DiscoveredModel {
   name?: string
 }
 
-export interface LlmFailure {
-  message: string
-  code: string
-  status?: number
-  providerRetryAfterMs?: number
-  requestId?: string
-}
-
-export interface TokenUsage {
-  inputTokens: number
-  outputTokens: number
-  cacheReadTokens?: number
-  reasoningTokens?: number
-}
-
-export type StreamChunk =
-  | { type: 'block-start'; index: number; block_type: 'text' | 'reasoning' | 'tool-call' }
-  | { type: 'text-delta'; index: number; text: string }
-  | { type: 'reasoning-delta'; index: number; text: string }
-  | {
-      type: 'tool-call-delta'
-      index: number
-      id: string
-      name?: string
-      arguments_delta: string
-    }
-  | { type: 'block-end'; index: number; block: ContentBlock }
-  | { type: 'usage'; usage: TokenUsage }
-  | { type: 'finish'; reason: FinishReason }
-
-export type FinishReason =
-  | { kind: 'stop' }
-  | { kind: 'tool-calls' }
-  | { kind: 'max-tokens' }
-  | { kind: 'aborted'; failure: LlmFailure }
-  | { kind: 'error'; failure: LlmFailure }
-
 /** One configured gateway route in the `llm-openai` section. */
 export interface OpenAiProfile {
   baseURL: string
@@ -142,29 +103,6 @@ export interface OpenAiProfile {
   defaultMaxTokens?: number
   /** 附加请求头;值支持 `${REF}` 引用凭据/环境变量(整段占位)。 */
   headers?: Record<string, string>
-}
-
-/* ---- session vocabulary (snake_case mirrors the Rust serde wire) ---- */
-
-export type ContentBlock =
-  | { type: 'text'; text: string }
-  | { type: 'reasoning'; text: string; replay?: { protocol: string; payload: unknown } }
-  | { type: 'tool-call'; id: string; name: string; arguments: string; incomplete?: boolean }
-
-export type TurnEndReason =
-  | { kind: 'completed' }
-  | { kind: 'aborted' }
-  | { kind: 'max-tokens' }
-  | { kind: 'error'; failure: LlmFailure }
-  /** 死循环保护:模型连续输出完全相同的内容达到阈值,driver 强制中断。 */
-  | { kind: 'loop-detected'; repeats?: number }
-  // 崩溃孤儿轮次的合成闭合(服务端 close_orphaned_turn 生成)。
-  | { kind: 'interrupted' }
-
-/** One entry in the session's todo list (mirrors the Rust `TodoItem`). */
-export interface TodoItem {
-  content: string
-  status: 'pending' | 'in_progress' | 'completed'
 }
 
 /** 输入框中的一张粘贴图片:预览 data URL 供缩略图,data 是发给模型的原始 base64。 */
@@ -199,249 +137,6 @@ export interface QueuedMessage {
   quotes?: { id: string; title: string; text: string }[]
 }
 
-/** One inline image attached to a user message (mirrors Rust `ImageData`). */
-export interface UserMessageImage {
-  mime: string
-  data: string
-}
-
-export type SessionEnvelope =
-  | { seq: number; time: number; type: 'agent-inbox' | 'agent-delivery'; id: string; text: string; source: string }
-  | { seq: number; time: number; type: 'turn-start'; turn: number }
-  | { seq: number; time: number; type: 'turn-end'; turn: number; reason: TurnEndReason }
-  | { seq: number; time: number; type: 'step-start'; turn: number; step: number }
-  | { seq: number; time: number; type: 'step-end'; turn: number; step: number }
-  | {
-      seq: number
-      time: number
-      type: 'user-message'
-      text: string
-      injected?: boolean
-      images?: UserMessageImage[]
-    }
-  | { seq: number; time: number; type: 'system-prompt'; turn: number; step: number; text: string }
-  | {
-      seq: number
-      time: number
-      type: 'assistant-chunk'
-      turn: number
-      step: number
-      chunk: StreamChunk
-    }
-  | {
-      seq: number
-      time: number
-      type: 'assistant-message'
-      turn: number
-      step: number
-      blocks: ContentBlock[]
-      usage?: TokenUsage
-      interrupted?: boolean
-      /** 首个 token 帧落盘时刻(epoch ms);旧日志无此字段。 */
-      first_token_time?: number
-    }
-  | {
-      seq: number
-      time: number
-      type: 'tool-call'
-      turn: number
-      step: number
-      call_id: string
-      name: string
-      arguments: string
-    }
-  | {
-      seq: number
-      time: number
-      type: 'tool-result'
-      turn: number
-      step: number
-      call_id: string
-      content: string
-      is_error: boolean
-      error?: string
-      /** 输出截断事实(统一输出预算产出);缺省 = 未截断。 */
-      truncation?: { total_chars: number; shown_chars: number }
-      /** 工具结果剪枝替换:本事件是对旧 tool-result 事件(seq)的 surface 替换。 */
-      replaces?: number
-    }
-  | {
-      seq: number
-      time: number
-      type: 'args-cleared'
-      turn: number
-      step: number
-      call_id: string
-      /** 派生历史里替换原参数的桩文本。 */
-      placeholder: string
-    }
-  | {
-      seq: number
-      time: number
-      type: 'compaction-summary'
-      turn: number
-      step: number
-      summary: string
-      /** 被压缩的事件 seq 区间(含);区间内的消息不再进入模型历史。 */
-      replaces_from: number
-      replaces_to: number
-      /** 压缩后保留窗口的起始事件 seq。 */
-      keep_from: number
-      pre_tokens?: number
-      post_tokens?: number
-    }
-  | {
-      seq: number
-      time: number
-      type: 'todo-write'
-      todos: TodoItem[]
-    }
-  | { seq: number; time: number; type: 'permission-mode'; mode: PermissionMode }
-  /** 会话标题快照(服务端后台生成);latest-wins、仅日志持久。 */
-  | { seq: number; time: number; type: 'session-title'; title: string }
-  /** 会话运行用的 agent preset(决定工具面与 persona);仅空白会话可改选。 */
-  | { seq: number; time: number; type: 'agent-preset'; preset: string }
-  | {
-      seq: number
-      time: number
-      type: 'goal'
-      op: GoalOp
-    }
-  | {
-      seq: number
-      time: number
-      type: 'command-run'
-      /** 命令名(如 goal)。 */
-      name: string
-      /** 用户输入的完整原文。 */
-      text: string
-    }
-  | { seq: number; time: number; type: 'approval-policy'; policy: 'ask' | 'never' }
-  | {
-      seq: number
-      time: number
-      type: 'approval-asked'
-      request_id: string
-      call_id: string
-      tool: string
-      args_preview: string
-      reason?: string
-    }
-  | {
-      seq: number
-      time: number
-      type: 'approval-decided'
-      request_id: string
-      outcome: 'allowed-once' | 'allowed-session' | 'rejected' | 'cancelled' | 'unavailable'
-    }
-  | {
-      seq: number
-      time: number
-      type: 'ask-requested'
-      request_id: string
-      call_id: string
-      questions: AskQuestion[]
-      timeout_ms: number
-    }
-  | {
-      seq: number
-      time: number
-      type: 'ask-resolved'
-      request_id: string
-      resolution: AskResolution
-    }
-  | {
-      seq: number
-      time: number
-      type: 'request-header'
-      turn: number
-      step: number
-      header: { config: { provider: string; model: string; reasoningEffort?: string } }
-      reason: 'initial' | 'resume' | 'change' | 'series'
-      starts_series?: boolean
-    }
-  | {
-      seq: number
-      time: number
-      type: 'request-context'
-      turn: number
-      step: number
-      provider: string
-      model: string
-      contextWindow?: number
-    }
-  | {
-      seq: number
-      time: number
-      type: 'retry-attempt'
-      turn: number
-      step: number
-      attempt: number
-      code: string
-      message: string
-      /** 本次失败后的退避毫秒数(下一次尝试前等待)。 */
-      delay_ms: number
-    }
-
-/* ---- ask 工具(模型向用户提问) ---- */
-
-/** 提问的一个可选项(与 Rust `AskOption` 对齐)。 */
-export interface AskOption {
-  label: string
-  description?: string
-  /** 模型推荐项;UI 高亮显示,不靠标签文本约定。 */
-  recommended?: boolean
-}
-
-/** 一个待回答的问题。 */
-export interface AskQuestion {
-  id: string
-  question: string
-  header?: string
-  detail?: string
-  options?: AskOption[]
-  multiSelect?: boolean
-  /** 是否允许自由填写;缺省 true。 */
-  allowCustom?: boolean
-}
-
-/** 一个问题的回答。 */
-export interface AskAnswer {
-  id: string
-  selected: string[]
-  custom?: string
-  /** 用户显式跳过本题。 */
-  skipped?: boolean
-}
-
-/** 提问的结局。 */
-export type AskOutcome = 'answered' | 'timed-out' | 'cancelled' | 'unavailable'
-
-/** 一次提问的闭合结果。 */
-export interface AskResolution {
-  outcome: AskOutcome
-  answers?: AskAnswer[]
-  reason?: string
-}
-
-/** 当前会话权限模式(与 Rust `PermissionMode` 对齐,四档)。 */
-export type PermissionMode = 'read-only' | 'auto-edit' | 'plan' | 'full'
-
-/** 会话目标状态(与 Rust `GoalStatus` 对齐)。 */
-export type GoalStatus = 'active' | 'paused' | 'blocked' | 'budget-limited' | 'complete'
-
-/** 会话目标操作(与 Rust `GoalOp` 对齐,内部 tag `kind`)。 */
-export type GoalOp =
-  | { kind: 'set'; objective: string; token_budget?: number }
-  | { kind: 'edit'; objective?: string; token_budget?: number }
-  | { kind: 'pause' }
-  | { kind: 'resume' }
-  | { kind: 'round' }
-  | { kind: 'complete' }
-  | { kind: 'block'; reason?: string }
-  | { kind: 'budget-limit' }
-  | { kind: 'clear' }
-
 /** 旧日志三档值 → 新四档的显示映射(serde alias 的前端对应)。 */
 export function normalizePermissionMode(raw: string): PermissionMode {
   if (raw === 'workspace-write') return 'auto-edit'
@@ -450,18 +145,6 @@ export function normalizePermissionMode(raw: string): PermissionMode {
     return raw
   }
   return 'auto-edit'
-}
-
-export interface SessionHeader {
-  subagent?: { label: string; depth: number; mode: string; selection: ModelSelection }
-  type: 'session'
-  version: number
-  id: string
-  created_at: number
-  cwd: string
-  sandbox: boolean
-  /** 分支血缘:父会话 id(旧日志/普通会话无此字段)。 */
-  parent_session?: string
 }
 
 export interface SessionSummary {
@@ -478,23 +161,6 @@ export interface SessionSummary {
   parent_session?: string
   /** 会话运行的 agent preset(id);创建时写入,缺省表示后端未提供。 */
   agent_preset?: string
-}
-
-/**
- * agent preset 功能开关快照(与服务端 `PresetFeatures` 同名同义)。
- * 关闭的功能连带摘除对应工具、纪律段、注入通道与运行时行为。
- */
-export interface PresetFeatures {
-  agentsMd: boolean
-  memory: boolean
-  compaction: boolean
-  goal: boolean
-  skills: boolean
-  subagents: boolean
-  jobs: boolean
-  browser: boolean
-  ask: boolean
-  planMode: boolean
 }
 
 /** agent preset 名册里的一行(随附或用户自定义)。 */

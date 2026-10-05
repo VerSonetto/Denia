@@ -67,7 +67,8 @@ mod tests {
         assert_ne!(a, b, "两次生成的令牌不能相同");
         assert_eq!(a.len(), 43, "32 字节 base64url 无填充是 43 字符");
         assert!(
-            a.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'),
+            a.chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'),
             "令牌必须能直接放进 URL query 与 cookie:{a}"
         );
     }

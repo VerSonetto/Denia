@@ -14,9 +14,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use playwright_rs::protocol::{
-    AriaSnapshotMode, AriaSnapshotOptions, Dialog, MouseButton, MouseOptions, Page,
-    ResponseObject, ScreencastStartOptions, ScreenshotClip, ScreenshotOptions, SelectOption,
-    Viewport, WaitForOptions,
+    AriaSnapshotMode, AriaSnapshotOptions, Dialog, MouseButton, MouseOptions, Page, ResponseObject,
+    ScreencastStartOptions, ScreenshotClip, ScreenshotOptions, SelectOption, Viewport,
+    WaitForOptions,
 };
 use serde_json::{Value, json};
 use tokio::sync::{Mutex, broadcast};
@@ -580,9 +580,7 @@ impl BrowserManager {
                             .and_then(|headers| {
                                 headers
                                     .iter()
-                                    .find(|entry| {
-                                        entry.name.eq_ignore_ascii_case("content-type")
-                                    })
+                                    .find(|entry| entry.name.eq_ignore_ascii_case("content-type"))
                                     .map(|entry| entry.value.clone())
                             })
                             .unwrap_or_default();
@@ -671,9 +669,7 @@ impl BrowserManager {
     /// 命令分发(已确保会话就绪)。
     async fn dispatch(&self, command: BrowserCommand) -> Result<CommandOutcome, String> {
         let mut guard = self.inner.lock().await;
-        let inner = guard
-            .as_mut()
-            .ok_or_else(|| "浏览器未启动".to_string())?;
+        let inner = guard.as_mut().ok_or_else(|| "浏览器未启动".to_string())?;
 
         match command {
             BrowserCommand::GetState { tab_id } => {
@@ -742,7 +738,10 @@ impl BrowserManager {
                 let _ = page.bring_to_front().await;
                 drop(guard);
                 self.broadcast(BrowserEvent::TabsChanged);
-                Ok(CommandOutcome::ok_value(json!({ "activeTabId": tab_id }), 0))
+                Ok(CommandOutcome::ok_value(
+                    json!({ "activeTabId": tab_id }),
+                    0,
+                ))
             }
             BrowserCommand::Navigate { url, tab_id } => {
                 let (tab_id, page) = inner.resolve(tab_id.as_deref())?;
@@ -850,8 +849,8 @@ impl BrowserManager {
                 clip,
             } => {
                 let (_tab_id, page) = inner.resolve(tab_id.as_deref())?;
-                let mut builder = ScreenshotOptions::builder()
-                    .full_page(full_page.unwrap_or(false));
+                let mut builder =
+                    ScreenshotOptions::builder().full_page(full_page.unwrap_or(false));
                 if let Some(rect) = clip {
                     builder = builder.clip(ScreenshotClip {
                         x: rect.x,
@@ -914,7 +913,11 @@ impl BrowserManager {
                     }
                 }
             }
-            BrowserCommand::Fill { tab_id, r#ref, value } => {
+            BrowserCommand::Fill {
+                tab_id,
+                r#ref,
+                value,
+            } => {
                 let (_tab_id, page) = inner.resolve(tab_id.as_deref())?;
                 let target = normalize_target(&r#ref);
                 page.locator(&target)
@@ -965,7 +968,12 @@ impl BrowserManager {
                 }
                 Ok(CommandOutcome::ok_value(json!({ "pressed": key }), 0))
             }
-            BrowserCommand::Hover { tab_id, r#ref, x, y } => {
+            BrowserCommand::Hover {
+                tab_id,
+                r#ref,
+                x,
+                y,
+            } => {
                 let (_tab_id, page) = inner.resolve(tab_id.as_deref())?;
                 match (r#ref, x, y) {
                     (Some(target), _, _) => {
@@ -1021,7 +1029,11 @@ impl BrowserManager {
                     }
                 }
             }
-            BrowserCommand::Select { tab_id, r#ref, values } => {
+            BrowserCommand::Select {
+                tab_id,
+                r#ref,
+                values,
+            } => {
                 let (_tab_id, page) = inner.resolve(tab_id.as_deref())?;
                 let target = normalize_target(&r#ref);
                 let locator = page.locator(&target);
@@ -1231,7 +1243,10 @@ impl BrowserManager {
                 page.set_viewport_size(Viewport { width, height })
                     .await
                     .map_err(|error| format!("设置视口失败: {error}"))?;
-                Ok(CommandOutcome::ok_value(json!({ "width": width, "height": height }), 0))
+                Ok(CommandOutcome::ok_value(
+                    json!({ "width": width, "height": height }),
+                    0,
+                ))
             }
             BrowserCommand::ViewportReset { tab_id } => {
                 let (_tab_id, page) = inner.resolve(tab_id.as_deref())?;
@@ -1265,7 +1280,7 @@ impl BrowserManager {
                 let kind = body_kind.unwrap_or_else(|| "response".to_string());
                 if kind == "request" {
                     let post_data = self
-                        .network_entry(&request_id.split("-r").next().unwrap_or(""), &request_id)
+                        .network_entry(request_id.split("-r").next().unwrap_or(""), &request_id)
                         .and_then(|value| value.get("postData").cloned())
                         .unwrap_or(Value::Null);
                     return Ok(CommandOutcome::ok_value(
@@ -1500,9 +1515,7 @@ fn escape_js_string(text: &str) -> String {
 
 /// 供 `MouseOptions` 复用的构造(避免调用点重复 import)。
 pub fn mouse_options(button: Option<&str>) -> MouseOptions {
-    MouseOptions::builder()
-        .button(parse_button(button))
-        .build()
+    MouseOptions::builder().button(parse_button(button)).build()
 }
 
 /// 默认命令超时。
@@ -1547,7 +1560,10 @@ mod tests {
 
     #[test]
     fn pick_target_prefers_ref_over_locator() {
-        assert_eq!(pick_target(Some("e6"), Some("#x")).as_deref(), Some("aria-ref=e6"));
+        assert_eq!(
+            pick_target(Some("e6"), Some("#x")).as_deref(),
+            Some("aria-ref=e6")
+        );
         assert_eq!(pick_target(None, Some("#x")).as_deref(), Some("#x"));
         assert_eq!(pick_target(None, None), None);
     }

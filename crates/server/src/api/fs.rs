@@ -654,7 +654,9 @@ struct FileQuery {
 /// - 400 路径非法（逃逸/绝对/盘符）、目标是目录、不是 UTF-8 文本；
 /// - 404 文件不存在（含读取期被删）；
 /// - 413 超过读取上限。
-async fn read_workspace_file(Query(query): Query<FileQuery>) -> Result<impl IntoResponse, ApiError> {
+async fn read_workspace_file(
+    Query(query): Query<FileQuery>,
+) -> Result<impl IntoResponse, ApiError> {
     let inner = tokio::task::spawn_blocking(move || {
         read_file_impl(query.path.as_str(), query.file.as_str())
     })
@@ -683,7 +685,10 @@ fn read_file_impl(root_path: &str, raw_file: &str) -> Result<FileView, ApiError>
     // `/etc/passwd` 会被当成工作区内的 `etc/passwd` —— 实测就是这样漏过校验的。
     let rel = rel.trim_end_matches('/').to_string();
     if rel.is_empty() || rel.trim().is_empty() {
-        return Err(ApiError::bad_request("fs/file-bad-path", "file path is empty"));
+        return Err(ApiError::bad_request(
+            "fs/file-bad-path",
+            "file path is empty",
+        ));
     }
     // 复用目录解析的同一条路径校验：拒 `..`/绝对路径/盘符段。
     let Some(abs) = resolve_relative_file(&root, &rel) else {
@@ -893,8 +898,14 @@ mod file_read_tests {
         std::fs::create_dir_all(root.join("src")).unwrap();
         std::fs::write(root.join("src/a.txt"), "hello").unwrap();
         let root_str = root.to_str().unwrap();
-        assert_eq!(read_file_impl(root_str, "src\\a.txt").unwrap().path, "src/a.txt");
-        assert_eq!(read_file_impl(root_str, "src/a.txt/").unwrap().path, "src/a.txt");
+        assert_eq!(
+            read_file_impl(root_str, "src\\a.txt").unwrap().path,
+            "src/a.txt"
+        );
+        assert_eq!(
+            read_file_impl(root_str, "src/a.txt/").unwrap().path,
+            "src/a.txt"
+        );
         assert_eq!(
             err_code(&read_file_impl(root_str, "/src/a.txt").unwrap_err()),
             "fs/file-bad-path"
@@ -907,7 +918,12 @@ mod file_read_tests {
     fn rejects_path_escape() {
         let root = scratch("escape");
         std::fs::write(root.join("ok.txt"), "x").unwrap();
-        for bad in ["../secret.txt", "a/../../x", "/etc/passwd", "C:/Windows/win.ini"] {
+        for bad in [
+            "../secret.txt",
+            "a/../../x",
+            "/etc/passwd",
+            "C:/Windows/win.ini",
+        ] {
             let error = read_file_impl(root.to_str().unwrap(), bad).unwrap_err();
             assert_eq!(err_code(&error), "fs/file-bad-path", "path {bad} 应当被拒");
         }
@@ -923,7 +939,10 @@ mod file_read_tests {
         std::fs::write(root.join("latin.txt"), [0xff, 0xfe, 0x41]).unwrap();
         let root_str = root.to_str().unwrap();
 
-        assert_eq!(err_code(&read_file_impl(root_str, "  ").unwrap_err()), "fs/file-bad-path");
+        assert_eq!(
+            err_code(&read_file_impl(root_str, "  ").unwrap_err()),
+            "fs/file-bad-path"
+        );
         assert_eq!(
             err_code(&read_file_impl(root_str, "sub").unwrap_err()),
             "fs/file-is-directory"
@@ -971,7 +990,12 @@ mod file_read_tests {
     fn unknown_extension_has_no_language_hint() {
         let root = scratch("lang");
         std::fs::write(root.join("notes.zzz"), "x").unwrap();
-        assert!(read_file_impl(root.to_str().unwrap(), "notes.zzz").unwrap().language.is_none());
+        assert!(
+            read_file_impl(root.to_str().unwrap(), "notes.zzz")
+                .unwrap()
+                .language
+                .is_none()
+        );
         std::fs::remove_dir_all(&root).ok();
     }
 }
@@ -988,7 +1012,11 @@ mod tree_tests {
     }
 
     fn names(listing: &TreeListing) -> Vec<&str> {
-        listing.entries.iter().map(|item| item.name.as_str()).collect()
+        listing
+            .entries
+            .iter()
+            .map(|item| item.name.as_str())
+            .collect()
     }
 
     #[test]

@@ -44,7 +44,7 @@ async function http<T>(path: string, init?: RequestInit, timeoutMs = DEFAULT_TIM
     const response = await fetch(path, {
       headers: { 'content-type': 'application/json' },
       ...init,
-      signal: init?.signal ?? timeout.signal,
+      signal: init?.signal ? AbortSignal.any([init.signal, timeout.signal]) : timeout.signal,
     })
     if (!response.ok) {
       let code = `http-${response.status}`
@@ -907,8 +907,8 @@ export interface ContextBreakdownResponse {
   usage: TurnTokenUsage
 }
 
-export function contextBreakdown(id: string): Promise<ContextBreakdownResponse> {
-  return http(`/api/sessions/${encodeURIComponent(id)}/context-breakdown`)
+export function contextBreakdown(id: string, signal?: AbortSignal): Promise<ContextBreakdownResponse> {
+  return http(`/api/sessions/${encodeURIComponent(id)}/context-breakdown`, { signal })
 }
 
 export interface ManualCompactResponse {

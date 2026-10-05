@@ -116,7 +116,12 @@ impl SessionTable {
     ///
     /// 空闲时长由调用方按会话通道给出(guard 传当前配置值):用户把空闲
     /// 超时从 30 分钟改成 5 分钟,应当立刻对新请求生效。
-    pub fn authenticate<F>(&self, token: &str, now_ms: u64, idle_seconds: F) -> Option<SessionRecord>
+    pub fn authenticate<F>(
+        &self,
+        token: &str,
+        now_ms: u64,
+        idle_seconds: F,
+    ) -> Option<SessionRecord>
     where
         F: FnOnce(Channel) -> u64,
     {
@@ -223,7 +228,10 @@ mod tests {
     fn idle_timeout_revokes_session() {
         let table = SessionTable::new();
         let issued = table.issue(Channel::Tunnel, "peer", IDLE, ABS, NOW);
-        assert!(verify(&table, &issued.token, NOW + IDLE * 1000).is_none(), "空闲到点即失效");
+        assert!(
+            verify(&table, &issued.token, NOW + IDLE * 1000).is_none(),
+            "空闲到点即失效"
+        );
         assert_eq!(table.len(), 0, "失效会话必须被移除");
     }
 
@@ -234,7 +242,10 @@ mod tests {
         let mut clock = NOW;
         for _ in 0..8 {
             clock += IDLE * 500;
-            assert!(verify(&table, &issued.token, clock).is_some(), "clock={clock}");
+            assert!(
+                verify(&table, &issued.token, clock).is_some(),
+                "clock={clock}"
+            );
         }
     }
 
@@ -318,7 +329,13 @@ mod tests {
         let table = SessionTable::new();
         let issued = table.issue(Channel::Lan, "a", IDLE, ABS, NOW);
         let map = table.inner.lock().unwrap();
-        assert!(map.keys().all(|key| key != &issued.token && !key.contains(&issued.token)));
-        assert_eq!(map.keys().next().unwrap(), &secret::hash_token(&issued.token));
+        assert!(
+            map.keys()
+                .all(|key| key != &issued.token && !key.contains(&issued.token))
+        );
+        assert_eq!(
+            map.keys().next().unwrap(),
+            &secret::hash_token(&issued.token)
+        );
     }
 }

@@ -90,8 +90,16 @@ impl McpServerConfig {
     /// (工具开关只是过滤,不需要重启子进程/重连。)
     pub fn connection_key(
         &self,
-    ) -> (String, Vec<String>, BTreeMap<String, String>, Option<PathBuf>, String, bool, Option<String>, BTreeMap<String, String>)
-    {
+    ) -> (
+        String,
+        Vec<String>,
+        BTreeMap<String, String>,
+        Option<PathBuf>,
+        String,
+        bool,
+        Option<String>,
+        BTreeMap<String, String>,
+    ) {
         (
             self.command.clone(),
             self.args.clone(),
@@ -192,7 +200,10 @@ mod tests {
     fn tool_names_are_model_writable() {
         assert_eq!(qualify_tool_name("fs", "read_file"), "mcp__fs__read_file");
         // 空格/点号折叠成下划线,模型不会被奇怪字符卡住。
-        assert_eq!(qualify_tool_name("fs", "read file.v2"), "mcp__fs__read_file_v2");
+        assert_eq!(
+            qualify_tool_name("fs", "read file.v2"),
+            "mcp__fs__read_file_v2"
+        );
         // 连续符号压成一个下划线,不留 `a__b` 这种歧义。
         assert_eq!(qualify_tool_name("fs", "a  --  b"), "mcp__fs__a_b");
         // 纯符号名退化成 tool,不会产出空名字。

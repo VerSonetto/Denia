@@ -237,7 +237,7 @@ fn check_revision(state: &NamespaceState, expected: Option<u64>) -> Result<(), S
     }
 }
 
-/// Validates, installs, persists, and announces one user-section write.
+/// Validates and persists a candidate before installing or announcing it.
 /// Borrows of `inner.namespaces` and `inner.document` stay sequential so
 /// the disjoint fields never overlap.
 impl SettingsStore {
@@ -250,29 +250,26 @@ impl SettingsStore {
         let revision = {
             let state = inner
                 .namespaces
-                .get_mut(ns)
+                .get(ns)
                 .ok_or_else(|| SettingsError::UnknownNamespace(ns.to_string()))?;
             let merged = deep_merge(&deep_merge(&state.spec.defaults, &state.base), &next_user);
             (state.spec.validate)(merged).map_err(SettingsError::Rejected)?;
-            state.user = next_user;
-            state.revision += 1;
-            state.revision
+            state.revision + 1
         };
-        let stored = inner
-            .namespaces
-            .get(ns)
-            .map(|state| state.user.clone())
-            .unwrap_or(Value::Null);
-        if stored.is_null() || stored.as_object().is_some_and(|map| map.is_empty()) {
-            inner.document.sections.remove(ns);
+        let mut document = inner.document.clone();
+        if next_user.is_null() || next_user.as_object().is_some_and(|map| map.is_empty()) {
+            document.sections.remove(ns);
         } else {
-            inner.document.sections.insert(ns.to_string(), stored);
+            document.sections.insert(ns.to_string(), next_user.clone());
         }
-        persist(self, inner)?;
+        persist(self, &document)?;
+        inner.document = document;
         let state = inner
             .namespaces
-            .get(ns)
+            .get_mut(ns)
             .ok_or_else(|| SettingsError::UnknownNamespace(ns.to_string()))?;
+        state.user = next_user;
+        state.revision = revision;
         let view = view_of(&ns.to_string(), state);
         if let Some(sender) = &self.events {
             let _ = sender.send(SettingsEvent::Updated { ns: ns.to_string() });
@@ -285,9 +282,9 @@ impl SettingsStore {
     }
 }
 
-fn persist(store: &SettingsStore, inner: &Inner) -> Result<(), SettingsError> {
+fn persist(store: &SettingsStore, document: &SettingsStoreDocument) -> Result<(), SettingsError> {
     let mut doc =
-        serde_yaml::to_string(&inner.document).map_err(|e| SettingsError::Parse(e.to_string()))?;
+        serde_yaml::to_string(document).map_err(|e| SettingsError::Parse(e.to_string()))?;
     if !doc.ends_with('\n') {
         doc.push('\n');
     }
@@ -371,5 +368,54 @@ impl<'de> serde::Deserialize<'de> for SettingsStoreDocument {
         Ok(Self {
             sections: Map::deserialize(deserializer)?,
         })
+    }
+}
+
+#[cfg(test)]
+mod failure_tests {
+    use super::*;
+    use crate::Applies;
+    use serde_json::json;
+
+    #[test]
+    fn failed_persistence_does_not_change_revision_value_or_notifications() {
+        let home =
+            std::env::temp_dir().join(format!("denia-settings-failure-{}", std::process::id()));
+        std::fs::create_dir_all(&home).unwrap();
+        let (events, mut receiver) = broadcast::channel(8);
+        let store = SettingsStore::open(&home).unwrap().with_events(events);
+        store
+            .register(
+                "test",
+                NamespaceSpec {
+                    defaults: json!({"enabled": false}),
+                    validate: Ok,
+                    secrets: &[],
+                    applies: Applies::Live,
+                },
+                json!({}),
+            )
+            .unwrap();
+        // A directory at the temp-file path fails deterministically on all platforms.
+        std::fs::create_dir(home.join("settings.yaml.tmp")).unwrap();
+        assert!(
+            store
+                .update("test", json!({"enabled": true}), Some(0))
+                .is_err()
+        );
+        assert_eq!(store.resolved("test").unwrap(), json!({"enabled": false}));
+        assert_eq!(store.describe()[0].revision, 0);
+        assert!(receiver.try_recv().is_err());
+        std::fs::remove_dir(home.join("settings.yaml.tmp")).unwrap();
+        assert_eq!(
+            store
+                .update("test", json!({"enabled": true}), Some(0))
+                .unwrap()
+                .revision,
+            1
+        );
+        assert!(receiver.try_recv().is_ok());
+        drop(store);
+        std::fs::remove_dir_all(home).unwrap();
     }
 }

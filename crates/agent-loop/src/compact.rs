@@ -17,9 +17,9 @@ use denia_core::session::SurfaceMessage;
 use denia_core::stream::StreamChunk;
 use denia_core::tool::ToolSchema;
 use denia_llm::GenerateRequest;
-use futures::StreamExt;
 use denia_session::Session;
 use denia_token_meter::{ContextPressure, estimate_message};
+use futures::StreamExt;
 use tokio_util::sync::CancellationToken;
 
 /// 压缩配置。默认值对齐 Claude Code auto-compact 的缓冲语义
@@ -303,18 +303,18 @@ pub fn truncate_head(messages: &[ChatMessage], attempt: u32) -> Vec<ChatMessage>
 pub fn format_summary(summary: &str) -> String {
     let mut formatted = summary.to_string();
     // 剥 analysis 草稿(非贪婪跨行)。
-    if let Some(start) = formatted.find("<analysis>") {
-        if let Some(end) = formatted[start..].find("</analysis>") {
-            formatted.replace_range(start..start + end + "</analysis>".len(), "");
-        }
+    if let Some(start) = formatted.find("<analysis>")
+        && let Some(end) = formatted[start..].find("</analysis>")
+    {
+        formatted.replace_range(start..start + end + "</analysis>".len(), "");
     }
-    if let Some(start) = formatted.find("<summary>") {
-        if let Some(end) = formatted[start..].find("</summary>") {
-            let content = formatted[start + "<summary>".len()..start + end]
-                .trim()
-                .to_string();
-            formatted = format!("Summary:\n{content}");
-        }
+    if let Some(start) = formatted.find("<summary>")
+        && let Some(end) = formatted[start..].find("</summary>")
+    {
+        let content = formatted[start + "<summary>".len()..start + end]
+            .trim()
+            .to_string();
+        formatted = format!("Summary:\n{content}");
     }
     // 压缩多余空行。
     let mut out = String::with_capacity(formatted.len());
@@ -329,6 +329,200 @@ pub fn format_summary(summary: &str) -> String {
         prev_blank = blank;
     }
     out.trim().to_string()
+}
+
+/// —— SessionDriver 的压缩实现(自动路径,由 request 模块的闸门调用)——
+impl crate::SessionDriver {
+    /// LLM 总结压缩(学 Claude Code compact):把 surface 中旧事件区间
+    /// 折叠成一条摘要。摘要请求复用主请求的 system + tools + 消息前缀
+    /// (学 `tengu_compact_cache_prefix` / `runForkedAgent`:前缀不变则
+    /// provider 缓存命中,压缩成本几乎只是增量)。
+    ///
+    /// 失败(PTL 等)时按 Claude Code `truncateHeadForPTLRetry` 丢最老约
+    /// 20% 消息重试,最多 `max_attempts` 次;仍失败返回 `Err`(调用方熔断)。
+    pub(crate) async fn compact_context(
+        &self,
+        session: &std::sync::Arc<Session>,
+        selection: &ModelSelection,
+        framed_system: &str,
+        tools: &[ToolSchema],
+        turn: u32,
+        step: u32,
+        cancel: &CancellationToken,
+        replay: Option<&denia_llm::ReplayPolicy>,
+        settings: &CompactionSettings,
+    ) -> Result<Option<CompactOutcome>, LlmFailure> {
+        let fallback_replay = denia_llm::ReplayPolicy::default();
+        let replay = replay.unwrap_or(&fallback_replay);
+        let events = session.events();
+        // 压缩输入即当前模型可见 surface(与主请求同视角,原文直出)。
+        let surface = denia_core::session::derive_surface(&events);
+        let Some(keep_start) = select_keep_start(&surface, settings) else {
+            return Ok(None);
+        };
+        let (compressed, kept) = surface.split_at(keep_start);
+        let pre_tokens = compressed.iter().fold(0u64, |acc, item| {
+            acc.saturating_add(rough_tokens(&item.message))
+        });
+        let post_tokens = kept.iter().fold(0u64, |acc, item| {
+            acc.saturating_add(rough_tokens(&item.message))
+        });
+
+        let mut attempt = 0u32;
+        let mut messages = build_summary_messages(compressed, "");
+        let mut summary: Option<String> = None;
+        while attempt < settings.max_attempts {
+            attempt += 1;
+            if cancel.is_cancelled() {
+                return Err(LlmFailure::new(
+                    codes::ABORTED,
+                    "compaction cancelled by user",
+                ));
+            }
+            let request = GenerateRequest {
+                model: selection.model.clone(),
+                reasoning_effort: selection.reasoning_effort.clone(),
+                messages: messages.clone(),
+                system: Some(framed_system.to_string()),
+                tools: tools.to_vec(),
+                temperature: Some(0.0),
+                max_tokens: Some(settings.summary_max_tokens),
+                stop: Vec::new(),
+            };
+            let retry_sink: denia_llm::RetrySink = std::sync::Arc::new({
+                let session = session.clone();
+                move |retry| {
+                    let _ = session.append(denia_core::session::SessionEvent::RetryAttempt {
+                        turn,
+                        step,
+                        attempt: retry.attempt,
+                        code: retry.code.clone(),
+                        message: retry.message.clone(),
+                        delay_ms: retry.delay_ms,
+                    });
+                }
+            });
+            let stream = match self
+                .registry
+                .stream_with_replay(&selection.provider, &request, Some(retry_sink), replay)
+                .await
+            {
+                Ok(stream) => stream,
+                Err(error) => {
+                    tracing::warn!(
+                        session_id = session.id(),
+                        error_code = %error.failure.code,
+                        attempt,
+                        "compaction summary request setup failed"
+                    );
+                    if attempt >= settings.max_attempts {
+                        return Err(error.failure);
+                    }
+                    messages = truncate_head(&messages, attempt);
+                    continue;
+                }
+            };
+            let mut stream = stream;
+            let mut text = String::new();
+            let mut stream_error: Option<LlmFailure> = None;
+            loop {
+                let next = tokio::select! {
+                    biased;
+                    _ = cancel.cancelled() => {
+                        return Err(LlmFailure::new(codes::ABORTED, "compaction cancelled by user"));
+                    }
+                    item = stream.next() => item,
+                };
+                match next {
+                    Some(Ok(StreamChunk::TextDelta { text: delta, .. })) => {
+                        text.push_str(&delta);
+                    }
+                    Some(Ok(StreamChunk::Finish {
+                        reason:
+                            denia_core::stream::FinishReason::Error { failure }
+                            | denia_core::stream::FinishReason::Aborted { failure },
+                    })) => {
+                        stream_error = Some(failure);
+                        break;
+                    }
+                    Some(Ok(_)) => {}
+                    Some(Err(failure)) => {
+                        stream_error = Some(failure);
+                        break;
+                    }
+                    None => break,
+                }
+            }
+            if let Some(failure) = stream_error {
+                let route = self
+                    .registry
+                    .route_identity(&selection.provider, &request.model);
+                if replay.downgrade(&route, &request, &failure) {
+                    let _ = session.append(denia_core::session::SessionEvent::RetryAttempt {
+                        turn,
+                        step,
+                        attempt: 1,
+                        code: denia_llm::REASONING_REJECTED.into(),
+                        message: format!(
+                            "摘要接口拒绝历史思考，仅本 turn 移除思考重试：{}",
+                            failure.message
+                        ),
+                        delay_ms: 0,
+                    });
+                    attempt -= 1;
+                    continue;
+                }
+                tracing::warn!(
+                    session_id = session.id(),
+                    error_code = %failure.code,
+                    error_message = %failure.message,
+                    attempt,
+                    "compaction summary stream failed"
+                );
+                if attempt >= settings.max_attempts || cancel.is_cancelled() {
+                    return Err(failure);
+                }
+                messages = truncate_head(&messages, attempt);
+                continue;
+            }
+            let formatted = format_summary(&text);
+            if formatted.is_empty() {
+                tracing::warn!(
+                    session_id = session.id(),
+                    attempt,
+                    "compaction summary produced no text"
+                );
+                if attempt >= settings.max_attempts {
+                    return Err(LlmFailure::new(
+                        codes::MALFORMED_RESPONSE,
+                        "compaction summary produced no text".to_string(),
+                    ));
+                }
+                messages = truncate_head(&messages, attempt);
+                continue;
+            }
+            summary = Some(formatted);
+            break;
+        }
+
+        let Some(summary) = summary else {
+            return Err(LlmFailure::new(
+                codes::UNKNOWN,
+                "compaction exhausted retries without a summary".to_string(),
+            ));
+        };
+        Ok(Some(CompactOutcome {
+            summary: summary.clone(),
+            replaces_from: compressed[0].seq,
+            replaces_to: compressed[compressed.len() - 1].seq,
+            keep_from: kept[0].seq,
+            pre_tokens,
+            // 摘要消息本身的开销按角色框 + 文本估算,并入压缩后占用。
+            post_tokens: post_tokens.saturating_add(rough_tokens(&ChatMessage::user(&summary))),
+            // 读状态恢复在调用方做(它持有 driver 的 read_state 句柄)。
+            read_state_entries: Vec::new(),
+        }))
+    }
 }
 
 #[cfg(test)]
@@ -452,7 +646,9 @@ mod tests {
                 blocks: vec![denia_core::stream::ContentBlock::ToolCall {
                     id: "call_9".into(),
                     name: "bash".into(),
-                    arguments: "{}".into(), incomplete: false }],
+                    arguments: "{}".into(),
+                    incomplete: false,
+                }],
                 usage: None,
                 interrupted: false,
                 source_event_seqs: Vec::new(),
@@ -532,167 +728,5 @@ mod tests {
         assert!(messages[0].images.is_empty());
         assert!(messages[0].content.contains("[image]"));
         assert!(messages[1].content.contains("Primary Request and Intent"));
-    }
-}
-
-/// —— SessionDriver 的压缩实现(自动路径,由 request 模块的闸门调用)——
-impl crate::SessionDriver {
-    /// LLM 总结压缩(学 Claude Code compact):把 surface 中旧事件区间
-    /// 折叠成一条摘要。摘要请求复用主请求的 system + tools + 消息前缀
-    /// (学 `tengu_compact_cache_prefix` / `runForkedAgent`:前缀不变则
-    /// provider 缓存命中,压缩成本几乎只是增量)。
-    ///
-    /// 失败(PTL 等)时按 Claude Code `truncateHeadForPTLRetry` 丢最老约
-    /// 20% 消息重试,最多 `max_attempts` 次;仍失败返回 `Err`(调用方熔断)。
-    pub(crate) async fn compact_context(
-        &self,
-        session: &std::sync::Arc<Session>,
-        selection: &ModelSelection,
-        framed_system: &str,
-        tools: &[ToolSchema],
-        turn: u32,
-        step: u32,
-        cancel: &CancellationToken,
-        replay: Option<&denia_llm::ReplayPolicy>,
-    ) -> Result<Option<CompactOutcome>, LlmFailure> {
-        let fallback_replay = denia_llm::ReplayPolicy::default();
-        let replay = replay.unwrap_or(&fallback_replay);
-        let settings = self.compaction.clone();
-        let events = session.events();
-        // 压缩输入即当前模型可见 surface(与主请求同视角,原文直出)。
-        let surface = denia_core::session::derive_surface(&events);
-        let Some(keep_start) = select_keep_start(&surface, &settings) else {
-            return Ok(None);
-        };
-        let (compressed, kept) = surface.split_at(keep_start);
-        let pre_tokens = compressed.iter().fold(0u64, |acc, item| {
-            acc.saturating_add(rough_tokens(&item.message))
-        });
-        let post_tokens = kept.iter().fold(0u64, |acc, item| {
-            acc.saturating_add(rough_tokens(&item.message))
-        });
-
-        let mut attempt = 0u32;
-        let mut messages = build_summary_messages(compressed, "");
-        let mut summary: Option<String> = None;
-        while attempt < settings.max_attempts {
-            attempt += 1;
-            if cancel.is_cancelled() {
-                return Err(LlmFailure::new(codes::ABORTED, "compaction cancelled by user"));
-            }
-            let request = GenerateRequest {
-                model: selection.model.clone(),
-                reasoning_effort: selection.reasoning_effort.clone(),
-                messages: messages.clone(),
-                system: Some(framed_system.to_string()),
-                tools: tools.to_vec(),
-                temperature: Some(0.0),
-                max_tokens: Some(settings.summary_max_tokens),
-                stop: Vec::new(),
-            };
-            let retry_sink: denia_llm::RetrySink = std::sync::Arc::new({
-                let session = session.clone();
-                move |retry| { let _ = session.append(denia_core::session::SessionEvent::RetryAttempt { turn, step, attempt: retry.attempt, code: retry.code.clone(), message: retry.message.clone(), delay_ms: retry.delay_ms }); }
-            });
-            let stream = match self.registry.stream_with_replay(&selection.provider, &request, Some(retry_sink), replay).await {
-                Ok(stream) => stream,
-                Err(error) => {
-                    tracing::warn!(
-                        session_id = session.id(),
-                        error_code = %error.failure.code,
-                        attempt,
-                        "compaction summary request setup failed"
-                    );
-                    if attempt >= settings.max_attempts {
-                        return Err(error.failure);
-                    }
-                    messages = truncate_head(&messages, attempt);
-                    continue;
-                }
-            };
-            let mut stream = stream;
-            let mut text = String::new();
-            let mut stream_error: Option<LlmFailure> = None;
-            loop {
-                let next = tokio::select! {
-                    biased;
-                    _ = cancel.cancelled() => {
-                        return Err(LlmFailure::new(codes::ABORTED, "compaction cancelled by user"));
-                    }
-                    item = stream.next() => item,
-                };
-                match next {
-                    Some(Ok(StreamChunk::TextDelta { text: delta, .. })) => {
-                        text.push_str(&delta);
-                    }
-                    Some(Ok(StreamChunk::Finish { reason: denia_core::stream::FinishReason::Error { failure } | denia_core::stream::FinishReason::Aborted { failure } })) => {
-                        stream_error = Some(failure);
-                        break;
-                    }
-                    Some(Ok(_)) => {}
-                    Some(Err(failure)) => {
-                        stream_error = Some(failure);
-                        break;
-                    }
-                    None => break,
-                }
-            }
-            if let Some(failure) = stream_error {
-                let route = self.registry.route_identity(&selection.provider, &request.model);
-                if replay.downgrade(&route, &request, &failure) {
-                    let _ = session.append(denia_core::session::SessionEvent::RetryAttempt { turn, step, attempt: 1, code: denia_llm::REASONING_REJECTED.into(), message: format!("摘要接口拒绝历史思考，仅本 turn 移除思考重试：{}", failure.message), delay_ms: 0 });
-                    attempt -= 1;
-                    continue;
-                }
-                tracing::warn!(
-                    session_id = session.id(),
-                    error_code = %failure.code,
-                    error_message = %failure.message,
-                    attempt,
-                    "compaction summary stream failed"
-                );
-                if attempt >= settings.max_attempts || cancel.is_cancelled() {
-                    return Err(failure);
-                }
-                messages = truncate_head(&messages, attempt);
-                continue;
-            }
-            let formatted = format_summary(&text);
-            if formatted.is_empty() {
-                tracing::warn!(
-                    session_id = session.id(),
-                    attempt,
-                    "compaction summary produced no text"
-                );
-                if attempt >= settings.max_attempts {
-                    return Err(LlmFailure::new(
-                        codes::MALFORMED_RESPONSE,
-                        "compaction summary produced no text".to_string(),
-                    ));
-                }
-                messages = truncate_head(&messages, attempt);
-                continue;
-            }
-            summary = Some(formatted);
-            break;
-        }
-
-        let Some(summary) = summary else {
-            return Err(LlmFailure::new(
-                codes::UNKNOWN,
-                "compaction exhausted retries without a summary".to_string(),
-            ));
-        };
-        Ok(Some(CompactOutcome {
-            summary: summary.clone(),
-            replaces_from: compressed[0].seq,
-            replaces_to: compressed[compressed.len() - 1].seq,
-            keep_from: kept[0].seq,
-            pre_tokens,
-            // 摘要消息本身的开销按角色框 + 文本估算,并入压缩后占用。
-            post_tokens: post_tokens.saturating_add(rough_tokens(&ChatMessage::user(&summary))),
-            // 读状态恢复在调用方做(它持有 driver 的 read_state 句柄)。
-            read_state_entries: Vec::new(),
-        }))
     }
 }

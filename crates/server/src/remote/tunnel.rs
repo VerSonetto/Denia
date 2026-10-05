@@ -224,10 +224,7 @@ fn extract_tunnel_url(line: &str) -> Option<String> {
     if label.is_empty() || !host.ends_with(".trycloudflare.com") {
         return None;
     }
-    if !label
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || c == '-')
-    {
+    if !label.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
         return None;
     }
     Some(candidate.to_string())
@@ -262,7 +259,10 @@ pub fn cleanup_stale(pid_file: &Path) {
             kill_pid(pid);
         }
         Some(false) => {
-            tracing::warn!(pid, "stale tunnel pid no longer belongs to cloudflared; leaving it alone");
+            tracing::warn!(
+                pid,
+                "stale tunnel pid no longer belongs to cloudflared; leaving it alone"
+            );
         }
         None => {}
     }
@@ -299,7 +299,9 @@ fn kill_pid(pid: u32) {
 
 #[cfg(not(windows))]
 fn kill_pid(pid: u32) {
-    let _ = std::process::Command::new("kill").args(["-9", &pid.to_string()]).output();
+    let _ = std::process::Command::new("kill")
+        .args(["-9", &pid.to_string()])
+        .output();
 }
 
 /// 子进程不该继承 denia 的进程环境:凭据、代理设置都不需要传给隧道进程。
@@ -344,11 +346,17 @@ mod tests {
 
     #[test]
     fn ignores_unrelated_urls() {
-        assert_eq!(extract_tunnel_url("see https://developers.cloudflare.com/tunnel"), None);
+        assert_eq!(
+            extract_tunnel_url("see https://developers.cloudflare.com/tunnel"),
+            None
+        );
         assert_eq!(extract_tunnel_url("INF no url here"), None);
         assert_eq!(extract_tunnel_url("https://example.com"), None);
         // 域名标签里出现非法字符不认。
-        assert_eq!(extract_tunnel_url("https://bad_label.trycloudflare.com"), None);
+        assert_eq!(
+            extract_tunnel_url("https://bad_label.trycloudflare.com"),
+            None
+        );
     }
 
     #[test]

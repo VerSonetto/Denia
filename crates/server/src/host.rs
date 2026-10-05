@@ -82,6 +82,7 @@ pub struct Host {
     pub state: Arc<AppState>,
     listener: tokio::net::TcpListener,
     router: Router,
+    home_lock: std::fs::File,
 }
 
 /// 绑端口、建 state、装路由。失败时进程里没有半启动的服务。
@@ -95,9 +96,10 @@ pub async fn prepare(
         .await
         .map_err(|error| format!("bind {addr}: {error}"))?;
     let addr = listener.local_addr()?;
+    let home_lock = crate::home_lock::acquire(&options.home)?;
 
     // 绑定地址非回环 ⇒ 远程浏览器 ⇒ 目录选择器走 browse。
-    let bound_remote = !matches!(options.host.as_str(), "127.0.0.1" | "localhost" | "::1");
+    let bound_remote = !addr.ip().is_loopback();
     let state = Arc::new(build_state(&options.home, bound_remote, addr.port()).await?);
 
     let web_dir = options
@@ -130,26 +132,28 @@ pub async fn prepare(
     // API 响应压缩在 api::router() 内部挂载:它只包裹注册时已有的路由,
     // 上面这个 fallback 因此不被压缩层碰 —— 静态资源自己按
     // Accept-Encoding 挑构建期预压缩好的实体,运行时零 CPU。
-    // 主 listener:只做来源标注(本机 UI 要看得到 PIN 与票据链接,而
-    // 以 `--host 0.0.0.0` 启动时局域网来客必须被标成 Lan 而不是本机)。
-    let router = business.clone().layer(axum::middleware::from_fn_with_state(
-        state.remote.clone(),
-        crate::remote::guard::annotate,
-    ));
-    // 远程 listener:同一份业务路由,外面再套一层「远程门」。
-    state
-        .remote
-        .attach_router(business.layer(axum::middleware::from_fn_with_state(
-            state.remote.clone(),
-            crate::remote::guard::gate,
-        )));
+    // Both listeners enforce the same boundary. The gate allows local UI requests
+    // and authenticates remote peers, including on a non-loopback main listener.
+    let router = guarded_router(business, state.remote.clone());
+    state.remote.attach_router(router.clone());
 
     Ok(Host {
         addr,
         state,
         listener,
         router,
+        home_lock,
     })
+}
+
+pub(crate) fn guarded_router(
+    business: Router,
+    manager: Arc<crate::remote::RemoteManager>,
+) -> Router {
+    business.layer(axum::middleware::from_fn_with_state(
+        manager,
+        crate::remote::guard::gate,
+    ))
 }
 
 impl Host {
@@ -161,6 +165,7 @@ impl Host {
         self,
         shutdown: impl std::future::Future<Output = ()> + Send + 'static,
     ) -> std::io::Result<()> {
+        let _home_lock = self.home_lock;
         let remote = self.state.remote.clone();
         axum::serve(
             nodelay(self.listener),

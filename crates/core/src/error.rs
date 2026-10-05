@@ -33,15 +33,19 @@ pub mod codes {
 
 /// Serializable failure facts, frozen at the adapter boundary.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "bindings", derive(ts_rs::TS))]
 #[serde(rename_all = "camelCase")]
 pub struct LlmFailure {
     pub message: String,
     pub code: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "bindings", ts(optional))]
     pub status: Option<u16>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "bindings", ts(optional))]
     pub provider_retry_after_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "bindings", ts(optional))]
     pub request_id: Option<String>,
 }
 

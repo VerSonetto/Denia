@@ -48,21 +48,22 @@ impl InjectionBaselines {
         // 一次进锁把 5 个通道基准全部扫出来:每调一次 events() 就是一次
         // 整条日志的克隆,而这里原本要克隆 4~5 次。
         let session = &state.session;
-        let (capability_fallback, workspace_baseline, skill_catalog) = session.with_events(|events| {
-            let capability_fallback = events.iter().rev().find_map(|e| match &e.event {
-                SessionEvent::UserMessage {
-                    text,
-                    injected: true,
-                    ..
-                } if text.starts_with("[denia 能力上下文]") => Some(text.clone()),
-                _ => None,
+        let (capability_fallback, workspace_baseline, skill_catalog) =
+            session.with_events(|events| {
+                let capability_fallback = events.iter().rev().find_map(|e| match &e.event {
+                    SessionEvent::UserMessage {
+                        text,
+                        injected: true,
+                        ..
+                    } if text.starts_with("[denia 能力上下文]") => Some(text.clone()),
+                    _ => None,
+                });
+                (
+                    capability_fallback,
+                    restore_injected_text(events, WORKSPACE_PREFIX),
+                    restore_injected_text(events, SKILL_CATALOG_PREFIX),
+                )
             });
-            (
-                capability_fallback,
-                restore_injected_text(events, WORKSPACE_PREFIX),
-                restore_injected_text(events, SKILL_CATALOG_PREFIX),
-            )
-        });
         Self {
             capability_context: last_injected_channel(session, "capability")
                 .or(capability_fallback),
@@ -77,15 +78,18 @@ impl InjectionBaselines {
 /// 按通道名取日志中最后一条注入消息(新事件模型:channel 字段)。
 pub(crate) fn last_injected_channel(session: &Session, channel: &str) -> Option<String> {
     session.with_events(|events| {
-        events.iter().rev().find_map(|envelope| match &envelope.event {
-            SessionEvent::UserMessage {
-                text,
-                injected: true,
-                channel: Some(name),
-                ..
-            } if name == channel => Some(text.clone()),
-            _ => None,
-        })
+        events
+            .iter()
+            .rev()
+            .find_map(|envelope| match &envelope.event {
+                SessionEvent::UserMessage {
+                    text,
+                    injected: true,
+                    channel: Some(name),
+                    ..
+                } if name == channel => Some(text.clone()),
+                _ => None,
+            })
     })
 }
 
@@ -104,8 +108,7 @@ pub(crate) async fn refresh_background_injections(
     let cwd = state.cwd();
     // 会话组装的功能开关:装配层按它摘工具与纪律段,这里按它关掉纯通道。
     // 两处读的是同一份声明,features 关闭的功能不会以任何形态泄漏给模型。
-    let preset_features = driver
-        .preset_features(session.agent_preset().as_deref());
+    let preset_features = driver.preset_features(session.agent_preset().as_deref());
 
     // ① 工作区指令(AGENTS.md):发现/预算/替换语义在 runtime 侧;
     // restore 的旧文本作为 previous 传入,由正文比较决定幂等与"取代"引导语。
@@ -238,8 +241,14 @@ pub(crate) async fn refresh_background_injections(
             .is_none_or(|allowed| allowed.iter().any(|name| name == "get_goal"));
     if goal_tool_visible {
         let goal_text = match session.goal() {
-            Some(goal) => Some(render_goal_block(&goal, session.goal_tokens_used().unwrap_or(0))),
-            None => baselines.goal.as_ref().map(|_| GOAL_CLEARED_TEXT.to_string()),
+            Some(goal) => Some(render_goal_block(
+                &goal,
+                session.goal_tokens_used().unwrap_or(0),
+            )),
+            None => baselines
+                .goal
+                .as_ref()
+                .map(|_| GOAL_CLEARED_TEXT.to_string()),
         };
         if let Some(text) = goal_text
             && baselines.goal.as_deref() != Some(&text)

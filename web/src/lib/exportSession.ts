@@ -394,8 +394,8 @@ function eventBody(envelope: SessionEnvelope): string {
     case 'request-context': {
       lines.push(`- provider: ${envelope.provider}`)
       lines.push(`- model: ${envelope.model}`)
-      if (envelope.contextWindow !== undefined) {
-        lines.push(`- context_window: ${envelope.contextWindow}`)
+      if (envelope.context_window !== undefined) {
+        lines.push(`- context_window: ${envelope.context_window}`)
       }
       return lines.join('\n')
     }

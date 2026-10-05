@@ -19,9 +19,7 @@ use denia_system_prompt::{
 use denia_token_meter::estimate_system_tokens;
 
 use crate::errors::MAX_FEEDBACK;
-use crate::injections::{
-    InjectionBaselines, refresh_background_injections, last_injected_channel,
-};
+use crate::injections::{InjectionBaselines, last_injected_channel, refresh_background_injections};
 use crate::rescue::{detect_fake_names, fake_tool_call_feedback, log_rescued, rescue_from_blocks};
 use crate::runtime_context::RuntimeContextProjection;
 use crate::workspace_instructions::skill_gesture;
@@ -84,8 +82,26 @@ pub(crate) async fn run_turn_inner(
         // —— 背景注入(工作区指令/能力上下文/技能目录),失败不阻断 ——
         refresh_background_injections(driver, state, &mut assembly.baselines, &assembly.touched)
             .await?;
-        let real_input = state.session.with_events(|events| events.iter().rev().find_map(|event| matches!(&event.event, SessionEvent::UserMessage { injected: false, .. }).then_some(event.seq)).unwrap_or(0));
-        if real_input != state.last_real_input { state.loop_guard.reset(); state.last_real_input = real_input; }
+        let real_input = state.session.with_events(|events| {
+            events
+                .iter()
+                .rev()
+                .find_map(|event| {
+                    matches!(
+                        &event.event,
+                        SessionEvent::UserMessage {
+                            injected: false,
+                            ..
+                        }
+                    )
+                    .then_some(event.seq)
+                })
+                .unwrap_or(0)
+        });
+        if real_input != state.last_real_input {
+            state.loop_guard.reset();
+            state.last_real_input = real_input;
+        }
         let step = state.turn_step_next();
         append(
             &state.session,
@@ -218,7 +234,9 @@ pub(crate) async fn run_turn_inner(
             crate::request::RequestOutcome::TurnEnded(reason) => return Ok(reason),
             crate::request::RequestOutcome::RestartStep => continue 'step_loop,
             crate::request::RequestOutcome::Step { blocks, finish } => {
-                let mut calls = denia_core::message::assistant_from_blocks(&blocks).map(|message| message.tool_calls).unwrap_or_default();
+                let mut calls = denia_core::message::assistant_from_blocks(&blocks)
+                    .map(|message| message.tool_calls)
+                    .unwrap_or_default();
                 let hit_max_tokens = matches!(finish, Some(FinishReason::MaxTokens));
 
                 if calls.is_empty() && !hit_max_tokens {
@@ -266,8 +284,26 @@ pub(crate) async fn run_turn_inner(
 
                 if calls.is_empty() && hit_max_tokens && state.continuations < 3 {
                     state.continuations += 1;
-                    append(&state.session, &state.emit, SessionEvent::StepEnd { turn: state.turn, step })?;
-                    append(&state.session, &state.emit, SessionEvent::RetryAttempt { turn: state.turn, step, attempt: state.continuations, code: "MAX_TOKENS_CONTINUATION".into(), message: "输出达到预算，已保存部分响应，继续生成；最多三次。".into(), delay_ms: 0 })?;
+                    append(
+                        &state.session,
+                        &state.emit,
+                        SessionEvent::StepEnd {
+                            turn: state.turn,
+                            step,
+                        },
+                    )?;
+                    append(
+                        &state.session,
+                        &state.emit,
+                        SessionEvent::RetryAttempt {
+                            turn: state.turn,
+                            step,
+                            attempt: state.continuations,
+                            code: "MAX_TOKENS_CONTINUATION".into(),
+                            message: "输出达到预算，已保存部分响应，继续生成；最多三次。".into(),
+                            delay_ms: 0,
+                        },
+                    )?;
                     append(&state.session, &state.emit, SessionEvent::UserMessage { text: "上次响应因输出预算截断。请从已有内容继续，不要重复已完成操作。截断或不完整的工具调用未执行，如仍需要该动作，请重新生成完整合法的调用。".into(), injected: true, channel: Some("output-continuation".into()), images: Vec::new() })?;
                     continue 'step_loop;
                 }
@@ -299,10 +335,26 @@ pub(crate) async fn run_turn_inner(
                 // —— 工具并行执行(滚动池;升权串行;结果兜底截断)——
                 crate::exec::execute_calls(driver, state, step, &calls, &mut assembly.touched)
                     .await?;
-                let results = state.session.with_events(|events| calls.iter().filter_map(|call| events.iter().rev().find_map(|event| match &event.event {
-                    SessionEvent::ToolResult { call_id, content, is_error, meta, replaces: None, .. } if call_id == &call.id => Some((content.clone(), *is_error, meta.clone())),
-                    _ => None,
-                })).collect::<Vec<_>>());
+                let results = state.session.with_events(|events| {
+                    calls
+                        .iter()
+                        .filter_map(|call| {
+                            events.iter().rev().find_map(|event| match &event.event {
+                                SessionEvent::ToolResult {
+                                    call_id,
+                                    content,
+                                    is_error,
+                                    meta,
+                                    replaces: None,
+                                    ..
+                                } if call_id == &call.id => {
+                                    Some((content.clone(), *is_error, meta.clone()))
+                                }
+                                _ => None,
+                            })
+                        })
+                        .collect::<Vec<_>>()
+                });
                 match state.loop_guard.observe(&calls, &results) {
                     crate::loop_guard::LoopVerdict::Continue => {}
                     crate::loop_guard::LoopVerdict::Warn { .. } => {
@@ -340,8 +392,9 @@ pub(crate) async fn run_turn_inner(
                 }
 
                 // 计一次工具轮次:rapid-refill 断路器靠它判断"压缩后多久又满"。
-                driver
-                    .tool_turns_since_compact
+                state
+                    .compaction_state
+                    .tool_turns
                     .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 // 本 step 闭合(工具与结果全部落盘后)。
                 append(
@@ -490,10 +543,7 @@ fn image_kind_label(mime: &str) -> String {
         "image/gif" => "GIF".to_string(),
         "image/webp" => "WEBP".to_string(),
         "image/bmp" => "BMP".to_string(),
-        other => other
-            .strip_prefix("image/")
-            .unwrap_or(other)
-            .to_uppercase(),
+        other => other.strip_prefix("image/").unwrap_or(other).to_uppercase(),
     }
 }
 
@@ -555,10 +605,13 @@ async fn detect_gesture_skill(
 /// None = 会话尚未发过任何请求,当前提示词即为基准。
 fn last_request_header_system(session: &Session) -> Option<String> {
     session.with_events(|events| {
-        events.iter().rev().find_map(|envelope| match &envelope.event {
-            SessionEvent::RequestHeader { header, .. } => header.system.clone(),
-            _ => None,
-        })
+        events
+            .iter()
+            .rev()
+            .find_map(|envelope| match &envelope.event {
+                SessionEvent::RequestHeader { header, .. } => header.system.clone(),
+                _ => None,
+            })
     })
 }
 
@@ -642,10 +695,7 @@ pub(crate) fn retain_loaded_mcp_tools(
 /// 装配本 step 的系统提示与工具集。
 /// 系统提示热更新不丢能力(bash schema 回填实际注册表版本);
 /// 子代理 persona 覆盖 + 工具白名单过滤。
-fn assemble_step(
-    driver: &SessionDriver,
-    state: &TurnState,
-) -> Result<PromptAssembly, String> {
+fn assemble_step(driver: &SessionDriver, state: &TurnState) -> Result<PromptAssembly, String> {
     let cwd = state.session.header().cwd.clone();
     let mut assembly = driver.system_prompt.load().assemble(&AssembleContext {
         cwd: Some(cwd),
@@ -671,7 +721,11 @@ fn assemble_step(
     // `allowed_tools`/角色提示词在其后继续收窄——继承即收窄,绝不放大。
     // 放在能力 schema 追加之后:preset 说"不给 bash"就得对追加进来的
     // 扩展工具同样生效。
-    apply_session_preset(driver, state.session.agent_preset().as_deref(), &mut assembly);
+    apply_session_preset(
+        driver,
+        state.session.agent_preset().as_deref(),
+        &mut assembly,
+    );
     // MCP 目录化:未装载的 `mcp__*` 工具整体移出工具面,模型经 mcp_list
     // 发现、按名调用、首次调用装载。放白名单收窄之后:被 preset/子代理
     // 白名单排除的 MCP 工具同样不进请求。
@@ -683,8 +737,7 @@ fn assemble_step(
                 .iter_mut()
                 .find(|s| s.name == "deployment:persona")
         {
-            section.text =
-                format!("{persona}\n始终使用简体中文回复，除非用户明确要求其他语言。");
+            section.text = format!("{persona}\n始终使用简体中文回复，除非用户明确要求其他语言。");
         }
         if let Some(allowed) = &child.allowed_tools {
             // 纪律段与工具同进退(AGENTS.md 的同步要求):子代理拿不到的工具,
@@ -699,8 +752,7 @@ fn assemble_step(
     // 不在此列:其工具面由 allowed_tools 白名单收窄,且记忆提取子代理的写
     // 落点限定记忆目录(MemoryWrite 类放行),收掉写工具会弄断记忆沉淀。
     // 执行档(auto-edit/plan/full)之间维持跨模式字节稳定,不按模式增删。
-    if state.session.permission_mode().is_read_only() && state.session.header().subagent.is_none()
-    {
+    if state.session.permission_mode().is_read_only() && state.session.header().subagent.is_none() {
         crate::preset::apply_tool_blocklist(&mut assembly, &["bash", "write_file", "edit"]);
     }
     // 执行档(auto-edit/plan/full)之间**不**增删 schema 与纪律段(计划档
@@ -724,7 +776,9 @@ fn assemble_step(
             .as_ref()
             .and_then(|runtime| runtime.memory_root_for(&session_cwd))
         {
-            Some(root) => assembly.sections[position].text = denia_tools::render_memory_section(Some(&root)),
+            Some(root) => {
+                assembly.sections[position].text = denia_tools::render_memory_section(Some(&root))
+            }
             None => {
                 assembly.sections.remove(position);
             }
@@ -741,23 +795,19 @@ fn assemble_step(
 /// 的 step 数(通常个位数,扫描成本可忽略)。
 impl TurnState {
     pub(crate) fn turn_step_next(&self) -> u32 {
-        self.session
-            .with_events(|events| {
-                events
-                    .iter()
-                    .rev()
-                    .take_while(|envelope| {
-                        !matches!(envelope.event, SessionEvent::TurnStart { .. })
-                    })
-                    .filter(|envelope| {
-                        matches!(
-                            envelope.event,
-                            SessionEvent::StepStart { turn, .. } if turn == self.turn
-                        )
-                    })
-                    .count() as u32
-            })
-            + 1
+        self.session.with_events(|events| {
+            events
+                .iter()
+                .rev()
+                .take_while(|envelope| !matches!(envelope.event, SessionEvent::TurnStart { .. }))
+                .filter(|envelope| {
+                    matches!(
+                        envelope.event,
+                        SessionEvent::StepStart { turn, .. } if turn == self.turn
+                    )
+                })
+                .count() as u32
+        }) + 1
     }
 }
 

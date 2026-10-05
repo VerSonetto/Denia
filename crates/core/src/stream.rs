@@ -9,6 +9,7 @@ use crate::error::LlmFailure;
 
 /// The kind of content block a stream opens.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "bindings", derive(ts_rs::TS))]
 #[serde(rename_all = "kebab-case")]
 pub enum BlockType {
     Text,
@@ -18,6 +19,7 @@ pub enum BlockType {
 
 /// A completed content block, delivered by `block-end`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "bindings", derive(ts_rs::TS))]
 #[serde(tag = "type", rename_all = "kebab-case")]
 pub enum ContentBlock {
     Text {
@@ -26,6 +28,7 @@ pub enum ContentBlock {
     Reasoning {
         text: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "bindings", ts(optional))]
         replay: Option<ReasoningReplay>,
     },
     ToolCall {
@@ -38,26 +41,32 @@ pub enum ContentBlock {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "bindings", derive(ts_rs::TS))]
 #[serde(rename_all = "camelCase")]
 pub struct ReasoningReplay {
     pub protocol: String,
+    #[cfg_attr(feature = "bindings", ts(type = "unknown"))]
     pub payload: serde_json::Value,
 }
 
 /// Token accounting; cache reads are disjoint from `input_tokens`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "bindings", derive(ts_rs::TS))]
 #[serde(rename_all = "camelCase")]
 pub struct TokenUsage {
     pub input_tokens: u64,
     pub output_tokens: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "bindings", ts(optional))]
     pub cache_read_tokens: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "bindings", ts(optional))]
     pub reasoning_tokens: Option<u64>,
 }
 
 /// Why the model stopped producing output.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "bindings", derive(ts_rs::TS))]
 #[serde(tag = "kind", rename_all = "kebab-case")]
 pub enum FinishReason {
     Stop,
@@ -69,6 +78,7 @@ pub enum FinishReason {
 
 /// One streaming protocol frame.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "bindings", derive(ts_rs::TS))]
 #[serde(tag = "type", rename_all = "kebab-case")]
 pub enum StreamChunk {
     BlockStart {
@@ -87,6 +97,7 @@ pub enum StreamChunk {
         index: u32,
         id: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "bindings", ts(optional))]
         name: Option<String>,
         arguments_delta: String,
     },

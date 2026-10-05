@@ -82,12 +82,12 @@ impl SseTransport {
         let reader_responses = responses.clone();
         let reader_arrived = arrived.clone();
         let reader_base = url.clone();
-        let reader_name = name.clone();
+        let _reader_name = name.clone();
         let reader = tokio::spawn(async move {
             // 逐块累积字节,按 SSE 的空行切事件(块边界可能落在事件中间)。
             let mut buffer = String::new();
             let mut stream = std::pin::pin!(stream);
-            let mut endpoint_tx = endpoint_tx;
+            let endpoint_tx = endpoint_tx;
             while let Some(chunk) = stream.next().await {
                 let Ok(chunk) = chunk else { break };
                 buffer.push_str(&String::from_utf8_lossy(&chunk));
@@ -141,9 +141,7 @@ impl SseTransport {
             .body(frame.to_string())
             .send()
             .await
-            .map_err(|error| {
-                McpClientError::Disconnected(format!("POST {url} 失败: {error}"))
-            })?;
+            .map_err(|error| McpClientError::Disconnected(format!("POST {url} 失败: {error}")))?;
         if !response.status().is_success() {
             return Err(McpClientError::Rpc {
                 message: format!(

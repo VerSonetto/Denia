@@ -605,6 +605,20 @@ const zh = {
   producedFilesMore: '+{count} 个文件',
   producedFilesOpenFolder: '打开 {name} 所在文件夹',
   producedFilesOpenFile: '打开 {name}',
+  // 收尾变更卡片:标题说清"改了什么"(新建/编辑/几个文件),副标题是 ±行数;
+  // 悬停时副标题换成「查看变更」,因为用户悬停时想的是"我要看哪里"。
+  turnDiffCreated: '新建 {name}',
+  turnDiffEditedOne: '编辑 {name}',
+  turnDiffEdited: '编辑 {count} 个文件',
+  turnDiffViewChanges: '查看变更',
+  turnDiffViewAll: '在审查面板查看本轮改动',
+  turnDiffShowMore: '再显示 {count} 个文件',
+  turnDiffCollapse: '收起',
+  turnDiffOpenFile: '打开 {name}',
+  // 中断轮次的标记:已落盘的文件照样列出来,但要让用户看得出这轮没跑完
+  // —— 半路的产物与跑完的产物不是一回事。
+  turnDiffPartial: '· 中断前',
+  turnDiffPartialHint: '本轮未正常结束,以上是中断前已落盘的改动',
   currentModel: '当前模型',
 
   messageBranch: '在新对话中分支',
@@ -1667,6 +1681,16 @@ const en: typeof zh = {
   producedFilesMore: '+{count} files',
   producedFilesOpenFolder: 'Open folder containing {name}',
   producedFilesOpenFile: 'Open {name}',
+  turnDiffCreated: 'Created {name}',
+  turnDiffEditedOne: 'Edited {name}',
+  turnDiffEdited: 'Edited {count} files',
+  turnDiffViewChanges: 'View changes',
+  turnDiffViewAll: "View this turn's changes in the review panel",
+  turnDiffShowMore: 'Show {count} more files',
+  turnDiffCollapse: 'Collapse',
+  turnDiffOpenFile: 'Open {name}',
+  turnDiffPartial: '· before interrupt',
+  turnDiffPartialHint: "This turn didn't finish; these are the changes written before it stopped",
   currentModel: 'Current model',
 
   messageBranch: 'Branch into a new conversation',

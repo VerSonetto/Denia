@@ -168,7 +168,11 @@ pub fn scan_manifest(root: &Path) -> ProjectMemoryManifest {
                 if !metadata.is_file() || path.extension().is_none_or(|ext| ext != "md") {
                     continue;
                 }
-                if dir == root && path.file_name().is_some_and(|name| name == MEMORY_INDEX_FILE) {
+                if dir == root
+                    && path
+                        .file_name()
+                        .is_some_and(|name| name == MEMORY_INDEX_FILE)
+                {
                     continue;
                 }
                 let name = path
@@ -312,7 +316,10 @@ mod tests {
         // 超字节预算:UTF-8 边界截断 + 告警。
         std::fs::write(root.join(MEMORY_INDEX_FILE), "好".repeat(100)).unwrap();
         let cut = read_index(&root, 8).unwrap();
-        assert!(cut.starts_with("好好"), "预算 8 字节只能装下 2 个汉字:{cut}");
+        assert!(
+            cut.starts_with("好好"),
+            "预算 8 字节只能装下 2 个汉字:{cut}"
+        );
         assert!(!cut.contains("好好好"));
         assert!(cut.contains("字节预算"));
         // 空文件与缺失都返回 None。
@@ -334,7 +341,10 @@ mod tests {
         std::fs::write(root.join("notes.txt"), "忽略非 md").unwrap();
         // b.md 设为最新。
         let new_time = std::time::SystemTime::now() + std::time::Duration::from_secs(10);
-        let file = std::fs::File::options().append(true).open(root.join("b.md")).unwrap();
+        let file = std::fs::File::options()
+            .append(true)
+            .open(root.join("b.md"))
+            .unwrap();
         file.set_modified(new_time).unwrap();
         let manifest = scan_manifest(&root);
         assert_eq!(manifest.files.len(), 2);
@@ -356,7 +366,10 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(root.join("a.md"), "ok").unwrap();
         assert!(resolve_manifest_file(&root, "a.md").is_ok());
-        assert!(resolve_manifest_file(&root, "/a.md").is_ok(), "前导斜杠被剥掉");
+        assert!(
+            resolve_manifest_file(&root, "/a.md").is_ok(),
+            "前导斜杠被剥掉"
+        );
         assert!(resolve_manifest_file(&root, "../escape.md").is_err());
         assert!(resolve_manifest_file(&root, "sub/../../x.md").is_err());
         assert!(resolve_manifest_file(&root, "a.txt").is_err());
@@ -379,7 +392,11 @@ mod tests {
     }
 
     fn envelope(seq: u64, event: SessionEvent) -> denia_core::session::SessionEnvelope {
-        denia_core::session::SessionEnvelope { seq, time: 0, event }
+        denia_core::session::SessionEnvelope {
+            seq,
+            time: 0,
+            event,
+        }
     }
 
     #[test]

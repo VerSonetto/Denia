@@ -17,6 +17,7 @@ pub const SESSION_FORMAT_VERSION: u32 = 0;
 
 /// First JSONL line of every session file.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "bindings", derive(ts_rs::TS))]
 pub struct SessionHeader {
     #[serde(rename = "type")]
     pub kind: SessionHeaderKind,
@@ -30,13 +31,16 @@ pub struct SessionHeader {
     /// 分支来源:本会话由哪个父会话 fork 而来(dsh parentSession 血缘)。
     /// 旧日志/普通会话无此字段。
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "bindings", ts(optional))]
     pub parent_session: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "bindings", ts(optional))]
     pub subagent: Option<SubagentDescriptor>,
 }
 
 /// 子代理身份与恢复配置随会话头持久化；普通用户分支没有此描述符。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "bindings", derive(ts_rs::TS))]
 #[serde(rename_all = "camelCase")]
 pub struct SubagentDescriptor {
     pub label: String,
@@ -44,8 +48,10 @@ pub struct SubagentDescriptor {
     pub mode: String,
     pub selection: crate::config::ModelSelection,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "bindings", ts(optional))]
     pub persona: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "bindings", ts(optional))]
     pub allowed_tools: Option<Vec<String>>,
 }
 
@@ -54,6 +60,7 @@ fn default_true() -> bool {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "bindings", derive(ts_rs::TS))]
 #[serde(rename_all = "kebab-case")]
 pub enum SessionHeaderKind {
     Session,
@@ -61,12 +68,14 @@ pub enum SessionHeaderKind {
 
 /// Why one turn closed.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "bindings", derive(ts_rs::TS))]
 #[serde(tag = "kind", rename_all = "kebab-case")]
 pub enum TurnEndReason {
     Completed,
     /// 取消中断(对齐 dsh `aborted` + `AgentCancelCause`);cause 缺失 = 旧日志。
     Aborted {
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "bindings", ts(optional))]
         cause: Option<AbortCause>,
     },
     MaxTokens,
@@ -84,6 +93,7 @@ pub enum TurnEndReason {
 
 /// 取消的发起方(对齐 dsh `AgentCancelCause`;`Legacy` 兼容旧日志无 cause 记录)。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "bindings", derive(ts_rs::TS))]
 #[serde(tag = "kind", rename_all = "kebab-case")]
 pub enum AbortCause {
     User,
@@ -98,6 +108,7 @@ pub enum AbortCause {
 /// serde `alias` 承担旧日志兼容:历史 JSONL 里的三档值在反序列化时
 /// 落到语义等价的新档位,新事件只写新值。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "bindings", derive(ts_rs::TS))]
 #[serde(rename_all = "kebab-case")]
 pub enum PermissionMode {
     /// 只读:工具面只留只读类(bash/写文件工具不开放),写类操作被策略拒绝。
@@ -148,6 +159,7 @@ impl PermissionMode {
 /// 审批策略(遗留词汇):仅旧日志的 `approval-policy` 事件仍携带该值;
 /// 新事件不再发射,折叠时按 no-op 处理。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "bindings", derive(ts_rs::TS))]
 #[serde(rename_all = "kebab-case")]
 pub enum ApprovalPolicy {
     Ask,
@@ -165,6 +177,7 @@ impl ApprovalPolicy {
 
 /// 一次审批请求的闭合结果(抄 dsh ApprovalOutcome)。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "bindings", derive(ts_rs::TS))]
 #[serde(rename_all = "kebab-case")]
 pub enum ApprovalOutcome {
     AllowedOnce,
@@ -179,32 +192,39 @@ pub enum ApprovalOutcome {
 /// 计划审批(`exit_plan`)的闭合决策:批准可携带执行档位与模型选择,
 /// 拒绝可携带补充建议(驱动模型同轮修订重提)。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "bindings", derive(ts_rs::TS))]
 #[serde(rename_all = "camelCase")]
 pub struct PlanReviewDecision {
     pub outcome: ApprovalOutcome,
     /// 批准时用户选定的执行档位(仅 auto-edit / full);缺省 auto-edit。
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "bindings", ts(optional))]
     pub execute_mode: Option<PermissionMode>,
     /// 批准时用户选定的执行模型;缺省沿用当前 selection。
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "bindings", ts(optional))]
     pub selection: Option<crate::config::ModelSelection>,
     /// 所选模型是否可识图(宿主在应答时解析目录后回填,供 driver 同步
     /// 视觉注入开关);缺省沿用当前值。
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "bindings", ts(optional))]
     pub vision_supported: Option<bool>,
     /// 用户补充建议:批准时随执行参考,拒绝时驱动重写。
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "bindings", ts(optional))]
     pub feedback: Option<String>,
 }
 
 /// 向用户提问时可选项(denia `ask` 工具,对照 dsh `AskUserQuestionOption`)。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "bindings", derive(ts_rs::TS))]
 #[serde(rename_all = "camelCase")]
 pub struct AskOption {
     /// 用户可见的选项标签,也是回答里回传的取值。
     pub label: String,
     /// 一句话说明取舍/影响;UI 渲染在标签下方。
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "bindings", ts(optional))]
     pub description: Option<String>,
     /// 模型推荐的选项。结构化字段,不靠标签后缀约定(对照 dsh 的
     /// "(Recommended)" 字符串约定:多语言/全半角括号都会失配)。
@@ -214,6 +234,7 @@ pub struct AskOption {
 
 /// 一个待回答的问题。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "bindings", derive(ts_rs::TS))]
 #[serde(rename_all = "camelCase")]
 pub struct AskQuestion {
     /// 调用方给的稳定 id,原样回显在回答里(配对答案与问题)。
@@ -222,9 +243,11 @@ pub struct AskQuestion {
     pub question: String,
     /// 可选短标题(如"确认""选择模式")。
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "bindings", ts(optional))]
     pub header: Option<String>,
     /// 可选补充说明(可含 markdown);渲染在问题与选项之间,不混进选项标签。
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "bindings", ts(optional))]
     pub detail: Option<String>,
     /// 可选选项;为空表示纯自由文本回答。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -239,6 +262,7 @@ pub struct AskQuestion {
 
 /// 一个问题的回答。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "bindings", derive(ts_rs::TS))]
 #[serde(rename_all = "camelCase")]
 pub struct AskAnswer {
     /// 对应的 `AskQuestion::id`。
@@ -248,6 +272,7 @@ pub struct AskAnswer {
     pub selected: Vec<String>,
     /// 自由文本补充。
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "bindings", ts(optional))]
     pub custom: Option<String>,
     /// 用户显式跳过本题(区别于"空回答":模型据此知道是没答还是没看到)。
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -257,6 +282,7 @@ pub struct AskAnswer {
 /// 一次提问的结局(denia 扩展:dsh 只有 answered/cancelled 两种,
 /// 无超时、无"通道不可用",模型无法区分"没人答"和"答了空")。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "bindings", derive(ts_rs::TS))]
 #[serde(rename_all = "kebab-case")]
 pub enum AskOutcome {
     /// 用户已作答(可能含跳过项)。
@@ -271,6 +297,7 @@ pub enum AskOutcome {
 
 /// 一次提问的闭合结果。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "bindings", derive(ts_rs::TS))]
 #[serde(rename_all = "camelCase")]
 pub struct AskResolution {
     pub outcome: AskOutcome,
@@ -279,6 +306,7 @@ pub struct AskResolution {
     pub answers: Vec<AskAnswer>,
     /// `Unavailable` 时的原因(可执行提示)。
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "bindings", ts(optional))]
     pub reason: Option<String>,
 }
 
@@ -289,6 +317,7 @@ pub struct AskResolution {
 /// `status`. No id, priority, or ordering field — the list is replaced
 /// wholesale on every write (last-write-wins), so entries need no identity.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "bindings", derive(ts_rs::TS))]
 pub struct TodoItem {
     /// What the task is — a short imperative line shown in the UI.
     pub content: String,
@@ -297,6 +326,7 @@ pub struct TodoItem {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "bindings", derive(ts_rs::TS))]
 #[serde(rename_all = "snake_case")]
 pub enum TodoStatus {
     Pending,
@@ -307,6 +337,7 @@ pub enum TodoStatus {
 /// 会话目标的生命周期状态(工作逻辑对照 codex thread goals;codex 的
 /// `usage_limited` 是账号配额概念,denia 走 API key 无此反馈,不设)。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "bindings", derive(ts_rs::TS))]
 #[serde(rename_all = "kebab-case")]
 pub enum GoalStatus {
     /// 进行中:harness 会在会话空闲时自动续跑(goal 轮)。
@@ -350,15 +381,18 @@ impl GoalStatus {
 /// `base_tokens` 记录目标激活时刻的会话累计;pause/resume 不重置总账,
 /// 一个目标生命周期内的花费连续累计。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "bindings", derive(ts_rs::TS))]
 #[serde(rename_all = "camelCase")]
 pub struct GoalState {
     pub objective: String,
     pub status: GoalStatus,
     /// token 预算(可选);`None` = 不限,续跑只受轮数上限约束。
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "bindings", ts(optional))]
     pub token_budget: Option<u64>,
     /// 受阻原因(blocked 时的 hover 提示与模型侧上下文)。
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "bindings", ts(optional))]
     pub blocked_reason: Option<String>,
     /// 目标激活时刻的会话累计 token 快照(减法记账基数)。
     #[serde(default)]
@@ -374,20 +408,24 @@ pub struct GoalState {
 /// 非法转换在折叠时忽略(回放健壮性);调用方(API/工具)应在写事件前
 /// 校验转换合法性并显式报错,两层各司其职。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "bindings", derive(ts_rs::TS))]
 #[serde(tag = "kind", rename_all = "kebab-case")]
 pub enum GoalOp {
     /// 创建目标(仅当当前无目标;已存在时忽略——用户先清除再重建)。
     Set {
         objective: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "bindings", ts(optional))]
         token_budget: Option<u64>,
     },
     /// 编辑目标文本与/或预算。blocked/budget-limited 下编辑视为用户重新
     /// 出发,状态回到 active;paused 保持暂停;complete 忽略(终态)。
     Edit {
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "bindings", ts(optional))]
         objective: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "bindings", ts(optional))]
         token_budget: Option<u64>,
     },
     /// 暂停(仅 active 生效)。
@@ -468,10 +506,7 @@ pub fn apply_goal_op(
                 goal.token_budget = if *budget == 0 { None } else { Some(*budget) };
             }
             // 用户编辑 = 重新出发:受阻/预算耗尽回到进行中;暂停保持暂停。
-            if matches!(
-                goal.status,
-                GoalStatus::Blocked | GoalStatus::BudgetLimited
-            ) {
+            if matches!(goal.status, GoalStatus::Blocked | GoalStatus::BudgetLimited) {
                 goal.status = GoalStatus::Active;
                 goal.blocked_reason = None;
             }
@@ -544,6 +579,7 @@ pub fn apply_goal_op(
 /// - `change` — 后续请求的 header 与上次不同(同时开启新消息列);
 /// - `series` — 头未变但开始显式独立消息列(本仓暂不产出,保留位对齐)。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "bindings", derive(ts_rs::TS))]
 #[serde(rename_all = "kebab-case")]
 pub enum RequestHeaderReason {
     Initial,
@@ -556,11 +592,13 @@ pub enum RequestHeaderReason {
 /// 模型实际收到的系统提示 + 工具 schema。日志专用,不进入派生历史;
 /// 最近的快照即可重建一次请求的形态。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "bindings", derive(ts_rs::TS))]
 pub struct RequestHeaderSnapshot {
     /// 调用配置(provider/model/推理强度/采样参数)。
     pub config: LlmCallConfig,
     /// 渲染后的完整系统提示(含模型框架,模型实际收到的原文);无 system 请求时缺省。
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "bindings", ts(optional))]
     pub system: Option<String>,
     /// 组装好的工具 schema 列表;无工具请求时缺省。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -571,6 +609,7 @@ pub struct RequestHeaderSnapshot {
 /// 与 `ToolResult.error`(模型可见错误文本)互补:这里记的是工具内部的
 /// 失败种类与码,供诊断聚合,不进入派生历史。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "bindings", derive(ts_rs::TS))]
 pub struct ToolFailureIdentity {
     pub name: String,
     pub code: String,
@@ -579,6 +618,7 @@ pub struct ToolFailureIdentity {
 /// 一次工具输出被截断的事实(落盘层统一输出预算产出);模型可见的截断
 /// 提示已并入 `ToolResult.content` 尾部,这里是给 UI 徽标用的结构化数据。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "bindings", derive(ts_rs::TS))]
 pub struct TruncationInfo {
     /// 截断前的总字符数。
     pub total_chars: u64,
@@ -588,6 +628,7 @@ pub struct TruncationInfo {
 
 /// The durable event vocabulary, internally tagged on `type`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "bindings", derive(ts_rs::TS))]
 #[serde(tag = "type", rename_all = "kebab-case")]
 pub enum SessionEvent {
     /// 已准入但尚未在模型步边界领取的代理/任务通知。
@@ -627,6 +668,7 @@ pub enum SessionEvent {
         /// image 等);None = 真实用户消息或旧日志。通道识别以本字段优先,
         /// 旧日志回退到文本前缀判断。
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "bindings", ts(optional))]
         channel: Option<String>,
         /// 用户粘贴/上传的内联图片(仅 vision 模型;旧日志无此字段)。
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -648,6 +690,7 @@ pub enum SessionEvent {
         step: u32,
         blocks: Vec<ContentBlock>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "bindings", ts(optional))]
         usage: Option<TokenUsage>,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         interrupted: bool,
@@ -659,6 +702,7 @@ pub enum SessionEvent {
         /// 首字延迟与解码吞吐的锚点:框架帧(block-start 等)不算 token,
         /// 历史回放没有 chunk 事件,统计从这里读取。旧日志缺省。
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "bindings", ts(optional))]
         first_token_time: Option<u64>,
     },
     ToolCall {
@@ -675,20 +719,26 @@ pub enum SessionEvent {
         content: String,
         is_error: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "bindings", ts(optional))]
         error: Option<String>,
         /// 工具内部失败身份(对齐 dsh `tool/result.error{name,code}`);None = 无内部标识。
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "bindings", ts(optional))]
         error_identity: Option<ToolFailureIdentity>,
         /// 工具私有展示载荷(对齐 dsh `tool/result.meta`);核心不解释其形状。
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "bindings", ts(optional))]
+        #[cfg_attr(feature = "bindings", ts(type = "unknown"))]
         meta: Option<serde_json::Value>,
         /// 输出截断事实(统一输出预算产出);None = 未截断。旧日志无此字段。
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "bindings", ts(optional))]
         truncation: Option<TruncationInfo>,
         /// 工具结果剪枝替换:本事件是对旧 `ToolResult` 事件(seq)的 surface
         /// 替换,旧节点不再进入模型历史与 token-meter 表面(对齐 dsh
         /// `tool/result` 的 `surfaceOp.replace`)。None = 普通追加。
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "bindings", ts(optional))]
         replaces: Option<u64>,
     },
     /// 超长工具参数打桩(模型侧投影):把 `call_id` 对应的工具调用参数在
@@ -722,26 +772,26 @@ pub enum SessionEvent {
         #[serde(default)]
         post_tokens: u64,
     },
-/// Whole-list todo snapshot; latest write wins on replay. Log-only UI
-/// state — never part of the derived model history.
-TodoWrite {
-    todos: Vec<TodoItem>,
-},
-/// 会话目标(goal 模式)的一次操作。日志持久、可回放、fork 随种子继承,
-/// 不进入模型历史;模型侧的目标感知走 `channel: "goal"` 注入消息。
-/// 投影语义见 [`apply_goal_op`]:操作即意图,状态机集中折叠。
-Goal {
-    op: GoalOp,
-},
-/// 本地斜杠命令的回显(如 `/goal <目标>`):落日志获得真实 seq,前端
-/// 按序渲染为右对齐命令气泡——命令的"发送"必须有可见且排序正确的
-/// 结果。仅日志;不进入模型历史,也不携带任何目标状态语义。
-CommandRun {
-    /// 命令名(如 `goal`)。
-    name: String,
-    /// 用户输入的完整原文(含 `/name` 前缀)。
-    text: String,
-},
+    /// Whole-list todo snapshot; latest write wins on replay. Log-only UI
+    /// state — never part of the derived model history.
+    TodoWrite {
+        todos: Vec<TodoItem>,
+    },
+    /// 会话目标(goal 模式)的一次操作。日志持久、可回放、fork 随种子继承,
+    /// 不进入模型历史;模型侧的目标感知走 `channel: "goal"` 注入消息。
+    /// 投影语义见 [`apply_goal_op`]:操作即意图,状态机集中折叠。
+    Goal {
+        op: GoalOp,
+    },
+    /// 本地斜杠命令的回显(如 `/goal <目标>`):落日志获得真实 seq,前端
+    /// 按序渲染为右对齐命令气泡——命令的"发送"必须有可见且排序正确的
+    /// 结果。仅日志;不进入模型历史,也不携带任何目标状态语义。
+    CommandRun {
+        /// 命令名(如 `goal`)。
+        name: String,
+        /// 用户输入的完整原文(含 `/name` 前缀)。
+        text: String,
+    },
     /// 会话权限模式切换(抄 dsh sandbox/mode):日志持久、可回放,
     /// 不进入模型历史;driver 读 fold 后的当前值做策略判断。
     PermissionMode {
@@ -774,6 +824,7 @@ CommandRun {
         tool: String,
         args_preview: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "bindings", ts(optional))]
         reason: Option<String>,
     },
     /// 一次审批请求的闭合结果(抄 dsh approval/decided)。
@@ -818,6 +869,7 @@ CommandRun {
         model: String,
         /// 路由通告的最大上下文(输入+输出,token);未通告时缺省。
         #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(feature = "bindings", ts(optional))]
         context_window: Option<u64>,
     },
     /// 一次模型请求重试尝试的轨迹(对齐 dsh llm-retry 的事件化重试):
@@ -835,6 +887,7 @@ CommandRun {
 
 /// One log entry: monotonic coordinates plus the event payload.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "bindings", derive(ts_rs::TS))]
 pub struct SessionEnvelope {
     /// Contiguous, starts at 1.
     pub seq: u64,
@@ -977,8 +1030,12 @@ fn derive_surface_inner(events: &[SessionEnvelope]) -> Vec<SurfaceMessage> {
                 });
             }
             SessionEvent::AssistantMessage { blocks, .. } => {
-                let Some(message) = crate::message::assistant_from_blocks(blocks) else { continue; };
-                for call in &message.tool_calls { unanswered.push(call.id.clone()); }
+                let Some(message) = crate::message::assistant_from_blocks(blocks) else {
+                    continue;
+                };
+                for call in &message.tool_calls {
+                    unanswered.push(call.id.clone());
+                }
                 surface.push(plain(seq, message));
             }
             SessionEvent::ToolResult {
@@ -990,12 +1047,12 @@ fn derive_surface_inner(events: &[SessionEnvelope]) -> Vec<SurfaceMessage> {
             } => {
                 unanswered.retain(|id| id != call_id);
                 let content = content.clone();
-                if let Some(replaced_seq) = replaces {
-                    if let Some(item) = surface.iter_mut().find(|item| item.seq == *replaced_seq) {
-                        item.message = ChatMessage::tool_result(call_id.clone(), content);
-                        item.is_error = *is_error;
-                        continue;
-                    }
+                if let Some(replaced_seq) = replaces
+                    && let Some(item) = surface.iter_mut().find(|item| item.seq == *replaced_seq)
+                {
+                    item.message = ChatMessage::tool_result(call_id.clone(), content);
+                    item.is_error = *is_error;
+                    continue;
                 }
                 if pending_tool_images.is_empty() {
                     surface.push(SurfaceItem {
@@ -1154,7 +1211,9 @@ mod tests {
                     blocks: vec![ContentBlock::ToolCall {
                         id: "c1".into(),
                         name: "browser".into(),
-                        arguments: "{}".into(), incomplete: false }],
+                        arguments: "{}".into(),
+                        incomplete: false,
+                    }],
                     usage: None,
                     interrupted: false,
                     source_event_seqs: Vec::new(),
@@ -1266,7 +1325,10 @@ mod tests {
         );
         let json = serde_json::to_string(&with_time).unwrap();
         assert!(json.contains(r#""first_token_time":1700000004200"#));
-        assert_eq!(serde_json::from_str::<SessionEnvelope>(&json).unwrap(), with_time);
+        assert_eq!(
+            serde_json::from_str::<SessionEnvelope>(&json).unwrap(),
+            with_time
+        );
 
         let without_time = envelope(
             8,
@@ -1288,7 +1350,10 @@ mod tests {
         assert!(
             matches!(
                 parsed.event,
-                SessionEvent::AssistantMessage { first_token_time: None, .. }
+                SessionEvent::AssistantMessage {
+                    first_token_time: None,
+                    ..
+                }
             ),
             "{parsed:?}"
         );
@@ -1297,18 +1362,88 @@ mod tests {
     #[test]
     fn token_delta_excludes_frame_chunks() {
         // token 帧:非空正文/推理增量、工具参数增量、带名首帧。
-        assert!(StreamChunk::TextDelta { index: 0, text: "你".into() }.is_token_delta());
-        assert!(StreamChunk::ReasoningDelta { index: 0, text: "想".into() }.is_token_delta());
-        assert!(StreamChunk::ToolCallDelta { index: 0, id: "c".into(), name: Some("bash".into()), arguments_delta: String::new() }.is_token_delta());
-        assert!(StreamChunk::ToolCallDelta { index: 0, id: "c".into(), name: None, arguments_delta: "{\"".into() }.is_token_delta());
+        assert!(
+            StreamChunk::TextDelta {
+                index: 0,
+                text: "你".into()
+            }
+            .is_token_delta()
+        );
+        assert!(
+            StreamChunk::ReasoningDelta {
+                index: 0,
+                text: "想".into()
+            }
+            .is_token_delta()
+        );
+        assert!(
+            StreamChunk::ToolCallDelta {
+                index: 0,
+                id: "c".into(),
+                name: Some("bash".into()),
+                arguments_delta: String::new()
+            }
+            .is_token_delta()
+        );
+        assert!(
+            StreamChunk::ToolCallDelta {
+                index: 0,
+                id: "c".into(),
+                name: None,
+                arguments_delta: "{\"".into()
+            }
+            .is_token_delta()
+        );
         // 空增量与框架帧不算 token。
-        assert!(!StreamChunk::TextDelta { index: 0, text: String::new() }.is_token_delta());
-        assert!(!StreamChunk::ReasoningDelta { index: 0, text: String::new() }.is_token_delta());
-        assert!(!StreamChunk::ToolCallDelta { index: 0, id: String::new(), name: None, arguments_delta: String::new() }.is_token_delta());
-        assert!(!StreamChunk::BlockStart { index: 0, block_type: BlockType::Text }.is_token_delta());
-        assert!(!StreamChunk::BlockEnd { index: 0, block: crate::stream::ContentBlock::Text { text: "x".into() } }.is_token_delta());
-        assert!(!StreamChunk::Usage { usage: crate::stream::TokenUsage::default() }.is_token_delta());
-        assert!(!StreamChunk::Finish { reason: crate::stream::FinishReason::Stop }.is_token_delta());
+        assert!(
+            !StreamChunk::TextDelta {
+                index: 0,
+                text: String::new()
+            }
+            .is_token_delta()
+        );
+        assert!(
+            !StreamChunk::ReasoningDelta {
+                index: 0,
+                text: String::new()
+            }
+            .is_token_delta()
+        );
+        assert!(
+            !StreamChunk::ToolCallDelta {
+                index: 0,
+                id: String::new(),
+                name: None,
+                arguments_delta: String::new()
+            }
+            .is_token_delta()
+        );
+        assert!(
+            !StreamChunk::BlockStart {
+                index: 0,
+                block_type: BlockType::Text
+            }
+            .is_token_delta()
+        );
+        assert!(
+            !StreamChunk::BlockEnd {
+                index: 0,
+                block: crate::stream::ContentBlock::Text { text: "x".into() }
+            }
+            .is_token_delta()
+        );
+        assert!(
+            !StreamChunk::Usage {
+                usage: crate::stream::TokenUsage::default()
+            }
+            .is_token_delta()
+        );
+        assert!(
+            !StreamChunk::Finish {
+                reason: crate::stream::FinishReason::Stop
+            }
+            .is_token_delta()
+        );
     }
 
     #[test]
@@ -1331,14 +1466,19 @@ mod tests {
                     turn: 1,
                     step: 1,
                     blocks: vec![
-                        ContentBlock::Reasoning { text: "hmm".into(), replay: None },
+                        ContentBlock::Reasoning {
+                            text: "hmm".into(),
+                            replay: None,
+                        },
                         ContentBlock::Text {
                             text: "running".into(),
                         },
                         ContentBlock::ToolCall {
                             id: "c1".into(),
                             name: "bash".into(),
-                            arguments: "{}".into(), incomplete: false },
+                            arguments: "{}".into(),
+                            incomplete: false,
+                        },
                     ],
                     usage: None,
                     interrupted: false,
@@ -1430,7 +1570,9 @@ mod tests {
                     blocks: vec![ContentBlock::ToolCall {
                         id: "c1".into(),
                         name: "bash".into(),
-                        arguments: "{}".into(), incomplete: false }],
+                        arguments: "{}".into(),
+                        incomplete: false,
+                    }],
                     usage: None,
                     interrupted: false,
                     source_event_seqs: Vec::new(),
@@ -1515,7 +1657,9 @@ mod tests {
                     blocks: vec![ContentBlock::ToolCall {
                         id: "cX".into(),
                         name: "bash".into(),
-                        arguments: "{}".into(), incomplete: false }],
+                        arguments: "{}".into(),
+                        incomplete: false,
+                    }],
                     usage: None,
                     interrupted: true,
                     source_event_seqs: Vec::new(),
@@ -1592,82 +1736,158 @@ mod tests {
         };
         // Set 仅在无目标时生效。
         assert_eq!(
-            apply_goal_op(None, &GoalOp::Set { objective: "x".into(), token_budget: Some(5) }, 7, 42)
-                .unwrap()
-                .objective,
+            apply_goal_op(
+                None,
+                &GoalOp::Set {
+                    objective: "x".into(),
+                    token_budget: Some(5)
+                },
+                7,
+                42
+            )
+            .unwrap()
+            .objective,
             "x"
         );
-        let seeded = apply_goal_op(None, &GoalOp::Set { objective: "x".into(), token_budget: Some(5) }, 7, 42).unwrap();
+        let seeded = apply_goal_op(
+            None,
+            &GoalOp::Set {
+                objective: "x".into(),
+                token_budget: Some(5),
+            },
+            7,
+            42,
+        )
+        .unwrap();
         assert_eq!(seeded.base_tokens, 42);
         assert_eq!(seeded.status, GoalStatus::Active);
         assert_eq!(
-            apply_goal_op(Some(seeded.clone()), &GoalOp::Set { objective: "y".into(), token_budget: None }, 8, 9)
-                .unwrap()
-                .objective,
+            apply_goal_op(
+                Some(seeded.clone()),
+                &GoalOp::Set {
+                    objective: "y".into(),
+                    token_budget: None
+                },
+                8,
+                9
+            )
+            .unwrap()
+            .objective,
             "x",
             "已有目标时 Set 忽略"
         );
         // Round 累计;Pause/Resume 矩阵。
         assert_eq!(
-            apply_goal_op(Some(base(GoalStatus::Active)), &GoalOp::Round, 3, 0).unwrap().rounds_started,
+            apply_goal_op(Some(base(GoalStatus::Active)), &GoalOp::Round, 3, 0)
+                .unwrap()
+                .rounds_started,
             3
         );
         assert_eq!(
-            apply_goal_op(Some(base(GoalStatus::Active)), &GoalOp::Pause, 3, 0).unwrap().status,
+            apply_goal_op(Some(base(GoalStatus::Active)), &GoalOp::Pause, 3, 0)
+                .unwrap()
+                .status,
             GoalStatus::Paused
         );
         assert_eq!(
-            apply_goal_op(Some(base(GoalStatus::Paused)), &GoalOp::Resume, 3, 0).unwrap().status,
+            apply_goal_op(Some(base(GoalStatus::Paused)), &GoalOp::Resume, 3, 0)
+                .unwrap()
+                .status,
             GoalStatus::Active
         );
         assert_eq!(
-            apply_goal_op(Some(base(GoalStatus::BudgetLimited)), &GoalOp::Resume, 3, 0).unwrap().status,
+            apply_goal_op(Some(base(GoalStatus::BudgetLimited)), &GoalOp::Resume, 3, 0)
+                .unwrap()
+                .status,
             GoalStatus::BudgetLimited,
             "预算耗尽状态 resume 拒绝"
         );
         // Edit:受阻/预算耗尽回 active;complete 终态忽略;暂停保持。
         let edited = apply_goal_op(
             Some(base(GoalStatus::Blocked)),
-            &GoalOp::Edit { objective: Some("新目标".into()), token_budget: Some(10) },
+            &GoalOp::Edit {
+                objective: Some("新目标".into()),
+                token_budget: Some(10),
+            },
             4,
             0,
         )
         .unwrap();
-        assert_eq!((edited.status, edited.objective.as_str(), edited.token_budget),
-            (GoalStatus::Active, "新目标", Some(10)));
         assert_eq!(
-            apply_goal_op(Some(base(GoalStatus::Paused)), &GoalOp::Edit { objective: None, token_budget: None }, 4, 0)
-                .unwrap()
-                .status,
+            (
+                edited.status,
+                edited.objective.as_str(),
+                edited.token_budget
+            ),
+            (GoalStatus::Active, "新目标", Some(10))
+        );
+        assert_eq!(
+            apply_goal_op(
+                Some(base(GoalStatus::Paused)),
+                &GoalOp::Edit {
+                    objective: None,
+                    token_budget: None
+                },
+                4,
+                0
+            )
+            .unwrap()
+            .status,
             GoalStatus::Paused,
             "暂停中编辑保持暂停"
         );
         assert_eq!(
-            apply_goal_op(Some(base(GoalStatus::Complete)), &GoalOp::Edit { objective: Some("z".into()), token_budget: None }, 4, 0)
-                .unwrap()
-                .objective,
+            apply_goal_op(
+                Some(base(GoalStatus::Complete)),
+                &GoalOp::Edit {
+                    objective: Some("z".into()),
+                    token_budget: None
+                },
+                4,
+                0
+            )
+            .unwrap()
+            .objective,
             "修完回归",
             "complete 终态忽略编辑"
         );
         // BudgetLimit 仅 active 生效;Clear 回 None。
         assert_eq!(
-            apply_goal_op(Some(base(GoalStatus::Paused)), &GoalOp::BudgetLimit, 5, 0).unwrap().status,
+            apply_goal_op(Some(base(GoalStatus::Paused)), &GoalOp::BudgetLimit, 5, 0)
+                .unwrap()
+                .status,
             GoalStatus::Paused
         );
         assert_eq!(
-            apply_goal_op(Some(base(GoalStatus::Active)), &GoalOp::BudgetLimit, 5, 0).unwrap().status,
+            apply_goal_op(Some(base(GoalStatus::Active)), &GoalOp::BudgetLimit, 5, 0)
+                .unwrap()
+                .status,
             GoalStatus::BudgetLimited
         );
-        assert_eq!(apply_goal_op(Some(base(GoalStatus::Active)), &GoalOp::Clear, 6, 0), None);
+        assert_eq!(
+            apply_goal_op(Some(base(GoalStatus::Active)), &GoalOp::Clear, 6, 0),
+            None
+        );
         assert_eq!(apply_goal_op(None, &GoalOp::Clear, 6, 0), None);
         // 事件序列化:tag + kebab-case。
-        let env = envelope(9, SessionEvent::Goal { op: GoalOp::Block { reason: "卡住了".into() } });
+        let env = envelope(
+            9,
+            SessionEvent::Goal {
+                op: GoalOp::Block {
+                    reason: "卡住了".into(),
+                },
+            },
+        );
         let json = serde_json::to_string(&env).unwrap();
         assert!(json.contains(r#""type":"goal""#), "{json}");
         assert!(json.contains(r#""kind":"block""#), "{json}");
         assert_eq!(serde_json::from_str::<SessionEnvelope>(&json).unwrap(), env);
         let round = envelope(10, SessionEvent::Goal { op: GoalOp::Round });
-        assert!(serde_json::to_string(&round).unwrap().contains(r#""kind":"round""#));
+        assert!(
+            serde_json::to_string(&round)
+                .unwrap()
+                .contains(r#""kind":"round""#)
+        );
     }
 
     #[test]

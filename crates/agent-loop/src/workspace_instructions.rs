@@ -13,14 +13,17 @@ const REMINDER_CLOSE: &str = "</system-reminder>";
 
 /// 从日志反向扫描最后一条匹配通道的注入消息全文；返回值就是幂等比较基准。
 pub fn restore_injected_text(events: &[SessionEnvelope], prefix: &str) -> Option<String> {
-    events.iter().rev().find_map(|envelope| match &envelope.event {
-        SessionEvent::UserMessage {
-            text,
-            injected: true,
-            ..
-        } if text.starts_with(prefix) => Some(text.clone()),
-        _ => None,
-    })
+    events
+        .iter()
+        .rev()
+        .find_map(|envelope| match &envelope.event {
+            SessionEvent::UserMessage {
+                text,
+                injected: true,
+                ..
+            } if text.starts_with(prefix) => Some(text.clone()),
+            _ => None,
+        })
 }
 
 /// 提取一条本通道注入文本的正文（去掉框架与引导语行）；供新旧内容比较。
@@ -42,7 +45,10 @@ fn extract_body(message: &str) -> &str {
 /// 引导语由**目录内容是否变化**决定：首次用"本会话可用的技能如下"，
 /// 旧目录存在但内容相同 → None（幂等），内容变化才切换"取代"文案。
 /// 否则首次发布后 `has_visible` 翻转会同一段目录以"取代"版重发一次。
-pub fn render_skill_catalog(entries: &[(String, String)], previous: Option<&str>) -> Option<String> {
+pub fn render_skill_catalog(
+    entries: &[(String, String)],
+    previous: Option<&str>,
+) -> Option<String> {
     // 空目录正文为空串；非空目录正文 = <available_skills> 行列表 + 固定尾注。
     // 尾注计入正文:幂等比较的就是这段完整内容。
     let guidance = "技能是可复用的任务指令集。若用户点名某技能，或任务与某技能的描述明确匹配，先调用 skill 工具（action=load）加载其完整指令，再执行任务；可同时加载多个适用技能。目录只含摘要：未加载前不得凭摘要推断或执行技能内容。用户也可能以 /技能名 直接调用技能，其正文会以注入消息出现，此时无需再调 skill 工具。";
@@ -96,9 +102,12 @@ pub fn skill_gesture(prompt: &str) -> Option<String> {
 /// 与 skills.rs 一致的 kebab-case 技能名词法。
 fn is_skill_name(name: &str) -> bool {
     !name.is_empty()
-        && name
-            .split('-')
-            .all(|part| !part.is_empty() && part.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit()))
+        && name.split('-').all(|part| {
+            !part.is_empty()
+                && part
+                    .bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
+        })
 }
 
 /// 从工具原始参数里提取触碰路径（read_file/write_file/edit 共用 `path` 字段）；
@@ -143,8 +152,15 @@ mod tests {
         ];
         let restored = restore_injected_text(&events, WORKSPACE_PREFIX).unwrap();
         assert!(restored.contains("新"));
-        assert!(restore_injected_text(&events, SKILL_CATALOG_PREFIX).unwrap().contains("目录"));
-        assert_eq!(restore_injected_text(&events, "<system-reminder>\n无此通道:"), None);
+        assert!(
+            restore_injected_text(&events, SKILL_CATALOG_PREFIX)
+                .unwrap()
+                .contains("目录")
+        );
+        assert_eq!(
+            restore_injected_text(&events, "<system-reminder>\n无此通道:"),
+            None
+        );
     }
 
     #[test]

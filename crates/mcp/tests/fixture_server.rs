@@ -23,7 +23,10 @@ fn main() {
         let Ok(request) = serde_json::from_str::<serde_json::Value>(trimmed) else {
             continue;
         };
-        let id = request.get("id").cloned().unwrap_or(serde_json::Value::Null);
+        let id = request
+            .get("id")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
         let method = request.get("method").and_then(|m| m.as_str()).unwrap_or("");
         // 通知(无 id)不回响应。
         if id.is_null() {

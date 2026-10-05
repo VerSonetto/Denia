@@ -36,8 +36,8 @@ const ROOT_MIN_CHARS: usize = 100;
 /// 导航/页脚/侧栏在文章页全是噪声,portal 首页的主要信息也在 main 里。
 const NOISE_TAGS: &[&str] = &[
     "script", "style", "noscript", "template", "iframe", "svg", "canvas", "nav", "header",
-    "footer", "aside", "form", "button", "select", "option", "input", "textarea", "video",
-    "audio", "object", "embed", "dialog", "link", "meta", "head",
+    "footer", "aside", "form", "button", "select", "option", "input", "textarea", "video", "audio",
+    "object", "embed", "dialog", "link", "meta", "head",
 ];
 
 /// Chrome 桌面版 UA:多数反爬只看 UA 字符串,这是性价比最高的一层。
@@ -48,7 +48,10 @@ const BROWSER_UA: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/
 fn browser_headers() -> HeaderMap {
     let mut headers = HeaderMap::new();
     let mut set = |name: &'static str, value: &'static str| {
-        headers.insert(HeaderName::from_static(name), HeaderValue::from_static(value));
+        headers.insert(
+            HeaderName::from_static(name),
+            HeaderValue::from_static(value),
+        );
     };
     set(
         "accept",
@@ -310,11 +313,7 @@ fn meta_charset(bytes: &[u8]) -> Option<String> {
         .chars()
         .take_while(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
         .collect();
-    if value.is_empty() {
-        None
-    } else {
-        Some(value)
-    }
+    if value.is_empty() { None } else { Some(value) }
 }
 
 /// HTML → Markdown:主内容选根 + DOM 遍历转换(噪声标签在渲染时跳过)。
@@ -358,7 +357,7 @@ fn all_text(node: NodeRef<'_, Node>) -> String {
     let mut out = String::new();
     for descendant in node.descendants() {
         if let Node::Text(text) = descendant.value() {
-            out.push_str(&text.to_string());
+            out.push_str(text);
         }
     }
     out
@@ -376,7 +375,7 @@ fn render_children(node: NodeRef<'_, Node>, depth: usize, base: &reqwest::Url) -
 /// 渲染单个节点为 Markdown 片段(块级片段自带换行);噪声子树整棵跳过。
 fn render_node(node: NodeRef<'_, Node>, depth: usize, base: &reqwest::Url) -> String {
     match node.value() {
-        Node::Text(text) => collapse_text(&text.to_string()),
+        Node::Text(text) => collapse_text(text),
         Node::Element(element) if !NOISE_TAGS.contains(&element.name()) => {
             render_element(element, node, depth, base)
         }
@@ -469,7 +468,11 @@ fn render_element(
                     continue;
                 }
                 index += 1;
-                let marker = if ordered { format!("{index}.") } else { "-".to_string() };
+                let marker = if ordered {
+                    format!("{index}.")
+                } else {
+                    "-".to_string()
+                };
                 let content = render_list_item(item, depth, base);
                 out.push_str(&format!("{}{} {}\n", INDENT.repeat(depth), marker, content));
             }
@@ -561,7 +564,7 @@ fn collect_text(node: NodeRef<'_, Node>) -> String {
     let mut out = String::new();
     for descendant in node.descendants() {
         match descendant.value() {
-            Node::Text(text) => out.push_str(&text.to_string()),
+            Node::Text(text) => out.push_str(text),
             Node::Element(element) if NOISE_TAGS.contains(&element.name()) => {
                 // script/style 混进代码块很常见:整棵子树的文本不入码。
                 out.clear();
@@ -574,7 +577,8 @@ fn collect_text(node: NodeRef<'_, Node>) -> String {
 }
 
 fn is_inside_pre(node: NodeRef<'_, Node>) -> bool {
-    node.ancestors().any(|ancestor| is_element_named(ancestor, "pre"))
+    node.ancestors()
+        .any(|ancestor| is_element_named(ancestor, "pre"))
 }
 
 fn is_element_named(node: NodeRef<'_, Node>, name: &str) -> bool {
@@ -604,8 +608,16 @@ fn collapse_text(text: &str) -> String {
     if collapsed.is_empty() {
         return String::new();
     }
-    let leading = if text.starts_with(|c: char| c.is_whitespace()) { " " } else { "" };
-    let trailing = if text.ends_with(|c: char| c.is_whitespace()) { " " } else { "" };
+    let leading = if text.starts_with(|c: char| c.is_whitespace()) {
+        " "
+    } else {
+        ""
+    };
+    let trailing = if text.ends_with(|c: char| c.is_whitespace()) {
+        " "
+    } else {
+        ""
+    };
     format!("{leading}{collapsed}{trailing}")
 }
 
@@ -656,7 +668,8 @@ mod tests {
         assert_eq!(title, "文档标题");
         assert!(markdown.contains("# 指南"), "{markdown}");
         assert!(
-            markdown.contains("第一段,含 [一个链接](https://example.com/other) 与 **加粗**、*斜体*。"),
+            markdown
+                .contains("第一段,含 [一个链接](https://example.com/other) 与 **加粗**、*斜体*。"),
             "{markdown}"
         );
         assert!(markdown.contains("第二段"), "{markdown}");
@@ -702,9 +715,18 @@ mod tests {
     fn relative_links_resolve_against_final_url() {
         let html = r##"<body><p><a href="sub/x.html">子页</a><a href="https://cdn.example/a.js">外链</a><a href="#sec">锚点</a></p></body>"##;
         let markdown = extract(html);
-        assert!(markdown.contains("[子页](https://example.com/docs/sub/x.html)"), "{markdown}");
-        assert!(markdown.contains("[外链](https://cdn.example/a.js)"), "{markdown}");
-        assert!(!markdown.contains("](#sec)"), "锚点链接不应输出 href:{markdown}");
+        assert!(
+            markdown.contains("[子页](https://example.com/docs/sub/x.html)"),
+            "{markdown}"
+        );
+        assert!(
+            markdown.contains("[外链](https://cdn.example/a.js)"),
+            "{markdown}"
+        );
+        assert!(
+            !markdown.contains("](#sec)"),
+            "锚点链接不应输出 href:{markdown}"
+        );
         assert!(markdown.contains("锚点"), "{markdown}");
     }
 
@@ -732,7 +754,10 @@ mod tests {
     fn charset_header_wins_over_meta() {
         // GBK 编码的"中文",header 声明 gbk:解码正确。
         let (bytes, _, _) = encoding_rs::GBK.encode("中文内容");
-        assert_eq!(decode_bytes(bytes.as_ref(), Some("text/html; charset=GBK")), "中文内容");
+        assert_eq!(
+            decode_bytes(bytes.as_ref(), Some("text/html; charset=GBK")),
+            "中文内容"
+        );
         // header 缺省时 meta 兜底:GBK 字节流按声明解码成可读中文。
         let (encoded, _, _) = encoding_rs::GBK.encode("正文");
         let mut body = b"<html><head><meta charset=\"gbk\"></head><body>".to_vec();

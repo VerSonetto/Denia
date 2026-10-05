@@ -26,9 +26,13 @@ async fn consume_output(
     let mut buffer = [0u8; 8192];
     loop {
         let count = reader.read(&mut buffer).await?;
-        if count == 0 { return Ok(()); }
+        if count == 0 {
+            return Ok(());
+        }
         preview.lock().await.push(&buffer[..count]);
-        if let Some(capture) = &capture { capture.append(stream, &buffer[..count]).await; }
+        if let Some(capture) = &capture {
+            capture.append(stream, &buffer[..count]).await;
+        }
     }
 }
 
@@ -123,7 +127,10 @@ impl BashTool {
                 );
             }
             Err(join_error) => {
-                return tool_error(format!("持久 shell 启动任务失败:{join_error}"), "请重试一次");
+                return tool_error(
+                    format!("持久 shell 启动任务失败:{join_error}"),
+                    "请重试一次",
+                );
             }
         };
 
@@ -195,7 +202,10 @@ impl Tool for BashTool {
                 );
             }
         };
-        let requested_ms = args.timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS).min(MAX_TIMEOUT_MS);
+        let requested_ms = args
+            .timeout_ms
+            .unwrap_or(DEFAULT_TIMEOUT_MS)
+            .min(MAX_TIMEOUT_MS);
         let timeout = Duration::from_millis(requested_ms);
 
         // 挂了常驻 shell 注册表且当前调用归属某个会话 → 走持久路径。
@@ -218,9 +228,7 @@ impl Tool for BashTool {
         };
         let mut child = match spawn_once() {
             Ok(child) => child,
-            Err(error)
-                if error.kind() == std::io::ErrorKind::NotFound =>
-            {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 // os error 2/3:shell 可执行文件路径失效(如 Store 版
                 // PowerShell 更新后按版本目录整体换路径)。清缓存重解析
                 // 并重试一次;仍失败才是真错误。
@@ -249,8 +257,18 @@ impl Tool for BashTool {
         };
         let stdout_preview = Arc::new(tokio::sync::Mutex::new(crate::output::Preview::default()));
         let stderr_preview = Arc::new(tokio::sync::Mutex::new(crate::output::Preview::default()));
-        let mut stdout_task = tokio::spawn(consume_output(child.stdout.take().unwrap(), stdout_preview.clone(), capture.clone(), "stdout"));
-        let mut stderr_task = tokio::spawn(consume_output(child.stderr.take().unwrap(), stderr_preview.clone(), capture.clone(), "stderr"));
+        let mut stdout_task = tokio::spawn(consume_output(
+            child.stdout.take().unwrap(),
+            stdout_preview.clone(),
+            capture.clone(),
+            "stdout",
+        ));
+        let mut stderr_task = tokio::spawn(consume_output(
+            child.stderr.take().unwrap(),
+            stderr_preview.clone(),
+            capture.clone(),
+            "stderr",
+        ));
         let mut error = None;
         let code = tokio::select! {
             biased;
@@ -261,21 +279,46 @@ impl Tool for BashTool {
                 Err(failure) => { error = Some(format!("等待命令结束失败:{failure}")); -1 }
             }
         };
-        if error.is_some() { let _ = child.kill().await; }
-        let drained = matches!(tokio::time::timeout(Duration::from_secs(2), async {
-            let stdout = (&mut stdout_task).await;
-            let stderr = (&mut stderr_task).await;
-            (stdout, stderr)
-        }).await, Ok((Ok(Ok(())), Ok(Ok(())))));
-        if !drained { stdout_task.abort(); stderr_task.abort(); }
-        let artifact = match capture { Some(capture) => Some(capture.finish(drained).await), None => None };
-        let mut content = format!("退出码: {code}\n{}", stdout_preview.lock().await.render(4_000, 8_000));
+        if error.is_some() {
+            let _ = child.kill().await;
+        }
+        let drained = matches!(
+            tokio::time::timeout(Duration::from_secs(2), async {
+                let stdout = (&mut stdout_task).await;
+                let stderr = (&mut stderr_task).await;
+                (stdout, stderr)
+            })
+            .await,
+            Ok((Ok(Ok(())), Ok(Ok(()))))
+        );
+        if !drained {
+            stdout_task.abort();
+            stderr_task.abort();
+        }
+        let artifact = match capture {
+            Some(capture) => Some(capture.finish(drained).await),
+            None => None,
+        };
+        let mut content = format!(
+            "退出码: {code}\n{}",
+            stdout_preview.lock().await.render(4_000, 8_000)
+        );
         let stderr = stderr_preview.lock().await.render(4_000, 8_000);
-        if !stderr.is_empty() { content.push_str(&format!("\n--- stderr ---\n{stderr}")); }
-        if let Some(message) = &error { content.insert_str(0, &format!("[工具错误] {message}\n")); }
-        if !drained { content.push_str("\n[输出消费未完整结束，产物可能不完整]"); }
+        if !stderr.is_empty() {
+            content.push_str(&format!("\n--- stderr ---\n{stderr}"));
+        }
+        if let Some(message) = &error {
+            content.insert_str(0, &format!("[工具错误] {message}\n"));
+        }
+        if !drained {
+            content.push_str("\n[输出消费未完整结束，产物可能不完整]");
+        }
         content.push_str(&crate::output::artifact_notice(artifact.as_ref()));
-        ToolOutput { content, is_error: error.is_some(), artifact }
+        ToolOutput {
+            content,
+            is_error: error.is_some(),
+            artifact,
+        }
     }
 }
 
@@ -366,27 +409,56 @@ mod tests {
     #[tokio::test]
     async fn megabyte_streams_do_not_deadlock_and_tail_is_readable() {
         let root = std::env::temp_dir().join(format!("denia-bash-{}", uuid::Uuid::new_v4()));
-        let storage = crate::output::OutputStore::open(root.clone()).await.unwrap();
+        let storage = crate::output::OutputStore::open(root.clone())
+            .await
+            .unwrap();
         let mut context = ctx(&std::env::temp_dir());
         context.output_store = Some(storage.clone());
         for streams in ["stdout", "stderr", "both"] {
             let command = if cfg!(windows) {
-                let output = if streams == "stderr" { "[Console]::Error" } else { "[Console]::Out" };
-                let extra = if streams == "both" { "; [Console]::Error.Write(('e' * 1048576)); [Console]::Error.WriteLine('tail-error')" } else { "" };
+                let output = if streams == "stderr" {
+                    "[Console]::Error"
+                } else {
+                    "[Console]::Out"
+                };
+                let extra = if streams == "both" {
+                    "; [Console]::Error.Write(('e' * 1048576)); [Console]::Error.WriteLine('tail-error')"
+                } else {
+                    ""
+                };
                 format!("{output}.Write(('x' * 1048576)); {output}.WriteLine('tail-error'){extra}")
             } else {
                 let redirect = if streams == "stderr" { " >&2" } else { "" };
-                let extra = if streams == "both" { "; head -c 1048576 /dev/zero >&2; echo tail-error >&2" } else { "" };
+                let extra = if streams == "both" {
+                    "; head -c 1048576 /dev/zero >&2; echo tail-error >&2"
+                } else {
+                    ""
+                };
                 format!("head -c 1048576 /dev/zero{redirect}; echo tail-error{redirect}{extra}")
             };
             let arguments = serde_json::json!({"command":command,"timeout_ms":15000}).to_string();
-            let result = tokio::time::timeout(Duration::from_secs(20), BashTool::new().execute(&arguments, &context)).await.unwrap();
+            let result = tokio::time::timeout(
+                Duration::from_secs(20),
+                BashTool::new().execute(&arguments, &context),
+            )
+            .await
+            .unwrap();
             assert!(!result.is_error, "{}", result.content);
             assert!(result.content.chars().count() < 32000);
             let artifact = result.artifact.unwrap();
             assert!(artifact.complete);
-            let stream = if streams == "stdout" { "stdout" } else { "stderr" };
-            assert!(storage.read(&artifact.output_id, Some(stream), 1, 400).await.unwrap().contains("tail-error"));
+            let stream = if streams == "stdout" {
+                "stdout"
+            } else {
+                "stderr"
+            };
+            assert!(
+                storage
+                    .read(&artifact.output_id, Some(stream), 1, 400)
+                    .await
+                    .unwrap()
+                    .contains("tail-error")
+            );
         }
         tokio::fs::remove_dir_all(root).await.unwrap();
     }

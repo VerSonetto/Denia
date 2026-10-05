@@ -145,17 +145,12 @@ pub struct AssembleContext {
 /// `Model` —— 只发给模型(用户不应看到,如工具纪律/工具使用说明)。
 /// `User`  —— 既发给模型,也展示给用户(身份块/部署 persona 等)。
 /// `Context` —— 运行时上下文块,落日志但不在对话流渲染(用户只看到 metadata)。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum SectionAudience {
+    #[default]
     Model,
     User,
     Context,
-}
-
-impl Default for SectionAudience {
-    fn default() -> Self {
-        Self::Model
-    }
 }
 
 /// One contributed system-prompt section.
@@ -702,7 +697,9 @@ mod tests {
                 })),
             })
             .unwrap();
-        prompt.variable("cwd", |context| context.cwd.clone()).unwrap();
+        prompt
+            .variable("cwd", |context| context.cwd.clone())
+            .unwrap();
         let assembly = prompt
             .assemble(&AssembleContext {
                 cwd: Some("/tmp/ws".to_string()),

@@ -179,7 +179,8 @@ mod tests {
     #[test]
     fn rejects_unsupported_transport_and_bad_urls() {
         // 白名单外的传输:点名可用值。
-        let value = json!({ "servers": [{ "id": "fs", "transport": "websocket", "command": "x" }] });
+        let value =
+            json!({ "servers": [{ "id": "fs", "transport": "websocket", "command": "x" }] });
         let error = validate_mcp(value).unwrap_err();
         assert!(error.contains("不受支持"), "{error}");
         assert!(error.contains("stdio"), "应列出可用传输:{error}");
@@ -203,10 +204,7 @@ mod tests {
             let value = json!({
                 "servers": [{ "id": "web", "transport": transport, "url": "https://example.com/mcp" }]
             });
-            assert!(
-                validate_mcp(value).is_ok(),
-                "{transport} 传输应被接受"
-            );
+            assert!(validate_mcp(value).is_ok(), "{transport} 传输应被接受");
         }
     }
 
@@ -214,12 +212,20 @@ mod tests {
     fn rejects_missing_command_and_bad_args() {
         let no_command =
             json!({ "servers": [{ "id": "fs", "transport": "stdio", "command": "  " }] });
-        assert!(validate_mcp(no_command).unwrap_err().contains("缺少 command"));
+        assert!(
+            validate_mcp(no_command)
+                .unwrap_err()
+                .contains("缺少 command")
+        );
 
         let blank_arg = json!({
             "servers": [{ "id": "fs", "transport": "stdio", "command": "npx", "args": ["", "y"] }]
         });
-        assert!(validate_mcp(blank_arg).unwrap_err().contains("参数不能为空"));
+        assert!(
+            validate_mcp(blank_arg)
+                .unwrap_err()
+                .contains("参数不能为空")
+        );
 
         let too_many = json!({
             "servers": [{
@@ -294,6 +300,10 @@ mod tests {
         assert_eq!(defaults(), json!({ "servers": [] }));
         assert!(McpSettings::from_value(&defaults()).servers.is_empty());
         // 坏值不阻断启动:退化成空配置。
-        assert!(McpSettings::from_value(&json!("not an object")).servers.is_empty());
+        assert!(
+            McpSettings::from_value(&json!("not an object"))
+                .servers
+                .is_empty()
+        );
     }
 }

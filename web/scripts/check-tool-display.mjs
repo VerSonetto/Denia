@@ -36,6 +36,19 @@ function check(label, actual, expected) {
 const fmt = (diff) =>
   diff.lines.map((l) => `${l.kind}:${l.text}:${l.oldNo ?? ''}/${l.newNo ?? ''}`)
 
+// Single-hunk assertions share the current grouped edit contract.
+function singleEdit(name, args, startLine) {
+  const group = mod.editDiff(name, args, startLine === undefined ? undefined : [startLine]);
+  return group?.diffs[0] ?? null;
+}
+
+const grouped = mod.editDiff('edit', JSON.stringify({path:'a.ts', edits:[
+  {old_string:'a', new_string:'A'}, {old_string:'b', new_string:'B'},
+]}), [3, 9]);
+check('多处编辑保留独立锚点', grouped?.diffs.map(d => d.startLine), [3, 9]);
+check('多处编辑共享文件路径', grouped?.path, 'a.ts');
+check('空 edits 不生成差异', mod.editDiff('edit', JSON.stringify({path:'a.ts', edits:[]})), null);
+
 /* 1) 参数里的 old_string 含 `}` → 摘要必须是文件名,不是代码片段。 */
 const args = JSON.stringify({
   path: 'web/src/toolDisplay.ts',
@@ -52,7 +65,7 @@ check(
 )
 
 /* 3) 单行替换:一删一加,行号正确。 */
-const d = mod.editDiff('edit', args)
+const d = singleEdit('edit', args)
 check('diff removed/added', [d.removed, d.added], [1, 1])
 check('diff path', d.path, '…/src/toolDisplay.ts')
 check('diff 行序列', fmt(d), [
@@ -63,18 +76,18 @@ check('diff 行序列', fmt(d), [
 ])
 
 /* 4) 带起始行号:startLine 透传到行号列。 */
-const at10 = mod.editDiff('edit', args, 10)
+const at10 = singleEdit('edit', args, 10)
 check('startLine 透传', fmt(at10)[0], 'context:function f() {:10/10')
 
 /* 5) 纯新增(不删行)。 */
-const add = mod.editDiff(
+const add = singleEdit(
   'edit',
   JSON.stringify({ path: 'a.ts', old_string: 'a\nb', new_string: 'a\nb\nc' }),
 )
 check('纯新增', [add.removed, add.added], [0, 1])
 
 /* 6) 多行改写:LCS 找回未变行,不整段推倒。 */
-const lcs = mod.editDiff(
+const lcs = singleEdit(
   'edit',
   JSON.stringify({
     path: 'a.ts',
@@ -93,7 +106,7 @@ check('LCS 行序列', fmt(lcs), [
 
 /* 7) 超长 diff 折叠:头尾各 3 行 + 一行省略占位。 */
 const long = (i) => Array.from({ length: 60 }, (_, k) => (k === 30 ? 'LINE30' : `line${k}`)).join('\n')
-const folded = mod.editDiff(
+const folded = singleEdit(
   'edit',
   JSON.stringify({ path: 'a.ts', old_string: Array.from({ length: 60 }, (_, k) => `line${k}`).join('\n'), new_string: long() }),
 )
@@ -102,8 +115,8 @@ check('折叠占位行', folded.lines[3].fold, true)
 check('折叠计数', folded.skipped, 60 - 6 + 1) // 含新增的一行,diff 总长 61
 
 /* 8) 非 edit 工具不产 diff;缺字段返回 null。 */
-check('非 edit 返回 null', mod.editDiff('bash', args), null)
-check('缺 new_string 返回 null', mod.editDiff('edit', JSON.stringify({ path: 'a.ts', old_string: 'x' })), null)
+check('非 edit 返回 null', singleEdit('bash', args), null)
+check('缺 new_string 返回 null', singleEdit('edit', JSON.stringify({ path: 'a.ts', old_string: 'x' })), null)
 
 /* 9) write_file:整文件覆盖写 = 全量新增(旧内容不随参数给出)。 */
 const write = mod.writeDiff(

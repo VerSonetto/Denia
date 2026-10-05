@@ -35,7 +35,11 @@ pub fn http_error_failure(status: StatusCode, body: &str, headers: &HeaderMap) -
         }
         400 => {
             let lower = message.to_lowercase();
-            if super::replay::explicit_context_overflow(&lower) || serde_json::from_str::<serde_json::Value>(body).ok().is_some_and(|value| value["error"]["code"] == "context_length_exceeded") {
+            if super::replay::explicit_context_overflow(&lower)
+                || serde_json::from_str::<serde_json::Value>(body)
+                    .ok()
+                    .is_some_and(|value| value["error"]["code"] == "context_length_exceeded")
+            {
                 codes::CONTEXT_WINDOW_EXCEEDED
             } else {
                 codes::INVALID_REQUEST
@@ -46,7 +50,9 @@ pub fn http_error_failure(status: StatusCode, body: &str, headers: &HeaderMap) -
         _ => codes::INVALID_REQUEST,
     };
     let mut failure = LlmFailure::new(code, message).with_status(status.as_u16());
-    if super::replay::explicit_reasoning_rejection(&failure) { failure.code = super::replay::REASONING_REJECTED.into(); }
+    if super::replay::explicit_reasoning_rejection(&failure) {
+        failure.code = super::replay::REASONING_REJECTED.into();
+    }
     if let Some(ms) = retry_after_ms(headers) {
         failure = failure.with_retry_after_ms(ms);
     }
@@ -85,7 +91,7 @@ fn error_message(body: &str) -> String {
 /// 实际不会由网关产生,解析失败即 None)。
 fn retry_after_ms(headers: &HeaderMap) -> Option<u64> {
     let value = headers.get(RETRY_AFTER)?.to_str().ok()?.trim();
-    if let Some(seconds) = value.parse::<u64>().ok() {
+    if let Ok(seconds) = value.parse::<u64>() {
         return Some(seconds.saturating_mul(1000));
     }
     let then = parse_imf_fixdate(value)?;
@@ -132,7 +138,7 @@ fn parse_imf_fixdate(value: &str) -> Option<u64> {
     let hour = value[17..19].parse::<u32>().ok()?;
     let min = value[20..22].parse::<u32>().ok()?;
     let sec = value[23..25].parse::<u32>().ok()?;
-    if day < 1 || day > 31 || hour > 23 || min > 59 || sec > 60 {
+    if !(1..=31).contains(&day) || hour > 23 || min > 59 || sec > 60 {
         return None;
     }
     // 用 days-since-epoch 的民用历法换算(公历,公元 1970 起,忽略闰秒)。
@@ -215,7 +221,9 @@ mod tests {
         });
 
         let builder = reqwest::Client::new().post(format!("http://{addr}/v1/chat/completions"));
-        let err = send_sse(builder, Duration::from_millis(150)).await.unwrap_err();
+        let err = send_sse(builder, Duration::from_millis(150))
+            .await
+            .unwrap_err();
         assert_eq!(err.code, codes::TIMEOUT);
     }
 

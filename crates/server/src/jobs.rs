@@ -271,11 +271,34 @@ impl Jobs {
         let id = snapshot.id.clone();
         let output_store = ctx.output_store.clone();
         tokio::spawn(async move {
-            let capture = match output_store { Some(store) => Some(store.start(&["stdout", "stderr"]).await), None => None };
-            let stdout_preview = Arc::new(tokio::sync::Mutex::new(denia_tools::output::Preview::default()));
-            let stderr_preview = Arc::new(tokio::sync::Mutex::new(denia_tools::output::Preview::default()));
-            let out = tokio::spawn(pump(stdout, jobs.clone(), id.clone(), cap, capture.clone(), "stdout", stdout_preview.clone()));
-            let err = tokio::spawn(pump(stderr, jobs.clone(), id.clone(), cap, capture.clone(), "stderr", stderr_preview.clone()));
+            let capture = match output_store {
+                Some(store) => Some(store.start(&["stdout", "stderr"]).await),
+                None => None,
+            };
+            let stdout_preview = Arc::new(tokio::sync::Mutex::new(
+                denia_tools::output::Preview::default(),
+            ));
+            let stderr_preview = Arc::new(tokio::sync::Mutex::new(
+                denia_tools::output::Preview::default(),
+            ));
+            let out = tokio::spawn(pump(
+                stdout,
+                jobs.clone(),
+                id.clone(),
+                cap,
+                capture.clone(),
+                "stdout",
+                stdout_preview.clone(),
+            ));
+            let err = tokio::spawn(pump(
+                stderr,
+                jobs.clone(),
+                id.clone(),
+                cap,
+                capture.clone(),
+                "stderr",
+                stderr_preview.clone(),
+            ));
             let pid = child.id();
             let (status, exit) = tokio::select! {
                 result=child.wait()=>match result {Ok(s)=>(if s.success(){"completed"}else{"failed"},s.code()),Err(_)=>("failed",None)},
@@ -285,16 +308,34 @@ impl Jobs {
             // 后代持有管道时不能无限等待；结果读取不会阻塞注册表锁。
             let out_abort = out.abort_handle();
             let err_abort = err.abort_handle();
-            let drained = matches!(tokio::time::timeout(Duration::from_secs(2), async { (out.await, err.await) }).await, Ok((Ok(true), Ok(true))));
+            let drained = matches!(
+                tokio::time::timeout(Duration::from_secs(2), async { (out.await, err.await) })
+                    .await,
+                Ok((Ok(true), Ok(true)))
+            );
             if !drained {
                 out_abort.abort();
                 err_abort.abort();
             }
-            let artifact = match capture { Some(capture) => Some(capture.finish(drained).await), None => None };
+            let artifact = match capture {
+                Some(capture) => Some(capture.finish(drained).await),
+                None => None,
+            };
             let notice = denia_tools::output::artifact_notice(artifact.as_ref());
             // cap is bytes; allow four bytes per Unicode character plus framing.
             let per_stream = (cap.saturating_sub(notice.len() + 32) / 8).min(12_000);
-            let preview = format!("{}\n--- stderr ---\n{}{}", stdout_preview.lock().await.render(per_stream / 3, per_stream * 2 / 3), stderr_preview.lock().await.render(per_stream / 3, per_stream * 2 / 3), notice);
+            let preview = format!(
+                "{}\n--- stderr ---\n{}{}",
+                stdout_preview
+                    .lock()
+                    .await
+                    .render(per_stream / 3, per_stream * 2 / 3),
+                stderr_preview
+                    .lock()
+                    .await
+                    .render(per_stream / 3, per_stream * 2 / 3),
+                notice
+            );
             let settled = {
                 let mut records = jobs.records.lock().unwrap();
                 if let Some(r) = records.get_mut(&id) {
@@ -330,7 +371,15 @@ impl Jobs {
         }
     }
 }
-async fn pump<R: AsyncRead + Unpin>(mut stream: R, jobs: Arc<Jobs>, id: String, cap: usize, capture: Option<denia_tools::output::Capture>, name: &str, preview: Arc<tokio::sync::Mutex<denia_tools::output::Preview>>) -> bool {
+async fn pump<R: AsyncRead + Unpin>(
+    mut stream: R,
+    jobs: Arc<Jobs>,
+    id: String,
+    cap: usize,
+    capture: Option<denia_tools::output::Capture>,
+    name: &str,
+    preview: Arc<tokio::sync::Mutex<denia_tools::output::Preview>>,
+) -> bool {
     let mut bytes = [0u8; 4096];
     let mut pending = Vec::new();
     loop {
@@ -338,7 +387,9 @@ async fn pump<R: AsyncRead + Unpin>(mut stream: R, jobs: Arc<Jobs>, id: String, 
             Ok(0) => break,
             Ok(n) => {
                 preview.lock().await.push(&bytes[..n]);
-                if let Some(capture) = &capture { capture.append(name, &bytes[..n]).await; }
+                if let Some(capture) = &capture {
+                    capture.append(name, &bytes[..n]).await;
+                }
                 pending.extend_from_slice(&bytes[..n]);
                 let valid = match std::str::from_utf8(&pending) {
                     Ok(_) => pending.len(),
@@ -417,7 +468,9 @@ mod tests {
     async fn large_unicode_output_does_not_block_and_wait_does_not_cancel() {
         let jobs = Jobs::new();
         let root = std::env::temp_dir().join(format!("denia-job-output-{}", uuid::Uuid::new_v4()));
-        let store = denia_tools::output::OutputStore::open(root.clone()).await.unwrap();
+        let store = denia_tools::output::OutputStore::open(root.clone())
+            .await
+            .unwrap();
         let ctx = ToolContext {
             output_store: Some(store.clone()),
             session_id: Some("bounded".into()),
@@ -465,7 +518,18 @@ mod tests {
         assert!(!output.contains('\u{fffd}'));
         let artifact = &preview["outputArtifact"];
         assert_eq!(artifact["complete"], true);
-        assert!(store.read(artifact["output_id"].as_str().unwrap(), Some("stdout"), 1, 400).await.unwrap().contains('界'));
+        assert!(
+            store
+                .read(
+                    artifact["output_id"].as_str().unwrap(),
+                    Some("stdout"),
+                    1,
+                    400
+                )
+                .await
+                .unwrap()
+                .contains('界')
+        );
         assert_eq!(
             jobs.read(&job.id, "bounded").unwrap()["output"],
             preview["output"]

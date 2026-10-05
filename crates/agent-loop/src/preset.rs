@@ -61,7 +61,10 @@ pub(crate) fn apply_tool_blocklist(assembly: &mut PromptAssembly, blocked: &[&st
 /// 与子代理的收窄顺序一致:preset 先收窄,子代理的 `allowed_tools` 在其后
 /// 继续收窄(继承即收窄,绝不放大)。
 pub(crate) fn apply_preset(assembly: &mut PromptAssembly, preset: &AgentPreset) {
-    if let Some(persona) = preset.persona.as_deref().filter(|text| !text.trim().is_empty())
+    if let Some(persona) = preset
+        .persona
+        .as_deref()
+        .filter(|text| !text.trim().is_empty())
         && let Some(section) = assembly
             .sections
             .iter_mut()
@@ -272,10 +275,12 @@ mod tests {
         let mut p = preset(None, None);
         p.features.compaction = false;
         apply_preset(&mut assembly, &p);
-        assert!(!assembly
-            .sections
-            .iter()
-            .any(|s| s.name == "harness:context-management"));
+        assert!(
+            !assembly
+                .sections
+                .iter()
+                .any(|s| s.name == "harness:context-management")
+        );
         assert!(assembly.sections.iter().any(|s| s.name == "tool:bash"));
     }
 
@@ -301,7 +306,11 @@ mod tests {
         assert!(properties.get("run_in_background").is_none());
         assert!(properties.get("command").is_some());
         let required = bash.parameters.get("required").unwrap().as_array().unwrap();
-        assert!(!required.iter().any(|v| v.as_str() == Some("run_in_background")));
+        assert!(
+            !required
+                .iter()
+                .any(|v| v.as_str() == Some("run_in_background"))
+        );
     }
 
     #[test]

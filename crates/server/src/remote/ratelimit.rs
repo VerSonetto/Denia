@@ -18,7 +18,10 @@ use super::config::RateLimitSettings;
 pub enum Admission {
     Allow,
     /// 被拒,附建议的重试等待秒数(响应里的 `Retry-After`)。
-    Deny { retry_after_seconds: u64, reason: DenyReason },
+    Deny {
+        retry_after_seconds: u64,
+        reason: DenyReason,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -72,7 +75,11 @@ impl RateLimiter {
     /// 计入发生在准入之后而不是失败之后:否则攻击者可以用"发请求但不让
     /// 服务端判定失败"的方式绕开窗口计数。
     pub fn admit(&self, peer: &str, now_ms: u64) -> Admission {
-        let settings = self.settings.lock().unwrap_or_else(|p| p.into_inner()).clone();
+        let settings = self
+            .settings
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone();
         let mut map = self.inner.lock().unwrap_or_else(|p| p.into_inner());
         let entry = map.entry(peer.to_string()).or_default();
 
@@ -89,7 +96,10 @@ impl RateLimiter {
             .retain(|at| now_ms.saturating_sub(*at) < window_ms);
         if entry.attempts.len() as u32 >= settings.window_max_attempts {
             let oldest = entry.attempts.first().copied().unwrap_or(now_ms);
-            let retry_after = (oldest + window_ms).saturating_sub(now_ms).div_ceil(1000).max(1);
+            let retry_after = (oldest + window_ms)
+                .saturating_sub(now_ms)
+                .div_ceil(1000)
+                .max(1);
             return Admission::Deny {
                 retry_after_seconds: retry_after,
                 reason: DenyReason::Window,
@@ -102,7 +112,11 @@ impl RateLimiter {
 
     /// 记一次失败,必要时安排退避。返回当前的连续失败次数。
     pub fn record_failure(&self, peer: &str, now_ms: u64) -> u32 {
-        let settings = self.settings.lock().unwrap_or_else(|p| p.into_inner()).clone();
+        let settings = self
+            .settings
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone();
         let mut map = self.inner.lock().unwrap_or_else(|p| p.into_inner());
         let entry = map.entry(peer.to_string()).or_default();
         entry.failures = entry.failures.saturating_add(1);
@@ -170,7 +184,10 @@ mod tests {
             limiter.record_failure("10.0.0.1", NOW + i);
         }
         match limiter.admit("10.0.0.1", NOW + 5) {
-            Admission::Deny { retry_after_seconds, reason } => {
+            Admission::Deny {
+                retry_after_seconds,
+                reason,
+            } => {
                 assert_eq!(reason, DenyReason::Backoff);
                 assert!(retry_after_seconds >= 1, "必须给出重试等待秒数");
             }
@@ -185,14 +202,20 @@ mod tests {
             limiter.record_failure("10.0.0.1", NOW + i);
         }
         let first = match limiter.admit("10.0.0.1", NOW + 10) {
-            Admission::Deny { retry_after_seconds, .. } => retry_after_seconds,
+            Admission::Deny {
+                retry_after_seconds,
+                ..
+            } => retry_after_seconds,
             Admission::Allow => panic!("应处于退避中"),
         };
         assert!(first <= 1, "首次退避是 1 秒,得到 {first}");
 
         limiter.record_failure("10.0.0.1", NOW + 10);
         let second = match limiter.admit("10.0.0.1", NOW + 11) {
-            Admission::Deny { retry_after_seconds, .. } => retry_after_seconds,
+            Admission::Deny {
+                retry_after_seconds,
+                ..
+            } => retry_after_seconds,
             Admission::Allow => panic!("应处于退避中"),
         };
         assert!(second >= 2, "第二次退避应当翻倍,得到 {second}");
@@ -202,7 +225,10 @@ mod tests {
             limiter.record_failure("10.0.0.1", NOW + 100 + i);
         }
         let capped = match limiter.admit("10.0.0.1", NOW + 200) {
-            Admission::Deny { retry_after_seconds, .. } => retry_after_seconds,
+            Admission::Deny {
+                retry_after_seconds,
+                ..
+            } => retry_after_seconds,
             Admission::Allow => panic!("应处于退避中"),
         };
         assert!(capped <= 300, "退避延迟必须封顶 300 秒,得到 {capped}");
@@ -214,7 +240,10 @@ mod tests {
         for i in 0..6 {
             limiter.record_failure("10.0.0.1", NOW + i);
         }
-        assert!(matches!(limiter.admit("10.0.0.1", NOW + 10), Admission::Deny { .. }));
+        assert!(matches!(
+            limiter.admit("10.0.0.1", NOW + 10),
+            Admission::Deny { .. }
+        ));
         limiter.record_success("10.0.0.1");
         assert_eq!(
             limiter.admit("10.0.0.1", NOW + 11),
@@ -231,7 +260,10 @@ mod tests {
             assert_eq!(limiter.admit("10.0.0.2", NOW + i * 100), Admission::Allow);
         }
         match limiter.admit("10.0.0.2", NOW + 2_000) {
-            Admission::Deny { reason, retry_after_seconds } => {
+            Admission::Deny {
+                reason,
+                retry_after_seconds,
+            } => {
                 assert_eq!(reason, DenyReason::Window);
                 assert!(retry_after_seconds >= 1);
             }
@@ -275,6 +307,9 @@ mod tests {
         });
         limiter.record_failure("10.0.0.1", NOW);
         limiter.record_failure("10.0.0.1", NOW + 1);
-        assert!(matches!(limiter.admit("10.0.0.1", NOW + 2), Admission::Deny { .. }));
+        assert!(matches!(
+            limiter.admit("10.0.0.1", NOW + 2),
+            Admission::Deny { .. }
+        ));
     }
 }

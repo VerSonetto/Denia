@@ -7,7 +7,7 @@
 //!   的 message 重写为中文摘要——结论、已重试次数、分类建议、原始信息,
 //!   前端 turn-chrome 直接展示,用户不用再猜 `[CODE] raw-payload`。
 
-use denia_core::error::{codes, LlmFailure};
+use denia_core::error::{LlmFailure, codes};
 
 /// 反馈注入的适用范围(模型输出/请求形态问题,模型自纠有意义):
 /// 提供方抖动(TRANSPORT/TIMEOUT/SERVER/RATE_LIMIT 等)与配置/凭据问题
@@ -113,10 +113,8 @@ pub(crate) fn summarize_failure(failure: &LlmFailure, retries: u32) -> LlmFailur
     let (conclusion, hint) = classify(&failure.code, retries);
     // 分类表里只有限流/服务端两条把"已自动重试"写进了建议文案(它们确属可重试码),
     // 其余一律由计数机制按事实补句——响应异常类不在可重试集,不能凭空声称重试过。
-    let needs_count = !matches!(
-        failure.code.as_str(),
-        codes::RATE_LIMIT | codes::SERVER
-    ) && retries > 0;
+    let needs_count =
+        !matches!(failure.code.as_str(), codes::RATE_LIMIT | codes::SERVER) && retries > 0;
     let count_note = if needs_count {
         format!("已自动重试 {retries} 次。")
     } else {
@@ -168,7 +166,11 @@ mod tests {
     fn retried_failures_mention_the_count() {
         let failure = LlmFailure::new(codes::TIMEOUT, "request timed out");
         let summarized = summarize_failure(&failure, 5);
-        assert!(summarized.message.contains("已自动重试 5 次"), "{}", summarized.message);
+        assert!(
+            summarized.message.contains("已自动重试 5 次"),
+            "{}",
+            summarized.message
+        );
         let zero = summarize_failure(&failure, 0);
         assert!(!zero.message.contains("已自动重试"));
     }
@@ -178,7 +180,11 @@ mod tests {
         let raw = "x".repeat(1000);
         let failure = LlmFailure::new(codes::UNKNOWN, raw);
         let summarized = summarize_failure(&failure, 0);
-        assert!(summarized.message.chars().count() < 600, "{}", summarized.message.len());
+        assert!(
+            summarized.message.chars().count() < 600,
+            "{}",
+            summarized.message.len()
+        );
         assert!(summarized.message.contains("…"));
     }
 
@@ -208,7 +214,15 @@ mod tests {
         // MALFORMED_RESPONSE 不在可重试集:没有重试就不能说"已自动重试"。
         let failure = LlmFailure::new(codes::MALFORMED_RESPONSE, "malformed SSE payload: x");
         let summarized = summarize_failure(&failure, 0);
-        assert!(!summarized.message.contains("已自动重试"), "{}", summarized.message);
-        assert!(summarized.message.contains("原始信息"), "{}", summarized.message);
+        assert!(
+            !summarized.message.contains("已自动重试"),
+            "{}",
+            summarized.message
+        );
+        assert!(
+            summarized.message.contains("原始信息"),
+            "{}",
+            summarized.message
+        );
     }
 }

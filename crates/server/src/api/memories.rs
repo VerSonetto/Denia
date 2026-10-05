@@ -29,9 +29,7 @@ async fn list_projects(State(state): State<Arc<AppState>>) -> impl IntoResponse 
         let path = std::path::PathBuf::from(workspace.path.clone());
         // fs 阻塞调用走 spawn_blocking(设计哲学:不挡异步运行时)。
         let manifest = tokio::task::spawn_blocking(move || {
-            crate::project_memory::scan_manifest(&crate::project_memory::memory_root(
-                &home, &path,
-            ))
+            crate::project_memory::scan_manifest(&crate::project_memory::memory_root(&home, &path))
         })
         .await
         .unwrap_or_else(|_| crate::project_memory::ProjectMemoryManifest {
@@ -147,7 +145,7 @@ fn io_error(error: std::io::Error) -> ApiError {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+
     use serde_json::Value;
     use std::sync::Arc;
 

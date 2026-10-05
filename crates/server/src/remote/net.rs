@@ -33,7 +33,8 @@ pub fn candidates() -> Vec<LanCandidate> {
             match interface.addr {
                 if_addrs::IfAddr::V4(v4) => {
                     let address = v4.ip;
-                    if address.is_loopback() || address.is_link_local() || address.is_unspecified() {
+                    if address.is_loopback() || address.is_link_local() || address.is_unspecified()
+                    {
                         return None;
                     }
                     Some(LanCandidate {
@@ -73,8 +74,13 @@ struct CachedIfAddrs {
 ///
 /// 需要即时结果的调用方(开局域网监听、切换地址)仍用 `candidates()`。
 pub fn cached_addresses() -> Vec<String> {
-    let mut guard = CACHE.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-    if let Some(cached) = guard.as_ref().filter(|cached| cached.at.elapsed() < CACHE_TTL) {
+    let mut guard = CACHE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(cached) = guard
+        .as_ref()
+        .filter(|cached| cached.at.elapsed() < CACHE_TTL)
+    {
         return cached.addresses.clone();
     }
     let addresses: Vec<String> = candidates()
@@ -90,7 +96,9 @@ pub fn cached_addresses() -> Vec<String> {
 
 /// 测试/网卡变化后主动失效缓存。
 pub fn invalidate_cache() {
-    let mut guard = CACHE.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut guard = CACHE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     *guard = None;
 }
 

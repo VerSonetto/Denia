@@ -128,7 +128,9 @@ impl PersistentShell {
                 std::fs::write(&script, PWSH_LOOP)
                     .map_err(|error| format!("写持久 shell 循环脚本失败:{error}"))?;
                 let mut command = Command::new(executable);
-                command.args(["-NoLogo", "-NoProfile", "-File"]).arg(&script);
+                command
+                    .args(["-NoLogo", "-NoProfile", "-File"])
+                    .arg(&script);
                 command
             }
             Dialect::Posix => {
@@ -210,9 +212,7 @@ impl PersistentShell {
             }
             if state.closed {
                 self.dead.store(true, Ordering::Release);
-                return Err(format!(
-                    "持久 shell 进程已退出(命令未返回结果)\n建议:下一条命令会自动重开一个干净 shell"
-                ));
+                return Err("持久 shell 进程已退出(命令未返回结果)\n建议:下一条命令会自动重开一个干净 shell".to_string());
             }
             let now = Instant::now();
             if now >= deadline {
@@ -362,7 +362,9 @@ fn extract(bytes: &[u8], start: &str, end: &str) -> Option<Captured> {
 }
 
 fn trim_blank_edges(text: &str) -> String {
-    let text = text.strip_prefix("\r\n").unwrap_or_else(|| text.strip_prefix('\n').unwrap_or(text));
+    let text = text
+        .strip_prefix("\r\n")
+        .unwrap_or_else(|| text.strip_prefix('\n').unwrap_or(text));
     text.strip_suffix("\r\n")
         .or_else(|| text.strip_suffix('\n'))
         .unwrap_or(text)
@@ -426,17 +428,20 @@ mod tests {
     /// `cmd /c` 带管道 stdin 完全正常,而现有一次性 bash 之所以没事,是因为它
     /// 用 `Stdio::null()`。等换到不受沙盒约束的宿主(或改用套接字/命名管道
     /// 传命令)再跑这些用例。诊断入口见 `diagnose_child_exit`。
-
+    ///
     /// 标记提取是纯函数,可以在这里验:它决定"命令结束没结束、退出码几"。
     #[test]
     fn extract_pulls_body_and_exit_code_between_markers() {
-        let bytes = b"prefix junk\n__DENIA_SHELL_START_7-1__\nhello\nworld\n__DENIA_SHELL_END_7-1:0\n";
-        let captured = extract(bytes, "__DENIA_SHELL_START_7-1__", "__DENIA_SHELL_END_7-1:").unwrap();
+        let bytes =
+            b"prefix junk\n__DENIA_SHELL_START_7-1__\nhello\nworld\n__DENIA_SHELL_END_7-1:0\n";
+        let captured =
+            extract(bytes, "__DENIA_SHELL_START_7-1__", "__DENIA_SHELL_END_7-1:").unwrap();
         assert_eq!(captured.text, "hello\nworld");
         assert_eq!(captured.exit_code, Some(0));
         // 换行用 \r\n 也要认(Windows 输出)。
         let crlf = b"__DENIA_SHELL_START_7-2__\r\nbody\r\n__DENIA_SHELL_END_7-2:3\r\n";
-        let captured = extract(crlf, "__DENIA_SHELL_START_7-2__", "__DENIA_SHELL_END_7-2:").unwrap();
+        let captured =
+            extract(crlf, "__DENIA_SHELL_START_7-2__", "__DENIA_SHELL_END_7-2:").unwrap();
         assert_eq!(captured.text, "body");
         assert_eq!(captured.exit_code, Some(3));
         // 标记还没出现 → None(调用方继续等)。
@@ -467,7 +472,10 @@ mod tests {
                     Err(error) => eprintln!("  control write FAILED: {error}"),
                 }
                 let out = control.wait_with_output();
-                eprintln!("  control output = {:?}", out.map(|o| String::from_utf8_lossy(&o.stdout).to_string()));
+                eprintln!(
+                    "  control output = {:?}",
+                    out.map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+                );
             }
             Err(error) => eprintln!("  control spawn failed: {error}"),
         }
@@ -613,7 +621,11 @@ mod tests {
     #[ignore = "沙盒环境下 PowerShell 带管道 stdin 建进程会挂(tests 模块注释)"]
     fn exit_code_is_captured_and_shell_survives_failure() {
         let (hub, cwd) = shell_for_tests();
-        let fail = if cfg!(windows) { "cmd /c exit 7" } else { "exit 7" };
+        let fail = if cfg!(windows) {
+            "cmd /c exit 7"
+        } else {
+            "exit 7"
+        };
         let failed = run(&hub, "s3", &cwd, fail);
         // POSIX 的 `exit 7` 会退出 shell 本身,单独断言下面另测。
         if cfg!(windows) {
@@ -644,13 +656,12 @@ mod tests {
     fn marker_text_in_output_does_not_confuse_extraction() {
         let (hub, cwd) = shell_for_tests();
         // 命令自己打印一个像标记的串:nonce 唯一,不该被误判为结束。
-        let out = run(
-            &hub,
-            "s5",
-            &cwd,
-            "Write-Output '__DENIA_SHELL_END_0-0:999'",
+        let out = run(&hub, "s5", &cwd, "Write-Output '__DENIA_SHELL_END_0-0:999'");
+        assert!(
+            out.text.contains("__DENIA_SHELL_END_0-0:999"),
+            "{}",
+            out.text
         );
-        assert!(out.text.contains("__DENIA_SHELL_END_0-0:999"), "{}", out.text);
         hub.close_all();
     }
 

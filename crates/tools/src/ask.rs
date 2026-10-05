@@ -446,8 +446,16 @@ mod tests {
             .await;
         assert!(!output.is_error, "{}", output.content);
         assert!(output.content.contains("用户已回答"), "{}", output.content);
-        assert!(output.content.contains("\"selected\":[\"甲\"]"), "{}", output.content);
-        assert!(output.content.contains("\"custom\":\"补充说明\""), "{}", output.content);
+        assert!(
+            output.content.contains("\"selected\":[\"甲\"]"),
+            "{}",
+            output.content
+        );
+        assert!(
+            output.content.contains("\"custom\":\"补充说明\""),
+            "{}",
+            output.content
+        );
         let captured = bridge.captured.lock().unwrap().clone().unwrap();
         assert!(captured.0[0].options[1].recommended);
         assert_eq!(captured.1, DEFAULT_TIMEOUT_MS);
@@ -472,7 +480,11 @@ mod tests {
             .await;
         assert!(!output.is_error, "超时是正常结局,不应标记为工具错误");
         assert!(output.content.contains("提问超时"), "{}", output.content);
-        assert!(output.content.contains("不要原样重复同一问题"), "{}", output.content);
+        assert!(
+            output.content.contains("不要原样重复同一问题"),
+            "{}",
+            output.content
+        );
     }
 
     #[tokio::test]
@@ -497,7 +509,12 @@ mod tests {
                 )
                 .await;
             assert!(!output.is_error, "{:?}", outcome);
-            assert!(output.content.contains(needle), "{:?} → {}", outcome, output.content);
+            assert!(
+                output.content.contains(needle),
+                "{:?} → {}",
+                outcome,
+                output.content
+            );
         }
     }
 
@@ -511,7 +528,11 @@ mod tests {
             )
             .await;
         assert!(!output.is_error);
-        assert!(output.content.contains("无法向用户提问"), "{}", output.content);
+        assert!(
+            output.content.contains("无法向用户提问"),
+            "{}",
+            output.content
+        );
         assert!(output.content.contains("自行决策"), "{}", output.content);
     }
 
@@ -540,7 +561,10 @@ mod tests {
                 "id 重复",
             ),
             (r#"{"questions":[{"id":"","question":"?"}]}"#, "id 不能为空"),
-            (r#"{"questions":[{"id":"a","question":"  "}]}"#, "question 不能为空"),
+            (
+                r#"{"questions":[{"id":"a","question":"  "}]}"#,
+                "question 不能为空",
+            ),
             (
                 r#"{"questions":[{"id":"a","question":"?","allowCustom":false}]}"#,
                 "无从作答",

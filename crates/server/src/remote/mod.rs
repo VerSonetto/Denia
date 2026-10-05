@@ -448,7 +448,9 @@ impl RemoteManager {
                 inner.lan_address.clone(),
                 // 带票据的链接本身就是入场券:只回给本机。
                 include_secrets.then(|| inner.lan_ticket.clone()).flatten(),
-                include_secrets.then(|| inner.tunnel_ticket.clone()).flatten(),
+                include_secrets
+                    .then(|| inner.tunnel_ticket.clone())
+                    .flatten(),
                 inner.tunnel_pin.clone(),
                 inner.lan_pin.clone(),
             )
@@ -736,15 +738,14 @@ impl RemoteManager {
                 }
                 port
             }
-            None => {
-                self.spawn_listener(
+            None => self
+                .spawn_listener(
                     SocketAddr::new(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST), 0),
                     false,
                     true,
                 )
                 .await?
-                .port()
-            }
+                .port(),
         };
         let origin = format!("http://127.0.0.1:{port}");
 
@@ -811,9 +812,11 @@ impl RemoteManager {
         self.tickets.revoke(Some(Channel::Tunnel));
         let revoked = self.sessions.revoke(Some(Channel::Tunnel));
         let challenges = self.challenges.revoke_all();
-        self.audit(AuditRecord::new("tunnel-stop", "local", "tunnel", "ok").detail(format!(
-            "reason: {reason}; revoked {revoked} sessions, {challenges} challenges"
-        )));
+        self.audit(
+            AuditRecord::new("tunnel-stop", "local", "tunnel", "ok").detail(format!(
+                "reason: {reason}; revoked {revoked} sessions, {challenges} challenges"
+            )),
+        );
         self.publish();
         stopped.is_some()
     }
@@ -966,8 +969,10 @@ impl RemoteManager {
         } = self.limiter.admit(peer, now)
         {
             self.audit(
-                AuditRecord::new("exchange", peer, "unknown", "limited")
-                    .detail(format!("{} (retry after {retry_after_seconds}s)", reason.code())),
+                AuditRecord::new("exchange", peer, "unknown", "limited").detail(format!(
+                    "{} (retry after {retry_after_seconds}s)",
+                    reason.code()
+                )),
             );
             return Err(RemoteFailure::limited(reason.code(), retry_after_seconds));
         }
@@ -1036,8 +1041,10 @@ impl RemoteManager {
         } = self.limiter.admit(peer, now)
         {
             self.audit(
-                AuditRecord::new("pin-verify", peer, "unknown", "limited")
-                    .detail(format!("{} (retry after {retry_after_seconds}s)", reason.code())),
+                AuditRecord::new("pin-verify", peer, "unknown", "limited").detail(format!(
+                    "{} (retry after {retry_after_seconds}s)",
+                    reason.code()
+                )),
             );
             return Err(RemoteFailure::limited(reason.code(), retry_after_seconds));
         }
@@ -1083,7 +1090,12 @@ impl RemoteManager {
             }
             pin::VerifyOutcome::Unknown => {
                 self.limiter.record_failure(peer, now);
-                self.audit(AuditRecord::new("pin-verify", peer, via.as_str(), "expired"));
+                self.audit(AuditRecord::new(
+                    "pin-verify",
+                    peer,
+                    via.as_str(),
+                    "expired",
+                ));
                 Err(RemoteFailure::unauthorized(
                     "remote/challenge-expired",
                     "校验已过期,请重新扫码",
@@ -1206,7 +1218,10 @@ impl RemoteManager {
         }
         // 逐请求的网卡枚举走缓存:这是阻塞 syscall,不该出现在每个请求的
         // 关键路径上(手机上就是白加的一截延迟)。
-        if net::cached_addresses().iter().any(|address| address == &host) {
+        if net::cached_addresses()
+            .iter()
+            .any(|address| address == &host)
+        {
             return true;
         }
         let settings = self.config();
@@ -1252,7 +1267,11 @@ impl RemoteManager {
     ) -> String {
         if via == Via::Tunnel
             && let Some(raw) = cf_connecting_ip
-            && let Some(ip) = raw.split(',').next().map(str::trim).filter(|s| !s.is_empty())
+            && let Some(ip) = raw
+                .split(',')
+                .next()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
             && ip.parse::<std::net::IpAddr>().is_ok()
         {
             return ip.to_string();
@@ -1274,7 +1293,10 @@ impl RemoteManager {
                 ticker.tick().await;
                 let swept = manager.sweep();
                 if swept > 0 {
-                    tracing::debug!(count = swept, "swept expired remote tickets/challenges/sessions");
+                    tracing::debug!(
+                        count = swept,
+                        "swept expired remote tickets/challenges/sessions"
+                    );
                 }
             }
         });
@@ -1501,8 +1523,14 @@ mod tests {
 
     #[test]
     fn normalizes_host_headers() {
-        assert_eq!(normalize_host("127.0.0.1:3602").as_deref(), Some("127.0.0.1"));
-        assert_eq!(normalize_host("Example.COM").as_deref(), Some("example.com"));
+        assert_eq!(
+            normalize_host("127.0.0.1:3602").as_deref(),
+            Some("127.0.0.1")
+        );
+        assert_eq!(
+            normalize_host("Example.COM").as_deref(),
+            Some("example.com")
+        );
         assert_eq!(normalize_host("[::1]:3602").as_deref(), Some("[::1]"));
         assert_eq!(
             normalize_host("abc-def.trycloudflare.com").as_deref(),
@@ -1511,7 +1539,10 @@ mod tests {
         assert_eq!(normalize_host("   ").as_deref(), None);
         assert_eq!(normalize_host("").as_deref(), None);
         // 冒号结尾(无端口)不能把 host 削掉。
-        assert_eq!(normalize_host("example.com:").as_deref(), Some("example.com"));
+        assert_eq!(
+            normalize_host("example.com:").as_deref(),
+            Some("example.com")
+        );
         assert_eq!(normalize_host("[::1]").as_deref(), Some("[::1]"));
         assert_eq!(normalize_host("[::1]:").as_deref(), Some("[::1]"));
         // 畸形方括号不猜。
@@ -1520,12 +1551,27 @@ mod tests {
 
     #[test]
     fn classifies_requests_by_peer_and_cloudflare_headers() {
-        assert_eq!(RemoteManager::classify(peer("127.0.0.1:5000"), false), Via::Local);
-        assert_eq!(RemoteManager::classify(peer("127.0.0.1:5000"), true), Via::Tunnel);
-        assert_eq!(RemoteManager::classify(peer("[::1]:5000"), true), Via::Tunnel);
-        assert_eq!(RemoteManager::classify(peer("192.168.1.20:5000"), false), Via::Lan);
+        assert_eq!(
+            RemoteManager::classify(peer("127.0.0.1:5000"), false),
+            Via::Local
+        );
+        assert_eq!(
+            RemoteManager::classify(peer("127.0.0.1:5000"), true),
+            Via::Tunnel
+        );
+        assert_eq!(
+            RemoteManager::classify(peer("[::1]:5000"), true),
+            Via::Tunnel
+        );
+        assert_eq!(
+            RemoteManager::classify(peer("192.168.1.20:5000"), false),
+            Via::Lan
+        );
         // 局域网客户端伪造 CF 头也只能被当成隧道流量(会被 https 校验拦下)。
-        assert_eq!(RemoteManager::classify(peer("192.168.1.20:5000"), true), Via::Lan);
+        assert_eq!(
+            RemoteManager::classify(peer("192.168.1.20:5000"), true),
+            Via::Lan
+        );
         assert_eq!(RemoteManager::classify(None, false), Via::Lan);
         assert_eq!(RemoteManager::classify(None, true), Via::Lan);
     }
@@ -1561,7 +1607,10 @@ mod tests {
             RemoteManager::effective_peer(peer("127.0.0.1:1"), Via::Tunnel, Some("not-an-ip")),
             "127.0.0.1"
         );
-        assert_eq!(RemoteManager::effective_peer(None, Via::Lan, None), "unknown");
+        assert_eq!(
+            RemoteManager::effective_peer(None, Via::Lan, None),
+            "unknown"
+        );
     }
 
     #[test]

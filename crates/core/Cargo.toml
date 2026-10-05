@@ -5,10 +5,18 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+bindings = ["dep:ts-rs"]
+
 [dependencies]
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
+ts-rs = { version = "12", optional = true, features = ["serde-json-impl"] }
+
+[[example]]
+name = "bindings"
+required-features = ["bindings"]
 
 [dev-dependencies]
 serde_yaml = { workspace = true }

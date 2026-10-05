@@ -56,7 +56,10 @@ impl EventPulse {
 
     fn push(&self, event: ServerEvent) {
         let seq = self.latest.fetch_add(1, Ordering::SeqCst) + 1;
-        let mut ring = self.ring.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let mut ring = self
+            .ring
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         if ring.len() == RING_CAPACITY {
             let (oldest_seq, _) = ring.pop_front().expect("容量非零时必有元素");
             self.mark_gap(oldest_seq);
@@ -71,7 +74,10 @@ impl EventPulse {
     /// 客户端于是反复拿到同一批旧事件(或反过来跳过没读到的)。
     pub fn after(&self, after: u64) -> (Vec<(u64, ServerEvent)>, u64, bool) {
         let latest = self.latest.load(Ordering::SeqCst);
-        let ring = self.ring.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let ring = self
+            .ring
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let events = ring
             .iter()
             .filter(|(seq, _)| *seq > after)
@@ -98,7 +104,10 @@ impl EventPulse {
                 match receiver.recv().await {
                     Ok(event) => task_pulse.push(event),
                     Err(broadcast::error::RecvError::Lagged(skipped)) => {
-                        tracing::warn!(skipped, "event pulse lagged behind broadcast; clients will resync");
+                        tracing::warn!(
+                            skipped,
+                            "event pulse lagged behind broadcast; clients will resync"
+                        );
                         // 下一个序号起的内容没抄到:从这个边界开始算断档。
                         task_pulse.mark_gap(task_pulse.latest.load(Ordering::SeqCst) + 1);
                     }
@@ -153,7 +162,10 @@ mod tests {
             pulse.push(ServerEvent::McpUpdated);
         }
         let (events, latest, gap) = pulse.after(0);
-        assert!(gap, "被覆盖掉的区间必须报断档,否则客户端会以为拿到了完整增量");
+        assert!(
+            gap,
+            "被覆盖掉的区间必须报断档,否则客户端会以为拿到了完整增量"
+        );
         assert_eq!(events.len(), RING_CAPACITY, "环只保留最近若干条");
         assert_eq!(latest, (RING_CAPACITY + 5) as u64);
         // 断档时增量是从环里最旧那条开始的,其序号大于 after+1 —— 这正是

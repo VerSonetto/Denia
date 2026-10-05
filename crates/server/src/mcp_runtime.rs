@@ -16,7 +16,6 @@ use std::sync::Arc;
 use denia_agent_loop::SessionDriver;
 use denia_mcp::McpManager;
 use denia_settings::SettingsStore;
-use denia_tools::Tool;
 
 use crate::mcp_settings::{MCP_NS, McpSettings};
 

@@ -106,3 +106,16 @@ impl IntoResponse for ApiError {
         response
     }
 }
+
+impl From<crate::application::error::CommandError> for ApiError {
+    fn from(error: crate::application::error::CommandError) -> Self {
+        use crate::application::error::FailureKind;
+        let status = match error.kind {
+            FailureKind::BadRequest => StatusCode::BAD_REQUEST,
+            FailureKind::Conflict => StatusCode::CONFLICT,
+            FailureKind::NotFound => StatusCode::NOT_FOUND,
+            FailureKind::Internal => StatusCode::INTERNAL_SERVER_ERROR,
+        };
+        Self::new(status, error.code, error.message)
+    }
+}

@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use async_trait::async_trait;
 use denia_agent_loop::{ApprovalBridge, SessionDriver};
-use denia_core::session::{ApprovalOutcome, PermissionMode};
+use denia_core::session::ApprovalOutcome;
 use denia_credentials::{CredentialEvent, CredentialStore};
 use denia_llm::{LlmRegistry, OPENAI_SETTINGS_NS, OpenAiCompatAdapter, OpenAiSection, RetryPolicy};
 use denia_session::{Session, SessionError, SessionStore};
@@ -18,218 +18,7 @@ use serde_json::{Value, json};
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 
-/// Console preferences namespace (settings page).
-pub const CONSOLE_NS: &str = "console";
-
-/// The `console` settings section shape.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ConsoleSettings {
-    /// `system` | `light` | `dark`.
-    #[serde(default = "default_theme")]
-    pub theme: String,
-    /// `zh` | `en`;zh 是源语言(学 dsh 的 i18n 约定)。
-    #[serde(default = "default_locale")]
-    pub locale: String,
-    /// 层叠上下文管理(学 dsh 压力驱动 + Claude Code compact):
-    /// 低压力不动(前缀缓存稳定),高压力 LLM 总结压缩。
-    /// 全部字段带默认值;见 `ConsoleCompactionSettings`。
-    #[serde(default)]
-    pub compaction: ConsoleCompactionSettings,
-    /// 工具结果微压缩:摘要之前的廉价清理。
-    /// 全部字段带默认值;见 `ConsoleMicrocompactSettings`。
-    #[serde(default)]
-    pub microcompact: ConsoleMicrocompactSettings,
-    /// 工具并行执行上限(学 codex `ToolCallRuntime` + dsh `maxParallelToolCalls`)。
-    /// 一次 step 内模型返回的多个工具调用并发执行,受此上限约束。
-    #[serde(default = "default_max_parallel_tool_calls")]
-    pub max_parallel_tool_calls: usize,
-    /// 新建会话的默认权限模式(四档,但不含 plan —— 计划模式是用户
-    /// 在某次会话里显式进入的临时档位,不适合当全局默认值)。
-    #[serde(default = "default_permission_mode")]
-    pub default_permission_mode: String,
-}
-
-fn default_max_parallel_tool_calls() -> usize {
-    10
-}
-
-/// 出厂默认权限模式:自动编辑(与会话日志的初始档位一致)。
-pub fn default_permission_mode() -> String {
-    PermissionMode::AutoEdit.as_str().to_string()
-}
-
-/// 设置里可选的新建会话默认档位(剔除 plan,见字段注释)。
-pub const SELECTABLE_DEFAULT_PERMISSION_MODES: [&str; 3] = ["read-only", "auto-edit", "full"];
-
-/// `console.compaction` 段(层叠上下文管理配置,默认对齐 Claude Code
-/// auto-compact 缓冲语义)。
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default, rename_all = "camelCase")]
-pub struct ConsoleCompactionSettings {
-    /// LLM 总结压缩总开关。
-    pub compact_enabled: bool,
-    /// 压力 ≥ 窗口 × 该比例时触发 LLM 总结压缩。
-    pub compact_ratio: f64,
-    /// 压缩后保留窗口下限 token。
-    pub compact_min_keep_tokens: u64,
-    /// 压缩后保留窗口上限 token。
-    pub compact_max_keep_tokens: u64,
-    /// 保留窗口至少包含的文本消息数。
-    pub compact_min_text_messages: usize,
-    /// 摘要请求的输出预算。
-    pub compact_summary_max_tokens: u64,
-    /// 摘要请求 PTL/失败的截断重试上限。
-    pub compact_max_attempts: u32,
-}
-
-impl Default for ConsoleCompactionSettings {
-    fn default() -> Self {
-        Self {
-            compact_enabled: true,
-            compact_ratio: 0.90,
-            compact_min_keep_tokens: 10_000,
-            compact_max_keep_tokens: 40_000,
-            compact_min_text_messages: 5,
-            compact_summary_max_tokens: 20_000,
-            compact_max_attempts: 3,
-        }
-    }
-}
-
-/// `console.microcompact` 段(工具结果微压缩配置)。
-///
-/// 这是 LLM 摘要之前的廉价清理层:把已经用过的旧工具结果内容替换为
-/// 占位符,不调模型、不重写历史。
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default, rename_all = "camelCase")]
-pub struct ConsoleMicrocompactSettings {
-    /// 微压缩总开关。
-    pub microcompact_enabled: bool,
-    /// 保留最近多少组工具结果(一组 = 一次 assistant 消息发起的全部调用)。
-    pub microcompact_keep_recent_groups: usize,
-    /// 空闲触发阈值(分钟):模型闲置超过这么久,下次进入时清理一次。
-    pub microcompact_idle_threshold_minutes: u64,
-    /// 最小节省 token 数:省不到这么多就不动手(保护 provider 前缀缓存)。
-    pub microcompact_min_savings: u64,
-    /// 可清理的工具白名单。
-    pub microcompact_tools: Vec<String>,
-}
-
-impl Default for ConsoleMicrocompactSettings {
-    fn default() -> Self {
-        Self {
-            microcompact_enabled: true,
-            microcompact_keep_recent_groups: 5,
-            microcompact_idle_threshold_minutes: 60,
-            microcompact_min_savings: 256,
-            microcompact_tools: denia_agent_loop::microcompact::default_compactable_tools(),
-        }
-    }
-}
-
-/// 把 console compaction 配置翻译成 driver 的 [`CompactionSettings`]。
-pub fn compaction_settings_from(console: &ConsoleSettings) -> denia_agent_loop::CompactionSettings {
-    let c = &console.compaction;
-    denia_agent_loop::CompactionSettings {
-        compact_enabled: c.compact_enabled,
-        compact_ratio: c.compact_ratio,
-        min_keep_tokens: c.compact_min_keep_tokens,
-        max_keep_tokens: c.compact_max_keep_tokens,
-        min_text_messages: c.compact_min_text_messages,
-        summary_max_tokens: c.compact_summary_max_tokens,
-        max_attempts: c.compact_max_attempts,
-    }
-}
-
-/// 把 console microcompact 配置翻译成 driver 的 [`MicrocompactSettings`]。
-pub fn microcompact_settings_from(
-    console: &ConsoleSettings,
-) -> denia_agent_loop::microcompact::MicrocompactSettings {
-    let c = &console.microcompact;
-    denia_agent_loop::microcompact::MicrocompactSettings {
-        enabled: c.microcompact_enabled,
-        keep_recent_groups: c.microcompact_keep_recent_groups,
-        idle_threshold_minutes: c.microcompact_idle_threshold_minutes,
-        min_savings: c.microcompact_min_savings,
-        compactable_tools: c.microcompact_tools.clone(),
-        clear_error_results: false,
-    }
-}
-
-fn default_theme() -> String {
-    "system".to_string()
-}
-
-fn default_locale() -> String {
-    "zh".to_string()
-}
-
-fn validate_console(value: Value) -> Result<Value, String> {
-    let parsed: ConsoleSettings = serde_json::from_value(value).map_err(|e| e.to_string())?;
-    if !matches!(parsed.theme.as_str(), "system" | "light" | "dark") {
-        return Err(format!(
-            "theme must be 'system', 'light', or 'dark'; got '{}'",
-            parsed.theme
-        ));
-    }
-    if !matches!(parsed.locale.as_str(), "zh" | "en") {
-        return Err(format!(
-            "locale must be 'zh' or 'en'; got '{}'",
-            parsed.locale
-        ));
-    }
-    let c = &parsed.compaction;
-    if !(0.0..=1.0).contains(&c.compact_ratio) {
-        return Err(format!(
-            "compaction.compactRatio must be in [0, 1]; got {}",
-            c.compact_ratio
-        ));
-    }
-    if parsed.max_parallel_tool_calls == 0 || parsed.max_parallel_tool_calls > 64 {
-        return Err(format!(
-            "maxParallelToolCalls must be in [1, 64]; got {}",
-            parsed.max_parallel_tool_calls
-        ));
-    }
-    // 计划模式只在会话内显式进入,不允许设为新建会话的默认档位。
-    let Some(mode) = PermissionMode::parse(&parsed.default_permission_mode) else {
-        return Err(format!(
-            "defaultPermissionMode must be one of {}; got '{}'",
-            SELECTABLE_DEFAULT_PERMISSION_MODES.join(", "),
-            parsed.default_permission_mode
-        ));
-    };
-    if mode == PermissionMode::Plan {
-        return Err(
-            "defaultPermissionMode must not be 'plan' (plan mode is entered per session)".to_string(),
-        );
-    }
-    serde_json::to_value(parsed).map_err(|e| e.to_string())
-}
-
-/// 新建会话采用的权限模式:解析控制台默认值,非法值回落自动编辑。
-pub fn console_default_permission_mode(settings: &SettingsStore) -> PermissionMode {
-    PermissionMode::parse(&console_settings(settings).default_permission_mode)
-        .filter(|mode| *mode != PermissionMode::Plan)
-        .unwrap_or(PermissionMode::AutoEdit)
-}
-
-/// Reads the resolved console settings, tolerating an absent provider.
-pub fn console_settings(settings: &SettingsStore) -> ConsoleSettings {
-    settings
-        .resolved(CONSOLE_NS)
-        .ok()
-        .and_then(|value| serde_json::from_value(value).ok())
-        .unwrap_or(ConsoleSettings {
-            theme: "system".to_string(),
-            locale: "zh".to_string(),
-            compaction: ConsoleCompactionSettings::default(),
-            microcompact: ConsoleMicrocompactSettings::default(),
-            max_parallel_tool_calls: 10,
-            default_permission_mode: default_permission_mode(),
-        })
-}
+pub use crate::configuration::*;
 
 /// Process-wide shared state handed to every handler.
 pub struct AppState {
@@ -268,6 +57,19 @@ pub struct AppState {
 }
 
 impl AppState {
+    pub fn session_commands(&self) -> crate::application::sessions::SessionCommands<'_> {
+        use crate::application::sessions::{SessionCommands, SessionServices};
+        SessionCommands::new(SessionServices {
+            home: &self.home,
+            sessions: &self.sessions,
+            live: &self.live,
+            registry: self.registry.clone(),
+            driver: self.driver.clone(),
+            runtime: self.runtime.clone(),
+            events: self.events.clone(),
+        })
+    }
+
     /// 广播 MCP 状态变化(前端刷新面板)。
     pub fn announce_mcp_updated(&self) {
         let _ = self.events.send(ServerEvent::McpUpdated);
@@ -306,7 +108,10 @@ pub enum ServerEvent {
     /// 手动压缩已结束但**没有**摘要产出:无可压缩区间(`nothing-to-compact`)
     /// 或摘要调用失败(附可读原因)。压缩是后台任务(202),结果只能走广播;
     /// 成功路径不发这个 —— 成功有 append-only 的 compaction-summary 事件。
-    CompactionFailed { id: String, reason: String },
+    CompactionFailed {
+        id: String,
+        reason: String,
+    },
 }
 
 /// One materialized session: durable log plus live fan-out. `session` is an
@@ -327,8 +132,9 @@ pub struct LiveSession {
     ///
     /// 与审批分表:dsh 用同一 id 空间承担两种交互,重试/多问题批次时
     /// 应答可能误配;这里按 request_id 严格隔离,且答题是一次性原子结算。
-    pub pending_asks:
-        std::sync::Mutex<HashMap<String, tokio::sync::oneshot::Sender<denia_core::session::AskResolution>>>,
+    pub pending_asks: std::sync::Mutex<
+        HashMap<String, tokio::sync::oneshot::Sender<denia_core::session::AskResolution>>,
+    >,
 }
 
 /// 驻留会话数上限。超出后按 LRU 淘汰非运行、无订阅者会话。
@@ -472,9 +278,7 @@ impl LiveSessions {
         }
         let mut candidates: Vec<(String, u64)> = map
             .iter()
-            .filter(|(id, live)| {
-                Some(id.as_str()) != protected && Self::evictable(live)
-            })
+            .filter(|(id, live)| Some(id.as_str()) != protected && Self::evictable(live))
             .map(|(id, live)| {
                 (
                     id.clone(),
@@ -556,11 +360,11 @@ impl LiveSessions {
             let map = self.inner.lock().unwrap();
             for (id, live) in map.iter() {
                 if !live.running.load(Ordering::SeqCst)
-                    && Arc::strong_count(live) == 1 && Arc::strong_count(&live.session) == 1
+                    && Arc::strong_count(live) == 1
+                    && Arc::strong_count(&live.session) == 1
+                    && let Err(error) = live.session.cool()
                 {
-                    if let Err(error) = live.session.cool() {
-                        tracing::warn!(session = %id, %error, "could not release idle session history");
-                    }
+                    tracing::warn!(session = %id, %error, "could not release idle session history");
                 }
                 let idle = now
                     .saturating_sub(live.last_touch.load(std::sync::atomic::Ordering::Relaxed))
@@ -573,10 +377,10 @@ impl LiveSessions {
         let mut map = self.inner.lock().unwrap();
         for id in &to_remove {
             // 双检:可能已被其他路径移除。
-            if let Some(live) = map.get(id) {
-                if Self::evictable(live) {
-                    map.remove(id);
-                }
+            if let Some(live) = map.get(id)
+                && Self::evictable(live)
+            {
+                map.remove(id);
             }
         }
         to_remove
@@ -871,7 +675,9 @@ fn validate_openai(value: Value) -> Result<Value, String> {
     for (provider, profile) in &section.providers {
         for (name, raw) in &profile.headers {
             reqwest::header::HeaderName::from_bytes(name.as_bytes()).map_err(|_| {
-                format!("provider '{provider}': header name '{name}' is not a valid HTTP header name")
+                format!(
+                    "provider '{provider}': header name '{name}' is not a valid HTTP header name"
+                )
             })?;
             // 占位引用形式(整段 `${REF}`)跳过值的静态检查,由请求前解析兜底;
             // 其余值按 HeaderValue 规则即时拒绝(控制字符等)。
@@ -973,8 +779,7 @@ pub async fn build_state(
         registry.clone(),
         workspaces.clone(),
     )?;
-    let mut tools =
-        denia_tools::default_registry_with_browser(Some(browser_hub));
+    let mut tools = denia_tools::default_registry_with_browser(Some(browser_hub));
     denia_tools::capabilities::register(&mut tools, runtime.clone());
     tools.replace(Arc::new(
         denia_tools::BashTool::new().with_runtime(runtime.clone()),
@@ -996,6 +801,7 @@ pub async fn build_state(
             .with_ask(ask)
             .with_runtime(runtime.clone())
             .with_presets(agent_presets.clone())
+            .with_settings_source(Arc::new(ConsoleDriverSettingsSource(settings.clone())))
             .with_compaction(compaction_settings_from(&console))
             .with_microcompact(microcompact_settings_from(&console))
             .with_parallel(denia_agent_loop::ParallelSettings {
@@ -1023,6 +829,7 @@ pub async fn build_state(
             Arc::new(move |id: &str| {
                 file_history_for_evict.forget(id);
                 driver_for_evict.clear_read_state(id);
+                driver_for_evict.clear_compaction_state(id);
                 driver_for_evict.clear_mcp_loads(id);
             }),
         );
@@ -1274,6 +1081,31 @@ mod tests {
     use denia_tools::AskBridge as _;
     use std::sync::atomic::Ordering;
 
+    #[tokio::test]
+    async fn driver_reads_live_console_settings_without_waiting_for_a_forwarder() {
+        let home = temp_root();
+        let state = build_state(&home, false, 3600).await.unwrap();
+        let running_snapshot = state.driver.driver_settings();
+        state
+            .settings
+            .update(
+                CONSOLE_NS,
+                json!({
+                    "maxParallelToolCalls": 2,
+                    "compaction": {"compactEnabled": false},
+                    "microcompact": {"microcompactEnabled": false}
+                }),
+                None,
+            )
+            .unwrap();
+        let next_snapshot = state.driver.driver_settings();
+        assert_eq!(next_snapshot.parallel.max_parallel_tool_calls, 2);
+        assert!(!next_snapshot.compaction.compact_enabled);
+        assert!(!next_snapshot.microcompact.enabled);
+        assert_eq!(running_snapshot.parallel.max_parallel_tool_calls, 10);
+        assert!(running_snapshot.compaction.compact_enabled);
+    }
+
     fn temp_root() -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!("denia-live-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -1306,9 +1138,14 @@ mod tests {
         std::fs::create_dir_all(&cwd).unwrap();
         let store = SessionStore::open(&root).unwrap();
         let session = store.create(&cwd, true).unwrap();
-        session.append(denia_core::session::SessionEvent::UserMessage {
-            text: "preserved".into(), injected: false, channel: None, images: Vec::new(),
-        }).unwrap();
+        session
+            .append(denia_core::session::SessionEvent::UserMessage {
+                text: "preserved".into(),
+                injected: false,
+                channel: None,
+                images: Vec::new(),
+            })
+            .unwrap();
         session.flush().unwrap();
         let live = LiveSessions::new(8, u64::MAX);
         let handle = live.get_or_load(&store, session.id()).unwrap();
@@ -1434,7 +1271,10 @@ mod tests {
         // 预算 0 + 全部冷会话:谁都不占预算,谁也不该被裁掉。
         let live = LiveSessions::new(8, 0);
         live.get_or_load(&store, first.id()).unwrap();
-        assert!(live.get(first.id()).is_some(), "冷会话不驻留事件,不触发预算裁剪");
+        assert!(
+            live.get(first.id()).is_some(),
+            "冷会话不驻留事件,不触发预算裁剪"
+        );
         std::fs::remove_dir_all(&root).unwrap();
     }
 
@@ -1540,7 +1380,14 @@ mod tests {
             .await;
         assert_eq!(resolution.outcome, AskOutcome::TimedOut);
         // 超时后挂起表必须清空,重复应答会得到 404(不覆盖已结算结果)。
-        assert!(live.get(&id).unwrap().pending_asks.lock().unwrap().is_empty());
+        assert!(
+            live.get(&id)
+                .unwrap()
+                .pending_asks
+                .lock()
+                .unwrap()
+                .is_empty()
+        );
         std::fs::remove_dir_all(&root).unwrap();
     }
 

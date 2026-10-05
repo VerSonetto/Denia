@@ -15,8 +15,8 @@ use std::sync::Arc;
 
 use denia_core::message::ToolCallRef;
 use denia_core::session::{ApprovalOutcome, PermissionMode, PlanReviewDecision, SessionEvent};
-use denia_tools::permission::{ActionClass, Decision};
 use denia_tools::ToolOutput;
+use denia_tools::permission::{ActionClass, Decision};
 use futures::StreamExt;
 
 use crate::{SessionDriver, TurnState, append};
@@ -42,7 +42,7 @@ pub(crate) async fn execute_calls(
                 .preset_features(state.session.agent_preset().as_deref())
                 .memory
         });
-    let max_parallel = driver.parallel.max_parallel_tool_calls.max(1);
+    let max_parallel = state.settings.parallel.max_parallel_tool_calls.max(1);
     let mut in_flight: futures::stream::FuturesOrdered<
         futures::future::BoxFuture<'static, (usize, ToolOutput)>,
     > = futures::stream::FuturesOrdered::new();
@@ -74,15 +74,8 @@ pub(crate) async fn execute_calls(
                 }
                 Decision::Deny(reason) => {
                     append_call(state, step, call)?;
-                    commit_result(
-                        state,
-                        step,
-                        call,
-                        ToolOutput::error(reason),
-                        touched,
-                        &cwd,
-                    )
-                    .await?;
+                    commit_result(state, step, call, ToolOutput::error(reason), touched, &cwd)
+                        .await?;
                     next += 1;
                 }
                 Decision::Ask => break,
@@ -139,18 +132,23 @@ async fn commit_result(
     touched: &mut Vec<PathBuf>,
     cwd: &Path,
 ) -> Result<(), denia_core::error::LlmFailure> {
-    if !output.is_error && matches!(call.name.as_str(), "read_file" | "write_file" | "edit") {
-        if let Some(path) = crate::workspace_instructions::touched_path(cwd, &call.arguments) {
-            touched.push(path);
-        }
+    if !output.is_error
+        && matches!(call.name.as_str(), "read_file" | "write_file" | "edit")
+        && let Some(path) = crate::workspace_instructions::touched_path(cwd, &call.arguments)
+    {
+        touched.push(path);
     }
     let original_chars = output.content.chars().count();
     let mut preview_truncation = None;
-    if output.artifact.is_none() && call.name != "read_tool_output"
-        && output.content.chars().count() > denia_tools::support::OUTPUT_BUDGET_CHARS {
+    if output.artifact.is_none()
+        && call.name != "read_tool_output"
+        && output.content.chars().count() > denia_tools::support::OUTPUT_BUDGET_CHARS
+    {
         if let Some(store) = &state.output_store {
             let capture = store.start(&["text"]).await;
-            for chunk in output.content.as_bytes().chunks(8192) { capture.append("text", chunk).await; }
+            for chunk in output.content.as_bytes().chunks(8192) {
+                capture.append("text", chunk).await;
+            }
             output.artifact = Some(capture.finish(true).await);
         }
         let mut preview = denia_tools::output::Preview::default();
@@ -160,9 +158,16 @@ async fn commit_result(
             total_chars: original_chars as u64,
             shown_chars: output.content.chars().count() as u64,
         });
-        output.content.push_str(&denia_tools::output::artifact_notice(output.artifact.as_ref()));
+        output
+            .content
+            .push_str(&denia_tools::output::artifact_notice(
+                output.artifact.as_ref(),
+            ));
     }
-    let meta = output.artifact.as_ref().map(|artifact| serde_json::json!({ "outputArtifact": artifact }));
+    let meta = output
+        .artifact
+        .as_ref()
+        .map(|artifact| serde_json::json!({ "outputArtifact": artifact }));
     let (content, truncation) = denia_tools::support::apply_output_budget(&output.content);
     append(
         &state.session,
@@ -270,10 +275,10 @@ fn mcp_load_intercept(
     {
         return None;
     }
-    let definition = match driver.tools().get(&call.name) {
-        Some(tool) => serde_json::to_string_pretty(&tool.schema().parameters)
-            .unwrap_or_else(|_| "{\"type\":\"object\"}".to_string()),
-        None => return None, // 未知工具由 reject_before_dispatch 处理
+    let definition = {
+        let tool = driver.tools().get(&call.name)?;
+        serde_json::to_string_pretty(&tool.schema().parameters)
+            .unwrap_or_else(|_| "{\"type\":\"object\"}".to_string())
     };
     driver.load_mcp_tool(state.session.id(), &call.name);
     Some(ToolOutput::text(format!(
@@ -302,8 +307,7 @@ fn decide_for(
             "当前为只读模式,bash 命令不可用;请改用 ls/glob/grep/read_file 做阅读与检索,或请用户切换权限模式。".into(),
         );
     }
-    let confined =
-        denia_tools::permission::sandbox_applies(mode) && state.session.header().sandbox;
+    let confined = denia_tools::permission::sandbox_applies(mode) && state.session.header().sandbox;
     let class = classify_call(cwd, call, confined, memory_root);
     let is_memory_write = class == ActionClass::MemoryWrite;
     if is_memory_write {
@@ -329,7 +333,10 @@ fn decide_for(
     // 自动编辑档的"本窗口放行":用户批准过某类操作(区外写/删除/bash 写)
     // 后,本会话内同类操作直接放行,不再弹审批。
     if mode == PermissionMode::AutoEdit
-        && matches!(class, ActionClass::WriteOutside | ActionClass::BashWrite | ActionClass::Delete)
+        && matches!(
+            class,
+            ActionClass::WriteOutside | ActionClass::BashWrite | ActionClass::Delete
+        )
         && driver.ask_granted(state.session.id(), class)
     {
         return Decision::Allow;
@@ -341,25 +348,31 @@ fn decide_for(
 ///
 /// 分类宽容:参数取不到时按读类/区内放行,让工具自身的参数错误兜底,
 /// 避免分类失败伪装成权限问题。
-fn classify_call(cwd: &Path, call: &ToolCallRef, confined: bool, memory_root: Option<&Path>) -> ActionClass {
+fn classify_call(
+    cwd: &Path,
+    call: &ToolCallRef,
+    confined: bool,
+    memory_root: Option<&Path>,
+) -> ActionClass {
     match call.name.as_str() {
         "exit_plan" => ActionClass::PlanSubmit,
         // 组装创作:落盘路径服务端固定,按独立类别判定(不走工作区内外)。
         "create_preset" => ActionClass::PresetCreate,
-        "write_file" | "edit" => match crate::workspace_instructions::touched_path(cwd, &call.arguments)
-        {
-            // 记忆目录内的 .md 写:独立类别(harness 行为,四档放行)。
-            Some(path)
-                if memory_root.is_some_and(|root| path.starts_with(root))
-                    && path.extension().is_some_and(|ext| ext == "md") =>
-            {
-                ActionClass::MemoryWrite
+        "write_file" | "edit" => {
+            match crate::workspace_instructions::touched_path(cwd, &call.arguments) {
+                // 记忆目录内的 .md 写:独立类别(harness 行为,四档放行)。
+                Some(path)
+                    if memory_root.is_some_and(|root| path.starts_with(root))
+                        && path.extension().is_some_and(|ext| ext == "md") =>
+                {
+                    ActionClass::MemoryWrite
+                }
+                Some(path) if path.starts_with(cwd) => ActionClass::WriteInside,
+                // 真越界(confined 时工具本就会拒绝 `..` 逃逸,按区内处理)。
+                Some(_) if !confined => ActionClass::WriteOutside,
+                _ => ActionClass::WriteInside,
             }
-            Some(path) if path.starts_with(cwd) => ActionClass::WriteInside,
-            // 真越界(confined 时工具本就会拒绝 `..` 逃逸,按区内处理)。
-            Some(_) if !confined => ActionClass::WriteOutside,
-            _ => ActionClass::WriteInside,
-        },
+        }
         "bash" | "job_start" => {
             let command = serde_json::from_str::<serde_json::Value>(call.arguments.trim())
                 .ok()
@@ -485,7 +498,9 @@ fn dispatch_tool_call(
             read_state: Some(read_state),
         };
         let execute = tool.execute(&call.arguments, &context);
-        if call.name == "bash" { return execute.await; }
+        if call.name == "bash" {
+            return execute.await;
+        }
         tokio::pin!(execute);
         tokio::select! {
             biased;
@@ -508,9 +523,7 @@ async fn dispatch_asked_tool_call(
     }
     let is_plan = call.name == "exit_plan";
     // 计划参数先校验:空计划不该弹出审批卡打扰用户。
-    if is_plan
-        && let Err(message) = denia_tools::ExitPlanArgs::from_raw(&call.arguments)
-    {
+    if is_plan && let Err(message) = denia_tools::ExitPlanArgs::from_raw(&call.arguments) {
         return ToolOutput::error(format!("计划提交参数无效:{message}"));
     }
     let Some(approval) = &driver.approval else {
@@ -587,9 +600,9 @@ async fn dispatch_asked_tool_call(
                         text.push_str("请按以下补充建议修订计划后重新提交:\n");
                         text.push_str(feedback);
                     }
-                    None => text.push_str(
-                        "请修订计划后重新提交;不确定用户的顾虑时,先用 ask 工具询问。",
-                    ),
+                    None => {
+                        text.push_str("请修订计划后重新提交;不确定用户的顾虑时,先用 ask 工具询问。")
+                    }
                 }
                 ToolOutput::text(text)
             } else {
@@ -627,7 +640,10 @@ fn apply_plan_approval(state: &mut TurnState, decision: PlanReviewDecision) -> T
     if let Some(vision) = decision.vision_supported {
         state.vision_supported = vision;
     }
-    let mut text = format!("计划已批准,会话已切换至 {} 模式,请开始执行。", mode.as_str());
+    let mut text = format!(
+        "计划已批准,会话已切换至 {} 模式,请开始执行。",
+        mode.as_str()
+    );
     if switched_model {
         text.push_str("执行模型已按用户选择切换。");
     }
@@ -664,7 +680,11 @@ mod memory_anchor_tests {
         // 落点在记忆目录内:path 型读写工具全部豁免。
         for name in ["write_file", "edit", "read_file", "ls", "glob", "grep"] {
             assert!(
-                memory_anchored(cwd, &call(name, r#"{"path":"/home/u/.denia/memories/x/memory/a.md"}"#), root),
+                memory_anchored(
+                    cwd,
+                    &call(name, r#"{"path":"/home/u/.denia/memories/x/memory/a.md"}"#),
+                    root
+                ),
                 "{name} 锚定记忆目录应豁免沙箱"
             );
         }
@@ -679,12 +699,23 @@ mod memory_anchor_tests {
             &call("read_file", r#"{"path":"/etc/passwd"}"#),
             root
         ));
-        assert!(!memory_anchored(cwd, &call("grep", r#"{"pattern":"x"}"#), root));
-        assert!(!memory_anchored(cwd, &call("bash", r#"{"command":"echo hi"}"#), root));
+        assert!(!memory_anchored(
+            cwd,
+            &call("grep", r#"{"pattern":"x"}"#),
+            root
+        ));
+        assert!(!memory_anchored(
+            cwd,
+            &call("bash", r#"{"command":"echo hi"}"#),
+            root
+        ));
         // 记忆未启用(None):一律不豁免。
         assert!(!memory_anchored(
             cwd,
-            &call("write_file", r#"{"path":"/home/u/.denia/memories/x/memory/a.md"}"#),
+            &call(
+                "write_file",
+                r#"{"path":"/home/u/.denia/memories/x/memory/a.md"}"#
+            ),
             None
         ));
         // 相对路径消解到记忆目录内同样命中(以记忆目录为锚的相对写法)。

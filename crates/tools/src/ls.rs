@@ -144,10 +144,7 @@ impl Tool for LsTool {
                 root.display()
             ));
         }
-        let depth = args
-            .depth
-            .unwrap_or(DEFAULT_DEPTH)
-            .clamp(1, HARD_MAX_DEPTH);
+        let depth = args.depth.unwrap_or(DEFAULT_DEPTH).clamp(1, HARD_MAX_DEPTH);
         let max = args
             .max_results
             .unwrap_or(DEFAULT_MAX_RESULTS)
@@ -289,7 +286,8 @@ impl Tool for LsTool {
                     output.push_str(&format!("\n\n(部分子目录读取失败,结果可能不完整:{error})"));
                 }
                 if overflow {
-                    output.push_str("\n\n(条目数已达上限,结果不完整;缩小 depth 或用 glob 按模式找)");
+                    output
+                        .push_str("\n\n(条目数已达上限,结果不完整;缩小 depth 或用 glob 按模式找)");
                 }
                 ToolOutput::text(output)
             }
@@ -314,7 +312,9 @@ fn relative_display(path: &Path, root: &Path) -> String {
 /// 空目录提示里用的目录名:工作区内给相对路径,工作区外给绝对路径。
 fn display_dir(root: &Path, cwd: &Path) -> String {
     match root.strip_prefix(cwd) {
-        Ok(rel) if !rel.as_os_str().is_empty() => format!("./{}", rel.to_string_lossy().replace('\\', "/")),
+        Ok(rel) if !rel.as_os_str().is_empty() => {
+            format!("./{}", rel.to_string_lossy().replace('\\', "/"))
+        }
         _ => root.display().to_string(),
     }
 }
@@ -405,7 +405,11 @@ mod tests {
         assert!(!out.is_error, "{}", out.content);
         assert!(out.content.contains("src/"), "{}", out.content);
         assert!(out.content.contains("src/deep/"), "{}", out.content);
-        assert!(out.content.contains("src/deep/nested.rs"), "{}", out.content);
+        assert!(
+            out.content.contains("src/deep/nested.rs"),
+            "{}",
+            out.content
+        );
         std::fs::remove_dir_all(&ctx.cwd).unwrap();
     }
 
@@ -514,17 +518,13 @@ mod tests {
         }
         let ctx = context(root.clone());
         let tool = LsTool::new();
-        let page1 = tool
-            .execute(r#"{"max_results":4}"#, &ctx)
-            .await;
+        let page1 = tool.execute(r#"{"max_results":4}"#, &ctx).await;
         assert!(!page1.is_error, "{}", page1.content);
         let lines1: Vec<&str> = page1.content.lines().collect();
         assert_eq!(lines1[0], "f00.txt", "{}", page1.content);
         assert!(page1.content.contains("共 10 项"), "{}", page1.content);
         // 第二页:紧接着的后 4 条。
-        let page2 = tool
-            .execute(r#"{"max_results":4,"offset":4}"#, &ctx)
-            .await;
+        let page2 = tool.execute(r#"{"max_results":4,"offset":4}"#, &ctx).await;
         let lines2: Vec<&str> = page2.content.lines().collect();
         assert_eq!(lines2[0], "f04.txt", "{}", page2.content);
         assert!(!page2.content.contains("f00.txt"), "{}", page2.content);

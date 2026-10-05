@@ -178,7 +178,12 @@ pub(crate) fn build_responses_body(request: &GenerateRequest) -> serde_json::Val
             }
             ChatRole::Assistant => {
                 for replay in &message.reasoning_replay {
-                    if replay.protocol == "openai-responses" && replay.payload["type"] == "reasoning" && replay.payload["encrypted_content"].as_str().is_some_and(|text| !text.is_empty()) {
+                    if replay.protocol == "openai-responses"
+                        && replay.payload["type"] == "reasoning"
+                        && replay.payload["encrypted_content"]
+                            .as_str()
+                            .is_some_and(|text| !text.is_empty())
+                    {
                         input.push(replay.payload.clone());
                     }
                 }
@@ -313,11 +318,20 @@ pub(crate) fn build_anthropic_body(
                 for replay in &message.reasoning_replay {
                     let payload = &replay.payload;
                     let valid = match payload["type"].as_str() {
-                        Some("thinking") => payload["thinking"].is_string() && payload["signature"].as_str().is_some_and(|signature| !signature.is_empty()),
-                        Some("redacted_thinking") => payload["data"].as_str().is_some_and(|data| !data.is_empty()),
+                        Some("thinking") => {
+                            payload["thinking"].is_string()
+                                && payload["signature"]
+                                    .as_str()
+                                    .is_some_and(|signature| !signature.is_empty())
+                        }
+                        Some("redacted_thinking") => payload["data"]
+                            .as_str()
+                            .is_some_and(|data| !data.is_empty()),
                         _ => false,
                     };
-                    if replay.protocol == "anthropic-messages" && valid { push_block(ChatRole::Assistant, payload.clone(), &mut messages); }
+                    if replay.protocol == "anthropic-messages" && valid {
+                        push_block(ChatRole::Assistant, payload.clone(), &mut messages);
+                    }
                 }
                 if !message.content.is_empty() {
                     push_block(
@@ -523,7 +537,10 @@ fn sentinel(data: &str) -> Option<Sentinel> {
 fn malformed(detail: impl std::fmt::Display, raw: &str) -> LlmFailure {
     LlmFailure::new(
         codes::MALFORMED_RESPONSE,
-        format!("malformed SSE payload: {detail} (raw data: {})", payload_preview(raw)),
+        format!(
+            "malformed SSE payload: {detail} (raw data: {})",
+            payload_preview(raw)
+        ),
     )
 }
 
@@ -612,7 +629,10 @@ impl ResponsesStream {
         if let Some(block) = self.reasoning.take() {
             out.push(StreamChunk::BlockEnd {
                 index: block.index,
-                block: ContentBlock::Reasoning { text: block.text, replay: self.reasoning_replay.take() },
+                block: ContentBlock::Reasoning {
+                    text: block.text,
+                    replay: self.reasoning_replay.take(),
+                },
             });
         }
     }
@@ -767,13 +787,18 @@ impl EventTranslator for ResponsesStream {
                             block: ContentBlock::ToolCall {
                                 id: call_id,
                                 name,
-                                arguments, incomplete: item["status"] == "incomplete" },
+                                arguments,
+                                incomplete: item["status"] == "incomplete",
+                            },
                         });
                     }
                     Some("message") => self.close_text(&mut out),
                     Some("reasoning") => {
                         self.open_reasoning(&mut out);
-                        self.reasoning_replay = Some(denia_core::stream::ReasoningReplay { protocol: "openai-responses".into(), payload: item.clone() });
+                        self.reasoning_replay = Some(denia_core::stream::ReasoningReplay {
+                            protocol: "openai-responses".into(),
+                            payload: item.clone(),
+                        });
                         self.close_reasoning(&mut out);
                     }
                     _ => {}
@@ -914,14 +939,36 @@ impl AnthropicStream {
             Some(BlockType::Reasoning) => ContentBlock::Reasoning {
                 text: state.text.clone(),
                 replay: native.clone().map(|mut payload| {
-                    if payload["type"] == "thinking" { payload["thinking"] = serde_json::json!(state.text); }
-                    denia_core::stream::ReasoningReplay { protocol: "anthropic-messages".into(), payload }
+                    if payload["type"] == "thinking" {
+                        payload["thinking"] = serde_json::json!(state.text);
+                    }
+                    denia_core::stream::ReasoningReplay {
+                        protocol: "anthropic-messages".into(),
+                        payload,
+                    }
                 }),
             },
             Some(BlockType::ToolCall) => ContentBlock::ToolCall {
-                id: native.as_ref().and_then(|block| block["id"].as_str()).unwrap_or_default().into(),
-                name: native.as_ref().and_then(|block| block["name"].as_str()).unwrap_or_default().into(),
-                arguments: if state.text.is_empty() { native.as_ref().map(|block| block["input"].to_string()).unwrap_or_else(|| "{}".into()) } else { state.text.clone() }, incomplete: false },
+                id: native
+                    .as_ref()
+                    .and_then(|block| block["id"].as_str())
+                    .unwrap_or_default()
+                    .into(),
+                name: native
+                    .as_ref()
+                    .and_then(|block| block["name"].as_str())
+                    .unwrap_or_default()
+                    .into(),
+                arguments: if state.text.is_empty() {
+                    native
+                        .as_ref()
+                        .map(|block| block["input"].to_string())
+                        .unwrap_or_else(|| "{}".into())
+                } else {
+                    state.text.clone()
+                },
+                incomplete: false,
+            },
             _ => ContentBlock::Text {
                 text: state.text.clone(),
             },
@@ -936,7 +983,13 @@ impl AnthropicStream {
         let indexes: Vec<u64> = self.blocks.keys().copied().collect();
         for index in indexes {
             self.close_block(index, None, out);
-            if let Some(StreamChunk::BlockEnd { block: ContentBlock::ToolCall { incomplete, .. }, .. }) = out.last_mut() { *incomplete = true; }
+            if let Some(StreamChunk::BlockEnd {
+                block: ContentBlock::ToolCall { incomplete, .. },
+                ..
+            }) = out.last_mut()
+            {
+                *incomplete = true;
+            }
         }
     }
 }
@@ -978,7 +1031,9 @@ impl EventTranslator for AnthropicStream {
                     Some("text") => self.open_block(anthropic_index, BlockType::Text, &mut out),
                     Some("thinking") | Some("redacted_thinking") => {
                         self.open_block(anthropic_index, BlockType::Reasoning, &mut out);
-                        if let Some(state) = self.blocks.get_mut(&anthropic_index) { state.text = block["thinking"].as_str().unwrap_or_default().into(); }
+                        if let Some(state) = self.blocks.get_mut(&anthropic_index) {
+                            state.text = block["thinking"].as_str().unwrap_or_default().into();
+                        }
                     }
                     Some("tool_use") => {
                         self.open_block(anthropic_index, BlockType::ToolCall, &mut out);
@@ -1025,7 +1080,10 @@ impl EventTranslator for AnthropicStream {
                     }
                     (Some(BlockType::Reasoning), Some("signature_delta")) => {
                         if let Some(payload) = self.native_blocks.get_mut(&anthropic_index) {
-                            let mut signature = payload["signature"].as_str().unwrap_or_default().to_string();
+                            let mut signature = payload["signature"]
+                                .as_str()
+                                .unwrap_or_default()
+                                .to_string();
                             signature.push_str(delta["signature"].as_str().unwrap_or_default());
                             payload["signature"] = serde_json::json!(signature);
                         }
@@ -1253,7 +1311,10 @@ mod tests {
         // 思考预算必须在已解析输出上限以内，不擅自抬高输出预算。
         assert_eq!(body["max_tokens"], 8_192);
         // 保留用户显式参数，由服务端报告不兼容配置。
-        assert_eq!(body["temperature"], serde_json::json!(request.temperature.unwrap()));
+        assert_eq!(
+            body["temperature"],
+            serde_json::json!(request.temperature.unwrap())
+        );
     }
 
     #[test]
@@ -1373,7 +1434,9 @@ mod tests {
             ContentBlock::ToolCall {
                 id,
                 name,
-                arguments, .. } => {
+                arguments,
+                ..
+            } => {
                 assert_eq!(id, "call_1");
                 assert_eq!(name, "bash");
                 // done 的最终 arguments 校准 delta 累积值。
@@ -1638,7 +1701,11 @@ mod tests {
         let error = translator.feed(r#"{"choices":[{"delta":"#).unwrap_err();
         assert_eq!(error.code, codes::MALFORMED_RESPONSE);
         assert!(error.message.contains("raw data:"), "{}", error.message);
-        assert!(error.message.contains(r#"{"choices":[{"delta":"#), "{}", error.message);
+        assert!(
+            error.message.contains(r#"{"choices":[{"delta":"#),
+            "{}",
+            error.message
+        );
     }
 
     #[test]
@@ -1669,7 +1736,10 @@ mod tests {
             .iter()
             .find_map(|chunk| match chunk {
                 StreamChunk::BlockEnd {
-                    block: ContentBlock::ToolCall { name, arguments, .. },
+                    block:
+                        ContentBlock::ToolCall {
+                            name, arguments, ..
+                        },
                     ..
                 } => Some((name.clone(), arguments.clone())),
                 _ => None,
@@ -1690,34 +1760,59 @@ mod tests {
         use denia_core::{message::ChatMessage, stream::ReasoningReplay};
         let mut req = request();
         let native = serde_json::json!({"type":"reasoning","id":"rs_1","summary":[],"encrypted_content":"cipher"});
-        let thinking = serde_json::json!({"type":"thinking","thinking":"thought","signature":"signed"});
+        let thinking =
+            serde_json::json!({"type":"thinking","thinking":"thought","signature":"signed"});
         let redacted = serde_json::json!({"type":"redacted_thinking","data":"opaque"});
         let mut message = ChatMessage::assistant("", Some("thought".into()), vec![]);
         message.reasoning_replay = vec![
-            ReasoningReplay { protocol: "openai-responses".into(), payload: native.clone() },
-            ReasoningReplay { protocol: "anthropic-messages".into(), payload: thinking.clone() },
-            ReasoningReplay { protocol: "anthropic-messages".into(), payload: redacted.clone() },
+            ReasoningReplay {
+                protocol: "openai-responses".into(),
+                payload: native.clone(),
+            },
+            ReasoningReplay {
+                protocol: "anthropic-messages".into(),
+                payload: thinking.clone(),
+            },
+            ReasoningReplay {
+                protocol: "anthropic-messages".into(),
+                payload: redacted.clone(),
+            },
         ];
         req.messages = vec![message];
-        assert_eq!(build_openai_body(&req)["messages"][1]["reasoning_content"], "thought");
+        assert_eq!(
+            build_openai_body(&req)["messages"][1]["reasoning_content"],
+            "thought"
+        );
         let responses = build_responses_body(&req);
         assert_eq!(responses["input"], serde_json::json!([native]));
-        assert_eq!(responses["include"], serde_json::json!(["reasoning.encrypted_content"]));
+        assert_eq!(
+            responses["include"],
+            serde_json::json!(["reasoning.encrypted_content"])
+        );
         let anthropic = build_anthropic_body(&req, 4096);
-        assert_eq!(anthropic["messages"][0]["content"], serde_json::json!([thinking, redacted]));
+        assert_eq!(
+            anthropic["messages"][0]["content"],
+            serde_json::json!([thinking, redacted])
+        );
         req.messages[0].reasoning_replay.clear();
         assert_eq!(build_responses_body(&req)["input"], serde_json::json!([]));
-        assert_eq!(build_anthropic_body(&req, 4096)["messages"], serde_json::json!([]));
+        assert_eq!(
+            build_anthropic_body(&req, 4096)["messages"],
+            serde_json::json!([])
+        );
     }
 
     #[test]
     fn response_encrypted_reasoning_survives_stream_translation() {
         let mut translator = ResponsesStream::default();
         let native = serde_json::json!({"id":"rs_1","type":"reasoning","summary":[],"encrypted_content":"cipher"});
-        let chunks = translator.feed(&serde_json::json!({"type":"response.output_item.done","item":native}).to_string()).unwrap();
+        let chunks = translator
+            .feed(
+                &serde_json::json!({"type":"response.output_item.done","item":native}).to_string(),
+            )
+            .unwrap();
         assert!(chunks.iter().any(|chunk| matches!(chunk, StreamChunk::BlockEnd { block: ContentBlock::Reasoning { replay: Some(replay), .. }, .. } if replay.payload == native)));
     }
-
 
     #[test]
     fn anthropic_signatures_and_redacted_blocks_survive_stream() {
@@ -1730,11 +1825,29 @@ mod tests {
             serde_json::json!({"type":"content_block_stop","index":0}),
             serde_json::json!({"type":"content_block_start","index":1,"content_block":{"type":"redacted_thinking","data":"opaque"}}),
             serde_json::json!({"type":"content_block_stop","index":1}),
-        ] { chunks.extend(translator.feed(&frame.to_string()).unwrap()); }
-        let payloads: Vec<_> = chunks.into_iter().filter_map(|chunk| match chunk {
-            StreamChunk::BlockEnd { block: ContentBlock::Reasoning { replay: Some(replay), .. }, .. } => Some(replay.payload), _ => None,
-        }).collect();
-        assert_eq!(payloads, vec![serde_json::json!({"type":"thinking","thinking":"thought","signature":"signed"}), serde_json::json!({"type":"redacted_thinking","data":"opaque"})]);
+        ] {
+            chunks.extend(translator.feed(&frame.to_string()).unwrap());
+        }
+        let payloads: Vec<_> = chunks
+            .into_iter()
+            .filter_map(|chunk| match chunk {
+                StreamChunk::BlockEnd {
+                    block:
+                        ContentBlock::Reasoning {
+                            replay: Some(replay),
+                            ..
+                        },
+                    ..
+                } => Some(replay.payload),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            payloads,
+            vec![
+                serde_json::json!({"type":"thinking","thinking":"thought","signature":"signed"}),
+                serde_json::json!({"type":"redacted_thinking","data":"opaque"})
+            ]
+        );
     }
-
 }

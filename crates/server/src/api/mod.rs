@@ -60,11 +60,10 @@ fn skip_upgrades(
     status != axum::http::StatusCode::SWITCHING_PROTOCOLS
 }
 
-fn compression_layer() -> tower_http::compression::CompressionLayer<
-    impl tower_http::compression::predicate::Predicate,
-> {
-    use tower_http::compression::predicate::{DefaultPredicate, Predicate};
+fn compression_layer()
+-> tower_http::compression::CompressionLayer<impl tower_http::compression::predicate::Predicate> {
     use tower_http::compression::CompressionLevel;
+    use tower_http::compression::predicate::{DefaultPredicate, Predicate};
 
     tower_http::compression::CompressionLayer::new()
         .gzip(true)
@@ -149,13 +148,16 @@ mod compression_tests {
 
         let big = "a".repeat(8192);
         let app = axum::Router::new()
-            .route("/t", get({
-                let body = big.clone();
-                move || {
-                    let body = body.clone();
-                    async move { body }
-                }
-            }))
+            .route(
+                "/t",
+                get({
+                    let body = big.clone();
+                    move || {
+                        let body = body.clone();
+                        async move { body }
+                    }
+                }),
+            )
             .layer(compression_layer());
 
         let response = app

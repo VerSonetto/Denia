@@ -11,9 +11,7 @@
 use std::sync::Arc;
 
 use denia_core::error::LlmFailure;
-use denia_core::session::{
-    AbortCause, RequestHeaderReason, SessionEvent, TurnEndReason,
-};
+use denia_core::session::{AbortCause, RequestHeaderReason, SessionEvent, TurnEndReason};
 use denia_core::stream::{ContentBlock, FinishReason, StreamChunk, TokenUsage};
 use denia_core::tool::ToolSchema;
 use denia_llm::GenerateRequest;
@@ -36,7 +34,10 @@ pub(crate) struct StepOutput {
 /// - `RestartStep`:自纠反馈已注入,直接开新 step(旧 step 已闭合);
 /// - `TurnEnded`:轮次已闭合(StepEnd/TurnEnd 均已落盘),主循环直接返回。
 pub(crate) enum RequestOutcome {
-    Step { blocks: Vec<ContentBlock>, finish: Option<FinishReason> },
+    Step {
+        blocks: Vec<ContentBlock>,
+        finish: Option<FinishReason>,
+    },
     TurnEnded(TurnEndReason),
     RestartStep,
 }
@@ -50,7 +51,11 @@ pub(crate) async fn dispatch_request(
     framed_system: &str,
     tools: &[ToolSchema],
 ) -> Result<RequestOutcome, LlmFailure> {
-    state.output_budget = driver.registry.output_budget(&state.selection.provider, &state.selection.model, None).await.map_err(|error| error.failure)?;
+    state.output_budget = driver
+        .registry
+        .output_budget(&state.selection.provider, &state.selection.model, None)
+        .await
+        .map_err(|error| error.failure)?;
     log_request_headers(state, step, framed_system, tools)?;
     // 先做廉价的工具结果微压缩(不调模型),再做压力驱动的 LLM 摘要。
     // 顺序:先轻量清理,再重量摘要。
@@ -109,9 +114,12 @@ pub(crate) async fn dispatch_request(
         flush_before_dispatch(&state.session)?;
         // 请求建立期同样响应取消:网关/代理黑洞挂起时,点停止必须立刻能断。
         let attempt_request = request.clone();
-        let stream_setup = driver
-            .registry
-            .stream_with_replay(&state.selection.provider, &attempt_request, retry_sink.clone(), &state.replay);
+        let stream_setup = driver.registry.stream_with_replay(
+            &state.selection.provider,
+            &attempt_request,
+            retry_sink.clone(),
+            &state.replay,
+        );
         tokio::pin!(stream_setup);
         let mut stream = tokio::select! {
             biased;
@@ -228,14 +236,43 @@ pub(crate) async fn dispatch_request(
             _ => None,
         });
         if let Some(failure) = failure {
-            let route = driver.registry.route_identity(&state.selection.provider, &request.model);
+            let route = driver
+                .registry
+                .route_identity(&state.selection.provider, &request.model);
             if state.replay.downgrade(&route, &request, &failure) {
-                append(&state.session, &state.emit, SessionEvent::RetryAttempt { turn: state.turn, step, attempt: 1, code: denia_llm::REASONING_REJECTED.into(), message: format!("接口拒绝历史思考，仅本 turn 移除思考重试：{}", failure.message), delay_ms: 0 })?;
+                append(
+                    &state.session,
+                    &state.emit,
+                    SessionEvent::RetryAttempt {
+                        turn: state.turn,
+                        step,
+                        attempt: 1,
+                        code: denia_llm::REASONING_REJECTED.into(),
+                        message: format!(
+                            "接口拒绝历史思考，仅本 turn 移除思考重试：{}",
+                            failure.message
+                        ),
+                        delay_ms: 0,
+                    },
+                )?;
                 continue 'attempts;
             }
-            if failure.code == denia_core::error::codes::CONTEXT_WINDOW_EXCEEDED && !context_recovered {
+            if failure.code == denia_core::error::codes::CONTEXT_WINDOW_EXCEEDED
+                && !context_recovered
+            {
                 context_recovered = true;
-                append(&state.session, &state.emit, SessionEvent::RetryAttempt { turn: state.turn, step, attempt: 1, code: failure.code.clone(), message: "输入上下文超限，尝试本逻辑步骤唯一一次强制压缩。".into(), delay_ms: 0 })?;
+                append(
+                    &state.session,
+                    &state.emit,
+                    SessionEvent::RetryAttempt {
+                        turn: state.turn,
+                        step,
+                        attempt: 1,
+                        code: failure.code.clone(),
+                        message: "输入上下文超限，尝试本逻辑步骤唯一一次强制压缩。".into(),
+                        delay_ms: 0,
+                    },
+                )?;
                 if run_compaction_gate(driver, state, step, framed_system, tools, true).await {
                     request.messages = state.session.derive_messages();
                     continue 'attempts;
@@ -281,16 +318,16 @@ pub(crate) async fn dispatch_request(
                         append(
                             &state.session,
                             &state.emit,
-                        SessionEvent::AssistantMessage {
-                            turn: state.turn,
-                            step,
-                            blocks: blocks.clone(),
-                            usage,
-                            interrupted: true,
-                            source_event_seqs: source_event_seqs.clone(),
-                            first_token_time,
-                        },
-                    )?;
+                            SessionEvent::AssistantMessage {
+                                turn: state.turn,
+                                step,
+                                blocks: blocks.clone(),
+                                usage,
+                                interrupted: true,
+                                source_event_seqs: source_event_seqs.clone(),
+                                first_token_time,
+                            },
+                        )?;
                     }
                     return close_aborted(state, step);
                 }
@@ -301,7 +338,10 @@ pub(crate) async fn dispatch_request(
             append(
                 &state.session,
                 &state.emit,
-                SessionEvent::StepEnd { turn: state.turn, step },
+                SessionEvent::StepEnd {
+                    turn: state.turn,
+                    step,
+                },
             )?;
             if feedback_eligible(&failure.code) && state.feedback < MAX_FEEDBACK {
                 state.feedback += 1;
@@ -332,16 +372,16 @@ pub(crate) async fn dispatch_request(
         append(
             &state.session,
             &state.emit,
-        SessionEvent::AssistantMessage {
-            turn: state.turn,
-            step,
-            blocks: blocks.clone(),
-            usage,
-            interrupted: false,
-            source_event_seqs,
-            first_token_time,
-        },
-    )?;
+            SessionEvent::AssistantMessage {
+                turn: state.turn,
+                step,
+                blocks: blocks.clone(),
+                usage,
+                interrupted: false,
+                source_event_seqs,
+                first_token_time,
+            },
+        )?;
         return Ok(RequestOutcome::Step { blocks, finish });
     }
 }
@@ -407,7 +447,7 @@ fn log_request_headers(
 /// 触发条件(两者之一):空闲超时 / token 压力达到摘要阈值的一定比例。
 /// `min_savings` 保护前缀缓存:省不到阈值就不动手。
 async fn run_microcompact_gate(driver: &SessionDriver, state: &TurnState, step: u32) {
-    let settings = &driver.microcompact;
+    let settings = &state.settings.microcompact;
     if !settings.enabled {
         return;
     }
@@ -425,16 +465,13 @@ async fn run_microcompact_gate(driver: &SessionDriver, state: &TurnState, step: 
     }
 
     // 空闲时长:从最后一条 assistant 消息的落盘时间算起。
-    let idle_minutes = state
-        .session
-        .last_assistant_age_minutes()
-        .map(|m| m as u64);
+    let idle_minutes = state.session.last_assistant_age_minutes().map(|m| m as u64);
     // token 压力与阈值:微压缩的阈值取摘要阈值的 90%(
     // 让轻量清理总是先于重量摘要发生)。
     let pressure = state.session.context_pressure();
     let pressure_tokens = pressure.projected_tokens;
     let threshold_tokens = driver
-        .compaction_threshold_tokens(&pressure)
+        .compaction_threshold_tokens(&pressure, &state.settings.compaction)
         .map(|t| (t as f64 * 0.9) as u64);
 
     let decision = crate::microcompact::plan(
@@ -591,16 +628,23 @@ async fn run_compaction_gate(
         return false;
     }
     let pressure = state.session.context_pressure();
-    let mut reserved_pressure = pressure.clone();
-    reserved_pressure.context_window = reserved_pressure.context_window.map(|window| window.saturating_sub(state.output_budget));
-    if !driver.compaction.compact_enabled || (!forced && !should_compact(&reserved_pressure, &driver.compaction))
-        || driver.compact_failures.load(std::sync::atomic::Ordering::SeqCst)
-            >= driver.compaction.max_attempts
+    let mut reserved_pressure = pressure;
+    reserved_pressure.context_window = reserved_pressure
+        .context_window
+        .map(|window| window.saturating_sub(state.output_budget));
+    if !state.settings.compaction.compact_enabled
+        || (!forced && !should_compact(&reserved_pressure, &state.settings.compaction))
+        || state
+            .compaction_state
+            .failures
+            .load(std::sync::atomic::Ordering::SeqCst)
+            >= state.settings.compaction.max_attempts
     {
         return false;
     }
     // 断路器:连续快速回填已达上限时不再尝试,并把原因明确告知用户。
-    if driver
+    if state
+        .compaction_state
         .rapid_refills
         .load(std::sync::atomic::Ordering::SeqCst)
         >= RAPID_REFILL_MAX_CONSECUTIVE
@@ -631,37 +675,12 @@ async fn run_compaction_gate(
             step,
             &state.cancel,
             Some(&state.replay),
+            &state.settings.compaction,
         )
         .await
     {
         Ok(Some(outcome)) => {
-            // 压缩成功:熔断清零,落盘事件由 append 广播给前端。
-            driver
-                .compact_failures
-                .store(0, std::sync::atomic::Ordering::SeqCst);
-            // rapid-refill 判定:上次压缩后经过的工具轮次太少又撞阈值,
-            // 说明有超大输出在持续灌入。连续 3 次就停(见闸门开头的断路器)。
-            let since = driver
-                .tool_turns_since_compact
-                .swap(0, std::sync::atomic::Ordering::SeqCst);
-            if since < RAPID_REFILL_TOOL_TURN_THRESHOLD {
-                let count = driver
-                    .rapid_refills
-                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
-                    + 1;
-                tracing::warn!(
-                    session_id = state.session.id(),
-                    consecutive_rapid_refills = count,
-                    tool_turns_since_compact = since,
-                    "compaction refilled quickly; rapid-refill breaker counting"
-                );
-            } else {
-                // 回填速度正常:断路计数清零。
-                driver
-                    .rapid_refills
-                    .store(0, std::sync::atomic::Ordering::SeqCst);
-            }
-            let _ = append(
+            if append(
                 &state.session,
                 &state.emit,
                 SessionEvent::CompactionSummary {
@@ -674,7 +693,21 @@ async fn run_compaction_gate(
                     pre_tokens: outcome.pre_tokens,
                     post_tokens: outcome.post_tokens,
                 },
-            );
+            )
+            .is_err()
+            {
+                return false;
+            }
+            let refills = state
+                .compaction_state
+                .record_success(RAPID_REFILL_TOOL_TURN_THRESHOLD);
+            if refills > 0 {
+                tracing::warn!(
+                    session_id = state.session.id(),
+                    consecutive_rapid_refills = refills,
+                    "compaction refilled quickly"
+                );
+            }
             // 压缩后读状态恢复:
             // 把压缩前读过的文件内容按预算重新注入,避免模型"忘了看过什么"
             // 而立刻重新读一遍——那正是压缩后窗口二次膨胀的根源。
@@ -685,14 +718,15 @@ async fn run_compaction_gate(
             // 无可压缩区间(历史太短/窗口选择失败):不计数。
         }
         Err(error) => {
-            driver
-                .compact_failures
+            state
+                .compaction_state
+                .failures
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             tracing::warn!(
                 session_id = state.session.id(),
                 error_code = %error.code,
                 error_message = %error.message,
-                failures = driver.compact_failures.load(std::sync::atomic::Ordering::SeqCst),
+                failures = state.compaction_state.failures.load(std::sync::atomic::Ordering::SeqCst),
                 "llm compaction failed; skipping and continuing with full history"
             );
         }
@@ -705,7 +739,10 @@ fn close_aborted(state: &TurnState, step: u32) -> Result<RequestOutcome, LlmFail
     append(
         &state.session,
         &state.emit,
-        SessionEvent::StepEnd { turn: state.turn, step },
+        SessionEvent::StepEnd {
+            turn: state.turn,
+            step,
+        },
     )?;
     let reason = TurnEndReason::Aborted {
         cause: Some(AbortCause::User),
@@ -722,12 +759,7 @@ fn close_aborted(state: &TurnState, step: u32) -> Result<RequestOutcome, LlmFail
 }
 
 /// 错误终止的轮次闭合:失败摘要中文化后落 TurnEnd(Error)。
-fn close_error(
-    state: &TurnState,
-    _step: u32,
-    failure: LlmFailure,
-    retries: u32,
-) -> TurnEndReason {
+fn close_error(state: &TurnState, _step: u32, failure: LlmFailure, retries: u32) -> TurnEndReason {
     let reason = TurnEndReason::Error {
         failure: summarize_failure(&failure, retries),
     };

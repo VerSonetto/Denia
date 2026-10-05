@@ -31,6 +31,7 @@ use serde_json::json;
 use tokio_stream::wrappers::BroadcastStream;
 use tokio_util::sync::CancellationToken;
 
+use crate::application::sessions::model_vision_supported;
 use crate::error::ApiError;
 use crate::state::{AppState, RunningGuard, ServerEvent};
 
@@ -56,10 +57,7 @@ pub fn router() -> Router<Arc<AppState>> {
             "/api/sessions/{id}/approvals/{request_id}",
             post(answer_approval),
         )
-        .route(
-            "/api/sessions/{id}/asks/{request_id}",
-            post(answer_ask),
-        )
+        .route("/api/sessions/{id}/asks/{request_id}", post(answer_ask))
         .route("/api/sessions/{id}/fork", post(fork_session))
         .route("/api/sessions/{id}/follow", get(follow_session))
         .route("/api/sessions/{id}/follow/poll", get(follow_poll))
@@ -82,11 +80,13 @@ async fn list_sessions(State(state): State<Arc<AppState>>) -> Result<impl IntoRe
     // (与同文件的 get_session_events 一致)。
     let sessions = tokio::task::spawn_blocking(move || state.sessions.list())
         .await
-        .map_err(|error| ApiError::new(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "sessions/list-join",
-            &error.to_string(),
-        ))?
+        .map_err(|error| {
+            ApiError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "sessions/list-join",
+                error.to_string(),
+            )
+        })?
         .map_err(ApiError::from_session)?;
     Ok(Json(json!({ "sessions": sessions })))
 }
@@ -172,7 +172,9 @@ async fn create_session(
     // 新会话写入控制台默认权限档位(计划模式不可作默认值,见
     // `validate_console`),让前端/回放都能读到当前档位。
     session
-        .set_permission_mode(crate::state::console_default_permission_mode(&state.settings))
+        .set_permission_mode(crate::state::console_default_permission_mode(
+            &state.settings,
+        ))
         .map_err(ApiError::from_session)?;
     session
         .set_agent_preset(&preset_id)
@@ -244,8 +246,8 @@ fn snapshot_response_body(
         out.extend_from_slice(b",\"events\":[");
         let mut first = true;
         let result = sessions.for_each_event(&id, |envelope| {
-            let event_json = serde_json::to_vec(&envelope)
-                .map_err(|e| std::io::Error::other(e.to_string()))?;
+            let event_json =
+                serde_json::to_vec(&envelope).map_err(|e| std::io::Error::other(e.to_string()))?;
             if !first {
                 out.push(b',');
             }
@@ -341,6 +343,7 @@ async fn delete_session(
     state.live.remove(&id);
     // 审批放行表随会话一起回收,句柄不残留。
     state.driver.clear_ask_grants(&id);
+    state.driver.clear_compaction_state(&id);
     // MCP 工具装载表随会话一起回收(重建会话回到轻量工具面)。
     state.driver.clear_mcp_loads(&id);
     // 附件目录随会话一起回收:粘贴图片每次落盘一张,不清就是只增不减的占用。
@@ -353,337 +356,12 @@ async fn delete_session(
     Ok(Json(json!({ "ok": true })))
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct PromptBody {
-    prompt: String,
-    #[serde(default)]
-    skills: Vec<String>,
-    #[serde(default)]
-    provider: Option<String>,
-    #[serde(default)]
-    model: Option<String>,
-    #[serde(default)]
-    reasoning_effort: Option<String>,
-    /// 粘贴的内联图片(base64);模型必须标记为可识图。
-    #[serde(default)]
-    images: Vec<PromptImage>,
-    /// 已上传文件(绝对路径);作为注入上下文随消息发送。
-    #[serde(default)]
-    files: Vec<String>,
-    /// 轨迹引用(标题, 正文);以 injected 上下文消息随本轮注入。
-    #[serde(default)]
-    quoted: Vec<PromptQuote>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct PromptQuote {
-    title: String,
-    text: String,
-}
-
-/// 引用正文上限:单条 64k 字符、合计 256k,防异常体积拖垮本轮。
-const QUOTE_TEXT_LIMIT: usize = 64 * 1024;
-const QUOTE_TOTAL_LIMIT: usize = 256 * 1024;
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct PromptImage {
-    #[serde(default)]
-    name: Option<String>,
-    mime: String,
-    data: String,
-}
-
-/// 模型是否声明了图片输入能力(input_modalities 含 image)。
-fn model_vision_supported(resolved: &denia_llm::LlmResolvedModelInfo) -> bool {
-    resolved
-        .info
-        .input_modalities
-        .iter()
-        .any(|modality| modality.eq_ignore_ascii_case("image"))
-}
-
 async fn prompt_session(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
-    Json(body): Json<PromptBody>,
+    Json(body): Json<crate::application::sessions::PromptCommand>,
 ) -> Result<impl IntoResponse, ApiError> {
-    let prompt = body.prompt.trim().to_string();
-    if prompt.is_empty() {
-        return Err(ApiError::bad_request(
-            "session/empty-prompt",
-            "prompt is empty",
-        ));
-    }
-    let live = state
-        .live
-        .get_or_load(&state.sessions, &id)
-        .map_err(ApiError::from_session)?;
-    state
-        .live
-        .ensure_hot(&live)
-        .map_err(ApiError::from_session)?;
-    if live.session.header().subagent.is_some() {
-        return Err(ApiError::bad_request(
-            "subagent/read-only",
-            "请从父会话向子代理发送指令",
-        ));
-    }
-    {
-        let session = live.session.clone();
-        let cwd = session.header().cwd.clone();
-        if !std::path::Path::new(&cwd).is_dir() {
-            return Err(ApiError::bad_request(
-                "session/dead-cwd",
-                format!(
-                    "this session's working directory no longer exists: {cwd} — start a new session in an existing directory"
-                ),
-            ));
-        }
-    }
-    if live
-        .running
-        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-        .is_err()
-    {
-        return Err(ApiError::new(
-            StatusCode::CONFLICT,
-            "session/running",
-            "a turn is already running on this session",
-        ));
-    }
-    // 运行状态立即推给控制台(侧栏圆点/发送按钮,无需 follow 长连接)。
-    let _ = state.events.send(ServerEvent::RunningChanged {
-        id: id.clone(),
-        running: true,
-    });
-    // 消息落库后摘要变化:通知控制台刷新列表(excerpt 即时可见)。
-    let _ = state.events.send(ServerEvent::SessionsUpdated);
-
-    // 模型选择无服务端默认:前端为每个请求携带"上次使用的模型"。
-    let provider = body.provider.unwrap_or_default().trim().to_string();
-    let model = body.model.unwrap_or_default().trim().to_string();
-    if provider.is_empty() || model.is_empty() {
-        live.running.store(false, Ordering::SeqCst);
-        return Err(ApiError::bad_request(
-            "session/model-required",
-            "请先在输入栏选择模型再发送消息",
-        ));
-    }
-    let selection = ModelSelection {
-        provider,
-        model,
-        reasoning_effort: body.reasoning_effort,
-    };
-    let resolved = match state
-        .registry
-        .resolve_call(
-            &selection.provider,
-            &selection.model,
-            selection.reasoning_effort.as_deref(),
-        )
-        .await
-    {
-        Ok(resolved) => resolved,
-        Err(error) => {
-            live.running.store(false, Ordering::SeqCst);
-            return Err(ApiError::from_llm(error));
-        }
-    };
-    let vision_supported = model_vision_supported(&resolved);
-    // 用户要求:图片只允许发给标记为可识图的模型。
-    if !body.images.is_empty() && !vision_supported {
-        live.running.store(false, Ordering::SeqCst);
-        let shown = if selection.model.is_empty() {
-            "当前模型".to_string()
-        } else {
-            format!("模型 '{}'", selection.model)
-        };
-        return Err(ApiError::bad_request(
-            "model/no-vision",
-            format!("{shown} 未标记为可识图,粘贴的图片不能发送;请切换到支持图片输入的模型。"),
-        ));
-    }
-    // 上传文件校验:必须存在且位于会话工作区或本会话上传目录内。
-    let mut upload_files = Vec::new();
-    {
-        let cwd = live.session.header().cwd.clone();
-        let uploads_root = state.home.join("uploads").join(&id);
-        for file in &body.files {
-            let path = std::path::PathBuf::from(file);
-            let allowed =
-                (path.starts_with(&cwd) || path.starts_with(&uploads_root)) && path.is_file();
-            if !allowed {
-                live.running.store(false, Ordering::SeqCst);
-                return Err(ApiError::bad_request(
-                    "session/bad-attachment",
-                    format!("文件 '{}' 不在会话工作区或上传目录内", file),
-                ));
-            }
-            upload_files.push(path.to_string_lossy().to_string());
-        }
-    }
-    // 粘贴图片落盘:与上传文件同一目录、同一套消毒规则。内联 data URL 仍是
-    // 首选视觉通道,落盘只是给模型留一条 read_file 可走的备份 —— 协议转换层
-    // 或提供方把图片 part 丢掉时,有路径才可能自救。失败一律降级为无路径:
-    // 图仍照发,不因备份写不出而拒收整条消息。
-    let persisted: Vec<Option<String>> = if body.images.is_empty() {
-        Vec::new()
-    } else {
-        let home = state.home.clone();
-        let sid = id.clone();
-        let uploads = body
-            .images
-            .iter()
-            .enumerate()
-            .map(|(index, image)| {
-                (
-                    index,
-                    crate::api::uploads::pasted_image_name(
-                        image.name.as_deref(),
-                        &image.mime,
-                        index,
-                    ),
-                    image.data.clone(),
-                    image.mime.clone(),
-                )
-            })
-            .collect::<Vec<_>>();
-        tokio::task::spawn_blocking(move || {
-            let engine = &base64::engine::general_purpose::STANDARD;
-            let mut slots: Vec<Option<String>> = vec![None; uploads.len()];
-            for (index, name, data, mime) in uploads {
-                let Ok(bytes) = base64::Engine::decode(engine, data.as_bytes()) else {
-                    tracing::warn!(target: "denia::uploads", "粘贴图片 base64 解码失败,跳过落盘: {name}");
-                    continue;
-                };
-                match crate::api::uploads::write_upload(&home, sid.as_str(), &name, &bytes) {
-                    Ok((_, path)) => slots[index] = Some(path.to_string_lossy().into_owned()),
-                    Err(error) => tracing::warn!(
-                        target: "denia::uploads",
-                        "粘贴图片落盘失败({mime}): {error}"
-                    ),
-                }
-            }
-            slots
-        })
-        .await
-        .unwrap_or_default()
-    };
-    let images: Vec<denia_core::message::ImageData> = body
-        .images
-        .into_iter()
-        .enumerate()
-        .map(|(index, image)| denia_core::message::ImageData {
-            mime: image.mime,
-            data: image.data,
-            path: persisted.get(index).cloned().flatten(),
-        })
-        .collect();
-    // 轨迹引用:非空校验 + 体积上限(fail loud,不静默丢弃)。
-    let mut quoted: Vec<(String, String)> = Vec::with_capacity(body.quoted.len());
-    for name in &body.skills {
-        let skill = match state
-            .runtime
-            .load_skill(live.session.header().cwd.clone().into(), name.clone(), true)
-            .await
-        {
-            Ok(skill) => skill,
-            Err(e) => {
-                live.running.store(false, Ordering::SeqCst);
-                return Err(ApiError::bad_request("skill/invocation-failed", e));
-            }
-        };
-        quoted.push((format!("用户显式调用技能：{name}"), skill.to_string()));
-    }
-    let mut quoted_total = 0usize;
-    for quote in body.quoted {
-        let title = quote.title.trim().to_string();
-        let text = quote.text.trim().to_string();
-        if text.is_empty() {
-            live.running.store(false, Ordering::SeqCst);
-            return Err(ApiError::bad_request(
-                "session/empty-quote",
-                "引用的轨迹内容为空",
-            ));
-        }
-        if title.len() > 200 || text.len() > QUOTE_TEXT_LIMIT {
-            live.running.store(false, Ordering::SeqCst);
-            return Err(ApiError::bad_request(
-                "session/quote-too-large",
-                format!("引用过大:标题 ≤ 200 字符、单条正文 ≤ {QUOTE_TEXT_LIMIT} 字符"),
-            ));
-        }
-        quoted_total += text.len();
-        if quoted_total > QUOTE_TOTAL_LIMIT {
-            live.running.store(false, Ordering::SeqCst);
-            return Err(ApiError::bad_request(
-                "session/quote-too-large",
-                format!("引用总量超过 {QUOTE_TOTAL_LIMIT} 字符上限"),
-            ));
-        }
-        quoted.push((title, text));
-    }
-
-    let token = CancellationToken::new();
-    state.runtime.human_turn(&id, &selection);
-    *live.cancel.lock().unwrap() = Some(token.clone());
-
-    // 会话标题:第一轮用户消息(本会话还没有任何用户消息、非分支会话)
-    // 发出后,后台用同路由模型生成;dsh `first-prompt` 节奏的对齐——
-    // 分支会话沿用源会话标题,子代理有 label,都不生成。
-    if live.session.header().parent_session.is_none()
-        && live.session.first_prompt_excerpt(1).is_none()
-    {
-        crate::session_title::schedule(
-            state.registry.clone(),
-            live.clone(),
-            state.events.clone(),
-            selection.clone(),
-            prompt.clone(),
-        );
-    }
-
-    let followers_for_turn = live.followers.clone();
-    let events_for_guard = state.events.clone();
-    let driver = state.driver.clone();
-    let session = live.session.clone();
-    let live = live.clone();
-    let runtime = state.runtime.clone();
-    tokio::spawn(async move {
-        // RAII:任务结束(含 panic)自动复位 running + 清 cancel + 广播结束。
-        let _guard = RunningGuard::new(live.clone(), events_for_guard);
-        let emit: Arc<dyn Fn(&SessionEnvelope) + Send + Sync> =
-            Arc::new(move |envelope: &SessionEnvelope| {
-                // 无人订阅时不克隆:流式期间每秒几十条 chunk,每条都克隆一份
-                // 只为了喂给一个空的广播队列,纯属浪费。
-                if followers_for_turn.receiver_count() == 0 {
-                    return;
-                }
-                let _ = followers_for_turn.send(envelope.clone());
-            });
-        let _reason = driver
-            .run_turn(
-                &session,
-                &selection,
-                &prompt,
-                images,
-                upload_files,
-                quoted,
-                vision_supported,
-                token,
-                emit,
-            )
-            .await;
-        drop(_guard);
-        runtime.on_idle(session.id());
-        // 上下文管理(投影剪枝 + LLM 压缩)已内建于 driver 的请求构造前
-        // (denia_agent_loop::SessionDriver):轮次闭合后不再落盘替换,
-        // 日志保持 append-only,provider 前缀缓存不被破坏。
-    });
-
+    state.session_commands().submit_prompt(id, body).await?;
     Ok((StatusCode::ACCEPTED, Json(json!({ "accepted": true }))))
 }
 
@@ -713,10 +391,7 @@ async fn cancel_session(
     }
     // 挂起的提问同样结算为 cancelled:工具立刻返回,模型不必等到超时。
     {
-        let mut pending = live
-            .pending_asks
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
+        let mut pending = live.pending_asks.lock().unwrap_or_else(|p| p.into_inner());
         for (_, tx) in pending.drain() {
             let _ = tx.send(denia_core::session::AskResolution {
                 outcome: denia_core::session::AskOutcome::Cancelled,
@@ -810,8 +485,7 @@ async fn set_session_agent_preset(
         return Err(ApiError::new(
             StatusCode::CONFLICT,
             "agent-preset/locked",
-            "会话已经产出内容,不能再更换 preset(工具面变了会留下无法执行的工具调用)"
-                .to_string(),
+            "会话已经产出内容,不能再更换 preset(工具面变了会留下无法执行的工具调用)".to_string(),
         ));
     }
     let envelope = live
@@ -890,7 +564,9 @@ async fn answer_approval(
     // 不让审批通过后执行阶段才失败。
     let selection = match &body.selection {
         None => None,
-        Some(selection) if selection.provider.trim().is_empty() || selection.model.trim().is_empty() => {
+        Some(selection)
+            if selection.provider.trim().is_empty() || selection.model.trim().is_empty() =>
+        {
             return Err(ApiError::bad_request(
                 "approval/bad-selection",
                 "selection requires non-empty provider and model",
@@ -980,10 +656,7 @@ async fn answer_ask(
         ));
     };
     let sender = {
-        let mut pending = live
-            .pending_asks
-            .lock()
-            .unwrap_or_else(|p| p.into_inner());
+        let mut pending = live.pending_asks.lock().unwrap_or_else(|p| p.into_inner());
         pending.remove(&request_id)
     };
     let Some(sender) = sender else {
@@ -1061,15 +734,15 @@ async fn fork_session(
         .map_err(ApiError::from_session)?;
     // 挂到源会话所在工作区;工作区刚被删时回滚子会话,不留孤儿。
     let workspace = state.workspaces.resolve_by_path(&cwd);
-    if let Some(ws) = &workspace {
-        if !state.workspaces.attach(&ws.id, child.id()) {
-            let _ = state.sessions.delete(child.id());
-            return Err(ApiError::new(
-                StatusCode::NOT_FOUND,
-                "workspace/not-found",
-                "workspace not found",
-            ));
-        }
+    if let Some(ws) = &workspace
+        && !state.workspaces.attach(&ws.id, child.id())
+    {
+        let _ = state.sessions.delete(child.id());
+        return Err(ApiError::new(
+            StatusCode::NOT_FOUND,
+            "workspace/not-found",
+            "workspace not found",
+        ));
     }
     // 分支继承源会话运行的组装:种子回放本已带上 agent-preset 事件,
     // 但锚点在它之前(极端情况)时补写一条,保证子会话不会悄悄换组装。
@@ -1105,24 +778,23 @@ async fn list_checkpoints(
         .map_err(ApiError::from_session)?;
     // 冷会话事件不驻留:走磁盘流式扫描,不为列 checkpoint 整载会话。
     let checkpoints: Vec<serde_json::Value> = if live.session.is_hot() {
-        live.session
-            .with_events(|events| {
-                events
-                    .iter()
-                    .filter_map(|envelope| match &envelope.event {
-                        SessionEvent::UserMessage {
-                            text,
-                            injected: false,
-                            ..
-                        } => Some(json!({
-                            "seq": envelope.seq,
-                            "time": envelope.time,
-                            "text": text,
-                        })),
-                        _ => None,
-                    })
-                    .collect()
-            })
+        live.session.with_events(|events| {
+            events
+                .iter()
+                .filter_map(|envelope| match &envelope.event {
+                    SessionEvent::UserMessage {
+                        text,
+                        injected: false,
+                        ..
+                    } => Some(json!({
+                        "seq": envelope.seq,
+                        "time": envelope.time,
+                        "text": text,
+                    })),
+                    _ => None,
+                })
+                .collect()
+        })
     } else {
         state
             .sessions
@@ -1469,7 +1141,10 @@ async fn follow_poll(
 /// 于是本端点会一直回空增量。服务端不做截断检测(那要求读全量日志),交给
 /// 客户端数空轮并重取快照 —— 与 SSE 版"lagged 即关流、客户端重快照"同一语义。
 fn json_response(envelopes: Vec<SessionEnvelope>, after: u64) -> axum::response::Response {
-    let next_seq = envelopes.last().map(|envelope| envelope.seq).unwrap_or(after);
+    let next_seq = envelopes
+        .last()
+        .map(|envelope| envelope.seq)
+        .unwrap_or(after);
     // Cache-Control: no-store —— 响应带 cookie 且内容是"此刻的日志尾部",
     // 任何中间层(含 Cloudflare 边缘)缓存它都会让后来的请求拿到陈旧增量。
     (

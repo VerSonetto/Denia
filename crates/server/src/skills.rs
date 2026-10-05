@@ -9,10 +9,12 @@ fn summary(path: &Path, source: &str) -> Result<Skill, String> {
     let metadata = std::fs::metadata(path).map_err(|e| e.to_string())?;
     let modified = metadata.modified().map_err(|e| e.to_string())?;
     let cache = SUMMARY_CACHE.get_or_init(Default::default);
-    if let Some((size, time, origin, skill)) = cache.lock().unwrap().get(path) {
-        if *size == metadata.len() && *time == modified && origin == source {
-            return Ok(skill.clone());
-        }
+    if let Some((size, time, origin, skill)) = cache.lock().unwrap().get(path)
+        && *size == metadata.len()
+        && *time == modified
+        && origin == source
+    {
+        return Ok(skill.clone());
     }
     let (skill, _) = parse(path, source)?;
     let mut cache = cache.lock().unwrap();
@@ -262,7 +264,12 @@ mod tests {
     #[test]
     fn truncate_description_by_chars() {
         assert_eq!(truncate_chars("短描述", 500), "短描述");
-        assert_eq!(truncate_chars("a".repeat(501).as_str(), 500).chars().count(), 500);
+        assert_eq!(
+            truncate_chars("a".repeat(501).as_str(), 500)
+                .chars()
+                .count(),
+            500
+        );
         assert!(truncate_chars("a".repeat(501).as_str(), 500).ends_with('…'));
         // 多字节按字符计,不截半个字。
         assert_eq!(truncate_chars(&"好".repeat(600), 500).chars().count(), 500);
@@ -281,10 +288,7 @@ mod tests {
         .unwrap();
         std::fs::write(home.join("skills/review.md"), "用户版本").unwrap();
         let skills = discover(&home, &cwd).unwrap();
-        let bundled: Vec<&Skill> = skills
-            .iter()
-            .filter(|s| s.source == "bundled")
-            .collect();
+        let bundled: Vec<&Skill> = skills.iter().filter(|s| s.source == "bundled").collect();
         assert_eq!(bundled.len(), 2);
         assert!(
             load(&skills, "skill-creator", false).unwrap()["body"]
@@ -308,10 +312,7 @@ mod tests {
         )
         .unwrap();
         let overridden = discover(&home, &cwd).unwrap();
-        let guide = overridden
-            .iter()
-            .find(|s| s.name == "denia-guide")
-            .unwrap();
+        let guide = overridden.iter().find(|s| s.name == "denia-guide").unwrap();
         assert_eq!(guide.source, "project-denia");
         let skill = skills.iter().find(|s| s.name == "review").unwrap();
         assert_eq!(skill.source, "project-denia");

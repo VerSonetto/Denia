@@ -71,9 +71,7 @@ impl HttpTransport {
             .body(frame.to_string())
             .send()
             .await
-            .map_err(|error| {
-                McpClientError::Disconnected(format!("请求 {}: {error}", self.url))
-            })?;
+            .map_err(|error| McpClientError::Disconnected(format!("请求 {}: {error}", self.url)))?;
         // 会话 id:首响应下发,之后每次带回(无状态服务端可能不给)。
         if let Some(session) = response.headers().get(headers::SESSION_ID)
             && let Ok(value) = session.to_str()
@@ -103,9 +101,10 @@ impl HttpTransport {
             .get(reqwest::header::CONTENT_TYPE)
             .and_then(|value| value.to_str().ok())
             .is_some_and(|value| value.contains("text/event-stream"));
-        let body = response.text().await.map_err(|error| {
-            McpClientError::Disconnected(format!("读取响应失败:{error}"))
-        })?;
+        let body = response
+            .text()
+            .await
+            .map_err(|error| McpClientError::Disconnected(format!("读取响应失败:{error}")))?;
         // 两种响应体都要认:SSE 时取 data 行,否则整段当 JSON。
         let json_text = if is_event_stream {
             match parse_sse_data(&body) {
@@ -113,15 +112,14 @@ impl HttpTransport {
                 None => {
                     return Err(McpClientError::Disconnected(
                         "SSE 响应里没有 data 报文".to_string(),
-                    ))
+                    ));
                 }
             }
         } else {
             body
         };
-        let value: Value = serde_json::from_str(json_text.trim()).map_err(|error| {
-            McpClientError::Disconnected(format!("响应不是合法 JSON:{error}"))
-        })?;
+        let value: Value = serde_json::from_str(json_text.trim())
+            .map_err(|error| McpClientError::Disconnected(format!("响应不是合法 JSON:{error}")))?;
         Ok(Some(value))
     }
 }

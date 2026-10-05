@@ -122,9 +122,7 @@ fn decorate_schema(input_schema: Value) -> Value {
     }
     // 分页参数都是可选的:required 里若出现它们,无参工具会被判非法。
     if let Some(required) = object.get_mut("required").and_then(Value::as_array_mut) {
-        required.retain(|item| {
-            !matches!(item.as_str(), Some("offset" | "limit"))
-        });
+        required.retain(|item| !matches!(item.as_str(), Some("offset" | "limit")));
     }
     schema
 }
@@ -294,11 +292,16 @@ fn render_tool_catalog(servers: &[denia_mcp::McpServerState], only: Option<&str>
         .collect();
     if visible.is_empty() {
         return match only {
-            Some(id) => format!("没有名为 {id} 的已连接 MCP 服务器;不带 server 参数再调一次可查看全部。"),
-            None => "当前没有已连接的 MCP 服务器;可到设置 → MCP 检查服务器状态或重新连接。".to_string(),
+            Some(id) => {
+                format!("没有名为 {id} 的已连接 MCP 服务器;不带 server 参数再调一次可查看全部。")
+            }
+            None => {
+                "当前没有已连接的 MCP 服务器;可到设置 → MCP 检查服务器状态或重新连接。".to_string()
+            }
         };
     }
-    let mut body = String::from("已接入的 MCP 外部工具(按名称直接调用;首次调用只返回参数定义,不会执行):\n");
+    let mut body =
+        String::from("已接入的 MCP 外部工具(按名称直接调用;首次调用只返回参数定义,不会执行):\n");
     for server in visible {
         body.push_str(&format!("\n[服务器 {}]\n", server.id));
         let mut listed = 0usize;
@@ -368,7 +371,12 @@ mod catalog_tests {
     use super::*;
     use denia_mcp::{McpServerState, McpServerStatus, McpToolState};
 
-    fn server(id: &str, status: McpServerStatus, enabled: bool, tools: Vec<McpToolState>) -> McpServerState {
+    fn server(
+        id: &str,
+        status: McpServerStatus,
+        enabled: bool,
+        tools: Vec<McpToolState>,
+    ) -> McpServerState {
         McpServerState {
             id: id.to_string(),
             transport: "stdio".to_string(),
@@ -398,16 +406,24 @@ mod catalog_tests {
     #[test]
     fn catalog_lists_connected_servers_grouped() {
         let servers = vec![
-            server("fx", McpServerStatus::Connected, true, vec![
-                tool("echo", "mcp__fx__echo", true),
-                tool("off", "mcp__fx__off", false),
-            ]),
+            server(
+                "fx",
+                McpServerStatus::Connected,
+                true,
+                vec![
+                    tool("echo", "mcp__fx__echo", true),
+                    tool("off", "mcp__fx__off", false),
+                ],
+            ),
             server("dead", McpServerStatus::Error, true, vec![]),
         ];
         let text = render_tool_catalog(&servers, None);
         assert!(text.contains("mcp__fx__echo — echo 的用途说明"));
         assert!(!text.contains("mcp__fx__off"), "被关闭的工具不得出现在目录");
-        assert!(!text.contains("[服务器 dead]"), "连接失败的服务器不得出现在目录");
+        assert!(
+            !text.contains("[服务器 dead]"),
+            "连接失败的服务器不得出现在目录"
+        );
     }
 
     #[test]

@@ -19,6 +19,8 @@
 //! - [`microcompact`] — 工具结果微压缩(占位符替换,摘要前的廉价清理)。
 
 mod compact;
+mod compaction_state;
+mod driver_settings;
 mod errors;
 mod exec;
 mod injections;
@@ -33,15 +35,12 @@ mod workspace_instructions;
 
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::AtomicU32;
 
 use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use denia_core::config::{LlmCallConfig, ModelSelection};
 use denia_core::error::{LlmFailure, codes};
-use denia_core::session::{
-    RequestHeaderSnapshot, SessionEnvelope, SessionEvent, TurnEndReason,
-};
+use denia_core::session::{RequestHeaderSnapshot, SessionEnvelope, SessionEvent, TurnEndReason};
 use denia_llm::LlmRegistry;
 use denia_session::Session;
 use denia_system_prompt::SystemPrompt;
@@ -49,6 +48,7 @@ use denia_tools::{FileHistoryBackend, ToolRegistry};
 use tokio_util::sync::CancellationToken;
 
 pub use compact::{CompactOutcome, CompactionSettings};
+pub use driver_settings::{DriverSettings, DriverSettingsSource};
 pub use injections::GOAL_CHANNEL;
 pub use loop_guard::LOOP_THRESHOLD;
 pub use preset::AgentPresetSource;
@@ -125,21 +125,10 @@ pub struct SessionDriver {
     /// `None` 时所有会话都运行出厂全量组装(无 preset 的部署)。
     presets: Option<Arc<dyn AgentPresetSource>>,
     /// 层叠上下文管理:LLM 总结压缩(学 dsh 压力驱动 + Claude Code compact)。
-    compaction: CompactionSettings,
-    /// 工具结果微压缩:摘要之前的廉价清理。
-    microcompact: microcompact::MicrocompactSettings,
-    /// 连续压缩失败计数(熔断,学 Claude Code `MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES`)。
-    compact_failures: AtomicU32,
-    /// 连续"压缩后快速回填"计数(rapid-refill 断路器)。
-    rapid_refills: AtomicU32,
-    /// 上次压缩后经过的工具轮次(用于判定回填是否过快)。
-    tool_turns_since_compact: AtomicU32,
-    /// 工具并行执行配置(学 codex `ToolCallRuntime`)。
-    parallel: ParallelSettings,
-    /// 死循环检测状态(按会话):跨 turn 记忆——"用户手动继续后模型又
-    /// 重复同样内容"的场景只能靠跨轮记忆抓住。同一会话的轮次由 server
-    /// 的 running 位串行化,锁只保护跨会话的并发访问。
-
+    settings: DriverSettings,
+    settings_source: Option<Arc<dyn DriverSettingsSource>>,
+    compaction_states:
+        std::sync::Mutex<std::collections::HashMap<String, Arc<compaction_state::CompactionState>>>,
     /// 文件读取状态(按会话):重复读取去重 + 写前新鲜度校验。
     /// 同一会话的工具调用共享一张表。
     read_states: std::sync::Mutex<
@@ -148,12 +137,18 @@ pub struct SessionDriver {
     /// 会话级审批放行表(按会话 × 操作类别):自动编辑档下用户对某类
     /// 审批(bash 写/删除/区外写)选"本窗口放行"后,同类操作在本会话
     /// 内直接放行不再询问。运行时内存态,不落盘,进程重启后自然失效。
-    ask_grants: std::sync::Mutex<std::collections::HashMap<String, std::collections::HashSet<denia_tools::permission::ActionClass>>>,
+    ask_grants: std::sync::Mutex<
+        std::collections::HashMap<
+            String,
+            std::collections::HashSet<denia_tools::permission::ActionClass>,
+        >,
+    >,
     /// 已装载完整参数定义的 MCP 工具(按会话):两段式工具面的第二段。
     /// 未装载的 `mcp__*` 工具在请求里只带名称与描述,首次调用拦截返回
     /// 参数定义并登记到此表,之后 schema 全量进请求、调用正常执行。
     /// 运行时内存态:进程重启或会话淘汰后回到轻量态,重新装载即可。
-    mcp_loads: std::sync::Mutex<std::collections::HashMap<String, std::collections::HashSet<String>>>,
+    mcp_loads:
+        std::sync::Mutex<std::collections::HashMap<String, std::collections::HashSet<String>>>,
 }
 
 impl SessionDriver {
@@ -171,13 +166,9 @@ impl SessionDriver {
             approval: None,
             ask: None,
             presets: None,
-            compaction: CompactionSettings::default(),
-            microcompact: microcompact::MicrocompactSettings::default(),
-            compact_failures: AtomicU32::new(0),
-            rapid_refills: AtomicU32::new(0),
-            tool_turns_since_compact: AtomicU32::new(0),
-            parallel: ParallelSettings::default(),
-
+            settings: DriverSettings::default(),
+            settings_source: None,
+            compaction_states: std::sync::Mutex::new(std::collections::HashMap::new()),
             read_states: std::sync::Mutex::new(std::collections::HashMap::new()),
             ask_grants: std::sync::Mutex::new(std::collections::HashMap::new()),
             mcp_loads: std::sync::Mutex::new(std::collections::HashMap::new()),
@@ -195,20 +186,20 @@ impl SessionDriver {
     /// 覆盖层叠上下文管理配置(LLM 压缩;默认值见
     /// [`CompactionSettings::default`])。
     pub fn with_compaction(mut self, settings: CompactionSettings) -> Self {
-        self.compaction = settings;
+        self.settings.compaction = settings;
         self
     }
 
     /// 覆盖工具结果微压缩配置(默认值见
     /// [`MicrocompactSettings::default`])。
     pub fn with_microcompact(mut self, settings: microcompact::MicrocompactSettings) -> Self {
-        self.microcompact = settings;
+        self.settings.microcompact = settings;
         self
     }
 
     /// 当前微压缩配置(server 侧构造 driver 时同步设置)。
     pub fn microcompact_settings(&self) -> microcompact::MicrocompactSettings {
-        self.microcompact.clone()
+        self.driver_settings().microcompact.clone()
     }
 
     /// 摘要阈值 token 数(供微压缩取 90% 作为自己的触发线)。
@@ -218,20 +209,50 @@ impl SessionDriver {
     pub(crate) fn compaction_threshold_tokens(
         &self,
         pressure: &denia_token_meter::ContextPressure,
+        settings: &CompactionSettings,
     ) -> Option<u64> {
         let window = pressure.context_window?;
         if window == 0 {
             return None;
         }
-        let reserve = self.compaction.summary_max_tokens.min(window);
+        let reserve = settings.summary_max_tokens.min(window);
         let effective = window.saturating_sub(reserve);
         Some(effective.saturating_sub(13_000))
     }
 
     /// 覆盖工具并行执行配置(默认值见 [`ParallelSettings::default`])。
     pub fn with_parallel(mut self, settings: ParallelSettings) -> Self {
-        self.parallel = settings;
+        self.settings.parallel = settings;
         self
+    }
+
+    pub fn with_settings_source(mut self, source: Arc<dyn DriverSettingsSource>) -> Self {
+        self.settings_source = Some(source);
+        self
+    }
+
+    pub fn driver_settings(&self) -> Arc<DriverSettings> {
+        Arc::new(
+            self.settings_source
+                .as_ref()
+                .map_or_else(|| self.settings.clone(), |source| source.settings()),
+        )
+    }
+
+    fn compaction_state_for(&self, id: &str) -> Arc<compaction_state::CompactionState> {
+        self.compaction_states
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .entry(id.to_owned())
+            .or_default()
+            .clone()
+    }
+
+    pub fn clear_compaction_state(&self, id: &str) {
+        self.compaction_states
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(id);
     }
 
     /// 启用文件历史:回退功能依赖此提供者。
@@ -304,7 +325,7 @@ impl SessionDriver {
 
     /// 当前层叠上下文管理配置(server 热更新用)。
     pub fn compaction_settings(&self) -> CompactionSettings {
-        self.compaction.clone()
+        self.driver_settings().compaction.clone()
     }
 
     /// 供 server 端热加载写入同一 `ArcSwap`。
@@ -386,6 +407,10 @@ impl SessionDriver {
         let framed_system = header.system.clone().unwrap_or_default();
         // 压缩的是已发生的历史:事件归属于日志中最后一次出现的轮次,step 0
         // 表示轮次外的合成步骤(与自动压缩一样仅作元数据)。
+        let settings = self.driver_settings();
+        if !settings.compaction.compact_enabled {
+            return Err(LlmFailure::new(codes::UNKNOWN, "上下文压缩已在设置中关闭"));
+        }
         self.compact_context(
             session,
             &selection,
@@ -395,6 +420,7 @@ impl SessionDriver {
             0,
             &cancel,
             None,
+            &settings.compaction,
         )
         .await
     }
@@ -421,12 +447,13 @@ impl SessionDriver {
         cancel: CancellationToken,
         emit: Arc<dyn Fn(&SessionEnvelope) + Send + Sync>,
     ) -> TurnEndReason {
-        // 死循环检测记忆跨 turn 保留:轮次开始借出,结束(含错误路径)归还。
+        // 每轮独立检测重复输出，用户的新指令不继承上一轮的指纹。
         let loop_guard = loop_guard::LoopGuard::default();
         // 文件读取状态同样按会话持有:跨 turn 保留(同一会话的下一轮里,
         // "上一轮读过的文件"依然算读过,不该要求重读)。
         let read_state = self.read_state_for(session.id());
         let mut state = TurnState::new(
+            self,
             session.clone(),
             emit,
             selection.clone(),
@@ -435,7 +462,10 @@ impl SessionDriver {
             loop_guard,
             read_state,
         );
-        state.output_store = denia_tools::output::OutputStore::open(session.directory().join("tool-output")).await.ok();
+        state.output_store =
+            denia_tools::output::OutputStore::open(session.directory().join("tool-output"))
+                .await
+                .ok();
         let result = turn::run_turn_inner(self, &mut state, prompt, images, files, quoted).await;
         match result {
             Ok(reason) => reason,
@@ -449,10 +479,7 @@ impl SessionDriver {
     ///
     /// 按会话持有:同一会话的所有工具调用共享一张表,不同会话互不干扰。
     /// 表本身是 `Arc<Mutex<..>>`,借出的是克隆的句柄。
-    pub fn read_state_for(
-        &self,
-        session_id: &str,
-    ) -> denia_tools::read_state::SharedReadState {
+    pub fn read_state_for(&self, session_id: &str) -> denia_tools::read_state::SharedReadState {
         let mut map = self
             .read_states
             .lock()
@@ -482,7 +509,11 @@ impl SessionDriver {
     }
 
     /// 会话是否已放行某类审批操作(自动编辑档"本窗口放行"的查询口)。
-    pub fn ask_granted(&self, session_id: &str, class: denia_tools::permission::ActionClass) -> bool {
+    pub fn ask_granted(
+        &self,
+        session_id: &str,
+        class: denia_tools::permission::ActionClass,
+    ) -> bool {
         self.ask_grants
             .lock()
             .unwrap_or_else(|poison| poison.into_inner())
@@ -608,7 +639,7 @@ pub(crate) struct TurnState {
     pub turn: u32,
     /// 自纠反馈注入计数(每轮上限 [`errors::MAX_FEEDBACK`])。
     pub feedback: u32,
-    /// 死循环检测器(driver 按会话持有,跨 turn 记忆)。
+    /// 当前轮次的死循环检测器。
     pub loop_guard: loop_guard::LoopGuard,
     /// 文件读取状态表(按会话共享):重复读取去重 + 写前新鲜度校验。
     pub read_state: denia_tools::read_state::SharedReadState,
@@ -627,11 +658,14 @@ pub(crate) struct TurnState {
     pub context_window: Option<u64>,
     /// 每步已自动重试的次数(报错摘要用;attempt 环内更新)。
     pub step_retries: u32,
+    pub settings: Arc<DriverSettings>,
+    pub compaction_state: Arc<compaction_state::CompactionState>,
 }
 
 impl TurnState {
     #[allow(clippy::too_many_arguments)]
     fn new(
+        driver: &SessionDriver,
         session: Arc<Session>,
         emit: Arc<dyn Fn(&SessionEnvelope) + Send + Sync>,
         selection: ModelSelection,
@@ -640,7 +674,11 @@ impl TurnState {
         loop_guard: loop_guard::LoopGuard,
         read_state: denia_tools::read_state::SharedReadState,
     ) -> Self {
+        let settings = driver.driver_settings();
+        let compaction_state = driver.compaction_state_for(session.id());
         Self {
+            settings,
+            compaction_state,
             session,
             emit,
             selection,

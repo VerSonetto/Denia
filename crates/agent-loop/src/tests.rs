@@ -10,7 +10,9 @@ use denia_core::session::{
 };
 use denia_core::stream::{BlockType, ContentBlock, FinishReason, StreamChunk, TokenUsage};
 use denia_core::tool::ToolSchema;
-use denia_llm::{ChunkStream, GenerateRequest, LlmAdapter, LlmModelInfo, LlmResolvedModelInfo, ProviderInfo};
+use denia_llm::{
+    ChunkStream, GenerateRequest, LlmAdapter, LlmModelInfo, LlmResolvedModelInfo, ProviderInfo,
+};
 use denia_system_prompt::SystemPrompt;
 use denia_tools::ToolRegistry;
 use futures::StreamExt;
@@ -19,6 +21,24 @@ use std::sync::Mutex;
 
 #[path = "harness_tests.rs"]
 mod harness_tests;
+
+#[test]
+fn compaction_breakers_are_isolated_and_first_compaction_is_not_a_refill() {
+    use std::sync::atomic::Ordering;
+    let (driver, _) = driver(Vec::new());
+    let a = driver.compaction_state_for("a");
+    let b = driver.compaction_state_for("b");
+    a.failures.store(3, Ordering::SeqCst);
+    assert_eq!(b.failures.load(Ordering::SeqCst), 0);
+    assert_eq!(a.record_success(3), 0);
+    assert_eq!(a.record_success(3), 1);
+    b.tool_turns.store(20, Ordering::SeqCst);
+    assert_eq!(a.record_success(3), 2);
+    assert_eq!(b.rapid_refills.load(Ordering::SeqCst), 0);
+    assert!(Arc::ptr_eq(&a, &driver.compaction_state_for("a")));
+    driver.clear_compaction_state("a");
+    assert!(!Arc::ptr_eq(&a, &driver.compaction_state_for("a")));
+}
 
 #[test]
 fn system_prompt_frames_runtime_authority() {
@@ -198,7 +218,11 @@ impl denia_tools::Tool for EchoTool {
         }))
     }
 
-    async fn execute(&self, arguments: &str, _ctx: &denia_tools::ToolContext) -> denia_tools::ToolOutput {
+    async fn execute(
+        &self,
+        arguments: &str,
+        _ctx: &denia_tools::ToolContext,
+    ) -> denia_tools::ToolOutput {
         denia_tools::ToolOutput {
             artifact: None,
             content: format!("echo:{arguments}"),
@@ -220,7 +244,11 @@ impl denia_tools::Tool for BulkyTool {
         }))
     }
 
-    async fn execute(&self, _arguments: &str, _ctx: &denia_tools::ToolContext) -> denia_tools::ToolOutput {
+    async fn execute(
+        &self,
+        _arguments: &str,
+        _ctx: &denia_tools::ToolContext,
+    ) -> denia_tools::ToolOutput {
         denia_tools::ToolOutput {
             artifact: None,
             content: "x".repeat(denia_tools::support::OUTPUT_BUDGET_CHARS + 500),
@@ -233,10 +261,7 @@ impl denia_tools::Tool for BulkyTool {
 fn error_finish_script() -> Vec<StreamChunk> {
     vec![StreamChunk::Finish {
         reason: FinishReason::Error {
-            failure: LlmFailure::new(
-                denia_core::error::codes::EMPTY_RESPONSE,
-                "empty response",
-            ),
+            failure: LlmFailure::new(denia_core::error::codes::EMPTY_RESPONSE, "empty response"),
         },
     }]
 }
@@ -288,7 +313,9 @@ fn tool_script() -> Vec<StreamChunk> {
             block: ContentBlock::ToolCall {
                 id: "call_1".to_string(),
                 name: "echo".to_string(),
-                arguments: "{\"text\":\"hi\"}".to_string(), incomplete: false },
+                arguments: "{\"text\":\"hi\"}".to_string(),
+                incomplete: false,
+            },
         },
         StreamChunk::Finish {
             reason: FinishReason::ToolCalls,
@@ -359,9 +386,7 @@ fn temp_session() -> Arc<Session> {
 }
 
 /// 带请求录制的驱动器:捕获每次派发请求的 system 字节,供冻结断言用。
-fn recording_driver(
-    scripts: Vec<MockScript>,
-) -> (SessionDriver, Arc<Mutex<Vec<Option<String>>>>) {
+fn recording_driver(scripts: Vec<MockScript>) -> (SessionDriver, Arc<Mutex<Vec<Option<String>>>>) {
     let capture = Arc::new(Mutex::new(Vec::new()));
     let registry = Arc::new(LlmRegistry::new());
     registry
@@ -405,7 +430,11 @@ fn session_preset_narrows_the_step_assembly() {
         }
     }
 
-    fn preset(id: &str, tools: Option<Vec<&str>>, persona: Option<&str>) -> denia_core::preset::AgentPreset {
+    fn preset(
+        id: &str,
+        tools: Option<Vec<&str>>,
+        persona: Option<&str>,
+    ) -> denia_core::preset::AgentPreset {
         denia_core::preset::AgentPreset {
             id: id.to_string(),
             name: id.to_string(),
@@ -428,7 +457,11 @@ fn session_preset_narrows_the_step_assembly() {
     );
     let source = Arc::new(FakeSource(vec![
         preset("standard", None, None),
-        preset("minimal", Some(vec!["bash", "read_file"]), Some("你是极简助手。")),
+        preset(
+            "minimal",
+            Some(vec!["bash", "read_file"]),
+            Some("你是极简助手。"),
+        ),
     ]));
     let preset_driver = SessionDriver::new(
         registry,
@@ -460,10 +493,12 @@ fn session_preset_narrows_the_step_assembly() {
     let names: Vec<&str> = tools.iter().map(|schema| schema.name.as_str()).collect();
     assert_eq!(names, vec!["bash", "read_file"]);
     assert!(sections.iter().all(|section| section.name != "tool:write"));
-    assert!(sections
-        .iter()
-        .any(|section| section.name == "deployment:persona"
-            && section.text.starts_with("你是极简助手。")));
+    assert!(
+        sections
+            .iter()
+            .any(|section| section.name == "deployment:persona"
+                && section.text.starts_with("你是极简助手。"))
+    );
 
     // 会话未指定 preset:用部署默认(全量工具集)。
     let (tools, _) = assemble(&preset_driver, None);
@@ -595,11 +630,7 @@ async fn system_prompt_change_appends_in_history_and_freezes_system() {
         MockScript::Chunks(text_script("t3")),
     ]);
     let session = temp_session();
-    async fn run(
-        driver: &SessionDriver,
-        session: &Arc<Session>,
-        prompt: &str,
-    ) -> TurnEndReason {
+    async fn run(driver: &SessionDriver, session: &Arc<Session>, prompt: &str) -> TurnEndReason {
         driver
             .run_turn(
                 session,
@@ -699,7 +730,9 @@ async fn parallel_tool_calls_emit_one_result_each_in_order() {
                 block: ContentBlock::ToolCall {
                     id: id.to_string(),
                     name: "echo".to_string(),
-                    arguments: format!("{{\"text\":\"{id}\"}}"), incomplete: false },
+                    arguments: format!("{{\"text\":\"{id}\"}}"),
+                    incomplete: false,
+                },
             });
         }
         chunks.push(StreamChunk::Finish {
@@ -755,7 +788,9 @@ async fn unknown_tool_yields_error_result_and_continues() {
         *block = ContentBlock::ToolCall {
             id: "call_x".to_string(),
             name: "nope".to_string(),
-            arguments: "{}".to_string(), incomplete: false };
+            arguments: "{}".to_string(),
+            incomplete: false,
+        };
     }
     let (driver, _registry) = driver(vec![
         MockScript::Chunks(unknown),
@@ -804,11 +839,7 @@ async fn pending_stream_cancel_aborts() {
         async fn list_models(&self, _p: &str) -> Result<Vec<LlmModelInfo>, LlmError> {
             Ok(Vec::new())
         }
-        async fn resolve_model(
-            &self,
-            p: &str,
-            m: &str,
-        ) -> Result<LlmResolvedModelInfo, LlmError> {
+        async fn resolve_model(&self, p: &str, m: &str) -> Result<LlmResolvedModelInfo, LlmError> {
             Ok(LlmResolvedModelInfo {
                 info: LlmModelInfo {
                     provider: p.to_string(),
@@ -822,11 +853,7 @@ async fn pending_stream_cancel_aborts() {
                 reasoning: None,
             })
         }
-        async fn stream(
-            &self,
-            _p: &str,
-            _r: &GenerateRequest,
-        ) -> Result<ChunkStream, LlmError> {
+        async fn stream(&self, _p: &str, _r: &GenerateRequest) -> Result<ChunkStream, LlmError> {
             Ok(Box::pin(futures::stream::pending()))
         }
     }
@@ -1094,10 +1121,7 @@ async fn fake_tool_call_quota_exhausts_then_completes() {
         feedback, MAX_FEEDBACK as usize,
         "feedback quota must cap at MAX_FEEDBACK"
     );
-    assert_eq!(
-        loop_warnings, 0,
-        "文本重复不能单独触发无进展提醒"
-    );
+    assert_eq!(loop_warnings, 0, "文本重复不能单独触发无进展提醒");
     let calls = session
         .events()
         .iter()
@@ -1156,8 +1180,7 @@ async fn request_failure_is_fed_back_for_self_correction() {
 #[tokio::test]
 async fn provider_failure_terminates_without_feedback_waste() {
     // AUTH:不可重试、不可自纠 → 直接 error 终止,不注入反馈(不烧配额)。
-    let (driver, _registry) =
-        driver(vec![MockScript::Fail(LlmFailure::new("AUTH", "bad key"))]);
+    let (driver, _registry) = driver(vec![MockScript::Fail(LlmFailure::new("AUTH", "bad key"))]);
     let session = temp_session();
     let reason = driver
         .run_turn(
@@ -1459,10 +1482,24 @@ async fn request_header_and_context_are_logged() {
 /// 文本重复但工具证据改变，允许继续。
 fn mixed_script(text: &str, call_id: &str, arg: &str) -> Vec<StreamChunk> {
     vec![
-        StreamChunk::BlockStart { index: 0, block_type: BlockType::Text },
-        StreamChunk::TextDelta { index: 0, text: text.to_string() },
-        StreamChunk::BlockEnd { index: 0, block: ContentBlock::Text { text: text.to_string() } },
-        StreamChunk::BlockStart { index: 1, block_type: BlockType::ToolCall },
+        StreamChunk::BlockStart {
+            index: 0,
+            block_type: BlockType::Text,
+        },
+        StreamChunk::TextDelta {
+            index: 0,
+            text: text.to_string(),
+        },
+        StreamChunk::BlockEnd {
+            index: 0,
+            block: ContentBlock::Text {
+                text: text.to_string(),
+            },
+        },
+        StreamChunk::BlockStart {
+            index: 1,
+            block_type: BlockType::ToolCall,
+        },
         StreamChunk::ToolCallDelta {
             index: 1,
             id: call_id.to_string(),
@@ -1474,9 +1511,13 @@ fn mixed_script(text: &str, call_id: &str, arg: &str) -> Vec<StreamChunk> {
             block: ContentBlock::ToolCall {
                 id: call_id.to_string(),
                 name: "echo".to_string(),
-                arguments: format!(r#"{{"text":"{arg}"}}"#), incomplete: false },
+                arguments: format!(r#"{{"text":"{arg}"}}"#),
+                incomplete: false,
+            },
         },
-        StreamChunk::Finish { reason: FinishReason::ToolCalls },
+        StreamChunk::Finish {
+            reason: FinishReason::ToolCalls,
+        },
     ]
 }
 
@@ -1545,9 +1586,11 @@ async fn identical_text_with_new_tool_evidence_completes() {
 
 #[tokio::test]
 async fn identical_tool_results_tenth_time_forces_loop_abort() {
-    let (driver, _registry) = driver((0..10).map(|n| {
-        MockScript::Chunks(mixed_script("checking", &format!("c{n}"), "same"))
-    }).collect());
+    let (driver, _registry) = driver(
+        (0..10)
+            .map(|n| MockScript::Chunks(mixed_script("checking", &format!("c{n}"), "same")))
+            .collect(),
+    );
     let session = temp_session();
     let reason = driver
         .run_turn(
@@ -1569,7 +1612,10 @@ async fn identical_tool_results_tenth_time_forces_loop_abort() {
         .iter()
         .filter(|e| matches!(e.event, SessionEvent::ToolCall { .. }))
         .count();
-    assert_eq!(executed, 10, "judge progress after observing the tenth result");
+    assert_eq!(
+        executed, 10,
+        "judge progress after observing the tenth result"
+    );
 }
 
 #[tokio::test]
@@ -1660,7 +1706,9 @@ async fn oversized_tool_result_is_truncated_with_notice() {
         .iter()
         .find_map(|e| match &e.event {
             SessionEvent::ToolResult {
-                content, truncation, ..
+                content,
+                truncation,
+                ..
             } => Some((content.clone(), truncation.clone())),
             _ => None,
         })
@@ -1673,16 +1721,32 @@ async fn oversized_tool_result_is_truncated_with_notice() {
     assert!(content.contains("read_tool_output"));
     assert!(content.chars().count() <= denia_tools::support::OUTPUT_BUDGET_CHARS);
     let truncation = truncation.expect("truncation info must be recorded");
-    assert_eq!(truncation.total_chars, (denia_tools::support::OUTPUT_BUDGET_CHARS + 500) as u64);
+    assert_eq!(
+        truncation.total_chars,
+        (denia_tools::support::OUTPUT_BUDGET_CHARS + 500) as u64
+    );
     assert!(truncation.shown_chars < truncation.total_chars);
-    let artifact = session.events().iter().find_map(|e| match &e.event {
-        SessionEvent::ToolResult { meta: Some(meta), .. } => Some(meta["outputArtifact"].clone()),
-        _ => None,
-    }).unwrap();
+    let artifact = session
+        .events()
+        .iter()
+        .find_map(|e| match &e.event {
+            SessionEvent::ToolResult {
+                meta: Some(meta), ..
+            } => Some(meta["outputArtifact"].clone()),
+            _ => None,
+        })
+        .unwrap();
     assert_eq!(artifact["complete"], true);
-    let store = denia_tools::output::OutputStore::open(session.directory().join("tool-output")).await.unwrap();
-    assert!(store.read(artifact["output_id"].as_str().unwrap(), None, 1, 400).await.unwrap().contains("xxx"));
-
+    let store = denia_tools::output::OutputStore::open(session.directory().join("tool-output"))
+        .await
+        .unwrap();
+    assert!(
+        store
+            .read(artifact["output_id"].as_str().unwrap(), None, 1, 400)
+            .await
+            .unwrap()
+            .contains("xxx")
+    );
 }
 
 fn tool_script_with(name: &str, id: &str) -> Vec<StreamChunk> {
@@ -1702,7 +1766,9 @@ fn tool_script_with(name: &str, id: &str) -> Vec<StreamChunk> {
             block: ContentBlock::ToolCall {
                 id: id.to_string(),
                 name: name.to_string(),
-                arguments: "{}".to_string(), incomplete: false },
+                arguments: "{}".to_string(),
+                incomplete: false,
+            },
         },
         StreamChunk::Finish {
             reason: FinishReason::ToolCalls,
@@ -1741,7 +1807,10 @@ async fn feedback_injection_carries_channel() {
         } => channel.as_deref() == Some("feedback"),
         _ => false,
     });
-    assert!(has_feedback_channel, "feedback injection must carry channel");
+    assert!(
+        has_feedback_channel,
+        "feedback injection must carry channel"
+    );
 }
 
 fn png_image(n: usize) -> Vec<denia_core::message::ImageData> {
@@ -1856,7 +1925,10 @@ async fn images_without_prompt_text_still_reach_history() {
 fn image_paths_list_renders_only_present_paths() {
     // 路径是粘贴图落盘后才有;没有路径时不能留下空行或"路径如下"这种废话。
     assert_eq!(crate::turn::image_paths_list(&png_image(2)), "");
-    let with = png_image_paths(&["C:\\h\\uploads\\s\\pasted-1.png", "C:\\h\\uploads\\s\\pasted-2.png"]);
+    let with = png_image_paths(&[
+        "C:\\h\\uploads\\s\\pasted-1.png",
+        "C:\\h\\uploads\\s\\pasted-2.png",
+    ]);
     let rendered = crate::turn::image_paths_list(&with);
     assert!(rendered.contains("pasted-1.png"), "{rendered}");
     assert!(rendered.contains("pasted-2.png"), "{rendered}");
@@ -1941,7 +2013,9 @@ fn tool_calls_script(calls: &[(&str, &str, &str)]) -> Vec<StreamChunk> {
             block: ContentBlock::ToolCall {
                 id: id.to_string(),
                 name: name.to_string(),
-                arguments: arguments.to_string(), incomplete: false },
+                arguments: arguments.to_string(),
+                incomplete: false,
+            },
         });
     }
     chunks.push(StreamChunk::Finish {
@@ -2053,7 +2127,9 @@ async fn plan_mode_denies_writes_and_keeps_tool_face_stable() {
     assert!(results[0].1.contains("计划模式"), "{}", results[0].1);
     // 工作区没有落盘。
     assert!(
-        !std::path::Path::new(&session.header().cwd).join("a.txt").exists(),
+        !std::path::Path::new(&session.header().cwd)
+            .join("a.txt")
+            .exists(),
         "plan mode must not write files"
     );
     // 工具面跨模式稳定(缓存前缀不破):计划档**保留** write_file/edit
@@ -2087,9 +2163,10 @@ async fn exit_plan_outside_plan_mode_is_denied_without_approval() {
     assert_eq!(results.len(), 1, "exactly one result");
     assert!(results[0].0, "exit_plan must be denied outside plan mode");
     assert!(
-        !session.events().iter().any(|envelope| {
-            matches!(envelope.event, SessionEvent::ApprovalAsked { .. })
-        }),
+        !session
+            .events()
+            .iter()
+            .any(|envelope| { matches!(envelope.event, SessionEvent::ApprovalAsked { .. }) }),
         "denial must not pop an approval card"
     );
     assert_eq!(session.permission_mode(), PermissionMode::AutoEdit);
@@ -2108,7 +2185,11 @@ async fn oversized_write_args_are_stubbed_in_derived_history() {
                     "write_file",
                     &format!(r#"{{"path":"big.js","content":"{big}"}}"#),
                 ),
-                ("call_small", "write_file", r#"{"path":"small.txt","content":"tiny"}"#),
+                (
+                    "call_small",
+                    "write_file",
+                    r#"{"path":"small.txt","content":"tiny"}"#,
+                ),
             ])),
             MockScript::Chunks(text_script("done")),
         ],
@@ -2142,7 +2223,11 @@ async fn oversized_write_args_are_stubbed_in_derived_history() {
         big_call.arguments.len(),
         &big_call.arguments[..big_call.arguments.len().min(120)]
     );
-    assert!(big_call.arguments.contains("big.js"), "{}", big_call.arguments);
+    assert!(
+        big_call.arguments.contains("big.js"),
+        "{}",
+        big_call.arguments
+    );
     assert!(
         big_call.arguments.contains("_args_cleared"),
         "{}",
@@ -2169,11 +2254,7 @@ async fn auto_edit_allows_inside_write_and_fails_closed_outside_without_bridge()
     let (driver, _registry) = driver_with_tools(
         vec![
             MockScript::Chunks(tool_calls_script(&[
-                (
-                    "call_in",
-                    "write_file",
-                    r#"{"path":"a.txt","content":"x"}"#,
-                ),
+                ("call_in", "write_file", r#"{"path":"a.txt","content":"x"}"#),
                 (
                     "call_out",
                     "write_file",
@@ -2196,7 +2277,9 @@ async fn auto_edit_allows_inside_write_and_fails_closed_outside_without_bridge()
     assert!(results[1].0, "outside write needs approval");
     assert!(results[1].1.contains("审批通道"), "{}", results[1].1);
     assert!(
-        std::path::Path::new(&session.header().cwd).join("a.txt").exists(),
+        std::path::Path::new(&session.header().cwd)
+            .join("a.txt")
+            .exists(),
         "inside write must land"
     );
     assert!(!outside.exists(), "outside write must not land");
@@ -2227,7 +2310,9 @@ async fn sandbox_still_confines_readonly_and_plan_outside_writes() {
         |tools| *tools = denia_tools::default_registry(),
     );
     let session = temp_session();
-    session.set_permission_mode(PermissionMode::ReadOnly).unwrap();
+    session
+        .set_permission_mode(PermissionMode::ReadOnly)
+        .unwrap();
     run_simple_turn(&driver, &session, "write").await;
 
     let results = result_texts(&session);
@@ -2337,7 +2422,11 @@ async fn exit_plan_with_empty_plan_never_reaches_approval() {
 
     let results = result_texts(&session);
     assert!(results[0].0, "empty plan is an error");
-    assert!(results[0].1.contains("计划提交参数无效"), "{}", results[0].1);
+    assert!(
+        results[0].1.contains("计划提交参数无效"),
+        "{}",
+        results[0].1
+    );
     // 档位未被切换:审批桥根本没被调用。
     assert_eq!(session.permission_mode(), PermissionMode::Plan);
 }
@@ -2364,7 +2453,10 @@ async fn auto_edit_asks_for_bash_writes_and_deletions() {
 
     let results = result_texts(&session);
     assert_eq!(results.len(), 2);
-    assert!(results[0].0, "bash write must ask; rejection is an error result");
+    assert!(
+        results[0].0,
+        "bash write must ask; rejection is an error result"
+    );
     assert!(results[1].0, "deletion must ask too");
     // 审批卡理由按类别点题:删除的理由说"删除",bash 写的理由说"增删改写"。
     let reasons: Vec<String> = session
@@ -2376,7 +2468,10 @@ async fn auto_edit_asks_for_bash_writes_and_deletions() {
         })
         .collect();
     assert!(reasons.iter().any(|r| r.contains("删除")), "{reasons:?}");
-    assert!(reasons.iter().any(|r| r.contains("增删改写")), "{reasons:?}");
+    assert!(
+        reasons.iter().any(|r| r.contains("增删改写")),
+        "{reasons:?}"
+    );
 }
 
 #[tokio::test]
@@ -2426,7 +2521,8 @@ async fn allowed_session_grant_skips_later_asks_across_turns() {
 
     assert_eq!(*bridge.calls.lock().unwrap(), 1, "asked exactly once");
     let results = result_texts(&session);
-    let ok_results: Vec<&(bool, String)> = results.iter().filter(|(is_error, _)| !*is_error).collect();
+    let ok_results: Vec<&(bool, String)> =
+        results.iter().filter(|(is_error, _)| !*is_error).collect();
     assert_eq!(ok_results.len(), 2, "both mkdir calls ran, got {results:?}");
     // 放行有事件可回放。
     assert!(session.events().iter().any(|envelope| matches!(
@@ -2436,9 +2532,12 @@ async fn allowed_session_grant_skips_later_asks_across_turns() {
             ..
         }
     )));
-    assert_eq!(driver.ask_granted(session.id(), denia_tools::permission::ActionClass::BashWrite), true);
+    assert!(driver.ask_granted(
+        session.id(),
+        denia_tools::permission::ActionClass::BashWrite
+    ));
     // 其他类别不受牵连:删除与区外写仍要审批。
-    assert_eq!(driver.ask_granted(session.id(), denia_tools::permission::ActionClass::Delete), false);
+    assert!(!driver.ask_granted(session.id(), denia_tools::permission::ActionClass::Delete));
 }
 
 #[tokio::test]
@@ -2458,7 +2557,9 @@ async fn read_only_hides_bash_and_write_tools() {
         |tools| *tools = denia_tools::default_registry(),
     );
     let session = temp_session();
-    session.set_permission_mode(PermissionMode::ReadOnly).unwrap();
+    session
+        .set_permission_mode(PermissionMode::ReadOnly)
+        .unwrap();
     run_simple_turn(&driver, &session, "read only").await;
 
     let names = last_header_tool_names(&session);
@@ -2543,8 +2644,13 @@ impl denia_tools::Tool for CountingMcpTool {
         }))
     }
 
-    async fn execute(&self, arguments: &str, _ctx: &denia_tools::ToolContext) -> denia_tools::ToolOutput {
-        self.executes.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    async fn execute(
+        &self,
+        arguments: &str,
+        _ctx: &denia_tools::ToolContext,
+    ) -> denia_tools::ToolOutput {
+        self.executes
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         denia_tools::ToolOutput {
             artifact: None,
             content: format!("echo:{arguments}"),
@@ -2564,7 +2670,9 @@ fn mcp_call_script(name: &str, arguments: &str) -> Vec<StreamChunk> {
             block: ContentBlock::ToolCall {
                 id: "call_m1".to_string(),
                 name: name.to_string(),
-                arguments: arguments.to_string(), incomplete: false },
+                arguments: arguments.to_string(),
+                incomplete: false,
+            },
         },
         StreamChunk::Finish {
             reason: FinishReason::ToolCalls,
@@ -2622,7 +2730,11 @@ fn unloaded_mcp_tools_are_removed_until_loaded() {
             .any(|schema| schema.name == "mcp__fx__echo"),
         "未装载的 MCP 工具必须整体移出请求工具面"
     );
-    let echo = assembly.tools.iter().find(|schema| schema.name == "echo").unwrap();
+    let echo = assembly
+        .tools
+        .iter()
+        .find(|schema| schema.name == "echo")
+        .unwrap();
     assert_eq!(
         echo.parameters,
         serde_json::json!({ "type": "object" }),
@@ -2654,14 +2766,8 @@ async fn first_mcp_call_returns_definition_and_second_executes() {
     let counter = executes.clone();
     let (driver, _registry) = driver_with_tools(
         vec![
-            MockScript::Chunks(mcp_call_script(
-                "mcp__fx__echo",
-                r#"{"text":"hi"}"#,
-            )),
-            MockScript::Chunks(mcp_call_script(
-                "mcp__fx__echo",
-                r#"{"text":"hi"}"#,
-            )),
+            MockScript::Chunks(mcp_call_script("mcp__fx__echo", r#"{"text":"hi"}"#)),
+            MockScript::Chunks(mcp_call_script("mcp__fx__echo", r#"{"text":"hi"}"#)),
             MockScript::Chunks(text_script("done")),
         ],
         move |tools| {

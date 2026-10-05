@@ -99,7 +99,9 @@ impl Tool for CreatePresetTool {
         let spec: PresetSpec = match denia_tools::parse_args_lenient(arguments) {
             Ok(spec) => spec,
             Err(error) => {
-                return ToolOutput::error(format!("create_preset 参数解析失败:{error}。请检查 JSON 是否完整(必填:id、name)。"))
+                return ToolOutput::error(format!(
+                    "create_preset 参数解析失败:{error}。请检查 JSON 是否完整(必填:id、name)。"
+                ));
             }
         };
         let store = Arc::clone(&self.store);
@@ -111,10 +113,13 @@ impl Tool for CreatePresetTool {
         match result {
             Ok(Ok(row)) => ToolOutput::text(format!(
                 "已创建组装「{}」(id: {}),目录:{}。\n它已进入名册:设置 → Agent 预设,或新会话的组装选择器里即可选用;微调可直接编辑该目录下的 preset.yml,改动对后续步骤与新会话即时生效。",
-                row.name, row.id,
+                row.name,
+                row.id,
                 row.path.as_deref().unwrap_or("<未知目录>")
             )),
-            Ok(Err(reason)) => ToolOutput::error(format!("创建 preset 被拒绝:{reason}。请按原因调整(如换一个 id)后重试,不要静默换名重试。")),
+            Ok(Err(reason)) => ToolOutput::error(format!(
+                "创建 preset 被拒绝:{reason}。请按原因调整(如换一个 id)后重试,不要静默换名重试。"
+            )),
             Err(error) => ToolOutput::error(error),
         }
     }
@@ -217,10 +222,13 @@ mod tests {
         )
         .unwrap();
         assert!(!spec.features.goal);
-        assert_eq!(spec.features, PresetFeatures {
-            goal: false,
-            ..PresetFeatures::default()
-        });
+        assert_eq!(
+            spec.features,
+            PresetFeatures {
+                goal: false,
+                ..PresetFeatures::default()
+            }
+        );
     }
 
     fn test_ctx() -> ToolContext {

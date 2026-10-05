@@ -20,10 +20,7 @@ use crate::error::ApiError;
 use crate::state::{AppState, ServerEvent};
 
 pub fn router() -> Router<Arc<AppState>> {
-    Router::new().route(
-        "/api/sessions/{id}/goal",
-        get(get_goal).post(goal_action),
-    )
+    Router::new().route("/api/sessions/{id}/goal", get(get_goal).post(goal_action))
 }
 
 /// 目标视图:折叠后的目标状态 + 服务端权威的减法记账用量 + 配置上限
@@ -180,7 +177,12 @@ async fn goal_action(
 
     // 用户操作 = 记录模型选择(供续跑回推)+ 清失败计数;与发送消息同语义。
     if matches!(action, "set" | "edit" | "resume") {
-        let provider = body.provider.as_deref().unwrap_or_default().trim().to_string();
+        let provider = body
+            .provider
+            .as_deref()
+            .unwrap_or_default()
+            .trim()
+            .to_string();
         let model = body.model.as_deref().unwrap_or_default().trim().to_string();
         if !provider.is_empty() && !model.is_empty() {
             state.runtime.human_turn(
@@ -244,9 +246,10 @@ async fn goal_action(
     }
 
     // 状态回到 active 的操作(set/edit/resume)在空闲会话上立即触发续跑。
-    let resumed = live.session.goal().is_some_and(|goal| {
-        goal.status == GoalStatus::Active && action != "pause"
-    });
+    let resumed = live
+        .session
+        .goal()
+        .is_some_and(|goal| goal.status == GoalStatus::Active && action != "pause");
     if resumed && !live.running.load(Ordering::SeqCst) {
         state.runtime.continue_goal(&id);
     }
@@ -263,9 +266,8 @@ async fn goal_action(
 }
 
 fn require_goal(goal: &Option<GoalState>) -> Result<GoalState, ApiError> {
-    goal.clone().ok_or_else(|| {
-        ApiError::bad_request("goal/none", "该会话没有设置目标")
-    })
+    goal.clone()
+        .ok_or_else(|| ApiError::bad_request("goal/none", "该会话没有设置目标"))
 }
 
 fn non_empty(value: &Option<String>, message: &str) -> Result<String, ApiError> {

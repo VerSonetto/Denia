@@ -147,8 +147,13 @@ pub fn estimate_message(message: &ChatMessage) -> u64 {
     }
     for replay in &message.reasoning_replay {
         let mut metadata = replay.payload.clone();
-        if let Some(object) = metadata.as_object_mut() { object.remove("thinking"); object.remove("summary"); }
-        tokens = tokens.saturating_add(BLOCK_OVERHEAD).saturating_add(estimate_text(&metadata.to_string()));
+        if let Some(object) = metadata.as_object_mut() {
+            object.remove("thinking");
+            object.remove("summary");
+        }
+        tokens = tokens
+            .saturating_add(BLOCK_OVERHEAD)
+            .saturating_add(estimate_text(&metadata.to_string()));
     }
     tokens = tokens.saturating_add(estimate_tool_calls(&message.tool_calls));
     for image in &message.images {

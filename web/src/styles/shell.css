@@ -1,0 +1,910 @@
+/* ---------- 桌面端窗口条(只占主列,不横穿侧栏) ----------
+ *
+ * 这条带子**不是通栏标题栏**:它住在 `.main` 里,宽度就是主列宽度。
+ * 早期版本把它做成通栏,结果是侧栏被从顶部截断、且与侧栏顶部品牌形成两个
+ * Denia。现在侧栏从窗口顶端贯到底(logo 在它自己的左上角),窗口按钮落在
+ * 主列上沿 —— 拖拽/双击最大化的区域也只在主列上方,侧栏顶部的品牌区
+ * 保持可点。
+ *
+ * 浏览器形态不渲染(组件返回 null),窄屏也不渲染(手机端有自己的顶栏)。
+ */
+.desktop-titlebar {
+  display: none;
+}
+
+@media (min-width: 821px) {
+  .desktop-titlebar {
+    display: flex;
+    align-items: stretch;
+    flex: none;
+    height: 38px;
+    /* 与主列头部同一底色:它是主列的顶边,不是侧栏的邻居。 */
+    background: var(--sidebar-fill);
+    border-bottom: 1px solid var(--border-l1);
+    color: var(--label-secondary);
+    user-select: none;
+  }
+
+  /* 拖动区:吃掉除窗口按钮以外的全部宽度。不放文字 —— 品牌在侧栏顶部,
+     会话标题在下方 session-header,这里再写一遍就是重复。 */
+  .desktop-titlebar-drag {
+    display: flex;
+    align-items: center;
+    flex: 1;
+    min-width: 0;
+    padding-left: 16px;
+    cursor: default;
+  }
+
+  .desktop-titlebar-actions {
+    display: flex;
+    flex: none;
+    align-items: stretch;
+  }
+
+  .desktop-window-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 46px;
+    height: 38px;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    color: var(--label-secondary);
+    cursor: pointer;
+    transition: background-color 150ms var(--ease), color 150ms var(--ease);
+  }
+
+  .desktop-window-btn:hover {
+    background: var(--hover-fill);
+    color: var(--label-primary);
+  }
+
+  .desktop-window-btn:active {
+    background: var(--active-fill);
+  }
+
+  .desktop-window-btn.close:hover {
+    background: #c93c3c;
+    color: #fff;
+  }
+
+  .desktop-window-btn:focus-visible {
+    position: relative;
+    z-index: 1;
+    outline: 2px solid var(--accent);
+    outline-offset: -3px;
+  }
+}
+
+/* ---------- shell: sidebar + center column (dsh AppFrame) ---------- */.shell {
+  display: grid;
+  flex: 1;
+  min-height: 0;
+  grid-template-columns: var(--sidebar-w) minmax(0, 1fr);
+  background: var(--bg-base);
+  /* 列宽滑动过渡:收起/展开共用(dsh 侧栏曲线);拖拽/无动画偏好下由下述规则关闭 */
+  transition: grid-template-columns 260ms var(--ease);
+}
+
+/* 收起态固定 56px 控制栏(dsh SIDEBAR_COLLAPSED),不把宽度全让给主列 */
+.shell[data-collapsed] {
+  grid-template-columns: 56px minmax(0, 1fr);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .shell {
+    transition: none;
+  }
+}
+
+.sidebar {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  min-width: 0;
+  padding: 8px 10px 10px;
+  background: var(--sidebar-fill);
+  border-right: 1px solid var(--border-l1);
+  /* 列宽收拢时裁切冻结宽度的宽态内容:滑动途中不发生重排 */
+  overflow: hidden;
+}
+
+/* 宽态内容:冻结宽度随列收拢被裁切,原地淡出后卸载 */
+.sidebar-wide {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  flex: 1;
+  width: calc(var(--sidebar-w) - 20px);
+  transition: opacity 150ms var(--ease);
+}
+
+.sidebar-wide.fade-out {
+  opacity: 0;
+}
+
+.sidebar-wide.wide-in {
+  animation: sidebar-wide-in 150ms var(--ease) backwards;
+}
+
+@keyframes sidebar-wide-in {
+  from {
+    opacity: 0;
+  }
+}
+
+/* 收起态顶带:桌面端与展开态品牌行、主列窗口条等高同底线。 */
+.sidebar-rail-top {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+}
+
+/* 收起态控制栏:与展开态一一对应的图标控件(开关/新建/添加/搜索 + 设置) */
+.sidebar-rail {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  min-height: 0;
+  flex: 1;
+}
+
+.sidebar-rail.enter {
+  animation: sidebar-rail-in 150ms var(--ease) backwards;
+}
+
+@keyframes sidebar-rail-in {
+  from {
+    opacity: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sidebar-wide,
+  .sidebar-wide.fade-out {
+    transition: none;
+  }
+  .sidebar-wide.wide-in,
+  .sidebar-rail.enter {
+    animation: none;
+  }
+}
+
+.rail-btn {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  padding: 0;
+  border: none;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--label-secondary);
+  cursor: pointer;
+  transition:
+    background 0.15s var(--ease),
+    color 0.15s var(--ease),
+    opacity 0.15s var(--ease);
+}
+
+.rail-btn:hover {
+  background: var(--hover-fill);
+  color: var(--label-primary);
+}
+
+.rail-btn.accent {
+  background: var(--accent);
+  color: var(--accent-on);
+}
+
+.rail-btn.accent:hover {
+  opacity: 0.9;
+}
+
+.rail-spacer {
+  flex: 1;
+}
+
+.rail-foot {
+  flex: none;
+  display: flex;
+  justify-content: center;
+  width: 100%;
+  padding-top: 8px;
+  border-top: 1px solid var(--border-l1);
+}
+
+/* 展开态顶部开关:logo 行右侧 */
+.sidebar-toggle {
+  margin-left: auto;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  align-items: center;
+  justify-content: center;
+  border-radius: 7px;
+  flex: none;
+}
+
+.sidebar-logo {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  height: 52px;
+  padding: 6px 6px 2px;
+  margin-bottom: 4px;
+  color: var(--label-primary);
+}
+
+/* ---- 桌面端:侧栏顶带与主列窗口条对齐 ----
+ *
+ * 侧栏的品牌行(展开态)/ 展开开关行(收起态)与主列的窗口条同高(38px)、
+ * 同底线,两者合起来是横跨窗口的一条顶带:左段是侧栏品牌,右段是窗口
+ * 按钮 —— 品牌只此一处,不再与窗口条重复。
+ *
+ * 位置:必须写在 `.sidebar-logo` 基础规则**之后**。两者特异性相同,CSS
+ * 靠后出现者胜;放到前面的窗口条媒体查询里会被下面的基础规则反过来覆盖
+ * (实测:顶带还是 52px,底线对不上)。
+ *
+ * 下边框要横贯整列:侧栏有 10px 左右内边距,靠负 margin 把线拉到列边界,
+ * 再用等量 padding 把内容推回去。
+ *
+ * 只在桌面生效:手机端侧栏是覆盖式抽屉,顶部尺寸要按触控来(≥44px)。
+ */
+@media (min-width: 821px) {
+  .sidebar {
+    padding-top: 0;
+  }
+
+  .sidebar-logo,
+  .sidebar-rail-top {
+    height: 38px;
+    margin-bottom: 8px;
+    border-bottom: 1px solid var(--border-l1);
+    margin-left: -10px;
+    margin-right: -10px;
+    padding-left: 10px;
+    padding-right: 10px;
+  }
+
+  .sidebar-logo {
+    padding-top: 0;
+    padding-bottom: 0;
+  }
+}
+
+.brand-text {
+  font-family: var(--font-mono);
+  font-size: 17px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  color: var(--label-primary);
+}
+
+.brand-text em {
+  font-style: normal;
+  font-family: var(--font-mono);
+  font-size: 13px;
+  font-weight: 400;
+  color: var(--label-tertiary);
+  letter-spacing: 0;
+}
+
+.sidebar-new-btn {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  height: 36px;
+  margin: 0 2px 10px;
+  padding: 8px 14px;
+  border: 1px solid var(--border-l2);
+  border-radius: var(--r-md);
+  background: var(--accent);
+  color: var(--accent-on);
+  font-size: 13.5px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: opacity 0.15s var(--ease), transform 0.15s var(--ease);
+}
+
+.sidebar-new-btn:hover {
+  opacity: 0.9;
+}
+
+.sidebar-new-btn:active {
+  transform: scale(0.985);
+}
+
+.sidebar-region {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.sidebar-region-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-height: 28px;
+  padding: 0 4px;
+}
+
+.sidebar-region-head .label {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--label-caption);
+}
+
+.sidebar-region-actions {
+  display: flex;
+  align-items: center;
+  gap: 1px;
+}
+
+.sidebar-region-actions .icon-btn {
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  align-items: center;
+  justify-content: center;
+  border-radius: 7px;
+}
+
+.sidebar-search {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 32px;
+  margin: 0 2px 4px;
+  padding: 0 10px;
+  border: 1px solid var(--border-l2);
+  border-radius: 9px;
+  background: var(--bg-layer-1);
+  color: var(--label-tertiary);
+  animation: sidebar-search-in 0.18s var(--ease);
+}
+
+@keyframes sidebar-search-in {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.sidebar-search-input {
+  flex: 1;
+  min-width: 0;
+  border: none;
+  outline: none;
+  background: transparent;
+  color: var(--label-primary);
+  font-size: 12.5px;
+  line-height: 1.2;
+}
+
+.sidebar-search-input::placeholder {
+  color: var(--label-caption);
+}
+
+.sidebar-search-input::-webkit-search-cancel-button {
+  display: none;
+}
+
+.sidebar-search-clear {
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  align-items: center;
+  justify-content: center;
+}
+
+.sidebar-foot {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 10px 2px 2px;
+  border-top: 1px solid var(--border-l1);
+  margin-top: 4px;
+}
+
+.sidebar-nav {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  height: 36px;
+  padding: 0 10px;
+  border: none;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--label-secondary);
+  font-size: 13px;
+  font-weight: 500;
+  cursor: pointer;
+  text-align: left;
+  transition: background 0.15s var(--ease), color 0.15s var(--ease);
+}
+
+.sidebar-nav:hover {
+  background: var(--hover-fill);
+  color: var(--label-primary);
+}
+
+.sidebar-nav.active {
+  background: var(--active-fill);
+  color: var(--label-primary);
+  font-weight: 500;
+}
+
+.main {
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  position: relative;
+  background: var(--bg-base);
+}
+
+.page-pane {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+}
+
+.page-pane[hidden] {
+  display: none !important;
+}
+
+/* ---------- session panel list ---------- */
+
+.sidebar-section {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  flex: 1;
+}
+
+.session-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  overflow-y: auto;
+  min-height: 0;
+  flex: 1;
+  scrollbar-gutter: stable;
+  padding-bottom: 8px;
+}
+
+.icon-btn {
+  border: none;
+  background: none;
+  color: var(--label-tertiary);
+  cursor: pointer;
+  padding: 4px;
+  border-radius: var(--r-sm);
+  display: flex;
+  transition:
+    background 0.15s var(--ease),
+    color 0.15s var(--ease);
+}
+
+.icon-btn:hover {
+  color: var(--label-primary);
+  background: var(--hover-fill);
+}
+
+.icon-btn.active {
+  color: var(--label-primary);
+  background: var(--active-fill);
+}
+
+.row-actions {
+  display: none;
+  align-items: center;
+  gap: 2px;
+  flex: none;
+  padding-right: 2px;
+}
+
+.row-action-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: none;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--label-tertiary);
+  cursor: pointer;
+  transition:
+    background 0.15s var(--ease),
+    color 0.15s var(--ease),
+    opacity 0.15s var(--ease);
+}
+
+.row-action-btn:hover {
+  color: var(--label-primary);
+  background: var(--hover-fill);
+}
+
+.row-action-btn.danger:hover {
+  color: var(--error-fg);
+  background: var(--danger-soft);
+}
+
+.row-action-btn:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+
+.row-action-btn:disabled:hover {
+  color: var(--label-tertiary);
+  background: transparent;
+}
+
+.ws-group-head-row {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  border-radius: 9px;
+}
+
+.ws-group-head-row .ws-group-head {
+  flex: 1;
+  min-width: 0;
+  width: auto;
+}
+
+.ws-group-head-row:hover .row-actions {
+  display: flex;
+}
+
+.ungrouped-actions {
+  display: flex;
+  align-items: center;
+  flex: none;
+}
+
+.ungrouped-clear {
+  height: 24px;
+  padding: 0 8px;
+  border: none;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--label-tertiary);
+  font-size: 11.5px;
+  font-weight: 500;
+  white-space: nowrap;
+  cursor: pointer;
+  transition:
+    background 0.15s var(--ease),
+    color 0.15s var(--ease);
+}
+
+.ungrouped-clear:hover {
+  color: var(--error-fg);
+  background: var(--danger-soft);
+}
+
+.ws-group + .ws-group {
+  margin-top: 8px;
+}
+
+.ws-group-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 32px;
+  border: none;
+  background: none;
+  color: var(--label-primary);
+  font-size: 13px;
+  font-weight: 550;
+  padding: 0 8px 0 6px;
+  border-radius: 9px;
+  cursor: pointer;
+  text-align: left;
+  width: 100%;
+  transition: background 0.15s var(--ease);
+}
+
+.ws-group-head:hover {
+  background: var(--hover-fill);
+  color: var(--label-primary);
+}
+
+.ws-group-head.active {
+  color: var(--label-primary);
+}
+
+.ws-folder {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
+  color: var(--label-secondary);
+  background: color-mix(in srgb, var(--label-secondary) 10%, transparent);
+}
+
+.ws-folder.muted {
+  color: var(--label-caption);
+  background: color-mix(in srgb, var(--label-caption) 10%, transparent);
+}
+
+.ws-group.open .ws-folder {
+  color: var(--label-primary);
+  background: color-mix(in srgb, var(--label-primary) 10%, transparent);
+}
+
+.ws-group-head .name {
+  flex: 1;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.ws-group-head .count {
+  font-size: 10.5px;
+  font-weight: 500;
+  color: var(--label-caption);
+  font-variant-numeric: tabular-nums;
+  min-width: 1.2em;
+  text-align: right;
+}
+
+.ws-group-body {
+  display: grid;
+  grid-template-rows: 0fr;
+  opacity: 0;
+  transition:
+    grid-template-rows 0.28s cubic-bezier(0.22, 1, 0.36, 1),
+    opacity 0.2s ease;
+}
+
+.ws-group-body.open {
+  grid-template-rows: 1fr;
+  opacity: 1;
+}
+
+.ws-group-body-inner {
+  overflow: hidden;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 2px 0 2px;
+}
+
+.ws-group .session-row-wrap {
+  margin-left: 6px;
+  width: calc(100% - 6px);
+}
+
+.session-row-wrap {
+  position: relative;
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  border-radius: 8px;
+}
+
+/* 悬停/选中底色画在整行(含折叠钮与时间列),行内元素不各画各的。 */
+.session-row-wrap:hover,
+.session-row-wrap.active {
+  background: var(--hover-fill);
+}
+
+/* 血缘缩进与树导轨:深度经 --depth 传入,导轨对齐父行折叠钮的中线。 */
+.session-row-wrap.nested {
+  padding-left: calc(var(--depth, 1) * 14px);
+}
+
+.session-row-wrap.nested::before {
+  content: '';
+  position: absolute;
+  left: calc(8px + (var(--depth, 1) - 1) * 14px);
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: color-mix(in srgb, var(--label-caption) 22%, transparent);
+}
+
+.session-row-wrap .session-row {
+  flex: 1;
+  min-width: 0;
+  margin-left: 0;
+  width: auto;
+}
+
+/* 行尾时间常显,悬停时让位给删除钮。 */
+.session-row-wrap:hover .session-time {
+  display: none;
+}
+
+.session-row-wrap:hover .row-actions {
+  display: flex;
+}
+
+.session-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 30px;
+  padding: 0 8px;
+  border-radius: 8px;
+  cursor: pointer;
+  border: none;
+  background: none;
+  text-align: left;
+  width: 100%;
+  color: var(--label-secondary);
+  transition: background 0.15s var(--ease), color 0.15s var(--ease);
+}
+
+.session-row:hover,
+.session-row.active {
+  color: var(--label-primary);
+}
+
+.session-row.active {
+  font-weight: 500;
+}
+
+.session-row .lead {
+  width: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+}
+
+.session-row .excerpt {
+  flex: 1;
+  min-width: 0;
+  font-size: 13px;
+  line-height: 18px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* 侧栏血缘徽标:子会话标题后的小胶囊,与运行中圆点同尺度 */
+.session-row .branch-tag {
+  flex: none;
+  font-size: 9.5px;
+  line-height: 14px;
+  padding: 0 6px;
+  border-radius: var(--r-pill);
+  background: var(--accent-soft);
+  color: var(--accent);
+  border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
+  letter-spacing: 0.02em;
+  user-select: none;
+}
+
+/* 子代理和用户主动分支使用不同身份色，避免只看血缘缩进无法区分。 */
+.session-row .subagent-tag {
+  flex: none;
+  font-size: 9.5px;
+  line-height: 14px;
+  padding: 0 6px;
+  border-radius: var(--r-pill);
+  background: color-mix(in srgb, var(--violet-base) 14%, transparent);
+  color: var(--violet-fg);
+  border: 1px solid color-mix(in srgb, var(--violet-base) 42%, transparent);
+  letter-spacing: 0.02em;
+  user-select: none;
+}
+
+/* 折叠列:所有会话行统一预留,无子会话者为空位,保证标题左缘对齐。 */
+.session-caret-slot {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+}
+
+.session-caret {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 18px;
+  padding: 0;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--label-caption);
+  cursor: pointer;
+  transition:
+    color 0.15s var(--ease),
+    background 0.15s var(--ease);
+}
+
+.session-caret:hover {
+  color: var(--label-primary);
+  background: var(--active-fill);
+}
+
+.session-caret svg {
+  transition: transform 0.18s var(--ease);
+}
+
+.session-caret.open svg {
+  transform: rotate(90deg);
+}
+
+/* 行尾相对时间:常显,悬停时让位给删除钮。 */
+.session-time {
+  flex: none;
+  padding-right: 8px;
+  font-size: 11px;
+  line-height: 18px;
+  color: var(--label-caption);
+  font-variant-numeric: tabular-nums;
+  user-select: none;
+}
+
+/* 折叠时的后代计数徽标。 */
+.session-row .child-count {
+  flex: none;
+  padding: 0 5px;
+  font-size: 9.5px;
+  line-height: 14px;
+  border-radius: var(--r-pill);
+  color: var(--label-caption);
+  background: color-mix(in srgb, var(--label-caption) 12%, transparent);
+  font-variant-numeric: tabular-nums;
+  user-select: none;
+}
+
+.expand-rest {
+  border: none;
+  background: none;
+  color: var(--label-caption);
+  font-size: 11px;
+  cursor: pointer;
+  text-align: left;
+  padding: 4px 8px 4px 36px;
+  border-radius: 8px;
+}
+
+.expand-rest:hover {
+  color: var(--label-primary);
+  background: var(--hover-fill);
+}
+
+.empty-hint {
+  color: var(--label-caption);
+  font-size: 12px;
+  padding: 10px 8px;
+  line-height: 1.65;
+}
+

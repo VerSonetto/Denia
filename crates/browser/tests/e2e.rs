@@ -71,10 +71,7 @@ async fn drives_a_real_browser_end_to_end() {
     //    后者可能因不可见/无尺寸而合理地过不了 Playwright 的可操作性检查。
     let clickable_ref = elements
         .lines()
-        .find(|line| {
-            (line.contains("link ") || line.contains("button "))
-                && line.contains("[ref=")
-        })
+        .find(|line| (line.contains("link ") || line.contains("button ")) && line.contains("[ref="))
         .and_then(|line| {
             let start = line.find("[ref=")? + 5;
             let rest = &line[start..];

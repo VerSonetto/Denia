@@ -24,14 +24,17 @@ $web = Join-Path $Root 'web'
 if (-not (Test-Path (Join-Path $web 'node_modules'))) {
     Push-Location $web
     pnpm install
+    if ($LASTEXITCODE -ne 0) { throw '前端依赖安装失败' }
     Pop-Location
 }
 Push-Location $web
 pnpm build
+if ($LASTEXITCODE -ne 0) { throw '前端构建失败' }
 Pop-Location
 
 Log 'release build + global install'
 cargo install --path crates/server --force
+if ($LASTEXITCODE -ne 0) { throw '服务端构建与安装失败' }
 
 # 改名前的旧二进制:安装成功后清掉,不留残留。
 Remove-Item (Join-Path $env:USERPROFILE '.cargo\bin\dsh-rs.exe') -Force -ErrorAction SilentlyContinue

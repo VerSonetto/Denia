@@ -20,8 +20,17 @@
 //! 加载时修复 torn tail(截断到最后一个合法行边界)并用合成
 //! `turn-end { aborted }` 关闭崩溃遗留的孤儿轮次——事件不会静默丢失。
 
+mod append;
+mod creation;
+mod history;
+mod log_writer;
+mod projection;
+mod recovery;
+mod store;
+
+use log_writer::LogWriter;
 use std::fs::{File, OpenOptions};
-use std::io::{BufRead, BufReader, BufWriter, Write};
+use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -99,7 +108,7 @@ fn file_stamp(path: &Path) -> Option<FileStamp> {
 /// Mutable log state behind the per-session lock.
 struct SessionInner {
     events: Vec<SessionEnvelope>,
-    writer: BufWriter<File>,
+    writer: LogWriter,
     /// 每个事件行结束的字节偏移(含换行);物理回退截断文件用。
     /// 与 `events` 一一对应。
     offsets: Vec<u64>,
@@ -174,252 +183,6 @@ pub struct Session {
 }
 
 impl Session {
-    /// Creates a fresh session file (header line only) inside `dir`.
-    /// `id` becomes both the header id and, by store convention, the
-    /// directory name. `sandbox` confines file tools to `cwd`.
-    /// `parent_session` 记录分支血缘(非分支会话为 `None`)。
-    pub fn create(
-        dir: &Path,
-        id: String,
-        cwd: &Path,
-        sandbox: bool,
-        parent_session: Option<String>,
-    ) -> Result<Session, SessionError> {
-        Self::create_described(dir, id, cwd, sandbox, parent_session, None)
-    }
-
-    fn create_described(
-        dir: &Path,
-        id: String,
-        cwd: &Path,
-        sandbox: bool,
-        parent_session: Option<String>,
-        subagent: Option<denia_core::session::SubagentDescriptor>,
-    ) -> Result<Session, SessionError> {
-        std::fs::create_dir_all(dir)?;
-        let file = dir.join("session.jsonl");
-        let header = SessionHeader {
-            kind: SessionHeaderKind::Session,
-            version: SESSION_FORMAT_VERSION,
-            id,
-            created_at: now_millis(),
-            cwd: cwd.to_string_lossy().to_string(),
-            sandbox,
-            parent_session,
-            subagent,
-        };
-        {
-            let mut handle = File::create(&file)?;
-            let header_line = serde_json::to_string(&header)?;
-            writeln!(handle, "{}", header_line)?;
-            handle.flush()?;
-            let base_offset = header_line.len() as u64 + 1;
-            let writer = open_append_writer(&file)?;
-            return Ok(Session {
-                header,
-                file,
-                inner: Mutex::new(SessionInner {
-                    events: Vec::new(),
-                    writer,
-                    offsets: Vec::new(),
-                    base_offset,
-                    next_offset: base_offset,
-                    last_turn: 0,
-                    last_system_prompt: None,
-                    meter: ContextMeter::new(),
-                    pending_turn: Vec::new(),
-                    permission_mode: PermissionMode::AutoEdit,
-                    agent_preset: None,
-                    goal: None,
-                    title: None,
-                    derived_surface: None,
-                    derived_revision: 0,
-                    log_revision: 0,
-                    cold: false,
-                    last_seq: 0,
-                    resident_bytes: 0,
-                    transient_bytes: 0,
-                    first_prompt_excerpt: None,
-                }),
-            });
-        }
-    }
-
-    /// Loads one session, repairing torn tails and orphaned turns.
-    ///
-    /// 流式逐行读取:不把整个日志读成 String(数百 MB 大会话会多出一份
-    /// 等体量的瞬时拷贝),峰值内存 = 解析后的事件 + 一个行缓冲。
-    pub fn load(file: &Path) -> Result<Session, SessionError> {
-        let (header, inner) = Self::parse_file(file, true)?;
-        let session = Session {
-            header,
-            file: file.to_path_buf(),
-            inner: Mutex::new(inner),
-        };
-        session.close_orphaned_turn()?;
-        session.refresh_meter_from_log()?;
-        Ok(session)
-    }
-
-    /// 冷打开(仅浏览路径):同样完整解析一遍日志 —— meter/goal/权限/
-    /// preset/标题等聚合投影照常保留 —— 但事件与 offsets **不驻留**。
-    ///
-    /// 内存从 O(全部事件) 降到 O(聚合);代价是失去事件 Vec,事件需求
-    /// 由 [`Session::events_after`] 的磁盘回放或 [`Session::ensure_hot`]
-    /// 升级满足。孤儿轮闭合是写盘修复,延迟到 ensure_hot(任何写路径都
-    /// 必先升级,修复因此总在首次写入前落地)。
-    pub fn open_cold(file: &Path) -> Result<Session, SessionError> {
-        let (header, inner) = Self::parse_file(file, false)?;
-        Ok(Session {
-            header,
-            file: file.to_path_buf(),
-            inner: Mutex::new(inner),
-        })
-    }
-
-    /// 流式解析日志:retain=true 全量驻留(热),false 只留聚合(冷)。
-    fn parse_file(
-        file: &Path,
-        retain: bool,
-    ) -> Result<(SessionHeader, SessionInner), SessionError> {
-        let mut reader = BufReader::new(File::open(file)?);
-        let mut raw = String::new();
-
-        raw.clear();
-        let header_read = reader.read_line(&mut raw)?;
-        if header_read == 0 {
-            return Err(SessionError::Corrupt("empty session log".into()));
-        }
-        let header: SessionHeader = serde_json::from_str(raw.trim_end_matches(['\n', '\r']))
-            .map_err(|e| SessionError::Corrupt(format!("bad header: {e}")))?;
-        if header.version != SESSION_FORMAT_VERSION {
-            return Err(SessionError::Corrupt(format!(
-                "unsupported session format version {}",
-                header.version
-            )));
-        }
-
-        // Byte offsets track the committed prefix for torn-tail truncation.
-        let consumed_base = header_read as u64;
-        let mut consumed = consumed_base;
-        let mut offsets: Vec<u64> = Vec::new();
-        let mut events: Vec<SessionEnvelope> = Vec::new();
-        let mut torn_at: Option<usize> = None;
-        let mut last_turn = 0u32;
-        let mut last_system_prompt: Option<String> = None;
-        let mut permission_mode = PermissionMode::AutoEdit;
-        let mut agent_preset: Option<String> = None;
-        let mut goal: Option<GoalState> = None;
-        let mut title: Option<String> = None;
-        let mut meter = ContextMeter::new();
-        let mut pending_turn: Vec<SessionEnvelope> = Vec::new();
-        let mut last_seq = 0u64;
-        let mut first_prompt_excerpt = None;
-        // 驻留事件的内存近似:逐行累计(chunk 只在打开的轮次里驻留,
-        // 加载时日志里的旧 chunk 一律不进内存,故此处只记非 chunk 行)。
-        let mut resident_bytes = 0u64;
-        loop {
-            raw.clear();
-            let read = reader.read_line(&mut raw)?;
-            if read == 0 {
-                break;
-            }
-            let line = raw.trim_end_matches(['\n', '\r']);
-            if line.trim().is_empty() {
-                consumed += read as u64;
-                continue;
-            }
-            match serde_json::from_str::<SessionEnvelope>(line) {
-                Ok(envelope) => {
-                    let transient = is_transient_event(&envelope.event);
-                    if retain && !transient {
-                        offsets.push(consumed + read as u64);
-                    }
-                    last_seq = last_seq.max(envelope.seq);
-                    match &envelope.event {
-                        SessionEvent::TurnStart { turn } => last_turn = last_turn.max(*turn),
-                        SessionEvent::SystemPrompt { text, .. } => {
-                            last_system_prompt = Some(text.clone())
-                        }
-                        SessionEvent::PermissionMode { mode } => permission_mode = *mode,
-                        SessionEvent::AgentPreset { preset } => agent_preset = Some(preset.clone()),
-                        SessionEvent::SessionTitle { title: t } => title = Some(t.clone()),
-                        SessionEvent::UserMessage { text, .. } if first_prompt_excerpt.is_none() => {
-                            first_prompt_excerpt = Some(excerpt_text(text, 80));
-                        }
-                        _ => {}
-                    }
-                    // meter/goal 的聚合折叠冷热一致;chunk 不进任何折叠
-                    // (token-meter 与派生面都不读它),只有驻留是可选项。
-                    if matches!(envelope.event, SessionEvent::TurnStart { .. }) {
-                        pending_turn.clear();
-                    }
-                    if let Some(sample) = usage_envelope(&envelope) {
-                        pending_turn.push(sample);
-                    }
-                    if matches!(envelope.event, SessionEvent::TurnEnd { .. }) {
-                        let slice = std::mem::take(&mut pending_turn);
-                        meter.fold_turn(&slice);
-                    }
-                    meter.apply_one(&envelope);
-                    if let SessionEvent::Goal { op } = &envelope.event {
-                        goal = apply_goal_op(goal, op, envelope.time, meter.turn_usage().total());
-                    }
-                    if retain && !transient {
-                        events.push(envelope);
-                        resident_bytes += read as u64;
-                    }
-                }
-                Err(_) => {
-                    if line.trim_end().ends_with('}') {
-                        // Retired or unknown event types are skipped so older
-                        // logs keep loading.
-                        consumed += read as u64;
-                        continue;
-                    }
-                    torn_at = Some(consumed as usize);
-                    break;
-                }
-            }
-            consumed += read as u64;
-        }
-
-        if let Some(torn) = torn_at {
-            // Truncate to the last good boundary; the torn tail is discarded.
-            let file_handle = OpenOptions::new().write(true).open(file)?;
-            file_handle.set_len(torn as u64)?;
-        }
-        if !retain {
-            // 冷态不驻留事件;turn 缓冲同样只服务热态的 meter 精确折叠。
-            pending_turn.clear();
-        }
-        let inner = SessionInner {
-            events,
-            writer: open_append_writer(file)?,
-            offsets,
-            base_offset: consumed_base,
-            next_offset: consumed,
-            last_turn,
-            last_system_prompt,
-            meter,
-            pending_turn,
-            permission_mode,
-            agent_preset,
-            goal,
-            title,
-            derived_surface: None,
-            derived_revision: 0,
-            log_revision: 0,
-            cold: !retain,
-            last_seq,
-            // 热态的事件内存近似 = 驻留各行的字节之和(与 append 同口径)。
-            resident_bytes,
-            transient_bytes: 0,
-            first_prompt_excerpt,
-        };
-        Ok((header, inner))
-    }
-
     pub fn id(&self) -> &str {
         &self.header.id
     }
@@ -521,7 +284,10 @@ impl Session {
     }
 
     pub fn cool(&self) -> Result<bool, SessionError> {
-        let mut inner = self.inner.lock().unwrap_or_else(|poison| poison.into_inner());
+        let mut inner = self
+            .inner
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
         if inner.cold {
             return Ok(false);
         }
@@ -586,643 +352,6 @@ impl Session {
     pub fn file(&self) -> &Path {
         &self.file
     }
-
-    /// Appends one event, assigning contiguous seq and wall-clock time. The
-    /// log lock is held only for this write, so concurrent readers observe
-    /// live progress instead of waiting for the whole turn.
-    ///
-    /// 写入走 BufWriter:高频流式帧不逐条 flush,崩溃尾部由 torn-tail 修复。
-    pub fn append(&self, event: SessionEvent) -> Result<SessionEnvelope, SessionError> {
-        self.append_with_time(event, now_millis())
-    }
-
-    /// 把缓冲的日志前缀刷到磁盘(对齐 dsh checkpoint-policy 的
-    /// "模型请求前"检查点):agent-loop 在模型请求 dispatched 之前调用,
-    /// 保证请求前缀(step-start/system-prompt/request-header/context)已
-    /// 落盘,崩溃后能完整重建请求上下文;fail-closed——flush 失败则
-    /// 不派发请求。
-    pub fn flush(&self) -> Result<(), SessionError> {
-        let mut inner = self
-            .inner
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
-        inner.writer.flush()?;
-        Ok(())
-    }
-
-    /// [`Session::append`] 的时间显式版:分支种子回放保留源事件时间戳,
-    /// 轨迹时间轴在子会话里保持真实。
-    fn append_with_time(
-        &self,
-        event: SessionEvent,
-        time: u64,
-    ) -> Result<SessionEnvelope, SessionError> {
-        // 写路径强制热态:冷会话的事件 Vec 为空,seq 分配与派生面都会错。
-        self.ensure_hot()?;
-        let mut inner = self
-            .inner
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
-        // last_seq 兜底:极旧日志存在 seq 跳变/乱序(历史回退遗留),
-        // 事件数可能小于最大 seq,只按 len+1 分配会撞号。
-        let seq = inner.last_seq.max(inner.events.len() as u64) + 1;
-        let envelope = SessionEnvelope {
-            seq,
-            time,
-            event,
-        };
-        inner.last_seq = seq;
-        // 维护 last_turn / last_system_prompt 的 O(1) 投影。
-        match &envelope.event {
-            SessionEvent::TurnStart { turn } => {
-                inner.last_turn = inner.last_turn.max(*turn);
-            }
-            SessionEvent::SystemPrompt { text, .. } => {
-                inner.last_system_prompt = Some(text.clone());
-            }
-            SessionEvent::PermissionMode { mode } => {
-                inner.permission_mode = *mode;
-            }
-            SessionEvent::AgentPreset { preset } => {
-                inner.agent_preset = Some(preset.clone());
-            }
-            SessionEvent::SessionTitle { title } => {
-                inner.title = Some(title.clone());
-            }
-            SessionEvent::UserMessage { text, .. } if inner.first_prompt_excerpt.is_none() => {
-                inner.first_prompt_excerpt = Some(excerpt_text(text, 80));
-            }
-            _ => {}
-        }
-        // 维护 token-meter:
-        // 1) 每个事件都贡献 message/system 启发式 fold(apply_one 内部按角色累计)。
-        // 2) `TurnStart` 重置本轮 envelope 缓冲;`TurnEnd` 闭合时把整段
-        //    喂给 `meter.fold_turn`,成功则并入精确 usage 与 anchor。
-        // chunk(transient)不进缓冲:token-meter 与派生面都不读它。
-        let transient = is_transient_event(&envelope.event);
-        if matches!(&envelope.event, SessionEvent::TurnStart { .. }) {
-            inner.pending_turn.clear();
-        }
-        if let Some(sample) = usage_envelope(&envelope) {
-            inner.pending_turn.push(sample);
-        }
-        if matches!(&envelope.event, SessionEvent::TurnEnd { .. }) {
-            let slice = std::mem::take(&mut inner.pending_turn);
-            inner.meter.fold_turn(&slice);
-        }
-        inner.meter.apply_one(&envelope);
-        // goal 折叠放在 meter 维护之后:`Set` 的记账基数取此刻的精确累计,
-        // 与 load 回放(`apply_one` 之后折叠)时序一致。
-        if let SessionEvent::Goal { op } = &envelope.event {
-            let total = inner.meter.turn_usage().total();
-            inner.goal = apply_goal_op(inner.goal.take(), op, envelope.time, total);
-        }
-
-        let line = serde_json::to_string(&envelope)?;
-        writeln!(inner.writer, "{line}")?;
-        let next_offset = inner.next_offset + line.len() as u64 + 1;
-        inner.next_offset = next_offset;
-        if !transient {
-            inner.offsets.push(next_offset);
-        }        // 落盘策略:步骤边界/工具结果/todo 快照/权限切换立即 flush(耐久性
-        // 边界——权限档位是安全语义,必须立即可被磁盘读者看到),流式 chunk
-        // 只进 buffer,超 16KB 自动落盘(高频帧零系统调用)。
-        match &envelope.event {
-            SessionEvent::TurnEnd { .. }
-            | SessionEvent::StepEnd { .. }
-            | SessionEvent::ToolResult { .. }
-            | SessionEvent::TodoWrite { .. }
-            | SessionEvent::PermissionMode { .. }
-            | SessionEvent::AgentPreset { .. }
-            | SessionEvent::SessionTitle { .. }
-            | SessionEvent::Goal { .. }
-            | SessionEvent::CommandRun { .. } => {
-                inner.writer.flush()?;
-            }
-            _ => {
-                if inner.writer.buffer().len() >= 16 * 1024 {
-                    inner.writer.flush()?;
-                }
-            }
-        }
-        // 当前步骤的 chunk 支持实时回放;消息结算或轮次闭合后只保留终稿。
-        let line_bytes = line.len() as u64 + 1;
-        inner.events.push(envelope.clone());
-        inner.resident_bytes += line_bytes;
-        if transient {
-            inner.transient_bytes += line_bytes;
-        }
-        if matches!(&envelope.event, SessionEvent::AssistantMessage { .. } | SessionEvent::TurnEnd { .. }) {
-            inner.events.retain(|item| !is_transient_event(&item.event));
-            inner.events.shrink_to_fit();
-            // 清扫的正是本轮的 chunk,按记账扣减(饱和,防历史回退遗留的偏差)。
-            inner.resident_bytes = inner.resident_bytes.saturating_sub(inner.transient_bytes);
-            inner.transient_bytes = 0;
-        }
-        // 日志变了:派生面缓存失效,版本号自增(回退截断也走这里)。
-        inner.derived_surface = None;
-        inner.log_revision += 1;
-        Ok(envelope)
-    }
-
-    /// 分支种子回放:把源日志前缀原样写入新会话(重新从 1 连续编号,
-    /// 保留源事件时间戳),last_turn/last_system_prompt/token-meter 随
-    /// `append_with_time` 一致重建。回放后新会话 `derive_messages` 与
-    /// 源会话前缀逐字一致——model-visible == logged 的不变量不破坏。
-    pub fn seed_from(&self, source: &[SessionEnvelope]) -> Result<(), SessionError> {
-        for envelope in source {
-            self.append_with_time(envelope.event.clone(), envelope.time)?;
-        }
-        Ok(())
-    }
-
-    /// 物理回退:截断会话日志到目标用户消息**之前**,并把回退审计追加到
-    /// `rewinds.jsonl`。内存事件/token-meter/计数器同步重建。
-    ///
-    /// 这是破坏性操作:目标 seq 之后的事件从磁盘移除,不可恢复。
-    pub fn rewind(&self, to_seq: u64) -> Result<RewindOutcome, SessionError> {
-        // 破坏性写路径强制热态:截断依赖完整事件与 offsets 对齐。
-        self.ensure_hot()?;
-        let mut inner = self
-            .inner
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
-        // seq 定位:事件表不驻留 chunk(seq 有空洞),下标 != seq-1。
-        if to_seq == 0 {
-            return Err(SessionError::NotARewindPoint(to_seq));
-        }
-        let target_idx = inner
-            .events
-            .partition_point(|envelope| envelope.seq < to_seq);
-        let target = match inner.events.get(target_idx) {
-            Some(envelope) if envelope.seq == to_seq => envelope,
-            _ => return Err(SessionError::NotARewindPoint(to_seq)),
-        };
-        let to_message = match &target.event {
-            SessionEvent::UserMessage {
-                text,
-                injected: false,
-                ..
-            } => Some(text.clone()),
-            _ => return Err(SessionError::NotARewindPoint(to_seq)),
-        };
-
-        let removed_events = inner.events.len() - target_idx;
-        // 先 flush,确保所有已写事件落盘;再按最后一个保留事件的字节偏移截断。
-        inner.writer.flush()?;
-        let truncate_offset = if target_idx == 0 {
-            inner.base_offset
-        } else {
-            *inner
-                .offsets
-                .get(target_idx - 1)
-                .ok_or(SessionError::NotARewindPoint(to_seq))?
-        };
-        {
-            let fh = OpenOptions::new().write(true).open(&self.file)?;
-            fh.set_len(truncate_offset)?;
-        }
-
-        // 内存与派生状态回退。
-        inner.events.truncate(target_idx);
-        inner.events.shrink_to_fit();
-        inner.offsets.truncate(target_idx);
-        inner.offsets.shrink_to_fit();
-        inner.next_offset = truncate_offset;
-        // 驻留字节随截断重算:offsets 只登记非 chunk 事件的行尾偏移,
-        // 差值即这些事件在内存里的近似体积。chunk 在轮次闭合时已清扫,
-        // 被截断的区间里也不含驻留的 chunk,因此这里不需要 transient 账。
-        inner.resident_bytes = if target_idx == 0 {
-            0
-        } else {
-            inner
-                .offsets
-                .get(target_idx - 1)
-                .copied()
-                .unwrap_or(0)
-                .saturating_sub(inner.base_offset)
-        };
-        inner.transient_bytes = 0;
-        // 派生面缓存随截断作废(版本号自增,即使截断后长度恰好等于某个
-        // 旧缓存时的长度,也不会误命中)。
-        inner.derived_surface = None;
-        inner.log_revision += 1;
-        inner.last_turn = 0;
-        inner.last_system_prompt = None;
-        inner.permission_mode = PermissionMode::AutoEdit;
-        inner.goal = None;
-        inner.meter = ContextMeter::new();
-        inner.pending_turn.clear();
-        inner.first_prompt_excerpt = None;
-        // 取出日志就地回放(而不是克隆一份):29MB 级的长会话下,这份副本
-        // 是回退时峰值内存的主要来源。回放完放回原位。
-        let kept = std::mem::take(&mut inner.events);
-        for envelope in &kept {
-            match &envelope.event {
-                SessionEvent::TurnStart { turn } => inner.last_turn = inner.last_turn.max(*turn),
-                SessionEvent::SystemPrompt { text, .. } => {
-                    inner.last_system_prompt = Some(text.clone())
-                }
-                SessionEvent::PermissionMode { mode } => {
-                    inner.permission_mode = *mode;
-                }
-                SessionEvent::AgentPreset { preset } => {
-                    inner.agent_preset = Some(preset.clone());
-                }
-                _ => {}
-            }
-            if matches!(&envelope.event, SessionEvent::TurnStart { .. }) {
-                inner.pending_turn.clear();
-            }
-            if let SessionEvent::UserMessage { text, .. } = &envelope.event {
-                if inner.first_prompt_excerpt.is_none() {
-                    inner.first_prompt_excerpt = Some(excerpt_text(text, 80));
-                }
-            }
-            if let Some(sample) = usage_envelope(envelope) {
-                inner.pending_turn.push(sample);
-            }
-            if matches!(&envelope.event, SessionEvent::TurnEnd { .. }) {
-                let slice = std::mem::take(&mut inner.pending_turn);
-                inner.meter.fold_turn(&slice);
-            }
-            inner.meter.apply_one(envelope);
-            if let SessionEvent::Goal { op } = &envelope.event {
-                let total = inner.meter.turn_usage().total();
-                inner.goal = apply_goal_op(inner.goal.take(), op, envelope.time, total);
-            }
-        }
-        inner.events = kept;
-        inner.last_seq = inner.events.last().map(|envelope| envelope.seq).unwrap_or(0);
-
-        // 回退审计:独立于 session.jsonl 追加,物理截断不会抹掉这段记录。
-        let rewind_file = self.file.with_file_name("rewinds.jsonl");
-        let record = serde_json::json!({
-            "time": now_millis(),
-            "to_seq": to_seq,
-            "to_message": to_message,
-            "removed_events": removed_events,
-        });
-        {
-            let mut fh = OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(rewind_file)?;
-            writeln!(fh, "{record}")?;
-        }
-
-        Ok(RewindOutcome {
-            to_seq,
-            to_message,
-            removed_events,
-        })
-    }
-
-    /// O(1):下一个 turn 号(维护的计数器,不再遍历日志)。
-    pub fn next_turn_number(&self) -> u32 {
-        self.inner
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner())
-            .last_turn
-            + 1
-    }
-
-    /// O(1):最近一次落库的系统提示词正文。
-    pub fn last_system_prompt(&self) -> Option<String> {
-        self.inner
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner())
-            .last_system_prompt
-            .clone()
-    }
-
-    /// 从内存事件重建 token-meter(load 后调用一次;之后由 `append`
-    /// 增量维护)。
-    fn refresh_meter_from_log(&self) -> Result<(), SessionError> {
-        let mut inner = self
-            .inner
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
-        // 借日志而不是克隆:与 `events` 同时驻留一份完整副本会让加载长会话的
-        // 峰值内存翻倍(实测 29MB 级会话即多出几十 MB)。`meter` 与 `events`
-        // 同为 inner 的字段,拆借用取出。
-        let SessionInner {
-            events,
-            meter,
-            pending_turn,
-            ..
-        } = &mut *inner;
-        *meter = ContextMeter::new();
-        pending_turn.clear();
-        for envelope in events.iter() {
-            if matches!(&envelope.event, SessionEvent::TurnStart { .. }) {
-                pending_turn.clear();
-            }
-            if let Some(sample) = usage_envelope(envelope) {
-                pending_turn.push(sample);
-            }
-            if matches!(&envelope.event, SessionEvent::TurnEnd { .. }) {
-                meter.fold_turn(pending_turn);
-                pending_turn.clear();
-            }
-            meter.apply_one(envelope);
-        }
-        pending_turn.clear();
-        Ok(())
-    }
-
-    /// 更新工具声明 token(供 token-meter;server 在请求启动后通知 fold)。
-    pub fn set_tools_tokens(&self, tokens: u64) {
-        self.inner
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner())
-            .meter
-            .set_tools_tokens(tokens);
-    }
-
-    /// 更新系统提示词 token(driver 喂 framed 版;同 provider 所见)。
-    pub fn set_system_tokens(&self, tokens: u64) {
-        self.inner
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner())
-            .meter
-            .set_system_tokens(tokens);
-    }
-
-    /// 当前上下文 token 拆分快照(纯启发式)。
-    pub fn context_breakdown(&self) -> ContextBreakdown {
-        self.inner
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner())
-            .meter
-            .breakdown()
-    }
-
-    /// 当前 provider 精确 usage 累计。
-    pub fn turn_token_usage(&self) -> TurnTokenUsage {
-        self.inner
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner())
-            .meter
-            .turn_usage()
-    }
-
-    /// 当前上下文压力(锚点 + 启发式;圆环面板用此值除以窗口得到百分比)。
-    pub fn context_pressure(&self) -> ContextPressure {
-        self.inner
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner())
-            .meter
-            .context_pressure()
-    }
-
-    /// 当前权限模式(由事件 fold,O(1),不遍历日志)。
-    pub fn permission_mode(&self) -> PermissionMode {
-        self.inner
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner())
-            .permission_mode
-    }
-
-    /// 当前会话的 agent preset(由事件 fold,O(1));`None` = 未指定,
-    /// 按部署默认值组装。
-    pub fn agent_preset(&self) -> Option<String> {
-        self.inner
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner())
-            .agent_preset
-            .clone()
-    }
-
-    /// 切换会话的 agent preset:追加 agent-preset 事件(事件源折叠,
-    /// O(1) 生效)。是否允许切换由调用方判定——只有尚未产出内容的会话
-    /// 可以换工具面,事后换会让已记录的工具调用无工具可执行。
-    pub fn set_agent_preset(&self, preset: &str) -> Result<SessionEnvelope, SessionError> {
-        self.append(SessionEvent::AgentPreset {
-            preset: preset.to_string(),
-        })
-    }
-
-    /// 当前会话目标(goal 事件折叠,O(1));`None` = 无目标。
-    pub fn goal(&self) -> Option<GoalState> {
-        self.inner
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner())
-            .goal
-            .clone()
-    }
-
-    /// 目标记账(减法):激活后的 token 消耗 = 会话精确累计 − 激活时快照。
-    /// 无目标时返回 `None`。
-    pub fn goal_tokens_used(&self) -> Option<u64> {
-        let inner = self
-            .inner
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
-        let goal = inner.goal.as_ref()?;
-        Some(
-            inner
-                .meter
-                .turn_usage()
-                .total()
-                .saturating_sub(goal.base_tokens),
-        )
-    }
-
-    /// 写一个 goal 操作事件(事件源折叠,O(1) 生效);调用方负责在写前
-    /// 校验状态转换合法(fold 端对非法转换做忽略兜底)。
-    pub fn apply_goal(&self, op: GoalOp) -> Result<SessionEnvelope, SessionError> {
-        self.append(SessionEvent::Goal { op })
-    }
-
-    /// 切换会话权限模式:追加 permission-mode 事件(事件源折叠,O(1) 生效)。
-    pub fn set_permission_mode(
-        &self,
-        mode: PermissionMode,
-    ) -> Result<SessionEnvelope, SessionError> {
-        self.append(SessionEvent::PermissionMode { mode })
-    }
-
-    /// 当前会话标题(session-title 事件折叠;None = 尚未生成)。
-    pub fn title(&self) -> Option<String> {
-        self.inner
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner())
-            .title
-            .clone()
-    }
-
-    /// 写入会话标题:追加 session-title 事件(latest-wins,事件源折叠,
-    /// O(1) 生效);append 自带落盘 flush,标题必须立即可被磁盘读者看到。
-    pub fn set_title(&self, title: String) -> Result<SessionEnvelope, SessionError> {
-        self.append(SessionEvent::SessionTitle { title })
-    }
-
-    /// The model-facing history projected from the log.
-    pub fn derive_messages(&self) -> Vec<ChatMessage> {
-        self.derive_surface()
-            .iter()
-            .map(|item| item.message.clone())
-            .collect()
-    }
-
-    /// 派生带 seq 的表面消息(微压缩/压缩需要 seq 定位 `replaces` 目标)。
-    ///
-    /// 结果按日志版本号缓存并交给调用方共享:`derive_messages` 与
-    /// `derive_surface` 是每 step 必跑的热路径,而事件是 append-only 的,
-    /// 同一份日志派生结果恒等。缓存把"每 step 两次全量重建"降为"每个
-    /// 新事件一次"。
-    pub fn derive_surface(&self) -> Arc<[denia_core::session::SurfaceMessage]> {
-        let mut inner = self
-            .inner
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
-        if let Some(cached) = &inner.derived_surface
-            && inner.derived_revision == inner.log_revision
-        {
-            return cached.clone();
-        }
-        let surface: Arc<[denia_core::session::SurfaceMessage]> =
-            denia_core::session::derive_surface(&inner.events).into();
-        inner.derived_surface = Some(surface.clone());
-        inner.derived_revision = inner.log_revision;
-        surface
-    }
-
-    /// 距最后一条 assistant 消息落盘过了多少分钟(微压缩的空闲触发用)。
-    ///
-    /// 日志里没有 assistant 消息时返回 `None`(没有"闲置"可言)。
-    /// 时间戳是 epoch 毫秒;系统时钟回拨时按 0 处理,不产生负值。
-    pub fn last_assistant_age_minutes(&self) -> Option<f64> {
-        let inner = self
-            .inner
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
-        let last_ms = inner
-            .events
-            .iter()
-            .rev()
-            .find(|envelope| matches!(envelope.event, SessionEvent::AssistantMessage { .. }))
-            .map(|envelope| envelope.time)?;
-        let now_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .ok()
-            .map(|d| d.as_millis() as u64)?;
-        Some(now_ms.saturating_sub(last_ms) as f64 / 60_000.0)
-    }
-
-    /// The first user prompt, trimmed, for list views.
-    pub fn first_prompt_excerpt(&self, max_chars: usize) -> Option<String> {
-        let inner = self
-            .inner
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
-        if inner.cold {
-            return inner.first_prompt_excerpt.as_ref().map(|text| excerpt_text(text, max_chars));
-        }
-        let text = inner
-            .events
-            .iter()
-            .find_map(|envelope| match &envelope.event {
-                SessionEvent::UserMessage { text, .. } => Some(text),
-                _ => None,
-            })?;
-        Some(excerpt_text(text, max_chars))
-    }
-
-    /// Crash recovery: a `turn-start` without `turn/end` gets a synthetic
-    /// interrupted close(对齐 dsh `interruptedTurnClosers`):先为已落库但
-    /// 未答复的工具调用补合成错误结果,再补 `step/end`,最后补
-    /// `turn/end { interrupted }`;时间戳复用最后真实事件时间戳(确定性,
-    /// 不发明未来时间)。用户取消的 `aborted` 与崩溃闭合区分开。
-    fn close_orphaned_turn(&self) -> Result<(), SessionError> {
-        let (open_turn, last_step, pending_calls, last_time) = {
-            let inner = self
-                .inner
-                .lock()
-                .unwrap_or_else(|poison| poison.into_inner());
-            let mut open_turn: Option<u32> = None;
-            let mut last_step: Option<u32> = None;
-            // 集合化:工具调用多的会话(含压缩前的历史)用 Vec 做 contains/any
-            // 是平方级扫描,而这段每次 load 会话都要跑。
-            let mut answered: std::collections::HashSet<String> = std::collections::HashSet::new();
-            let mut announced_ids: std::collections::HashSet<String> =
-                std::collections::HashSet::new();
-            let mut announced: Vec<(String, u32, u32)> = Vec::new();
-            let mut last_time: u64 = 0;
-            for envelope in &inner.events {
-                last_time = envelope.time;
-                match &envelope.event {
-                    SessionEvent::TurnStart { turn } => {
-                        open_turn = Some(*turn);
-                        last_step = None;
-                    }
-                    SessionEvent::TurnEnd { .. } => {
-                        open_turn = None;
-                        last_step = None;
-                    }
-                    SessionEvent::StepStart { turn, step } => {
-                        if Some(*turn) == open_turn {
-                            last_step = Some(*step);
-                        }
-                    }
-                    SessionEvent::AssistantMessage {
-                        blocks, turn, step, ..
-                    } => {
-                        if Some(*turn) == open_turn {
-                            for block in blocks {
-                                if let ContentBlock::ToolCall { id, .. } = block {
-                                    if announced_ids.insert(id.clone()) {
-                                        announced.push((id.clone(), *turn, *step));
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    SessionEvent::ToolResult { call_id, .. } => {
-                        answered.insert(call_id.clone());
-                    }
-                    _ => {}
-                }
-            }
-            let pending_calls: Vec<(String, u32, u32)> = announced
-                .into_iter()
-                .filter(|(call, _, _)| !answered.contains(call))
-                .collect();
-            (open_turn, last_step, pending_calls, last_time)
-        };
-        let Some(turn) = open_turn else {
-            return Ok(());
-        };
-        for (call_id, call_turn, call_step) in &pending_calls {
-            self.append_with_time(
-                SessionEvent::ToolResult {
-                    turn: *call_turn,
-                    step: *call_step,
-                    call_id: call_id.clone(),
-                    content: ORPHAN_TOOL_RESULT.to_string(),
-                    is_error: true,
-                    error: None,
-                    error_identity: None,
-                    meta: None,
-                    replaces: None,
-                    truncation: None,
-                },
-                last_time,
-            )?;
-        }
-        if let Some(step) = last_step {
-            self.append_with_time(SessionEvent::StepEnd { turn, step }, last_time)?;
-        }
-        self.append_with_time(
-            SessionEvent::TurnEnd {
-                turn,
-                reason: TurnEndReason::Interrupted,
-            },
-            last_time,
-        )?;
-        Ok(())
-    }
 }
 
 /// Drop 时把缓冲的日志推给 OS(不阻塞;优雅退出路径)。
@@ -1234,10 +363,8 @@ impl Drop for Session {
     }
 }
 
-fn open_append_writer(file: &Path) -> Result<BufWriter<File>, SessionError> {
-    Ok(BufWriter::new(
-        OpenOptions::new().append(true).create(true).open(file)?,
-    ))
+fn open_append_writer(file: &Path) -> Result<LogWriter, SessionError> {
+    Ok(LogWriter::open(file)?)
 }
 
 /// One row of the session list.
@@ -1301,9 +428,13 @@ fn is_transient_event(event: &SessionEvent) -> bool {
 
 fn usage_envelope(envelope: &SessionEnvelope) -> Option<SessionEnvelope> {
     let event = match &envelope.event {
-        SessionEvent::TurnStart { .. } | SessionEvent::TurnEnd { .. }
-        | SessionEvent::StepStart { .. } | SessionEvent::StepEnd { .. } => envelope.event.clone(),
-        SessionEvent::AssistantMessage { turn, step, usage, .. } => SessionEvent::AssistantMessage {
+        SessionEvent::TurnStart { .. }
+        | SessionEvent::TurnEnd { .. }
+        | SessionEvent::StepStart { .. }
+        | SessionEvent::StepEnd { .. } => envelope.event.clone(),
+        SessionEvent::AssistantMessage {
+            turn, step, usage, ..
+        } => SessionEvent::AssistantMessage {
             turn: *turn,
             step: *step,
             blocks: Vec::new(),
@@ -1314,7 +445,11 @@ fn usage_envelope(envelope: &SessionEnvelope) -> Option<SessionEnvelope> {
         },
         _ => return None,
     };
-    Some(SessionEnvelope { seq: envelope.seq, time: envelope.time, event })
+    Some(SessionEnvelope {
+        seq: envelope.seq,
+        time: envelope.time,
+        event,
+    })
 }
 
 /// 逐行读下一条可解析的日志事件:首个非空行产出会话头(存入 `header`,
@@ -1325,7 +460,8 @@ fn next_log_event(
     header: &mut Option<SessionHeader>,
     line: &mut String,
     line_no: &mut usize,
-) -> Result<Option<SessionEnvelope>, SessionError> {    loop {
+) -> Result<Option<SessionEnvelope>, SessionError> {
+    loop {
         line.clear();
         let read = reader.read_line(line)?;
         if read == 0 {
@@ -1390,546 +526,6 @@ pub struct SessionStore {
     active: Mutex<std::collections::HashMap<String, std::sync::Weak<Session>>>,
     /// 上次对目录做完整校验的 epoch ms;列表高频刷新时避免 O(会话数) stat。
     last_scan_ms: Mutex<u64>,
-}
-
-impl SessionStore {
-    pub fn open(home: &Path) -> Result<Self, SessionError> {
-        let root = home.join("sessions");
-        std::fs::create_dir_all(&root)?;
-        let store = Self {
-            root,
-            index: Mutex::new(std::collections::HashMap::new()),
-            active: Mutex::new(std::collections::HashMap::new()),
-            last_scan_ms: Mutex::new(0),
-        };
-        store.rescan_index()?;
-        Ok(store)
-    }
-
-    pub fn root(&self) -> &Path {
-        &self.root
-    }
-
-    /// 扫描目录重建摘要索引:每个文件只读 header + 首条用户消息(找到即停),
-    /// 不读全文;文件损坏的会话静默跳过(与旧行为一致)。
-    pub fn rescan_index(&self) -> Result<(), SessionError> {
-        let mut fresh = std::collections::HashMap::new();
-        for entry in std::fs::read_dir(&self.root)? {
-            let entry = entry?;
-            let file = entry.path().join("session.jsonl");
-            if !file.is_file() {
-                continue;
-            }
-            if let Some((meta, stamp)) = read_summary(&file) {
-                fresh.insert(
-                    meta.id.clone(),
-                    IndexEntry {
-                        meta,
-                        stamp,
-                        indexed_at: now_millis(),
-                    },
-                );
-            }
-        }
-        *self.index.lock().unwrap_or_else(|p| p.into_inner()) = fresh;
-        *self.last_scan_ms.lock().unwrap_or_else(|p| p.into_inner()) = now_millis();
-        Ok(())
-    }
-
-    pub fn create(&self, cwd: &Path, sandbox: bool) -> Result<Session, SessionError> {
-        self.create_with_parent(cwd, sandbox, None)
-    }
-
-    /// 分支创建:新会话继承父会话的 cwd/sandbox,血缘写进 header,
-    /// 并把源日志前缀(`source[..cut]`)作为种子回放。
-    pub fn create_forked(
-        &self,
-        source_events: &[SessionEnvelope],
-        cut: usize,
-        cwd: &Path,
-        sandbox: bool,
-        parent_id: &str,
-    ) -> Result<Session, SessionError> {
-        let session = self.create_with_parent(cwd, sandbox, Some(parent_id.to_string()))?;
-        session.seed_from(&source_events[..cut])?;
-        Ok(session)
-    }
-
-    pub fn create_subagent(
-        &self,
-        cwd: &Path,
-        sandbox: bool,
-        parent_id: &str,
-        descriptor: denia_core::session::SubagentDescriptor,
-    ) -> Result<Session, SessionError> {
-        let id = uuid::Uuid::new_v4().to_string();
-        let dir = self.root.join(&id);
-        let session = Session::create_described(
-            &dir,
-            id,
-            cwd,
-            sandbox,
-            Some(parent_id.into()),
-            Some(descriptor),
-        )?;
-        let meta = meta_of(&session);
-        self.index.lock().unwrap_or_else(|p| p.into_inner()).insert(
-            meta.id.clone(),
-            IndexEntry {
-                meta,
-                stamp: file_stamp(session.file()).unwrap_or(FileStamp {
-                    size: 0,
-                    mtime_ms: 0,
-                }),
-                indexed_at: now_millis(),
-            },
-        );
-        Ok(session)
-    }
-
-    fn create_with_parent(
-        &self,
-        cwd: &Path,
-        sandbox: bool,
-        parent_session: Option<String>,
-    ) -> Result<Session, SessionError> {
-        let id = uuid::Uuid::new_v4().to_string();
-        let dir = self.root.join(&id);
-        let session = Session::create(&dir, id, cwd, sandbox, parent_session)?;
-        let meta = meta_of(&session);
-        self.index.lock().unwrap_or_else(|p| p.into_inner()).insert(
-            meta.id.clone(),
-            IndexEntry {
-                meta,
-                stamp: file_stamp(session.file()).unwrap_or(FileStamp {
-                    size: 0,
-                    mtime_ms: 0,
-                }),
-                indexed_at: now_millis(),
-            },
-        );
-        Ok(session)
-    }
-
-    /// 会话是否存在:只看文件在不在,不做任何解析。
-    ///
-    /// 上传接口原先为这一句判断走完整 `load` —— 整份 JSONL 读入、逐行反序列化、
-    /// torn-tail 修复,还会**写盘**(孤儿轮次闭合),代价与收益完全不成比例。
-    pub fn exists(&self, id: &str) -> bool {
-        self.file_for(id).map(|file| file.is_file()).unwrap_or(false)
-    }
-
-    pub fn load(&self, id: &str) -> Result<Session, SessionError> {
-        let file = self.file_for(id)?;
-        if !file.exists() {
-            return Err(SessionError::NotFound(id.to_string()));
-        }
-        let session = Session::load(&file)?;
-        let meta = meta_of(&session);
-        self.index.lock().unwrap_or_else(|p| p.into_inner()).insert(
-            meta.id.clone(),
-            IndexEntry {
-                meta,
-                stamp: file_stamp(session.file()).unwrap_or(FileStamp {
-                    size: 0,
-                    mtime_ms: 0,
-                }),
-                indexed_at: now_millis(),
-            },
-        );
-        Ok(session)
-    }
-
-    /// 冷打开会话(仅浏览路径):聚合投影保留,事件不驻留内存。
-    ///
-    /// 与 [`Self::load`] 的差异只在事件驻留;索引账本同样刷新。
-    pub fn open_cold(&self, id: &str) -> Result<Session, SessionError> {
-        let file = self.file_for(id)?;
-        if !file.exists() {
-            return Err(SessionError::NotFound(id.to_string()));
-        }
-        let session = Session::open_cold(&file)?;
-        let meta = meta_of(&session);
-        self.index.lock().unwrap_or_else(|p| p.into_inner()).insert(
-            meta.id.clone(),
-            IndexEntry {
-                meta,
-                stamp: file_stamp(session.file()).unwrap_or(FileStamp {
-                    size: 0,
-                    mtime_ms: 0,
-                }),
-                indexed_at: now_millis(),
-            },
-        );
-        Ok(session)
-    }
-
-    /// 只读日志 header(第一行),不解析事件。
-    pub fn read_log_header(&self, id: &str) -> Result<SessionHeader, SessionError> {
-        let file = self.file_for(id)?;
-        let mut reader = BufReader::new(File::open(&file)?);
-        let mut line = String::new();
-        let read = reader.read_line(&mut line)?;
-        if read == 0 {
-            return Err(SessionError::Corrupt("empty session log".into()));
-        }
-        serde_json::from_str(line.trim_end_matches(['\n', '\r']))
-            .map_err(|e| SessionError::Corrupt(format!("bad header: {e}")))
-    }
-
-    /// 流式遍历日志中的合法事件(跳过退役类型行,遇 torn tail 截止),
-    /// 不驻留任何事件。闭包返回 `Err(io::Error)` 即中止(如响应流断开)。
-    pub fn for_each_event(
-        &self,
-        id: &str,
-        mut f: impl FnMut(SessionEnvelope) -> Result<(), std::io::Error>,
-    ) -> Result<(), SessionError> {
-        let file = self.file_for(id)?;
-        if !file.exists() {
-            return Err(SessionError::NotFound(id.to_string()));
-        }
-        let mut reader = BufReader::new(File::open(&file)?);
-        let mut header = None;
-        let mut line = String::new();
-        let mut line_no = 0usize;
-        while let Some(envelope) =
-            next_log_event(&mut reader, &mut header, &mut line, &mut line_no)?
-        {
-            f(envelope)?;
-        }
-        Ok(())
-    }
-
-    /// 冷路径 checkpoints:流式扫日志收集全部非注入用户消息。
-    pub fn read_checkpoints(&self, id: &str) -> Result<Vec<SessionEnvelope>, SessionError> {
-        let mut out: Vec<SessionEnvelope> = Vec::new();
-        self.for_each_event(id, |envelope| {
-            if matches!(
-                &envelope.event,
-                SessionEvent::UserMessage {
-                    injected: false,
-                    ..
-                }
-            ) {
-                out.push(envelope);
-            }
-            Ok(())
-        })?;
-        Ok(out)
-    }
-
-    /// 直接按文件流式读取一个「展示粒度」事件窗口,不构造/驻留完整 `Session`。
-    ///
-    /// - `before = None`:取日志尾部最近 `limit` 条。
-    /// - `before = Some(seq)`:取 `seq` 之前最近 `limit` 条(供前端向上翻页)。
-    /// - 分页单位是展示事件:流式 `assistant-chunk` 不计入 `total` 也不进入
-    ///   窗口——历史重建只依赖结算的 `assistant-message`(dsh 语义:失败
-    ///   尝试不进派生历史),否则 chunk 洪流会让窗口在两三个轮次内触底。
-    /// - 窗口起点对齐轮次组:展示边界(total-limit)回退到其前最近一条非
-    ///   注入 user-message——保证窗口内第一个轮次完整,前端折叠概览依赖
-    ///   成对的 turn-start/turn-end;边界落在首条锚点之前时直接用边界。
-    /// - `anchors` 恒为全会话非注入 user-message(不受 `before` 限制),供
-    ///   前端轮次轴渲染全部刻度。
-    /// - 两遍顺序扫描:窗口起点依赖文件末尾才能确定的边界,单遍需无界缓存;
-    ///   两遍只引入一次顺序 IO,内存 O(锚点数 + 窗口)。
-    pub fn read_page(
-        &self,
-        id: &str,
-        before: Option<u64>,
-        limit: usize,
-    ) -> Result<SessionPage, SessionError> {
-        let file = self.file_for(id)?;
-        if !file.exists() {
-            return Err(SessionError::NotFound(id.to_string()));
-        }
-        let limit = limit.clamp(1, 1000);
-        let eligible = |seq: u64| before.map_or(true, |cut| seq < cut);
-
-        // 第一遍:统计展示事件总数、收集全会话锚点,并记录每个 eligible 锚点
-        // 的展示位次(供起点回退二分)。
-        let mut reader = BufReader::new(File::open(&file)?);
-        let mut header: Option<SessionHeader> = None;
-        let mut line = String::new();
-        let mut line_no = 0usize;
-        let mut total = 0u64;
-        let mut anchors: Vec<SessionAnchor> = Vec::new();
-        // (展示位次, seq):展示位次按 eligible 展示事件序号计。
-        let mut anchor_at: Vec<(u64, u64)> = Vec::new();
-        while let Some(envelope) = next_log_event(&mut reader, &mut header, &mut line, &mut line_no)? {
-            if matches!(envelope.event, SessionEvent::AssistantChunk { .. }) {
-                continue;
-            }
-            if let SessionEvent::UserMessage { text, injected: false, .. } = &envelope.event {
-                anchors.push(SessionAnchor {
-                    seq: envelope.seq,
-                    text: anchor_preview(text),
-                });
-                if eligible(envelope.seq) {
-                    anchor_at.push((total, envelope.seq));
-                }
-            }
-            if eligible(envelope.seq) {
-                total += 1;
-            }
-        }
-        let header = header.ok_or_else(|| SessionError::Corrupt("missing header".into()))?;
-
-        // 窗口起点:边界回退到其前最近锚点;无锚点可用则直接用边界。
-        let boundary = total.saturating_sub(limit as u64);
-        let start_index = match anchor_at.binary_search_by(|(index, _)| index.cmp(&boundary)) {
-            Ok(pos) => anchor_at[pos].0,
-            Err(0) => boundary,
-            Err(insert) => anchor_at[insert - 1].0,
-        };
-
-        // 第二遍:收集 eligible 展示事件中位次 ≥ 起点的窗口。
-        let mut reader = BufReader::new(File::open(&file)?);
-        let mut header2: Option<SessionHeader> = None;
-        let mut line_no = 0usize;
-        let mut events: Vec<SessionEnvelope> = Vec::new();
-        let mut index = 0u64;
-        while let Some(envelope) = next_log_event(&mut reader, &mut header2, &mut line, &mut line_no)? {
-            if matches!(envelope.event, SessionEvent::AssistantChunk { .. }) {
-                continue;
-            }
-            if !eligible(envelope.seq) {
-                continue;
-            }
-            if index >= start_index {
-                events.push(envelope);
-            }
-            index += 1;
-        }
-        Ok(SessionPage {
-            header,
-            events,
-            total,
-            has_more_before: start_index > 0,
-            anchors,
-        })
-    }
-
-    /// 登记一个被 `Arc` 持有的会话:list 优先从内存读摘要,
-    /// 不依赖文件落盘状态,首条用户消息即刻可见。弱引用不阻止淘汰。
-    pub fn track_session(&self, session: &std::sync::Arc<Session>) {
-        let meta = meta_of(session);
-        self.index.lock().unwrap_or_else(|p| p.into_inner()).insert(
-            meta.id.clone(),
-            IndexEntry {
-                meta,
-                stamp: FileStamp {
-                    size: 0,
-                    mtime_ms: 0,
-                },
-                indexed_at: now_millis(),
-            },
-        );
-        self.active
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .insert(session.id().to_string(), std::sync::Arc::downgrade(session));
-    }
-
-    /// List summaries from the memory index and live registry.
-    ///
-    /// - 活跃(已加载)会话:纯内存读摘要,不碰文件、不等落盘。
-    /// - 其余条目:对每个文件做 stat 校验,文件变了才重读摘要;
-    ///   目录与索引的差集(新建文件)会被发现并补进索引——
-    ///   不做任何全文读取。
-    pub fn list(&self) -> Result<Vec<SessionSummary>, SessionError> {
-        let mut summaries: Vec<SessionSummary> = Vec::new();
-
-        // 1) 活跃会话内存优先(顺带清理失效弱引用)。
-        {
-            let mut active = self.active.lock().unwrap_or_else(|p| p.into_inner());
-            let stale: Vec<String> = active
-                .iter()
-                .filter_map(|(id, weak)| match weak.upgrade() {
-                    Some(session) => {
-                        summaries.push(summary_of(&session));
-                        None
-                    }
-                    None => Some(id.clone()),
-                })
-                .collect();
-            for id in stale {
-                active.remove(&id);
-            }
-        }
-
-        // 2) 目录校验节流:进程内 create/load/delete 都会直接维护索引,
-        //    列表高频刷新不需要每次都对全部文件做 stat;外部直接写文件时,
-        //    最多延迟 2 秒被下次全量扫描发现。
-        let last_scan_value = {
-            let mut last = self.last_scan_ms.lock().unwrap_or_else(|p| p.into_inner());
-            let now = now_millis();
-            let value = *last;
-            if now.saturating_sub(value) >= 2000 {
-                *last = now;
-                value
-            } else {
-                value
-            }
-        };
-        let should_scan = now_millis().saturating_sub(last_scan_value) >= 2000;
-
-        {
-            let mut index = self.index.lock().unwrap_or_else(|p| p.into_inner());
-            if should_scan {
-                let indexed: std::collections::HashSet<String> = index.keys().cloned().collect();
-                let mut discovered = Vec::new();
-                for entry in std::fs::read_dir(&self.root)? {
-                    let entry = entry?;
-                    let file = entry.path().join("session.jsonl");
-                    if !file.is_file() {
-                        continue;
-                    }
-                    let id = entry.file_name().to_string_lossy().to_string();
-                    if indexed.contains(&id) {
-                        continue;
-                    }
-                    if summaries.iter().any(|s| s.id == id) {
-                        continue;
-                    }
-                    if let Some((meta, stamp)) = read_summary(&file) {
-                        discovered.push(IndexEntry {
-                            meta,
-                            stamp,
-                            indexed_at: now_millis(),
-                        });
-                    }
-                }
-                for entry in discovered {
-                    index.insert(entry.meta.id.clone(), entry);
-                }
-
-                // 索引条目 stat 失效检测。
-                let ids: Vec<String> = index
-                    .keys()
-                    .filter(|id| !summaries.iter().any(|s| &s.id == *id))
-                    .cloned()
-                    .collect();
-                for id in ids {
-                    let file = self.root.join(&id).join("session.jsonl");
-                    let current = file_stamp(&file);
-                    let entry = index.get(&id);
-                    let dirty = match (entry, current) {
-                        (Some(entry), Some(current)) => entry.stamp != current,
-                        (_, None) => true,
-                        (None, _) => false,
-                    };
-                    if dirty {
-                        if let Some((meta, stamp)) = read_summary(&file) {
-                            index.insert(
-                                id,
-                                IndexEntry {
-                                    meta,
-                                    stamp,
-                                    indexed_at: now_millis(),
-                                },
-                            );
-                        } else {
-                            index.remove(&id);
-                        }
-                    }
-                }
-            } else {
-                // 刚创建/加载的条目还没经过一次全量校验:单独 stat 一次,
-                // 保证“创建后立刻 append 再刷新列表”也能看到最新摘要。
-                let recent_ids: Vec<String> = index
-                    .iter()
-                    .filter(|(_, entry)| entry.indexed_at > last_scan_value)
-                    .map(|(id, _)| id.clone())
-                    .collect();
-                for id in recent_ids {
-                    let file = self.root.join(&id).join("session.jsonl");
-                    let current = file_stamp(&file);
-                    let dirty = match (index.get(&id), current) {
-                        (Some(entry), Some(current)) => entry.stamp != current,
-                        (_, None) => true,
-                        (None, _) => false,
-                    };
-                    if dirty {
-                        if let Some((meta, stamp)) = read_summary(&file) {
-                            index.insert(
-                                id,
-                                IndexEntry {
-                                    meta,
-                                    stamp,
-                                    indexed_at: now_millis(),
-                                },
-                            );
-                        } else {
-                            index.remove(&id);
-                        }
-                    }
-                }
-            }
-            // 活跃会话已在步骤 1 产出摘要,索引并入时跳过,避免同一会话出现两行。
-            let listed: std::collections::HashSet<String> =
-                summaries.iter().map(|s| s.id.clone()).collect();
-            summaries.extend(
-                index
-                    .values()
-                    .filter(|entry| !listed.contains(&entry.meta.id))
-                    .map(|entry| summary_of_meta(&entry.meta)),
-            );
-        }
-
-        summaries.sort_by(|a, b| b.created_at.cmp(&a.created_at));
-        Ok(summaries)
-    }
-
-    pub fn delete(&self, id: &str) -> Result<(), SessionError> {
-        let dir = self.root.join(validate_id(id)?);
-        if !dir.exists() {
-            return Err(SessionError::NotFound(id.to_string()));
-        }
-        std::fs::remove_dir_all(dir)?;
-        self.index
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .remove(id);
-        self.active
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .remove(id);
-        Ok(())
-    }
-
-    fn file_for(&self, id: &str) -> Result<PathBuf, SessionError> {
-        Ok(self.root.join(validate_id(id)?).join("session.jsonl"))
-    }
-
-    /// 一次性清扫"从未发过消息的残留空白会话"(浏览器直接关闭、进程被杀
-    /// 留下的空壳)。只在**进程启动时**调用一次,不在运行期反复执行。
-    ///
-    /// 清理职责属于数据层,不属于某个视图:前端每个页面只知道自己的焦点
-    /// (`activeId`),却能看到全局会话列表;在那里做"非活跃空白即删"会误删
-    /// 别的页面(或共用同一数据目录的另一实例)刚创建、正在使用的会话。
-    ///
-    /// `older_than_ms` 是给并发实例留的缓冲:只删足够老的空白,避免删掉
-    /// 另一个实例里用户正停着的草稿。单个删除失败(Windows 上文件被占用)
-    /// 只跳过,不让一次清理挡住启动。
-    pub fn sweep_stale_blanks(&self, older_than_ms: u64) -> Vec<String> {
-        let cutoff = now_millis().saturating_sub(older_than_ms);
-        let candidates: Vec<String> = self
-            .list()
-            .unwrap_or_default()
-            .into_iter()
-            // 有内容的、分支血缘的(fork 子会话/委派)都保留,只动纯空白壳。
-            .filter(|summary| {
-                summary.excerpt.is_none()
-                    && summary.parent_session.is_none()
-                    && summary.created_at < cutoff
-            })
-            .map(|summary| summary.id)
-            .collect();
-        candidates
-            .into_iter()
-            .filter(|id| self.delete(id).is_ok())
-            .collect()
-    }
 }
 
 fn validate_id(id: &str) -> Result<&str, SessionError> {
@@ -2073,6 +669,37 @@ fn excerpt_text(text: &str, max_chars: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn failed_append_does_not_change_projections_or_retry_a_failed_buffer() {
+        let root = temp_root();
+        let store = SessionStore::open(&root).unwrap();
+        let session = store.create(&root, true).unwrap();
+        session.flush().unwrap();
+        let previous_mode = session.permission_mode();
+        let previous_seq = session.inner.lock().unwrap().last_seq;
+        let previous_bytes = std::fs::metadata(session.file()).unwrap().len();
+        session.inner.lock().unwrap().writer = LogWriter::new(File::open(session.file()).unwrap());
+        assert!(session.set_permission_mode(PermissionMode::Full).is_err());
+        assert_eq!(session.permission_mode(), previous_mode);
+        assert_eq!(session.inner.lock().unwrap().last_seq, previous_seq);
+        assert!(session.events().is_empty());
+        assert!(session.set_title("must not be written".into()).is_err());
+        assert_eq!(session.title(), None);
+        drop(session);
+        let file = store
+            .root()
+            .read_dir()
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path()
+            .join("session.jsonl");
+        assert_eq!(std::fs::metadata(file).unwrap().len(), previous_bytes);
+        drop(store);
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     fn temp_root() -> PathBuf {
         // pid + 进程内原子序号:同一次测试里连续调用也保证互不撞名
@@ -2357,10 +984,11 @@ mod tests {
         // 展示粒度:chunk 不计入 total,也不出现在窗口。
         let page = store.read_page(&id, None, 100).unwrap();
         assert_eq!(page.total, 10);
-        assert!(page
-            .events
-            .iter()
-            .all(|envelope| !matches!(envelope.event, SessionEvent::AssistantChunk { .. })));
+        assert!(
+            page.events
+                .iter()
+                .all(|envelope| !matches!(envelope.event, SessionEvent::AssistantChunk { .. }))
+        );
         assert!(!page.has_more_before);
         // 锚点为全会话非注入用户消息,预览压平换行。
         assert_eq!(page.anchors.len(), 2);
@@ -2408,9 +1036,7 @@ mod tests {
         // 无 turn-start 的残轮次,前端折叠失效。
         let turn = |turn: u32, tools: usize, session: &Session| {
             session.append(user(&format!("u{turn}"))).unwrap();
-            session
-                .append(SessionEvent::TurnStart { turn })
-                .unwrap();
+            session.append(SessionEvent::TurnStart { turn }).unwrap();
             for i in 0..tools {
                 session
                     .append(SessionEvent::ToolCall {
@@ -2465,7 +1091,10 @@ mod tests {
         // 窗口回退到 u1:第一个轮次完整,而不是从边界切出残轮次。
         assert_eq!(page.events.len(), 18);
         assert_eq!(page.anchors[0].seq, page.events[0].seq);
-        assert!(matches!(page.events[0].event, SessionEvent::UserMessage { .. }));
+        assert!(matches!(
+            page.events[0].event,
+            SessionEvent::UserMessage { .. }
+        ));
         assert!(!page.has_more_before);
 
         // 尾部小窗口:边界落在轮次 2/3 之间,起点对齐 u2,完整返回尾两个轮次。
@@ -2511,13 +1140,14 @@ mod tests {
 
         let session = store.create(&cwd, true).unwrap();
         assert_eq!(session.title(), None);
-        session.append(SessionEvent::UserMessage {
-            text: "帮我重构登录流程".into(),
-            injected: false,
-            channel: None,
-            images: Vec::new(),
-        })
-        .unwrap();
+        session
+            .append(SessionEvent::UserMessage {
+                text: "帮我重构登录流程".into(),
+                injected: false,
+                channel: None,
+                images: Vec::new(),
+            })
+            .unwrap();
         session.set_title("AI 生成标题·唯一串".into()).unwrap();
         assert_eq!(session.title().as_deref(), Some("AI 生成标题·唯一串"));
         let id = session.id().to_string();
@@ -2530,10 +1160,12 @@ mod tests {
         let summary = list.iter().find(|s| s.id == id).unwrap();
         assert_eq!(summary.title.as_deref(), Some("AI 生成标题·唯一串"));
         // 标题不进模型历史:model-visible == logged 的投影不受影响。
-        assert!(loaded
-            .derive_messages()
-            .iter()
-            .all(|m| !m.content.contains("AI 生成标题·唯一串")));
+        assert!(
+            loaded
+                .derive_messages()
+                .iter()
+                .all(|m| !m.content.contains("AI 生成标题·唯一串"))
+        );
         std::fs::remove_dir_all(&root).unwrap();
     }
 
@@ -3009,7 +1641,11 @@ mod tests {
         let cold = Session::open_cold(&dir.join("session.jsonl")).unwrap();
         assert!(!cold.is_hot(), "冷打开不驻留事件");
         assert!(cold.events().is_empty());
-        assert_eq!(cold.agent_preset().as_deref(), Some("minimal"), "聚合照常折叠");
+        assert_eq!(
+            cold.agent_preset().as_deref(),
+            Some("minimal"),
+            "聚合照常折叠"
+        );
         assert_eq!(cold.permission_mode(), PermissionMode::Full);
         std::fs::remove_dir_all(&root).unwrap();
     }
@@ -3045,21 +1681,46 @@ mod tests {
         std::fs::create_dir_all(&cwd).unwrap();
         let store = SessionStore::open(&root).unwrap();
         let session = Arc::new(store.create(&cwd, true).unwrap());
-        session.append(SessionEvent::UserMessage {
-            text: "keep this summary".into(), injected: false, channel: None, images: Vec::new(),
-        }).unwrap();
+        session
+            .append(SessionEvent::UserMessage {
+                text: "keep this summary".into(),
+                injected: false,
+                channel: None,
+                images: Vec::new(),
+            })
+            .unwrap();
         session.append(SessionEvent::TurnStart { turn: 1 }).unwrap();
-        session.append(SessionEvent::StepStart { turn: 1, step: 1 }).unwrap();
-        session.append(SessionEvent::AssistantMessage {
-            turn: 1, step: 1,
-            blocks: vec![ContentBlock::Text { text: "large answer".repeat(10_000) }],
-            usage: Some(denia_core::stream::TokenUsage { input_tokens: 20, output_tokens: 10,
-                cache_read_tokens: Some(5), reasoning_tokens: Some(3) }),
-            interrupted: false, source_event_seqs: Vec::new(), first_token_time: None,
-        }).unwrap();
-        session.append(SessionEvent::StepEnd { turn: 1, step: 1 }).unwrap();
+        session
+            .append(SessionEvent::StepStart { turn: 1, step: 1 })
+            .unwrap();
+        session
+            .append(SessionEvent::AssistantMessage {
+                turn: 1,
+                step: 1,
+                blocks: vec![ContentBlock::Text {
+                    text: "large answer".repeat(10_000),
+                }],
+                usage: Some(denia_core::stream::TokenUsage {
+                    input_tokens: 20,
+                    output_tokens: 10,
+                    cache_read_tokens: Some(5),
+                    reasoning_tokens: Some(3),
+                }),
+                interrupted: false,
+                source_event_seqs: Vec::new(),
+                first_token_time: None,
+            })
+            .unwrap();
+        session
+            .append(SessionEvent::StepEnd { turn: 1, step: 1 })
+            .unwrap();
         assert!(!session.cool().unwrap());
-        session.append(SessionEvent::TurnEnd { turn: 1, reason: TurnEndReason::Completed }).unwrap();
+        session
+            .append(SessionEvent::TurnEnd {
+                turn: 1,
+                reason: TurnEndReason::Completed,
+            })
+            .unwrap();
         store.track_session(&session);
         let surface = session.derive_surface();
         let weak_surface = Arc::downgrade(&surface);
@@ -3074,8 +1735,14 @@ mod tests {
         assert_eq!(session.turn_token_usage(), meter);
         assert_eq!(session.context_pressure(), pressure);
         assert_eq!(session.events_after(0).len(), count);
-        assert_eq!(session.first_prompt_excerpt(80).as_deref(), Some("keep this summary"));
-        assert_eq!(store.list().unwrap()[0].excerpt.as_deref(), Some("keep this summary"));
+        assert_eq!(
+            session.first_prompt_excerpt(80).as_deref(),
+            Some("keep this summary")
+        );
+        assert_eq!(
+            store.list().unwrap()[0].excerpt.as_deref(),
+            Some("keep this summary")
+        );
         {
             let inner = session.inner.lock().unwrap();
             assert_eq!(inner.events.capacity(), 0);
@@ -3086,9 +1753,14 @@ mod tests {
         assert_eq!(session.events().len(), count);
         assert_eq!(session.turn_token_usage(), meter);
         assert!(session.resident_bytes() > 0);
-        let appended = session.append(SessionEvent::UserMessage {
-            text: "next".into(), injected: false, channel: None, images: Vec::new(),
-        }).unwrap();
+        let appended = session
+            .append(SessionEvent::UserMessage {
+                text: "next".into(),
+                injected: false,
+                channel: None,
+                images: Vec::new(),
+            })
+            .unwrap();
         assert_eq!(appended.seq, count as u64 + 1);
         std::fs::remove_dir_all(&root).unwrap();
     }
@@ -3100,26 +1772,52 @@ mod tests {
         std::fs::create_dir_all(&cwd).unwrap();
         let session = Session::create(&root.join("s"), "s".into(), &cwd, true, None).unwrap();
         session.append(SessionEvent::TurnStart { turn: 1 }).unwrap();
-        session.append(SessionEvent::StepStart { turn: 1, step: 1 }).unwrap();
-        session.append(SessionEvent::AssistantMessage {
-            turn: 1, step: 1, blocks: vec![ContentBlock::Text { text: "x".repeat(1_000_000) }],
-            usage: Some(denia_core::stream::TokenUsage { input_tokens: 10, output_tokens: 5,
-                cache_read_tokens: None, reasoning_tokens: None }),
-            interrupted: false, source_event_seqs: (1..1000).collect(), first_token_time: None,
-        }).unwrap();
+        session
+            .append(SessionEvent::StepStart { turn: 1, step: 1 })
+            .unwrap();
+        session
+            .append(SessionEvent::AssistantMessage {
+                turn: 1,
+                step: 1,
+                blocks: vec![ContentBlock::Text {
+                    text: "x".repeat(1_000_000),
+                }],
+                usage: Some(denia_core::stream::TokenUsage {
+                    input_tokens: 10,
+                    output_tokens: 5,
+                    cache_read_tokens: None,
+                    reasoning_tokens: None,
+                }),
+                interrupted: false,
+                source_event_seqs: (1..1000).collect(),
+                first_token_time: None,
+            })
+            .unwrap();
         session.with_events(|events| assert_eq!(events.len(), 3));
         {
             let inner = session.inner.lock().unwrap();
             assert_eq!(inner.pending_turn.len(), 3);
             for envelope in &inner.pending_turn {
-                if let SessionEvent::AssistantMessage { blocks, source_event_seqs, .. } = &envelope.event {
+                if let SessionEvent::AssistantMessage {
+                    blocks,
+                    source_event_seqs,
+                    ..
+                } = &envelope.event
+                {
                     assert!(blocks.is_empty());
                     assert!(source_event_seqs.is_empty());
                 }
             }
         }
-        session.append(SessionEvent::StepEnd { turn: 1, step: 1 }).unwrap();
-        session.append(SessionEvent::TurnEnd { turn: 1, reason: TurnEndReason::Completed }).unwrap();
+        session
+            .append(SessionEvent::StepEnd { turn: 1, step: 1 })
+            .unwrap();
+        session
+            .append(SessionEvent::TurnEnd {
+                turn: 1,
+                reason: TurnEndReason::Completed,
+            })
+            .unwrap();
         assert_eq!(session.turn_token_usage().output_tokens, 5);
         assert_eq!(session.inner.lock().unwrap().pending_turn.capacity(), 0);
         std::fs::remove_dir_all(&root).unwrap();
@@ -3133,24 +1831,47 @@ mod tests {
         let session = Session::create(&root.join("s"), "s".into(), &cwd, true, None).unwrap();
         session.append(SessionEvent::TurnStart { turn: 1 }).unwrap();
         for _ in 0..1000 {
-            session.append(SessionEvent::AssistantChunk { turn: 1, step: 1,
-                chunk: denia_core::stream::StreamChunk::TextDelta { index: 0, text: "fragment".into() },
-            }).unwrap();
+            session
+                .append(SessionEvent::AssistantChunk {
+                    turn: 1,
+                    step: 1,
+                    chunk: denia_core::stream::StreamChunk::TextDelta {
+                        index: 0,
+                        text: "fragment".into(),
+                    },
+                })
+                .unwrap();
         }
         assert_eq!(session.events().len(), 1001);
-        session.append(SessionEvent::AssistantMessage {
-            turn: 1, step: 1, blocks: vec![ContentBlock::Text { text: "settled".into() }],
-            usage: None, interrupted: false, source_event_seqs: Vec::new(), first_token_time: None,
-        }).unwrap();
+        session
+            .append(SessionEvent::AssistantMessage {
+                turn: 1,
+                step: 1,
+                blocks: vec![ContentBlock::Text {
+                    text: "settled".into(),
+                }],
+                usage: None,
+                interrupted: false,
+                source_event_seqs: Vec::new(),
+                first_token_time: None,
+            })
+            .unwrap();
         assert_eq!(session.events().len(), 2);
         let inner = session.inner.lock().unwrap();
         assert_eq!(inner.transient_bytes, 0);
         assert_eq!(inner.events.capacity(), 2);
         drop(inner);
         assert!(!session.cool().unwrap());
-        session.append(SessionEvent::AssistantChunk { turn: 1, step: 2,
-            chunk: denia_core::stream::StreamChunk::TextDelta { index: 0, text: "next step".into() },
-        }).unwrap();
+        session
+            .append(SessionEvent::AssistantChunk {
+                turn: 1,
+                step: 2,
+                chunk: denia_core::stream::StreamChunk::TextDelta {
+                    index: 0,
+                    text: "next step".into(),
+                },
+            })
+            .unwrap();
         assert_eq!(session.events_after(1002).len(), 1);
         std::fs::remove_dir_all(&root).unwrap();
     }
@@ -3273,10 +1994,12 @@ mod tests {
         session.append(chunk.clone()).unwrap();
         session.append(chunk.clone()).unwrap();
         assert_eq!(session.events().len(), 3, "打开轮次的 chunk 驻留");
-        assert!(session
-            .events_after(1)
-            .iter()
-            .any(|envelope| matches!(envelope.event, SessionEvent::AssistantChunk { .. })));
+        assert!(
+            session
+                .events_after(1)
+                .iter()
+                .any(|envelope| matches!(envelope.event, SessionEvent::AssistantChunk { .. }))
+        );
 
         // 闭合:chunk 清扫出内存,磁盘仍完整记录(append-only 不变)。
         session

@@ -11,19 +11,20 @@ mod browser;
 pub mod capabilities;
 mod edit;
 mod files;
-mod goal;
 pub mod glob;
+mod goal;
 pub mod grep;
 mod ls;
 pub mod mcp;
-mod plan;
+pub mod output;
 pub mod permission;
+mod plan;
 pub mod prompt;
 pub mod read_state;
+pub mod runtime_command;
 pub mod shell;
 pub mod shell_session;
 pub mod support;
-pub mod output;
 mod todo;
 mod web_fetch;
 
@@ -48,12 +49,11 @@ pub use mcp::{MCP_LIST_TOOL, McpListTool, McpTool, mcp_list_schema};
 pub use plan::{ExitPlanArgs, ExitPlanTool};
 pub use prompt::{
     default_shipped, default_shipped_with_browser, default_shipped_with_browser_and_ask,
-    register_ask_prompt_section, register_capability_prompt_sections,
-    register_code_style_section, register_communication_section,
-    register_context_management_section, register_mcp_prompt_section,
-    register_mcp_prompt_section_with_manager, render_mcp_section,
-    register_memory_prompt_section, register_preset_prompt_section,
-    register_risk_honesty_section, register_shipped_prompt, register_working_style_section,
+    register_ask_prompt_section, register_capability_prompt_sections, register_code_style_section,
+    register_communication_section, register_context_management_section,
+    register_mcp_prompt_section, register_mcp_prompt_section_with_manager,
+    register_memory_prompt_section, register_preset_prompt_section, register_risk_honesty_section,
+    register_shipped_prompt, register_working_style_section, render_mcp_section,
     render_memory_section, shipped_with_persona, shipped_with_persona_and_browser_and_ask,
 };
 pub use shell_session::{Captured, PersistentShell, ShellHub};
@@ -85,8 +85,16 @@ pub type SessionEventSink = Arc<dyn Fn(SessionEvent) + Send + Sync>;
 /// 与 dsh 的差异:dsh 让子代理继承父代理的完整工具面,只靠深度与审批兜底;
 /// 这里在授予层直接收口,子代理拿不到交互/写类工具,也就不存在"子代理
 /// 提问没人应答"的问题。
-pub const SUBAGENT_READ_ONLY_TOOLS: &[&str] =
-    &["read_file", "read_tool_output", "ls", "glob", "grep", "skill", "browser", "web_fetch"];
+pub const SUBAGENT_READ_ONLY_TOOLS: &[&str] = &[
+    "read_file",
+    "read_tool_output",
+    "ls",
+    "glob",
+    "grep",
+    "skill",
+    "browser",
+    "web_fetch",
+];
 
 /// 提问通道:宿主实现,把 `ask` 工具的提问挂到会话的挂起表并等待用户应答。
 ///
@@ -143,7 +151,8 @@ pub struct ToolContext {
     pub call_id: Option<String>,
     /// 会话目标读取器(`get_goal` 用);`None` 表示当前调用无法读取
     /// 会话目标状态。返回 `(当前目标快照, 激活后的 token 用量)`。
-    pub goal_reader: Option<Arc<dyn Fn() -> Option<(denia_core::session::GoalState, u64)> + Send + Sync>>,
+    pub goal_reader:
+        Option<Arc<dyn Fn() -> Option<(denia_core::session::GoalState, u64)> + Send + Sync>>,
     /// 会话共享的文件读取状态表。
     ///
     /// `read_file` 用它做重复读取去重;`write_file`/`edit` 用它做写前
@@ -252,8 +261,8 @@ pub fn default_registry() -> ToolRegistry {
     registry.register(Arc::new(GrepTool::default()));
     registry.register(Arc::new(EditTool::default()));
     registry.register(Arc::new(ExitPlanTool));
-    registry.register(Arc::new(GetGoalTool::default()));
-    registry.register(Arc::new(UpdateGoalTool::default()));
+    registry.register(Arc::new(GetGoalTool));
+    registry.register(Arc::new(UpdateGoalTool));
     registry.register(Arc::new(WebFetchTool::new()));
     registry
 }
@@ -364,7 +373,7 @@ fn within(base: &Path, out: &Path) -> bool {
             }
         }
         // base 组件全部命中即算在内;base 为空路径时不算(避免把任意路径都当"在空边界内")。
-        return base.components().count() > 0;
+        base.components().count() > 0
     }
     #[cfg(not(windows))]
     {

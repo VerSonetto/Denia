@@ -12,10 +12,14 @@
 pub mod agent_presets;
 pub mod agent_runtime;
 pub mod api;
+pub mod application;
+pub mod configuration;
 pub mod error;
 pub mod event_pulse;
 pub mod file_history;
+mod home_lock;
 pub mod host;
+pub(crate) mod infrastructure;
 pub mod jobs;
 pub mod mcp_runtime;
 pub mod mcp_settings;

@@ -115,7 +115,8 @@ const REMINDER_OPEN: &str = "<system-reminder>";
 const REMINDER_OPEN_CLOSE: &str = "</system-reminder>";
 const INTRO_BASELINE: &str = "工作区指令:以下工作区指令可能与当前工作相关，适用时作为指导。更具体的指令优先于更宽泛的指令；它们不覆盖系统提示词或用户直接下达的指令。";
 const INTRO_REPLACEMENT: &str = "工作区指令:此完整工作区指令基线取代之前所有工作区指令基线。以下指令可能与当前工作相关，适用时作为指导。更具体的指令优先于更宽泛的指令；它们不覆盖系统提示词或用户直接下达的指令。";
-const INTRO_EMPTY_REPLACEMENT: &str = "工作区指令:此完整工作区指令基线取代之前所有工作区指令基线。当前没有激活的工作区指令。";
+const INTRO_EMPTY_REPLACEMENT: &str =
+    "工作区指令:此完整工作区指令基线取代之前所有工作区指令基线。当前没有激活的工作区指令。";
 const TRUNCATED_NOTICE: &str = "\n\n（工作区指令超出字节预算，已截断。）";
 
 /// 提取一条本通道注入文本的正文（去掉框架与引导语行）；供新旧内容比较。

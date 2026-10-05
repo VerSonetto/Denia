@@ -43,6 +43,7 @@ pub fn is_valid_preset_id(id: &str) -> bool {
 /// 出问题的本地 preset 的基线;只有用户根目录下的 `User` preset 可被
 /// 复制来源、可被删除。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "bindings", derive(ts_rs::TS))]
 #[serde(rename_all = "kebab-case")]
 pub enum PresetTrust {
     Shipped,
@@ -64,6 +65,7 @@ impl PresetTrust {
 /// 兼容。未知键直接拒绝(fail loud):一个拼写错的开关默默不生效,比解析
 /// 失败更难排查。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "bindings", derive(ts_rs::TS))]
 #[serde(rename_all = "camelCase", deny_unknown_fields, default)]
 pub struct PresetFeatures {
     /// AGENTS.md 工作区指令注入通道(对齐 dsh `agent-instructions` 行)。
@@ -173,6 +175,7 @@ impl PresetFeatures {
 
 /// 一份 preset:会话的工具面 + 可选 persona 覆盖。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "bindings", derive(ts_rs::TS))]
 #[serde(rename_all = "camelCase")]
 pub struct AgentPreset {
     pub id: String,
@@ -182,9 +185,11 @@ pub struct AgentPreset {
     pub trust: PresetTrust,
     /// 工具白名单;`None` = 出厂全量工具集。
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "bindings", ts(optional))]
     pub tools: Option<Vec<String>>,
     /// persona 正文;`None` = 沿用 `SYSTEM.md` / 出厂 persona。
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "bindings", ts(optional))]
     pub persona: Option<String>,
     /// persona 独占:系统提示只留 persona 一段,压制部署身份、风格纪律与
     /// 全部工具指引;工具 schema 保留(工具仍可用,只是没有指引)。
@@ -195,6 +200,7 @@ pub struct AgentPreset {
     pub features: PresetFeatures,
     /// 用户 preset 的目录(展示与"打开目录"用);随附 preset 没有路径。
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "bindings", ts(optional))]
     pub path: Option<String>,
 }
 
@@ -272,7 +278,9 @@ pub fn builtin_presets() -> Vec<AgentPreset> {
 /// 磁盘格式的程序化入口。省略的字段与手写文件语义一致(tools 省略=全量,
 /// features 里省略的键=开启)。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "bindings", derive(ts_rs::TS))]
 #[serde(rename_all = "camelCase", default)]
+#[derive(Default)]
 pub struct PresetSpec {
     /// 新 preset 的 id(同时是目录名)。
     pub id: String,
@@ -283,30 +291,18 @@ pub struct PresetSpec {
     pub description: String,
     /// persona 正文;`None` = 沿用部署 persona。
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "bindings", ts(optional))]
     pub persona: Option<String>,
     /// persona 独占(系统提示只留 persona 一段)。
     #[serde(default)]
     pub persona_complete: bool,
     /// 工具白名单;`None` = 出厂全量工具集。
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "bindings", ts(optional))]
     pub tools: Option<Vec<String>>,
     /// 功能开关;省略的键 = 开启。
     #[serde(default)]
     pub features: PresetFeatures,
-}
-
-impl Default for PresetSpec {
-    fn default() -> Self {
-        Self {
-            id: String::new(),
-            name: String::new(),
-            description: String::new(),
-            persona: None,
-            persona_complete: false,
-            tools: None,
-            features: PresetFeatures::default(),
-        }
-    }
 }
 
 #[cfg(test)]
@@ -334,11 +330,9 @@ mod tests {
     fn builtin_presets_carry_the_default_id() {
         let presets = builtin_presets();
         assert!(presets.iter().any(|preset| preset.id == DEFAULT_PRESET_ID));
-        assert!(presets
-            .iter()
-            .all(|preset| is_valid_preset_id(&preset.id)
-                && preset.trust == PresetTrust::Shipped
-                && !preset.name.is_empty()));
+        assert!(presets.iter().all(|preset| is_valid_preset_id(&preset.id)
+            && preset.trust == PresetTrust::Shipped
+            && !preset.name.is_empty()));
         let standard = presets
             .iter()
             .find(|preset| preset.id == DEFAULT_PRESET_ID)
@@ -350,8 +344,13 @@ mod tests {
             .iter()
             .find(|preset| preset.id == "creator")
             .expect("creator preset is shipped");
-        assert!(creator.restricts_tools() == false);
-        assert!(creator.persona.as_deref().is_some_and(|text| text.contains("ask")));
+        assert!(!creator.restricts_tools());
+        assert!(
+            creator
+                .persona
+                .as_deref()
+                .is_some_and(|text| text.contains("ask"))
+        );
         assert!(creator.features.is_default());
         let minimal = presets
             .iter()
@@ -375,10 +374,8 @@ mod tests {
 
     #[test]
     fn features_parse_camel_case_keys_and_off_values() {
-        let features: PresetFeatures = serde_yaml::from_str(
-            "agentsMd: false\nmemory: false\nplanMode: false\n",
-        )
-        .unwrap();
+        let features: PresetFeatures =
+            serde_yaml::from_str("agentsMd: false\nmemory: false\nplanMode: false\n").unwrap();
         assert!(!features.agents_md);
         assert!(!features.memory);
         assert!(!features.plan_mode);
@@ -399,11 +396,24 @@ mod tests {
         features.memory = true;
         features.compaction = true; // 这三项不是工具面开关,不产生摘除。
         let excluded = features.excluded_tools();
-        for name in ["get_goal", "update_goal", "skill", "spawn_agent", "fork_agent",
-                     "send_message", "interrupt_agent", "list_agents", "wait_agent",
-                     "job_start", "job_list", "job_output", "job_kill", "browser",
-                     "ask", "exit_plan"]
-        {
+        for name in [
+            "get_goal",
+            "update_goal",
+            "skill",
+            "spawn_agent",
+            "fork_agent",
+            "send_message",
+            "interrupt_agent",
+            "list_agents",
+            "wait_agent",
+            "job_start",
+            "job_list",
+            "job_output",
+            "job_kill",
+            "browser",
+            "ask",
+            "exit_plan",
+        ] {
             assert!(excluded.contains(&name), "excluded_tools 缺 {name}");
         }
         // 这些开关由通道/段落层面处理,不进工具摘除清单。

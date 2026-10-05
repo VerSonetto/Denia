@@ -71,5 +71,8 @@ async fn context7_http_transport_works_end_to_end() {
         "响应里应含 react 的库 ID:\n{}",
         result.text
     );
-    println!("resolve-library-id 返回前 400 字符:\n{}", &result.text[..400.min(result.text.len())]);
+    println!(
+        "resolve-library-id 返回前 400 字符:\n{}",
+        &result.text[..400.min(result.text.len())]
+    );
 }

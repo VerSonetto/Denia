@@ -6,9 +6,9 @@
 
 use std::path::{Path, PathBuf};
 #[cfg(windows)]
-use std::sync::atomic::{AtomicUsize, Ordering};
-#[cfg(windows)]
 use std::sync::Mutex;
+#[cfg(windows)]
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use tokio::process::Command;
 
@@ -183,9 +183,7 @@ pub fn shell_command(command: &str) -> Command {
             "-NoProfile",
             "-NonInteractive",
             "-Command",
-            &format!(
-                "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; {command}"
-            ),
+            &format!("[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; {command}"),
         ]);
         child
     } else {
@@ -208,19 +206,15 @@ pub fn invalidate_windows_shell_cache() {
 fn windows_shell_executable() -> PathBuf {
     let epoch = SHELL_EPOCH.load(Ordering::Acquire);
     let mut cached = WINDOWS_SHELL.lock().expect("shell cache poisoned");
-    match &*cached {
-        Some(path) => {
-            // 缓存代数仍一致且文件仍在 → 直接复用;文件被删除时降级重解析。
-            let still_valid =
-                SHELL_EPOCH.load(Ordering::Acquire) == epoch && path.is_file();
-            if still_valid {
-                return path.clone();
-            }
-            if SHELL_EPOCH.load(Ordering::Acquire) == epoch {
-                *cached = None;
-            }
+    if let Some(path) = &*cached {
+        // 缓存代数仍一致且文件仍在 → 直接复用;文件被删除时降级重解析。
+        let still_valid = SHELL_EPOCH.load(Ordering::Acquire) == epoch && path.is_file();
+        if still_valid {
+            return path.clone();
         }
-        None => {}
+        if SHELL_EPOCH.load(Ordering::Acquire) == epoch {
+            *cached = None;
+        }
     }
     let path = resolve_windows_shell();
     *cached = Some(path.clone());
@@ -242,10 +236,10 @@ fn resolve_windows_shell() -> PathBuf {
 fn windows_terminal_default_powershell() -> Option<PathBuf> {
     for path in windows_terminal_settings_paths() {
         let settings = read_json_lenient(&path)?;
-        if let Some(commandline) = default_profile_commandline(&settings) {
-            if let Some(shell) = powershell_from_commandline(&commandline) {
-                return Some(shell);
-            }
+        if let Some(commandline) = default_profile_commandline(&settings)
+            && let Some(shell) = powershell_from_commandline(&commandline)
+        {
+            return Some(shell);
         }
     }
     None

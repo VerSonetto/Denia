@@ -1,88 +1,69 @@
-# denia
+# Denia
 
-A Rust agent harness inspired by DeepSeek Harness (dsh): backend core in Rust,
-web console in React.
+Rust agent runtime with a React console and an optional Tauri desktop host.
 
-## Status
+## Architecture
 
-- **Phase 1 — model configuration**: OpenAI-compatible provider registry,
-  layered settings with revision OCC, credential chain (`env > file > .env`),
-  model catalog, default-model selection, chat smoke endpoint.
-- **Phase 2 — harness core**: event-sourced sessions (JSONL, torn-tail
-  repair, orphan-turn close), agent loop (turn/step, tool continuation,
-  cancellation, step limit), tools (`bash`, `read_file`, `write_file`, all
-  auto-executing this phase), session REST + SSE follow API, session-centric
-  console.
+- `core`: domain records, JSON wire types, event projection.
+- `agent-loop`: turn/step orchestration, provider retries, tool dispatch and compaction.
+- `llm`, `tools`, `browser`, `mcp`, `terminal`: capability adapters.
+- `session`: JSONL storage, recovery, history, projections and indexing in separate modules.
+- `settings`, `credentials`: layered configuration and credential resolution.
+- `server/application`: prompt admission and business orchestration.
+- `server/infrastructure`: shared filesystem adapters.
+- `server/api`: HTTP parameter and response translation.
+- `server/state` and `host`: composition, resource lifecycle and listener setup.
+- `desktop`: Tauri host using the same server startup path.
+- `web/src/features/conversation`: conversation state helpers and composer hooks.
 
-## Layout
+Both listeners use the same authentication gate. Local clients retain direct access;
+remote clients need the configured remote session. Model tools follow the session's
+permission mode: read-only, auto-edit, plan or full.
 
-```
-crates/
-  core/         shared domain types (StreamChunk, SessionEvent, derive_messages)
-  settings/     namespaced YAML settings store (layered resolve, OCC, redaction)
-  credentials/  credential store (env > file > .env resolution chain)
-  llm/          provider adapter registry + OpenAI-compatible adapters
-  tools/        bash / read_file / write_file
-  session/      JSONL session storage
-  agent-loop/   the session driver (turn/step loop)
-  server/       axum HTTP API + SSE push + embedded console (bin: denia)
-web/            React + Vite + TypeScript console (sessions + models)
-scripts/        mock-gateway.mjs (stateful OpenAI-compatible test gateway)
-```
+## Development
 
-## Run
+`cargo run -p denia-server` serves the console at http://127.0.0.1:3600.
+Run `pnpm dev` inside `web` for the Vite development server.
 
-One-shot build (kills any running `denia`, builds the console, release-builds
-and installs the global command):
+State lives under `DENIA_HOME`, defaulting to `~/.denia`. A running host holds an
+OS lock on its data directory. Use a separate `--home` / `DESKTOP_HOME` when
+running an additional development or desktop instance; multiple browser clients
+can use one server normally.
 
-```sh
-scripts/build.sh          # build + install
-scripts/build.sh --run    # build + install + start
-```
+Console compaction, microcompaction and tool concurrency settings are resolved
+when each turn begins. An active turn keeps a consistent configuration snapshot;
+the next turn reads saved changes immediately. Compaction circuit breakers belong
+to their session and are released when that session leaves the runtime cache.
+Settings writes publish their value and revision only after persistence succeeds.
 
-Then, from anywhere:
+Sessions are append-only JSONL logs under `sessions/<id>/session.jsonl`. Loading
+repairs partial tails and closes orphaned turns. After an I/O failure the log
+writer stops; reloading repairs any partial tail before further writes.
 
-```sh
-denia                 # API + console on http://127.0.0.1:3600
-denia --port 4000     # custom port
-denia --web web/dist  # serve a console directory instead of the embedded one
-```
+## Build and verification
 
-Development with hot reload:
+- `pwsh scripts/check.ps1`: Rust format, Clippy correctness/suspicious checks,
+  generated protocol freshness, all Rust tests, frontend tests/types and build.
+- `pwsh scripts/check.ps1 -SkipBuild`: the same checks without the Vite build.
+- `pnpm check` in `web`: every frontend regression suite, including memory tests.
+- `pnpm typecheck`: TypeScript verification.
+- `pnpm build`: the same frontend test inventory, type checking and Vite build.
+- `scripts/build.ps1 -NoRun` or `scripts/build.sh`: install the CLI.
+- `scripts/desktop.ps1 -BuildOnly`: build the desktop app.
 
-```sh
-cargo run -p denia-server        # debug builds read web/dist from disk
-cd web && pnpm dev               # vite dev server on :5173 proxying /api
-```
+Windows CI uses the same verification script. Browser/network integration tests
+that require external dependencies remain explicitly ignored by default.
 
-## Sessions
+Shared event and request types come from Rust/serde. Regenerate after changing
+those records with:
 
-Sessions are append-only JSONL event logs under `$DENIA_HOME/sessions/<id>/`.
-A session is bound to a workspace directory (`cwd`). Tools (`bash`,
-`read_file`, `write_file`) auto-execute this phase.
+`cargo run -p denia-core --features bindings --example bindings`
 
-Key API:
-
-```
-GET    /api/sessions                 list
-POST   /api/sessions {workspaceId|cwd}  create
-GET    /api/sessions/:id             cold history {header, events}
-DELETE /api/sessions/:id
-POST   /api/sessions/:id/prompt      start a turn (202)
-POST   /api/sessions/:id/cancel
-GET    /api/sessions/:id/follow?after=N   SSE: replay then live
-```
+The bindings feature is optional and adds no dependency to ordinary core builds.
+The generator's `--check` mode verifies committed TypeScript is current.
 
 ## Test gateway
 
-`scripts/mock-gateway.mjs` is a stateful OpenAI-compatible gateway on :8788:
-first request answers with a `bash` tool call, requests carrying a tool
-result get text. Register it as a provider (`llm-openai` section,
-`baseURL: http://127.0.0.1:8788/v1`) to exercise the whole loop keyless.
-
-## Home
-
-State lives in `$DENIA_HOME` (default `~/.denia`):
-
-- `settings.yaml` — namespaced configuration (agent-default-model, llm-openai)
-- `.credentials.yaml` — stored API keys (0600), resolved after process env
+`node scripts/mock-gateway.mjs` starts a local OpenAI-compatible gateway on
+port 8788. Register its `http://127.0.0.1:8788/v1` endpoint to exercise the agent
+loop without a provider key.

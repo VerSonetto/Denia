@@ -128,7 +128,10 @@ fn respond(body: &[u8]) -> String {
             r#"{"jsonrpc":"2.0","id":null,"error":{"code":-32700,"message":"parse error"}}"#,
         );
     };
-    let id = request.get("id").cloned().unwrap_or(serde_json::Value::Null);
+    let id = request
+        .get("id")
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
     let method = request.get("method").and_then(|m| m.as_str()).unwrap_or("");
     let result = match method {
         "initialize" => serde_json::json!({
@@ -163,7 +166,7 @@ fn respond(body: &[u8]) -> String {
                 "jsonrpc": "2.0", "id": id,
                 "error": { "code": -32601, "message": format!("Method not found: {other}") }
             })
-            .to_string()
+            .to_string();
         }
     };
     serde_json::json!({ "jsonrpc": "2.0", "id": id, "result": result }).to_string()

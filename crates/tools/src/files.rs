@@ -64,7 +64,9 @@ fn read_header(path: &std::path::Path) -> Option<Vec<u8>> {
 
 /// 文件头是否像一张受支持的图片(纯魔数判定,不解析尺寸)。
 fn looks_like_image(header: &[u8]) -> bool {
-    IMAGE_MAGICS.iter().any(|(magic, _)| header.starts_with(magic))
+    IMAGE_MAGICS
+        .iter()
+        .any(|(magic, _)| header.starts_with(magic))
         || (header.len() >= 12 && &header[8..12] == b"WEBP")
 }
 
@@ -270,8 +272,7 @@ impl Tool for ReadFileTool {
                         "切换到支持图片输入的模型后再读取该文件",
                     );
                 }
-                let b64 =
-                    base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &data);
+                let b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &data);
                 let image = denia_core::message::ImageData {
                     mime: mime.to_string(),
                     data: b64,
@@ -474,13 +475,13 @@ impl Tool for WriteFileTool {
                 );
             }
         };
-        if let Some(parent) = path.parent() {
-            if let Err(error) = std::fs::create_dir_all(parent) {
-                return tool_error(
-                    format!("创建父目录失败:{error}"),
-                    "确认路径合法且当前权限允许写该目录",
-                );
-            }
+        if let Some(parent) = path.parent()
+            && let Err(error) = std::fs::create_dir_all(parent)
+        {
+            return tool_error(
+                format!("创建父目录失败:{error}"),
+                "确认路径合法且当前权限允许写该目录",
+            );
         }
         // 写前新鲜度校验:
         // 覆盖一个已存在的文件前,要求模型在本会话里读过它、且读过之后
@@ -519,10 +520,7 @@ impl Tool for WriteFileTool {
                     }
                     crate::read_state::WriteCheck::Stale => {
                         return tool_error(
-                            format!(
-                                "{} 自上次读取以来已被改动(可能被用户或工具修改)",
-                                args.path
-                            ),
+                            format!("{} 自上次读取以来已被改动(可能被用户或工具修改)", args.path),
                             "重新读取该文件获取最新内容,再执行写入",
                         );
                     }
@@ -708,7 +706,11 @@ mod tests {
         let out = reader.execute(r#"{"path":"long.txt"}"#, &ctx).await;
         assert!(!out.is_error, "{}", out.content);
         assert!(out.content.contains("本行超长,已截断"), "{}", out.content);
-        assert!(out.content.contains("1 行因单行超长被截断"), "{}", out.content);
+        assert!(
+            out.content.contains("1 行因单行超长被截断"),
+            "{}",
+            out.content
+        );
     }
 
     #[tokio::test]
@@ -766,7 +768,7 @@ mod tests {
         ));
         std::fs::create_dir_all(&dir).unwrap();
         let image_path = dir.join("pixel.png");
-        std::fs::write(&image_path, &png).unwrap();
+        std::fs::write(&image_path, png).unwrap();
 
         // 可识图:注入视觉输入事件 + 报告尺寸。
         let emitted: Arc<std::sync::Mutex<Vec<denia_core::session::SessionEvent>>> =
@@ -795,21 +797,23 @@ mod tests {
             assert!(out.content.contains("image/png"), "{}", out.content);
             assert!(out.content.contains("1x1"), "{}", out.content);
         }
-        let events = emitted.lock().unwrap();
-        assert_eq!(events.len(), 1);
-        match &events[0] {
-            denia_core::session::SessionEvent::UserMessage {
-                injected: true,
-                channel,
-                images,
-                ..
-            } => {
-                assert_eq!(images.len(), 1);
-                assert_eq!(images[0].mime, "image/png");
-                assert!(!images[0].data.is_empty());
-                assert_eq!(channel.as_deref(), Some("image"));
+        {
+            let events = emitted.lock().unwrap();
+            assert_eq!(events.len(), 1);
+            match &events[0] {
+                denia_core::session::SessionEvent::UserMessage {
+                    injected: true,
+                    channel,
+                    images,
+                    ..
+                } => {
+                    assert_eq!(images.len(), 1);
+                    assert_eq!(images[0].mime, "image/png");
+                    assert!(!images[0].data.is_empty());
+                    assert_eq!(channel.as_deref(), Some("image"));
+                }
+                other => panic!("expected injected user message, got {other:?}"),
             }
-            other => panic!("expected injected user message, got {other:?}"),
         }
 
         // 不识图:明确报错,不注入。

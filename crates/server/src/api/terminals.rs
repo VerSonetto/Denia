@@ -43,7 +43,10 @@ fn error(message: String) -> ApiError {
 
 /// GET /api/terminals — 终端列表快照。
 async fn list(State(state): State<Arc<AppState>>) -> Json<Value> {
-    Json(serde_json::to_value(state.terminals.snapshot()).unwrap_or_else(|_| json!({"terminals": []})))
+    Json(
+        serde_json::to_value(state.terminals.snapshot())
+            .unwrap_or_else(|_| json!({"terminals": []})),
+    )
 }
 
 #[derive(Deserialize)]
@@ -136,12 +139,7 @@ async fn attach(
     upgrade.on_upgrade(move |socket| handle_socket(state, id, query, socket))
 }
 
-async fn handle_socket(
-    state: Arc<AppState>,
-    id: String,
-    query: AttachQuery,
-    socket: WebSocket,
-) {
+async fn handle_socket(state: Arc<AppState>, id: String, query: AttachQuery, socket: WebSocket) {
     if state.terminals.get(&id).is_none() {
         let (mut sink, _) = socket.split();
         let _ = sink
@@ -160,17 +158,20 @@ async fn handle_socket(
     // 顺序上"缓冲在前、增量在后",不会丢也不会重。
     let mut events = state.terminals.subscribe();
 
-    if query.replay.as_deref() == Some("1") {
-        if let Some(bytes) = state.terminals.scrollback(&id) {
-            if !bytes.is_empty() {
-                let payload = json!({
-                    "type": "replay",
-                    "data": base64_encode(&bytes),
-                });
-                if sink.send(Message::Text(payload.to_string().into())).await.is_err() {
-                    return;
-                }
-            }
+    if query.replay.as_deref() == Some("1")
+        && let Some(bytes) = state.terminals.scrollback(&id)
+        && !bytes.is_empty()
+    {
+        let payload = json!({
+            "type": "replay",
+            "data": base64_encode(&bytes),
+        });
+        if sink
+            .send(Message::Text(payload.to_string().into()))
+            .await
+            .is_err()
+        {
+            return;
         }
     }
 
@@ -255,10 +256,14 @@ async fn handle_socket(
                             }
                         }
                         Some("resize") => {
-                            let cols = value.get("cols").and_then(Value::as_u64).unwrap_or(80) as u16;
-                            let rows = value.get("rows").and_then(Value::as_u64).unwrap_or(24) as u16;
-                            if let Err(error) =
-                                state_for_input.terminals.resize(&terminal_id, cols, rows).await
+                            let cols =
+                                value.get("cols").and_then(Value::as_u64).unwrap_or(80) as u16;
+                            let rows =
+                                value.get("rows").and_then(Value::as_u64).unwrap_or(24) as u16;
+                            if let Err(error) = state_for_input
+                                .terminals
+                                .resize(&terminal_id, cols, rows)
+                                .await
                             {
                                 tracing::debug!(terminal_id = %terminal_id, %error, "terminal resize failed");
                             }

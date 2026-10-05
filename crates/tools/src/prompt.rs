@@ -4,8 +4,8 @@ use std::sync::Arc;
 
 use denia_core::tool::ToolSchema;
 use denia_system_prompt::{
-    AssembleContext, AssembledSection, PromptContext, PromptSection, PromptText, SectionAudience,
-    SectionOrder, SystemPrompt, ToolProviderResult,
+    AssembleContext, PromptContext, PromptSection, PromptText, SectionAudience, SectionOrder,
+    SystemPrompt, ToolProviderResult,
 };
 
 use crate::browser::BrowserHub;
@@ -315,9 +315,7 @@ fn connected_server_ids(manager: &denia_mcp::McpManager) -> Vec<String> {
     snapshot
         .servers
         .iter()
-        .filter(|server| {
-            server.enabled && server.status == denia_mcp::McpServerStatus::Connected
-        })
+        .filter(|server| server.enabled && server.status == denia_mcp::McpServerStatus::Connected)
         .map(|server| server.id.clone())
         .collect()
 }
@@ -738,7 +736,11 @@ mod tests {
             registry.get("web_fetch").is_some(),
             "web_fetch 应注册进 shipped 工具面"
         );
-        let tool_names: Vec<String> = assembly.tools.iter().map(|tool| tool.name.clone()).collect();
+        let tool_names: Vec<String> = assembly
+            .tools
+            .iter()
+            .map(|tool| tool.name.clone())
+            .collect();
         assert!(
             tool_names.contains(&"web_fetch".to_string()),
             "web_fetch schema 必须进 prompt 工具面:{tool_names:?}"
@@ -778,7 +780,10 @@ mod tests {
         }
 
         let model = render_prompt(&assembly);
-        assert!(model.contains("有足够信息就动手"), "工作方式纪律必须进模型提示");
+        assert!(
+            model.contains("有足够信息就动手"),
+            "工作方式纪律必须进模型提示"
+        );
         assert!(model.contains("先给结论"), "输出纪律必须进模型提示");
         assert!(
             model.contains("Markdown 语法写完整"),
@@ -824,7 +829,8 @@ mod tests {
         assert!(model.contains("如实报告结果"), "诚实报告纪律必须进模型提示");
 
         let user = render_prompt_for_user(&assembly);
-        for needle in ["你不需要提前收尾", "写代码要像周围的代码", "如实报告结果"] {
+        for needle in ["你不需要提前收尾", "写代码要像周围的代码", "如实报告结果"]
+        {
             assert!(!user.contains(needle), "用户副本不应含模型侧纪律:{needle}");
         }
     }
@@ -904,7 +910,7 @@ mod tests {
             provider: Some("mock".to_string()),
             ..Default::default()
         };
-        let mut reference: Option<(Vec<AssembledSection>, Vec<String>)> = None;
+        let mut reference: Option<(Vec<denia_system_prompt::AssembledSection>, Vec<String>)> = None;
         for mode in ["read-only", "auto-edit", "plan", "full"] {
             let assembly = prompt
                 .assemble(&AssembleContext {
@@ -997,7 +1003,12 @@ mod tests {
         assert!(!render_context_snapshot(&assembly).is_empty());
         // bash/read/write/todo/ls/glob/grep/edit/exit_plan/get_goal/update_goal/web_fetch。
         assert_eq!(assembly.tools.len(), 13);
-        assert!(assembly.tools.iter().any(|tool| tool.name == "read_tool_output"));
+        assert!(
+            assembly
+                .tools
+                .iter()
+                .any(|tool| tool.name == "read_tool_output")
+        );
     }
 
     /// 全量兜底:出厂提示词里**任何一处**都不许把探索动作推给 bash。
@@ -1064,7 +1075,11 @@ mod tests {
             "tool:grep",
             "tool:read",
         ] {
-            if let Some(section) = assembly.sections.iter().find(|section| section.name == name) {
+            if let Some(section) = assembly
+                .sections
+                .iter()
+                .find(|section| section.name == name)
+            {
                 eprintln!("\n===== {name} =====\n{}", section.text);
             }
         }
@@ -1096,7 +1111,10 @@ mod tests {
         assert!(section.text.contains("Get-ChildItem"), "{}", section.text);
         assert!(section.text.contains("depth"), "{}", section.text);
         let user_body = denia_system_prompt::render_prompt_for_user(&assembly);
-        assert!(!user_body.contains("不要用 shell 的 ls"), "tool:ls 段泄进了用户可见副本");
+        assert!(
+            !user_body.contains("不要用 shell 的 ls"),
+            "tool:ls 段泄进了用户可见副本"
+        );
     }
 
     #[test]
@@ -1141,7 +1159,10 @@ mod tests {
             );
         }
         let user_body = denia_system_prompt::render_prompt_for_user(&assembly);
-        assert!(!user_body.contains("按动作界定"), "tool:bash 段泄进了用户可见副本");
+        assert!(
+            !user_body.contains("按动作界定"),
+            "tool:bash 段泄进了用户可见副本"
+        );
     }
 
     #[test]
@@ -1241,7 +1262,10 @@ mod tests {
             assert!(section.text.contains(needle), "tool:memory 段缺少 {needle}");
         }
         let user_body = render_prompt_for_user(&assembly);
-        assert!(!user_body.contains("一事一文件"), "tool:memory 段泄进了用户可见副本");
+        assert!(
+            !user_body.contains("一事一文件"),
+            "tool:memory 段泄进了用户可见副本"
+        );
     }
 
     #[test]
@@ -1399,8 +1423,11 @@ mod browser_prompt_tests {
         assert!(!user_body.contains("绝不关闭不是自己开的 tab"));
 
         // persona 变体带 hub 同样有段。
-        let (prompt, _registry) =
-            shipped_with_persona_and_browser_and_ask("自定义 persona".to_string(), Some(fake_hub()), false);
+        let (prompt, _registry) = shipped_with_persona_and_browser_and_ask(
+            "自定义 persona".to_string(),
+            Some(fake_hub()),
+            false,
+        );
         let assembly = prompt.assemble(&context).expect("assemble");
         assert!(
             assembly
@@ -1414,10 +1441,7 @@ mod browser_prompt_tests {
     #[test]
     fn browser_section_absent_without_hub() {
         // 无 browser 工具的部署不注入纪律段:模型不看到不存在的工具。
-        for (prompt, _tools) in [
-            default_shipped(),
-            default_shipped_with_browser(None),
-        ] {
+        for (prompt, _tools) in [default_shipped(), default_shipped_with_browser(None)] {
             let assembly = prompt
                 .assemble(&denia_system_prompt::AssembleContext::default())
                 .expect("assemble");
@@ -1439,8 +1463,7 @@ mod browser_prompt_tests {
             crate::SUBAGENT_READ_ONLY_TOOLS.contains(&"browser"),
             "browser 应授予子代理"
         );
-        let (prompt, registry) =
-            default_shipped_with_browser_and_ask(Some(fake_hub()), true);
+        let (prompt, registry) = default_shipped_with_browser_and_ask(Some(fake_hub()), true);
         let assembly = prompt
             .assemble(&denia_system_prompt::AssembleContext {
                 cwd: Some("/tmp/ws".to_string()),
@@ -1500,11 +1523,8 @@ mod browser_prompt_tests {
         assert!(registry.get("ask").is_none());
 
         // persona 变体同样成对。
-        let (prompt, registry) = shipped_with_persona_and_browser_and_ask(
-            "自定义 persona".to_string(),
-            None,
-            true,
-        );
+        let (prompt, registry) =
+            shipped_with_persona_and_browser_and_ask("自定义 persona".to_string(), None, true);
         let assembly = prompt.assemble(&context).expect("assemble");
         assert!(assembly.sections.iter().any(|s| s.name == "tool:ask"));
         assert!(registry.get("ask").is_some());
@@ -1523,7 +1543,8 @@ mod browser_prompt_tests {
         .await;
         assert!(!output.is_error, "command should succeed");
         assert_eq!(
-            hub.visual_requests.load(std::sync::atomic::Ordering::SeqCst),
+            hub.visual_requests
+                .load(std::sync::atomic::Ordering::SeqCst),
             1,
             "visual mode should be requested exactly once"
         );
@@ -1535,14 +1556,12 @@ mod browser_prompt_tests {
         let hub = std::sync::Arc::new(FakeHub {
             visual_requests: std::sync::atomic::AtomicUsize::new(0),
         });
-        let output = run_browser_tool(
-            hub.clone() as crate::BrowserHub,
-            r#"{"method":"list"}"#,
-        )
-        .await;
+        let output =
+            run_browser_tool(hub.clone() as crate::BrowserHub, r#"{"method":"list"}"#).await;
         assert!(!output.is_error, "command should succeed");
         assert_eq!(
-            hub.visual_requests.load(std::sync::atomic::Ordering::SeqCst),
+            hub.visual_requests
+                .load(std::sync::atomic::Ordering::SeqCst),
             0,
             "visual mode must not be requested by default"
         );
@@ -1558,8 +1577,12 @@ mod capability_prompt_tests {
         let mut prompt = denia_system_prompt::SystemPrompt::new(
             denia_system_prompt::SystemPromptConfig::default(),
         );
-        prompt.variable("cwd", |context| context.cwd.clone()).unwrap();
-        prompt.variable("model", |context| context.model.clone()).unwrap();
+        prompt
+            .variable("cwd", |context| context.cwd.clone())
+            .unwrap();
+        prompt
+            .variable("model", |context| context.model.clone())
+            .unwrap();
         prompt
             .variable("provider", |context| context.provider.clone())
             .unwrap();
@@ -1573,7 +1596,11 @@ mod capability_prompt_tests {
             })
             .unwrap();
         let body = denia_system_prompt::render_prompt(&assembly);
-        assert!(body.contains("spawn_agent/fork_agent"), "{}", &body[..body.len().min(2000)]);
+        assert!(
+            body.contains("spawn_agent/fork_agent"),
+            "{}",
+            &body[..body.len().min(2000)]
+        );
         assert!(body.contains("job_start"));
         assert!(body.contains("<available_skills>"));
         // Model audience 段不进用户可见副本。

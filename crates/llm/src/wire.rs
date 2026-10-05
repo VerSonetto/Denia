@@ -210,10 +210,10 @@ pub fn build_wire_messages(request: &GenerateRequest) -> Vec<WireMessage> {
         tool_call_id: None,
     };
     let mut out = Vec::new();
-    if let Some(system) = &request.system {
-        if !system.is_empty() {
-            out.push(plain("system", system.clone()));
-        }
+    if let Some(system) = &request.system
+        && !system.is_empty()
+    {
+        out.push(plain("system", system.clone()));
     }
     for message in &request.messages {
         match message.role {
@@ -390,10 +390,9 @@ impl StreamTranslator {
                 .finish_reason
                 .as_deref()
                 .filter(|reason| !reason.is_empty())
+                && self.finish.is_none()
             {
-                if self.finish.is_none() {
-                    self.finish = Some(map_finish_reason(raw));
-                }
+                self.finish = Some(map_finish_reason(raw));
             }
         }
         if let Some(usage) = &chunk.usage {
@@ -470,18 +469,18 @@ impl StreamTranslator {
                     );
                 }
                 let entry = self.tool_calls.get_mut(&wire_index).unwrap();
-                if let Some(id) = wire_call.id.as_deref().filter(|id| !id.is_empty()) {
-                    if entry.id.is_empty() {
-                        entry.id = id.to_string();
-                    }
+                if let Some(id) = wire_call.id.as_deref().filter(|id| !id.is_empty())
+                    && entry.id.is_empty()
+                {
+                    entry.id = id.to_string();
                 }
                 if let Some(function) = &wire_call.function {
                     let mut first_name: Option<String> = None;
-                    if let Some(name) = function.name.as_deref().filter(|n| !n.is_empty()) {
-                        if entry.name.is_empty() {
-                            entry.name = name.to_string();
-                            first_name = Some(name.to_string());
-                        }
+                    if let Some(name) = function.name.as_deref().filter(|n| !n.is_empty())
+                        && entry.name.is_empty()
+                    {
+                        entry.name = name.to_string();
+                        first_name = Some(name.to_string());
                     }
                     if let Some(arguments) = &function.arguments {
                         entry.arguments.push_str(arguments);
@@ -504,7 +503,10 @@ impl StreamTranslator {
         if let Some(block) = self.reasoning.take() {
             out.push(StreamChunk::BlockEnd {
                 index: block.index,
-                block: ContentBlock::Reasoning { text: block.text, replay: None },
+                block: ContentBlock::Reasoning {
+                    text: block.text,
+                    replay: None,
+                },
             });
         }
         if let Some(block) = self.text.take() {
@@ -519,7 +521,9 @@ impl StreamTranslator {
                 block: ContentBlock::ToolCall {
                     id: call.id,
                     name: call.name,
-                    arguments: call.arguments, incomplete: false },
+                    arguments: call.arguments,
+                    incomplete: false,
+                },
             });
         }
         if let Some(usage) = self.usage.take() {
@@ -541,7 +545,9 @@ impl StreamTranslator {
 
 #[cfg(test)]
 mod tests {
-    use super::{StreamTranslator, UsageStyle, WireChunk, WireUsage, build_wire_messages, map_usage};
+    use super::{
+        StreamTranslator, UsageStyle, WireChunk, WireUsage, build_wire_messages, map_usage,
+    };
 
     fn chunk(json: &str) -> WireChunk {
         serde_json::from_str(json).unwrap()
@@ -792,7 +798,9 @@ mod tests {
             UsageStyle::OpenAi,
         );
         all.extend(translator.feed(
-            &chunk(r#"{"choices":[{"delta":{"tool_calls":[{"function":{"arguments":"\"ls\"}"}}]}}]}"#),
+            &chunk(
+                r#"{"choices":[{"delta":{"tool_calls":[{"function":{"arguments":"\"ls\"}"}}]}}]}"#,
+            ),
             UsageStyle::OpenAi,
         ));
         all.extend(translator.finalize());
@@ -803,7 +811,9 @@ mod tests {
             denia_core::stream::ContentBlock::ToolCall {
                 id,
                 name,
-                arguments, .. } => {
+                arguments,
+                ..
+            } => {
                 assert_eq!(id, "call_1");
                 assert_eq!(name, "bash");
                 assert_eq!(arguments, r#"{"command":"ls"}"#);

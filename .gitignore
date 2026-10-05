@@ -39,3 +39,12 @@
 # 本地图标预览页，不纳入版本库
 /web/public/tool-icons.html
 /web/public/sidebar-icons.html
+
+# 逆向分析产物(第三方程序解包:app.asar 524MB + 解包源码 498MB),与本项目无关
+/chatgpt-re/
+
+# 逆向分析报告与证据(推理强度滑块等),本地留存不入库
+/analysis/
+
+# 一次性应用扫描脚本(定位本机安装位置用)
+/_scan*.ps1

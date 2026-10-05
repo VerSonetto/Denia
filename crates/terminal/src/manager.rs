@@ -270,7 +270,9 @@ impl TerminalManager {
 
     /// 读取某个终端的回滚缓冲(重连/刷新后补齐历史)。
     pub fn scrollback(&self, id: &str) -> Option<Vec<u8>> {
-        self.map().get(id).map(|terminal| terminal.scrollback_bytes())
+        self.map()
+            .get(id)
+            .map(|terminal| terminal.scrollback_bytes())
     }
 
     pub fn get(&self, id: &str) -> Option<TerminalInfo> {
@@ -488,7 +490,9 @@ impl TerminalManager {
             writer
                 .write_all(&data)
                 .map_err(|error| format!("写入终端失败:{error}"))?;
-            writer.flush().map_err(|error| format!("刷新终端失败:{error}"))?;
+            writer
+                .flush()
+                .map_err(|error| format!("刷新终端失败:{error}"))?;
             Ok(data.len())
         })
         .await
@@ -588,7 +592,10 @@ fn answer_cursor_queries(terminal: &Terminal, carry: &mut Vec<u8>, chunk: &[u8])
     scan.extend_from_slice(carry);
     scan.extend_from_slice(chunk);
 
-    if !scan.windows(CURSOR_POSITION_QUERY.len()).any(|window| window == CURSOR_POSITION_QUERY) {
+    if !scan
+        .windows(CURSOR_POSITION_QUERY.len())
+        .any(|window| window == CURSOR_POSITION_QUERY)
+    {
         // 没命中:只留可能跨块的尾巴。
         carry.clear();
         if keep > 0 && scan.len() >= keep {

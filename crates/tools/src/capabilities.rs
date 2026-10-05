@@ -7,7 +7,15 @@ use std::sync::Arc;
 
 #[async_trait]
 pub trait AgentRuntime: Send + Sync {
-    async fn execute(&self, name: &str, args: Value, ctx: &ToolContext) -> Result<Value, String>;
+    async fn execute(&self, name: &str, args: Value, ctx: &ToolContext) -> Result<Value, String> {
+        let command = crate::runtime_command::RuntimeCommand::parse(name, args)?;
+        self.execute_command(command, ctx).await
+    }
+    async fn execute_command(
+        &self,
+        command: crate::runtime_command::RuntimeCommand,
+        ctx: &ToolContext,
+    ) -> Result<Value, String>;
     async fn context(&self, session: &str, cwd: &std::path::Path) -> Result<Vec<String>, String>;
     async fn drain(&self, session: &str) -> Result<Vec<String>, String>;
 
@@ -59,10 +67,7 @@ pub trait AgentRuntime: Send + Sync {
     /// 项目记忆索引(MEMORY.md)注入文本;None = 未启用。记忆启用时实现方
     /// 必须给出注入(空桶给目录路径,有索引给全文)——路径是主代理读写
     /// 记忆的前提。幂等去重由驱动器按通道基准承担(内容不变不重发)。
-    async fn project_memory_index(
-        &self,
-        cwd: &std::path::Path,
-    ) -> Result<Option<String>, String> {
+    async fn project_memory_index(&self, cwd: &std::path::Path) -> Result<Option<String>, String> {
         let _ = cwd;
         Ok(None)
     }

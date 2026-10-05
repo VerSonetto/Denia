@@ -42,8 +42,8 @@ pub fn schedule(
     first_prompt: String,
 ) {
     tokio::spawn(async move {
-        if let Err(error) = generate_and_store(&registry, &live, &events, &selection, &first_prompt)
-            .await
+        if let Err(error) =
+            generate_and_store(&registry, &live, &events, &selection, &first_prompt).await
         {
             tracing::debug!(session = %live.session.id(), error = %error, "会话标题未生成");
         }
@@ -139,10 +139,8 @@ async fn collect_text(
 /// 从模型声明的思考档位里挑最低强度:优先 `off`(直接关闭思考),缺失时
 /// 按已知低→高顺序取首个可用档;全部未知则取声明首档兜底。
 fn lowest_effort(efforts: &[denia_llm::ReasoningEffortInfo]) -> Option<String> {
-    let available: std::collections::HashSet<&str> = efforts
-        .iter()
-        .map(|effort| effort.id.as_str())
-        .collect();
+    let available: std::collections::HashSet<&str> =
+        efforts.iter().map(|effort| effort.id.as_str()).collect();
     EFFORT_ORDER_LOW_TO_HIGH
         .iter()
         .find(|id| available.contains(**id))
@@ -162,11 +160,12 @@ fn frame_input(prompt: &str) -> String {
 /// 空白归一、UTF-8 字节预算内截断,产出单行安全标题(可能为空)。
 fn normalize_title(input: &str, max_bytes: usize) -> String {
     let stripped = strip_escape_sequences(input);
-    let cleaned: String = stripped.chars().filter(|c| !is_stripped_control(*c)).collect();
+    let cleaned: String = stripped
+        .chars()
+        .filter(|c| !is_stripped_control(*c))
+        .collect();
     let normalized = cleaned.split_whitespace().collect::<Vec<_>>().join(" ");
-    truncate_utf8(&normalized, max_bytes)
-        .trim_end()
-        .to_string()
+    truncate_utf8(&normalized, max_bytes).trim_end().to_string()
 }
 
 /// OSC/DCS/SOS/PM/APC 序列:消费到 BEL 或 ESC\ 终止;未闭合则吞到末尾。
@@ -254,7 +253,10 @@ mod tests {
 
     #[test]
     fn normalize_strips_controls_and_collapses_whitespace() {
-        assert_eq!(normalize_title("  你好\t世界 \n 生成 ", 80), "你好 世界 生成");
+        assert_eq!(
+            normalize_title("  你好\t世界 \n 生成 ", 80),
+            "你好 世界 生成"
+        );
         assert_eq!(normalize_title("\u{1b}[31m红\u{1b}[0m色", 80), "红色");
         assert_eq!(normalize_title("\u{200e}隐藏\u{feff}字符", 80), "隐藏字符");
         assert_eq!(normalize_title("\u{7}\u{1b}", 80), "");
@@ -285,9 +287,15 @@ mod tests {
             name: id.into(),
             description: None,
         };
-        let full: Vec<_> = ["high", "off", "medium"].iter().map(|id| effort(id)).collect();
+        let full: Vec<_> = ["high", "off", "medium"]
+            .iter()
+            .map(|id| effort(id))
+            .collect();
         assert_eq!(lowest_effort(&full).as_deref(), Some("off"));
-        let no_off: Vec<_> = ["max", "medium", "low"].iter().map(|id| effort(id)).collect();
+        let no_off: Vec<_> = ["max", "medium", "low"]
+            .iter()
+            .map(|id| effort(id))
+            .collect();
         assert_eq!(lowest_effort(&no_off).as_deref(), Some("low"));
         let unknown: Vec<_> = ["turbo"].iter().map(|id| effort(id)).collect();
         assert_eq!(lowest_effort(&unknown).as_deref(), Some("turbo"));

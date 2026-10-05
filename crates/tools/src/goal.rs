@@ -285,9 +285,7 @@ mod tests {
         assert!(out.content.contains("进行中"));
         assert!(out.content.contains("900/10000 tokens"));
         assert!(out.content.contains("续跑轮数:2"));
-        let empty = GetGoalTool
-            .execute("", &ctx_with(sink.clone(), None))
-            .await;
+        let empty = GetGoalTool.execute("", &ctx_with(sink.clone(), None)).await;
         assert!(!empty.is_error);
         assert!(empty.content.contains("没有设置目标"));
         assert!(sink.lock().unwrap().is_empty(), "get_goal 不写事件");
@@ -297,23 +295,34 @@ mod tests {
     async fn update_goal_validates_actions_against_state() {
         let sink = Arc::new(Mutex::new(Vec::new()));
         let ok = UpdateGoalTool
-            .execute(r#"{"action":"complete"}"#, &ctx_with(sink.clone(), Some(active_goal())))
+            .execute(
+                r#"{"action":"complete"}"#,
+                &ctx_with(sink.clone(), Some(active_goal())),
+            )
             .await;
         assert!(!ok.is_error, "{}", ok.content);
         assert_eq!(
             sink.lock().unwrap().pop(),
-            Some(SessionEvent::Goal { op: GoalOp::Complete })
+            Some(SessionEvent::Goal {
+                op: GoalOp::Complete
+            })
         );
         // blocked 缺 reason 拒绝;未知 action 拒绝。
         assert!(
             UpdateGoalTool
-                .execute(r#"{"action":"blocked"}"#, &ctx_with(sink.clone(), Some(active_goal())))
+                .execute(
+                    r#"{"action":"blocked"}"#,
+                    &ctx_with(sink.clone(), Some(active_goal()))
+                )
                 .await
                 .is_error
         );
         assert!(
             UpdateGoalTool
-                .execute(r#"{"action":"destroy"}"#, &ctx_with(sink.clone(), Some(active_goal())))
+                .execute(
+                    r#"{"action":"destroy"}"#,
+                    &ctx_with(sink.clone(), Some(active_goal()))
+                )
                 .await
                 .is_error
         );
@@ -322,7 +331,10 @@ mod tests {
         limited.status = GoalStatus::BudgetLimited;
         assert!(
             UpdateGoalTool
-                .execute(r#"{"action":"resume"}"#, &ctx_with(sink.clone(), Some((limited, 10_000))))
+                .execute(
+                    r#"{"action":"resume"}"#,
+                    &ctx_with(sink.clone(), Some((limited, 10_000)))
+                )
                 .await
                 .is_error
         );
@@ -340,7 +352,10 @@ mod tests {
         let sink = Arc::new(Mutex::new(Vec::new()));
         assert!(
             UpdateGoalTool
-                .execute(r#"{"action":"edit"}"#, &ctx_with(sink.clone(), Some(active_goal())))
+                .execute(
+                    r#"{"action":"edit"}"#,
+                    &ctx_with(sink.clone(), Some(active_goal()))
+                )
                 .await
                 .is_error
         );

@@ -87,10 +87,7 @@ impl ChallengeTable {
         if challenge.peer != peer {
             return VerifyOutcome::PeerMismatch;
         }
-        if secret::constant_time_eq(
-            challenge.pin_hash.as_bytes(),
-            hash_pin(id, pin).as_bytes(),
-        ) {
+        if secret::constant_time_eq(challenge.pin_hash.as_bytes(), hash_pin(id, pin).as_bytes()) {
             map.remove(id);
             return VerifyOutcome::Ok;
         }
@@ -99,7 +96,9 @@ impl ChallengeTable {
         if left == 0 {
             map.remove(id);
         }
-        VerifyOutcome::Mismatch { attempts_left: left }
+        VerifyOutcome::Mismatch {
+            attempts_left: left,
+        }
     }
 
     /// 取 challenge 所属通道(审计与超时参数用)。已销毁时返回 None。
@@ -151,7 +150,10 @@ mod tests {
     fn correct_pin_opens_once() {
         let table = ChallengeTable::new();
         let id = open(&table, "203.0.113.7");
-        assert_eq!(table.verify(&id, "203.0.113.7", "123456", NOW + 1), VerifyOutcome::Ok);
+        assert_eq!(
+            table.verify(&id, "203.0.113.7", "123456", NOW + 1),
+            VerifyOutcome::Ok
+        );
         assert_eq!(
             table.verify(&id, "203.0.113.7", "123456", NOW + 2),
             VerifyOutcome::Unknown,
@@ -192,7 +194,10 @@ mod tests {
             VerifyOutcome::PeerMismatch
         );
         // 换 IP 尝试不消耗本 IP 的额度。
-        assert_eq!(table.verify(&id, "203.0.113.7", "123456", NOW + 2), VerifyOutcome::Ok);
+        assert_eq!(
+            table.verify(&id, "203.0.113.7", "123456", NOW + 2),
+            VerifyOutcome::Ok
+        );
     }
 
     #[test]

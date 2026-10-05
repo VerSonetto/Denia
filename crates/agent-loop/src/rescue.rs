@@ -189,7 +189,10 @@ mod tests {
         assert_eq!(calls[0].name, "edit");
         assert_eq!(calls[0].arguments["path"], "src/lib.rs");
         // 值本身是合法 JSON(对象)时原样保留,不是一律字符串。
-        assert_eq!(calls[0].arguments["old_string"], serde_json::json!({"a": 1}));
+        assert_eq!(
+            calls[0].arguments["old_string"],
+            serde_json::json!({"a": 1})
+        );
         assert_eq!(calls[1].name, "bash");
         assert_eq!(calls[1].arguments["command"], "Get-ChildItem");
         // 大小写不敏感,函数名归一为小写。
@@ -248,12 +251,15 @@ mod tests {
         let bad = ContentBlock::Text {
             text: "<tool_call><function=bash><parameter=command>ls</tool_call>".into(),
         };
-        assert!(rescue_from_blocks(&[good.clone()]).is_some());
+        assert!(rescue_from_blocks(std::slice::from_ref(&good)).is_some());
         // 任一块解析失败 → 整体放弃。
         assert!(rescue_from_blocks(&[good, bad]).is_none());
         // 纯文本块(没有伪调用)→ None。
         assert!(
-            rescue_from_blocks(&[ContentBlock::Text { text: "普通".into() }]).is_none()
+            rescue_from_blocks(&[ContentBlock::Text {
+                text: "普通".into()
+            }])
+            .is_none()
         );
     }
 }

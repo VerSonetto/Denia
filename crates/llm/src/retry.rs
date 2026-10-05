@@ -70,12 +70,12 @@ impl Default for RetryPolicy {
 impl RetryPolicy {
     /// 该错误码是否走退避重试(agent-loop 的 finish/流错误重试环复用)。
     pub fn is_retryable(&self, code: &str) -> bool {
-        self.retryable_codes.iter().any(|c| *c == code)
+        self.retryable_codes.contains(&code)
     }
 
     /// 该错误码是否为连接类错误(网络层抖动,独立退避曲线)。
     pub fn is_connection_error(&self, code: &str) -> bool {
-        self.connection_codes.iter().any(|c| *c == code)
+        self.connection_codes.contains(&code)
     }
 
     /// dsh 对齐退避:`min(initial · 2^min(retry-1, 1024), max) · jitter` 再夹 max,
@@ -94,7 +94,10 @@ impl RetryPolicy {
         connection: bool,
     ) -> Option<u64> {
         let (initial, max) = if connection {
-            (self.connection_initial_delay_ms, self.connection_max_delay_ms)
+            (
+                self.connection_initial_delay_ms,
+                self.connection_max_delay_ms,
+            )
         } else {
             (self.initial_delay_ms, self.max_delay_ms)
         };

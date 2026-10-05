@@ -19,10 +19,7 @@ use crate::state::AppState;
 
 pub fn router() -> Router<Arc<AppState>> {
     Router::new()
-        .route(
-            "/api/agent-presets",
-            get(list_presets).post(copy_preset),
-        )
+        .route("/api/agent-presets", get(list_presets).post(copy_preset))
         .route(
             "/api/agent-presets/{id}",
             get(get_preset).delete(delete_preset),
@@ -54,7 +51,11 @@ async fn get_preset(
         .cloned()
         .ok_or_else(|| unknown_preset(&id))?;
     let text = state.agent_presets.describe_text(&id).map_err(|reason| {
-        ApiError::new(StatusCode::UNPROCESSABLE_ENTITY, "agent-preset/broken", reason)
+        ApiError::new(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "agent-preset/broken",
+            reason,
+        )
     })?;
     Ok(Json(json!({ "preset": row, "text": text })))
 }
@@ -78,13 +79,20 @@ async fn copy_preset(
 ) -> Result<impl IntoResponse, ApiError> {
     let store = state.agent_presets.clone();
     let name = body.name.clone();
-    let row = tokio::task::spawn_blocking(move || store.copy(&body.from, &body.id, name.as_deref()))
-        .await
-        .map_err(|error| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "api/join", error.to_string()))?
-        .map_err(|reason| {
-            ApiError::bad_request("agent-preset/copy-rejected", reason)
-        })?;
-    let _ = state.events.send(crate::state::ServerEvent::AgentPresetsUpdated);
+    let row =
+        tokio::task::spawn_blocking(move || store.copy(&body.from, &body.id, name.as_deref()))
+            .await
+            .map_err(|error| {
+                ApiError::new(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "api/join",
+                    error.to_string(),
+                )
+            })?
+            .map_err(|reason| ApiError::bad_request("agent-preset/copy-rejected", reason))?;
+    let _ = state
+        .events
+        .send(crate::state::ServerEvent::AgentPresetsUpdated);
     Ok((StatusCode::CREATED, Json(json!({ "preset": row }))))
 }
 
@@ -97,7 +105,13 @@ async fn delete_preset(
     let id_for_task = id.clone();
     tokio::task::spawn_blocking(move || store.remove(&id_for_task))
         .await
-        .map_err(|error| ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "api/join", error.to_string()))?
+        .map_err(|error| {
+            ApiError::new(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "api/join",
+                error.to_string(),
+            )
+        })?
         .map_err(|reason| {
             let code = if reason.contains("不可删除") {
                 StatusCode::CONFLICT
@@ -108,7 +122,9 @@ async fn delete_preset(
             };
             ApiError::new(code, "agent-preset/remove-rejected", reason)
         })?;
-    let _ = state.events.send(crate::state::ServerEvent::AgentPresetsUpdated);
+    let _ = state
+        .events
+        .send(crate::state::ServerEvent::AgentPresetsUpdated);
     Ok(StatusCode::NO_CONTENT)
 }
 

@@ -72,7 +72,8 @@ fn parse_specs(args: &EditArgs) -> Result<Vec<EditSpec>, (String, String)> {
         if edits.is_empty() {
             return Err((
                 "edits 不能为空".to_string(),
-                "多处编辑至少提供一个 edits 项;如果只改一处,改用 old_string 与 new_string".to_string(),
+                "多处编辑至少提供一个 edits 项;如果只改一处,改用 old_string 与 new_string"
+                    .to_string(),
             ));
         }
         return edits
@@ -103,7 +104,8 @@ fn parse_specs(args: &EditArgs) -> Result<Vec<EditSpec>, (String, String)> {
     let Some(old) = args.old_string.as_deref() else {
         return Err((
             "缺少编辑内容".to_string(),
-            "单处编辑给 old_string 与 new_string;同一文件的多处编辑给 edits 数组;两种形式不要混用".to_string(),
+            "单处编辑给 old_string 与 new_string;同一文件的多处编辑给 edits 数组;两种形式不要混用"
+                .to_string(),
         ));
     };
     let Some(new) = args.new_string.as_deref() else {
@@ -500,8 +502,14 @@ mod tests {
         assert_eq!(parameters["type"], "object");
         let branches = parameters["oneOf"].as_array().expect("oneOf schema");
         assert_eq!(branches.len(), 2);
-        assert_eq!(branches[0]["required"], serde_json::json!(["path", "old_string", "new_string"]));
-        assert_eq!(branches[1]["required"], serde_json::json!(["path", "edits"]));
+        assert_eq!(
+            branches[0]["required"],
+            serde_json::json!(["path", "old_string", "new_string"])
+        );
+        assert_eq!(
+            branches[1]["required"],
+            serde_json::json!(["path", "edits"])
+        );
         assert_eq!(branches[1]["properties"]["edits"]["minItems"], 1);
         for branch in branches {
             assert_eq!(branch["additionalProperties"], false);
@@ -793,9 +801,7 @@ mod tests {
         std::fs::write(root.join("a.txt"), "hello\n").unwrap();
         let ctx = context(root.clone());
         let tool = EditTool::new();
-        let out = tool
-            .execute(r#"{"path":"a.txt","edits":[]}"#, &ctx)
-            .await;
+        let out = tool.execute(r#"{"path":"a.txt","edits":[]}"#, &ctx).await;
         assert!(out.is_error);
         assert!(out.content.contains("edits 不能为空"), "{}", out.content);
         let out = tool.execute(r#"{"path":"a.txt"}"#, &ctx).await;
@@ -816,7 +822,12 @@ mod tests {
             )
             .await;
         assert!(out.is_error);
-        assert!(out.content.contains("edits 与 old_string/new_string/replace_all"), "{}", out.content);
+        assert!(
+            out.content
+                .contains("edits 与 old_string/new_string/replace_all"),
+            "{}",
+            out.content
+        );
         std::fs::remove_dir_all(&ctx.cwd).unwrap();
     }
     #[tokio::test]

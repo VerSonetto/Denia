@@ -171,7 +171,10 @@ async fn exchange(
 ) -> Result<Response, ApiError> {
     let peer = peer_of(extension_peer(peer).as_ref());
     match state.remote.exchange(&body.ticket, &peer) {
-        Ok(ExchangeOutcome::PinRequired { challenge, attempts }) => Ok(Json(json!({
+        Ok(ExchangeOutcome::PinRequired {
+            challenge,
+            attempts,
+        }) => Ok(Json(json!({
             "status": "pin-required",
             "challenge": challenge,
             "attempts": attempts,
@@ -211,10 +214,7 @@ async fn verify_pin(
 }
 
 /// 退出当前远程会话:吊销会话并清 cookie。
-async fn logout(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-) -> Response {
+async fn logout(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
     if let Some(token) = headers
         .get(header::COOKIE)
         .and_then(|value| value.to_str().ok())
@@ -251,9 +251,8 @@ fn session_response(manager: &RemoteManager, via: Via, token: String) -> Respons
 fn cookie_for(manager: &RemoteManager, via: Via, token: &str) -> String {
     let secure = manager.cookie_secure(via);
     let max_age = manager.session_absolute_seconds(via);
-    let mut cookie = format!(
-        "{SESSION_COOKIE}={token}; Path=/; HttpOnly; SameSite=Strict; Max-Age={max_age}"
-    );
+    let mut cookie =
+        format!("{SESSION_COOKIE}={token}; Path=/; HttpOnly; SameSite=Strict; Max-Age={max_age}");
     if secure {
         cookie.push_str("; Secure");
     }
@@ -303,8 +302,8 @@ fn internal(error: serde_json::Error) -> ApiError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::remote::guard::{RemotePeer, annotate, gate};
-    use crate::remote::{Channel, RemoteManager, Via};
+    use crate::remote::Channel;
+    use crate::remote::guard::gate;
     use axum::body::Body;
     use axum::extract::connect_info::MockConnectInfo;
     use axum::http::{Request, StatusCode, header};
@@ -328,40 +327,51 @@ mod tests {
         // 与 main.rs 同构:API 路由(压缩层已在 api::router() 内挂载)+ 静态
         // 资源 fallback(远程连接要能把控制台 HTML 发给扫码的浏览器,少了这层
         // 测不出真实形态)。
-        let business = crate::api::router()
-            .with_state(state.clone())
-            .fallback(
-                |uri: axum::http::Uri, headers: axum::http::HeaderMap| async move {
-                    let accept_encoding = headers
-                        .get(axum::http::header::ACCEPT_ENCODING)
-                        .and_then(|value| value.to_str().ok())
-                        .unwrap_or("");
-                    crate::web_assets::response_for(&uri, None, accept_encoding)
-                },
-            );
+        let business = crate::api::router().with_state(state.clone()).fallback(
+            |uri: axum::http::Uri, headers: axum::http::HeaderMap| async move {
+                let accept_encoding = headers
+                    .get(axum::http::header::ACCEPT_ENCODING)
+                    .and_then(|value| value.to_str().ok())
+                    .unwrap_or("");
+                crate::web_assets::response_for(&uri, None, accept_encoding)
+            },
+        );
         // start_lan 会起真实 listener,需要先装配 Router(与 main.rs 同序)。
         state.remote.attach_router(business.clone());
         (state, business)
     }
 
-    /// 主 listener 形态:只有来源标注。
+    /// Main and remote listeners use the same production authentication boundary.
     fn main_app(state: &Arc<AppState>, business: &axum::Router) -> axum::Router {
-        business
-            .clone()
-            .layer(axum::middleware::from_fn_with_state(
-                state.remote.clone(),
-                annotate,
-            ))
+        crate::host::guarded_router(business.clone(), state.remote.clone())
     }
 
     /// 远程 listener 形态:来源标注 + 远程门。
     fn remote_app(state: &Arc<AppState>, business: &axum::Router) -> axum::Router {
-        business
-            .clone()
-            .layer(axum::middleware::from_fn_with_state(
-                state.remote.clone(),
-                gate,
-            ))
+        business.clone().layer(axum::middleware::from_fn_with_state(
+            state.remote.clone(),
+            gate,
+        ))
+    }
+
+    #[tokio::test]
+    async fn main_listener_authenticates_remote_peers_and_preserves_local_access() {
+        let (state, business) = harness().await;
+        let app = main_app(&state, &business);
+        let (status, _, body) = send(app.clone(), "192.168.1.20:5000", get("/api/settings")).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "{body}");
+        let (status, _, _) = send(app.clone(), "127.0.0.1:5000", get("/api/settings")).await;
+        assert_eq!(status, StatusCode::OK);
+        state
+            .settings
+            .update(
+                crate::remote::config::REMOTE_NS,
+                json!({"enabled": false}),
+                None,
+            )
+            .unwrap();
+        let (status, _, body) = send(app, "192.168.1.20:5000", get("/api/settings")).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
     }
 
     /// 用给定的 peer 地址发一个请求。
@@ -370,7 +380,9 @@ mod tests {
         peer: &str,
         request: Request<Body>,
     ) -> (StatusCode, HeaderMap, serde_json::Value) {
-        let app = app.layer(MockConnectInfo(peer.parse::<std::net::SocketAddr>().unwrap()));
+        let app = app.layer(MockConnectInfo(
+            peer.parse::<std::net::SocketAddr>().unwrap(),
+        ));
         let response = app.oneshot(request).await.unwrap();
         let status = response.status();
         let headers = response.headers().clone();
@@ -424,7 +436,10 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
         assert_eq!(body["error"]["code"], "remote/ticket-invalid");
-        assert!(!headers.contains_key(header::SET_COOKIE), "失败时不得发 cookie");
+        assert!(
+            !headers.contains_key(header::SET_COOKIE),
+            "失败时不得发 cookie"
+        );
 
         // 正确票据换到会话 cookie。
         let ticket = lan_ticket(&state, false);
@@ -446,7 +461,10 @@ mod tests {
         assert!(cookie.contains("SameSite=Strict"), "{cookie}");
         assert!(cookie.contains("Path=/"), "{cookie}");
         // 局域网是 http:`Secure` 会被浏览器丢弃,所以这里不能带。
-        assert!(!cookie.contains("Secure"), "局域网 cookie 不该带 Secure:{cookie}");
+        assert!(
+            !cookie.contains("Secure"),
+            "局域网 cookie 不该带 Secure:{cookie}"
+        );
     }
 
     #[tokio::test]
@@ -531,9 +549,11 @@ mod tests {
                 None,
             )
             .unwrap();
-        let token = state
-            .remote
-            .issue_ticket_for_test(Channel::Tunnel, "https://x.trycloudflare.com", true);
+        let token = state.remote.issue_ticket_for_test(
+            Channel::Tunnel,
+            "https://x.trycloudflare.com",
+            true,
+        );
         let mut request = post("/api/remote/exchange", json!({"ticket": token}));
         request
             .headers_mut()
@@ -561,9 +581,11 @@ mod tests {
         let app = remote_app(&state, &business);
         // 打开隧道的 PIN 二次验证:直接构造一张要求 PIN 的票据。
         let pin = state.remote.set_pin_for_test(Channel::Tunnel, "246810");
-        let token = state
-            .remote
-            .issue_ticket_for_test(Channel::Tunnel, "https://x.trycloudflare.com", true);
+        let token = state.remote.issue_ticket_for_test(
+            Channel::Tunnel,
+            "https://x.trycloudflare.com",
+            true,
+        );
 
         let mut request = post("/api/remote/exchange", json!({"ticket": token}));
         request
@@ -578,7 +600,10 @@ mod tests {
         let (status, headers, body) = send(app.clone(), "127.0.0.1:5000", request).await;
         assert_eq!(status, StatusCode::OK, "{body}");
         assert_eq!(body["status"], "pin-required");
-        assert!(!headers.contains_key(header::SET_COOKIE), "PIN 未过不得发会话");
+        assert!(
+            !headers.contains_key(header::SET_COOKIE),
+            "PIN 未过不得发会话"
+        );
         let challenge = body["challenge"].as_str().unwrap().to_string();
 
         // 错误 PIN → 401,且给出剩余次数。
@@ -630,9 +655,11 @@ mod tests {
             .unwrap();
         state.remote.apply_settings();
 
-        let token = state
-            .remote
-            .issue_ticket_for_test(Channel::Tunnel, "https://x.trycloudflare.com", true);
+        let token = state.remote.issue_ticket_for_test(
+            Channel::Tunnel,
+            "https://x.trycloudflare.com",
+            true,
+        );
         let mut request = post("/api/remote/exchange", json!({"ticket": token}));
         request
             .headers_mut()
@@ -732,7 +759,11 @@ mod tests {
             .headers_mut()
             .insert(header::HOST, "192.168.1.10:3602".parse().unwrap());
         let (status, _, body) = send(app.clone(), "192.168.1.20:5000", request).await;
-        assert_eq!(status, StatusCode::UNAUTHORIZED, "断开后旧 cookie 必须立即失效");
+        assert_eq!(
+            status,
+            StatusCode::UNAUTHORIZED,
+            "断开后旧 cookie 必须立即失效"
+        );
         assert_eq!(body["error"]["code"], "remote/session-invalid");
 
         // 旧票据同样失效。
@@ -762,7 +793,11 @@ mod tests {
     #[tokio::test]
     async fn lan_listener_serves_traffic_and_releases_port_on_stop() {
         let (state, _business) = harness().await;
-        let status = state.remote.start_lan(None).await.expect("局域网连接应当能开启");
+        let status = state
+            .remote
+            .start_lan(None)
+            .await
+            .expect("局域网连接应当能开启");
         let port = status.port;
         assert!(port > 0, "必须拿到真实端口");
         let ticket_url = status.link.ticket_url.clone();
@@ -832,9 +867,15 @@ mod tests {
         state.remote.set_pin_for_test(Channel::Lan, "135790");
 
         // 本机:看得到带票据链接与 PIN。
-        let (status, _, body) = send(app.clone(), "127.0.0.1:5000", get("/api/remote/status")).await;
+        let (status, _, body) =
+            send(app.clone(), "127.0.0.1:5000", get("/api/remote/status")).await;
         assert_eq!(status, StatusCode::OK);
-        assert!(body["lan"]["link"]["ticketUrl"].as_str().unwrap().contains("ticket="));
+        assert!(
+            body["lan"]["link"]["ticketUrl"]
+                .as_str()
+                .unwrap()
+                .contains("ticket=")
+        );
         assert_eq!(body["lan"]["link"]["pin"], "135790");
         assert!(!body["lan"]["link"]["qrSvg"].as_str().unwrap().is_empty());
 
@@ -849,7 +890,10 @@ mod tests {
             body["lan"]["link"]["ticketUrl"].as_str().unwrap() == body["lan"]["link"]["url"],
             "远程客户端不该拿到带票据的链接:{body}"
         );
-        assert!(body["lan"]["link"]["pin"].is_null(), "PIN 不得回给远程客户端");
+        assert!(
+            body["lan"]["link"]["pin"].is_null(),
+            "PIN 不得回给远程客户端"
+        );
     }
 
     /// 隧道已开(回源 listener 绑回环)时再开局域网:必须在**同一端口**上
@@ -905,7 +949,7 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         let lan_ticket = body["lan"]["link"]["ticketUrl"].as_str().unwrap();
         assert!(
-            lan_ticket.contains("192.168."),
+            lan_ticket.starts_with("http://") && !lan_ticket.contains("trycloudflare.com"),
             "局域网卡片必须显示局域网链接,而不是隧道的:{lan_ticket}"
         );
         assert!(

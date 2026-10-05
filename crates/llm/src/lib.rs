@@ -42,7 +42,7 @@ pub use protocols::{
 };
 pub use request::GenerateRequest;
 mod replay;
-pub use replay::{ReplayPolicy, REASONING_REJECTED};
+pub use replay::{REASONING_REJECTED, ReplayPolicy};
 pub use retry::{RetryAttempt, RetryPolicy, with_retry};
 
 /// A boxed chunk stream: adapter output, one attempt.
@@ -68,11 +68,22 @@ pub trait LlmAdapter: Send + Sync {
         model: &str,
     ) -> Result<LlmResolvedModelInfo, LlmError>;
 
-    fn route_identity(&self, provider: &str) -> String { provider.to_string() }
+    fn route_identity(&self, provider: &str) -> String {
+        provider.to_string()
+    }
 
-    async fn output_budget(&self, provider: &str, model: &str, explicit: Option<u64>) -> Result<u64, LlmError> {
+    async fn output_budget(
+        &self,
+        provider: &str,
+        model: &str,
+        explicit: Option<u64>,
+    ) -> Result<u64, LlmError> {
         let resolved = self.resolve_model(provider, model).await?;
-        Ok(explicit.or(resolved.default_max_tokens).unwrap_or(32_768).min(resolved.default_max_tokens.unwrap_or(u64::MAX)).max(1))
+        Ok(explicit
+            .or(resolved.default_max_tokens)
+            .unwrap_or(32_768)
+            .min(resolved.default_max_tokens.unwrap_or(u64::MAX))
+            .max(1))
     }
 
     /// One streaming model attempt.
@@ -246,8 +257,12 @@ impl LlmRegistry {
                 let result = adapter.stream(provider, request).await;
                 result.map_err(|error| {
                     if replay::explicit_reasoning_rejection(&error.failure) {
-                        let mut failure = error.failure; failure.code = REASONING_REJECTED.into(); LlmError::from_failure(failure)
-                    } else { error }
+                        let mut failure = error.failure;
+                        failure.code = REASONING_REJECTED.into();
+                        LlmError::from_failure(failure)
+                    } else {
+                        error
+                    }
                 })
             },
         )
@@ -255,37 +270,78 @@ impl LlmRegistry {
     }
 
     pub fn route_identity(&self, provider: &str, model: &str) -> String {
-        format!("{}:{model}", self.adapter_for(provider).map(|adapter| adapter.route_identity(provider)).unwrap_or_else(|| provider.into()))
+        format!(
+            "{}:{model}",
+            self.adapter_for(provider)
+                .map(|adapter| adapter.route_identity(provider))
+                .unwrap_or_else(|| provider.into())
+        )
     }
 
-    pub async fn output_budget(&self, provider: &str, model: &str, explicit: Option<u64>) -> Result<u64, LlmError> {
-        self.adapter_for(provider).ok_or_else(|| LlmError::new(codes::NO_ADAPTER, "no adapter registered"))?.output_budget(provider, model, explicit).await
+    pub async fn output_budget(
+        &self,
+        provider: &str,
+        model: &str,
+        explicit: Option<u64>,
+    ) -> Result<u64, LlmError> {
+        self.adapter_for(provider)
+            .ok_or_else(|| LlmError::new(codes::NO_ADAPTER, "no adapter registered"))?
+            .output_budget(provider, model, explicit)
+            .await
     }
 
-    pub async fn stream_with_replay(&self, provider: &str, request: &GenerateRequest, sink: Option<RetrySink>, replay: &ReplayPolicy) -> Result<ChunkStream, LlmError> {
+    pub async fn stream_with_replay(
+        &self,
+        provider: &str,
+        request: &GenerateRequest,
+        sink: Option<RetrySink>,
+        replay: &ReplayPolicy,
+    ) -> Result<ChunkStream, LlmError> {
         let route = self.route_identity(provider, &request.model);
         let (adapter, policy) = {
             let state = self.state.read().unwrap();
-            let entry = state.routes.get(provider).ok_or_else(|| LlmError::new(codes::NO_ADAPTER, "no adapter registered"))?;
+            let entry = state
+                .routes
+                .get(provider)
+                .ok_or_else(|| LlmError::new(codes::NO_ADAPTER, "no adapter registered"))?;
             (entry.adapter.clone(), entry.retry_policy.clone())
         };
         // One ordinary retry budget surrounds the compatibility attempt.
-        with_retry(&policy, |attempt| { if let Some(sink) = &sink { sink(attempt); } }, || async {
-            loop {
-                let prepared = replay.prepare(&route, request);
-                match adapter.stream(provider, &prepared).await {
-                    Err(error) if replay.downgrade(&route, &prepared, &error.failure) => {
-                        if let Some(sink) = &sink { sink(&RetryAttempt { attempt: 1, code: REASONING_REJECTED.into(), message: format!("接口明确拒绝历史思考，仅本 turn 移除思考重试：{}", error.failure.message), delay_ms: 0 }); }
-                    }
-                    Err(error) if replay::explicit_reasoning_rejection(&error.failure) => {
-                        let mut failure = error.failure;
-                        failure.code = REASONING_REJECTED.into();
-                        return Err(LlmError::from_failure(failure));
-                    }
-                    result => return result,
+        with_retry(
+            &policy,
+            |attempt| {
+                if let Some(sink) = &sink {
+                    sink(attempt);
                 }
-            }
-        }).await
+            },
+            || async {
+                loop {
+                    let prepared = replay.prepare(&route, request);
+                    match adapter.stream(provider, &prepared).await {
+                        Err(error) if replay.downgrade(&route, &prepared, &error.failure) => {
+                            if let Some(sink) = &sink {
+                                sink(&RetryAttempt {
+                                    attempt: 1,
+                                    code: REASONING_REJECTED.into(),
+                                    message: format!(
+                                        "接口明确拒绝历史思考，仅本 turn 移除思考重试：{}",
+                                        error.failure.message
+                                    ),
+                                    delay_ms: 0,
+                                });
+                            }
+                        }
+                        Err(error) if replay::explicit_reasoning_rejection(&error.failure) => {
+                            let mut failure = error.failure;
+                            failure.code = REASONING_REJECTED.into();
+                            return Err(LlmError::from_failure(failure));
+                        }
+                        result => return result,
+                    }
+                }
+            },
+        )
+        .await
     }
 
     /// Validates one call config against the route's adapter and returns the
@@ -309,15 +365,14 @@ impl LlmRegistry {
             }
         };
         let resolved = adapter.resolve_model(provider, model).await?;
-        if let Some(effort) = reasoning_effort {
-            if let Some(reasoning) = &resolved.reasoning {
-                if !reasoning.efforts.iter().any(|e| e.id == effort) {
-                    return Err(LlmError::new(
-                        codes::UNSUPPORTED_REASONING_EFFORT,
-                        format!("reasoning effort '{effort}' is not supported by model '{model}'"),
-                    ));
-                }
-            }
+        if let Some(effort) = reasoning_effort
+            && let Some(reasoning) = &resolved.reasoning
+            && !reasoning.efforts.iter().any(|e| e.id == effort)
+        {
+            return Err(LlmError::new(
+                codes::UNSUPPORTED_REASONING_EFFORT,
+                format!("reasoning effort '{effort}' is not supported by model '{model}'"),
+            ));
         }
         Ok(resolved)
     }

@@ -371,13 +371,34 @@ impl LlmAdapter for OpenAiCompatAdapter {
     }
 
     fn route_identity(&self, provider: &str) -> String {
-        self.profile(provider).map(|profile| format!("{provider}:{}:{}", profile.protocol.as_id(), profile.base_url)).unwrap_or_else(|_| provider.into())
+        self.profile(provider)
+            .map(|profile| {
+                format!(
+                    "{provider}:{}:{}",
+                    profile.protocol.as_id(),
+                    profile.base_url
+                )
+            })
+            .unwrap_or_else(|_| provider.into())
     }
 
-    async fn output_budget(&self, provider: &str, model: &str, explicit: Option<u64>) -> Result<u64, LlmError> {
+    async fn output_budget(
+        &self,
+        provider: &str,
+        model: &str,
+        explicit: Option<u64>,
+    ) -> Result<u64, LlmError> {
         let profile = self.profile(provider)?;
-        let limit = profile.models.iter().find(|entry| entry.id == model).and_then(|entry| entry.max_tokens);
-        Ok(explicit.or(profile.default_max_tokens).unwrap_or(DEFAULT_MAX_TOKENS).min(limit.unwrap_or(u64::MAX)).max(1))
+        let limit = profile
+            .models
+            .iter()
+            .find(|entry| entry.id == model)
+            .and_then(|entry| entry.max_tokens);
+        Ok(explicit
+            .or(profile.default_max_tokens)
+            .unwrap_or(DEFAULT_MAX_TOKENS)
+            .min(limit.unwrap_or(u64::MAX))
+            .max(1))
     }
 
     async fn stream(
@@ -390,16 +411,23 @@ impl LlmAdapter for OpenAiCompatAdapter {
 
         let protocol = profile.protocol;
         let mut request = request.clone();
-        let limit = profile.models.iter().find(|entry| entry.id == request.model).and_then(|entry| entry.max_tokens);
-        let max_tokens = request.max_tokens.or(profile.default_max_tokens).unwrap_or(DEFAULT_MAX_TOKENS).min(limit.unwrap_or(u64::MAX)).max(1);
+        let limit = profile
+            .models
+            .iter()
+            .find(|entry| entry.id == request.model)
+            .and_then(|entry| entry.max_tokens);
+        let max_tokens = request
+            .max_tokens
+            .or(profile.default_max_tokens)
+            .unwrap_or(DEFAULT_MAX_TOKENS)
+            .min(limit.unwrap_or(u64::MAX))
+            .max(1);
         request.max_tokens = Some(max_tokens);
         let request = &request;
         let body = match protocol {
             WireProtocol::ChatCompletions => protocols::build_openai_body(request),
             WireProtocol::Responses => protocols::build_responses_body(request),
-            WireProtocol::AnthropicMessages => {
-                protocols::build_anthropic_body(request, max_tokens)
-            }
+            WireProtocol::AnthropicMessages => protocols::build_anthropic_body(request, max_tokens),
         };
 
         let url = match protocol {
@@ -567,7 +595,10 @@ mod header_tests {
     fn placeholder_resolves_through_credential_chain() {
         let store = fresh_store();
         let mut headers = BTreeMap::new();
-        headers.insert("X-Token".to_string(), "\u{24}{MY_HEADER_TOKEN_XYZ}".to_string());
+        headers.insert(
+            "X-Token".to_string(),
+            "\u{24}{MY_HEADER_TOKEN_XYZ}".to_string(),
+        );
         let map = resolve_profile_headers(&headers, &store).unwrap();
         assert_eq!(map.get("x-token").unwrap().to_str().unwrap(), "secret-123");
     }

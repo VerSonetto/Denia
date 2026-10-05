@@ -14,7 +14,7 @@
 
 use std::path::{Component, Path, PathBuf};
 
-use axum::http::{header, StatusCode, Uri};
+use axum::http::{StatusCode, Uri, header};
 use axum::response::{IntoResponse, Response};
 use rust_embed::RustEmbed;
 
@@ -54,12 +54,20 @@ pub fn resolve_encoded(uri: &Uri, dir: Option<&Path>, accept_encoding: &str) -> 
     };
     for (suffix, encoding) in variants {
         if let Some((bytes, name)) = read_variant(dir, requested, suffix) {
-            return Some(Encoded { name, bytes, encoding: Some(encoding) });
+            return Some(Encoded {
+                name,
+                bytes,
+                encoding: Some(encoding),
+            });
         }
     }
 
     let (name, bytes) = plain(requested, dir)?;
-    Some(Encoded { name, bytes, encoding: None })
+    Some(Encoded {
+        name,
+        bytes,
+        encoding: None,
+    })
 }
 
 /// 明文资源的解析(嵌入 or 磁盘),含 SPA 回落。
@@ -72,7 +80,8 @@ fn plain(requested: &str, dir: Option<&Path>) -> Option<(String, Vec<u8>)> {
                 if requested.contains('.') {
                     None
                 } else {
-                    WebAssets::get("index.html").map(|file| ("index.html".to_string(), file.data.to_vec()))
+                    WebAssets::get("index.html")
+                        .map(|file| ("index.html".to_string(), file.data.to_vec()))
                 }
             }),
     }
@@ -180,13 +189,19 @@ fn response_from(entity: Encoded) -> Response {
     headers.insert(
         header::CONTENT_TYPE,
         // mime 表里的值都是合法 ASCII;真出现异常按 octet-stream 兜底而不是 panic。
-        header::HeaderValue::from_str(&mime.to_string())
+        header::HeaderValue::from_str(mime.as_ref())
             .unwrap_or_else(|_| header::HeaderValue::from_static("application/octet-stream")),
     );
-    headers.insert(header::CACHE_CONTROL, header::HeaderValue::from_static(cache));
+    headers.insert(
+        header::CACHE_CONTROL,
+        header::HeaderValue::from_static(cache),
+    );
     // 同一 URL 会因 Accept-Encoding 返回不同实体,不声明 Vary 会让中间缓存
     // (含 Cloudflare 边缘)把 gzip 版发给支持 br 的客户端。
-    headers.insert(header::VARY, header::HeaderValue::from_static("Accept-Encoding"));
+    headers.insert(
+        header::VARY,
+        header::HeaderValue::from_static("Accept-Encoding"),
+    );
     if let Some(encoding) = entity.encoding {
         headers.insert(
             header::CONTENT_ENCODING,
@@ -267,7 +282,10 @@ mod tests {
 
     #[test]
     fn falls_back_to_gzip_when_no_brotli_variant() {
-        let dir = fixture(&[("assets/app.js", b"x".as_slice()), ("assets/app.js.gz", b"G".as_slice())]);
+        let dir = fixture(&[
+            ("assets/app.js", b"x".as_slice()),
+            ("assets/app.js.gz", b"G".as_slice()),
+        ]);
         let entity =
             resolve_encoded(&uri("/assets/app.js"), Some(&dir), "br, gzip").expect("gzip 兜底");
         assert_eq!(entity.encoding, Some("gzip"));
@@ -306,7 +324,10 @@ mod tests {
 
     #[test]
     fn encoded_response_declares_content_encoding_and_vary() {
-        let dir = fixture(&[("assets/app.js", b"x".as_slice()), ("assets/app.js.br", b"B".as_slice())]);
+        let dir = fixture(&[
+            ("assets/app.js", b"x".as_slice()),
+            ("assets/app.js.br", b"B".as_slice()),
+        ]);
         let response = response_for(&uri("/assets/app.js"), Some(&dir), "br");
         let headers = response.headers();
         assert_eq!(headers[header::CONTENT_ENCODING], "br");

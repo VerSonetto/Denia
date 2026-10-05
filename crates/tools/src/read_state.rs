@@ -201,7 +201,9 @@ impl ReadState {
         // 文件变了 → 要求重读。判定规则:
         // 优先 mtime 前进或 size 变化;mtime 不可用时退化到 size。
         let changed = match (entry.mtime_ms, stamp.mtime_ms) {
-            (Some(cached), Some(current)) => current != cached || entry.size_bytes != stamp.size_bytes,
+            (Some(cached), Some(current)) => {
+                current != cached || entry.size_bytes != stamp.size_bytes
+            }
             _ => entry.size_bytes != stamp.size_bytes,
         };
         if changed {
@@ -371,8 +373,14 @@ mod tests {
     #[test]
     fn record_after_write_clears_stale_ranges() {
         let mut state = ReadState::new();
-        state.record(ReadKey::new("a.rs", Some(1), Some(10)), entry(Some(100), 50));
-        state.record(ReadKey::new("a.rs", Some(50), Some(10)), entry(Some(100), 50));
+        state.record(
+            ReadKey::new("a.rs", Some(1), Some(10)),
+            entry(Some(100), 50),
+        );
+        state.record(
+            ReadKey::new("a.rs", Some(50), Some(10)),
+            entry(Some(100), 50),
+        );
         assert_eq!(state.len(), 2);
         state.record_after_write(Path::new("a.rs"), "x".into(), stamp(Some(200), 1));
         // 写操作让所有旧分页视图过期,只剩写后那一条。

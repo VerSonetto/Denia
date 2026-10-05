@@ -329,7 +329,10 @@ static CATALOG: &[AppEntry] = &[
         darwin: Some(mac_app!(["Android Studio.app"])),
         win32: Some(spec(&[
             install_record("Android Studio", Some("bin/studio64.exe"), &[]),
-            file(&["${ProgramFiles}/Android/Android Studio/bin/studio64.exe"], &[]),
+            file(
+                &["${ProgramFiles}/Android/Android Studio/bin/studio64.exe"],
+                &[],
+            ),
         ])),
         linux: Some(spec(&[
             cli("studio", &[]),
@@ -652,8 +655,8 @@ impl RegistryOnce {
 fn read_registry_view() -> RegistryView {
     use windows_sys::Win32::Foundation::ERROR_SUCCESS;
     use windows_sys::Win32::System::Registry::{
-        RegCloseKey, RegEnumKeyExW, RegOpenKeyExW, RegQueryValueExW, HKEY, HKEY_CURRENT_USER,
-        HKEY_LOCAL_MACHINE, KEY_READ, REG_EXPAND_SZ, REG_SZ,
+        HKEY, HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_READ, REG_EXPAND_SZ, REG_SZ, RegCloseKey,
+        RegEnumKeyExW, RegOpenKeyExW, RegQueryValueExW,
     };
 
     const APP_PATHS_SUBKEY: &str = "Software\\Microsoft\\Windows\\CurrentVersion\\App Paths";
@@ -672,8 +675,7 @@ fn read_registry_view() -> RegistryView {
 
     fn open_key(parent: HKEY, path: &str) -> Option<HKEY> {
         let mut key: HKEY = unsafe { std::mem::zeroed() };
-        let status =
-            unsafe { RegOpenKeyExW(parent, wide(path).as_ptr(), 0, KEY_READ, &mut key) };
+        let status = unsafe { RegOpenKeyExW(parent, wide(path).as_ptr(), 0, KEY_READ, &mut key) };
         (status == ERROR_SUCCESS).then_some(key)
     }
 
@@ -742,7 +744,9 @@ fn read_registry_view() -> RegistryView {
                 return None;
             }
             let pairs: Vec<u16> = buffer
-                .chunks_exact(2)
+                .as_chunks::<2>()
+                .0
+                .iter()
                 .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
                 .collect();
             Some(from_wide(&pairs))
@@ -816,11 +820,17 @@ fn spec_for(entry: &'static AppEntry) -> Option<&'static PlatformSpec> {
 }
 
 async fn is_dir(path: &Path) -> bool {
-    tokio::fs::metadata(path).await.map(|m| m.is_dir()).unwrap_or(false)
+    tokio::fs::metadata(path)
+        .await
+        .map(|m| m.is_dir())
+        .unwrap_or(false)
 }
 
 async fn is_file(path: &Path) -> bool {
-    tokio::fs::metadata(path).await.map(|m| m.is_file()).unwrap_or(false)
+    tokio::fs::metadata(path)
+        .await
+        .map(|m| m.is_file())
+        .unwrap_or(false)
 }
 
 fn home_dir() -> PathBuf {
@@ -1016,7 +1026,9 @@ fn parse_desktop_entry(text: &str) -> DesktopEntry {
         if !inside {
             continue;
         }
-        let Some(sep) = trimmed.find('=') else { continue };
+        let Some(sep) = trimmed.find('=') else {
+            continue;
+        };
         let key = trimmed[..sep].trim();
         let value = trimmed[sep + 1..].trim();
         match key {
@@ -1045,15 +1057,22 @@ fn xdg_data_dirs() -> Vec<PathBuf> {
         .map(PathBuf::from)
         .unwrap_or_else(|| home_dir().join(".local/share"));
     let mut dirs = vec![data_home];
-    let system =
-        std::env::var("XDG_DATA_DIRS").unwrap_or_else(|_| "/usr/local/share:/usr/share".to_string());
-    dirs.extend(system.split(':').filter(|d| !d.is_empty()).map(PathBuf::from));
+    let system = std::env::var("XDG_DATA_DIRS")
+        .unwrap_or_else(|_| "/usr/local/share:/usr/share".to_string());
+    dirs.extend(
+        system
+            .split(':')
+            .filter(|d| !d.is_empty())
+            .map(PathBuf::from),
+    );
     dirs
 }
 
 async fn find_desktop_entry(desktop_id: &str) -> Option<DesktopEntry> {
     for dir in xdg_data_dirs() {
-        let path = dir.join("applications").join(format!("{desktop_id}.desktop"));
+        let path = dir
+            .join("applications")
+            .join(format!("{desktop_id}.desktop"));
         if let Ok(text) = tokio::fs::read_to_string(&path).await {
             return Some(parse_desktop_entry(&text));
         }
@@ -1100,7 +1119,10 @@ async fn locate(locator: &Locator, registry: &RegistryOnce) -> Option<ResolvedLa
             })
         }
         Locator::App { fs_names } => {
-            for root in [PathBuf::from("/Applications"), home_dir().join("Applications")] {
+            for root in [
+                PathBuf::from("/Applications"),
+                home_dir().join("Applications"),
+            ] {
                 for name in *fs_names {
                     let bundle = root.join(name);
                     if is_dir(&bundle).await {
@@ -1156,7 +1178,9 @@ async fn locate(locator: &Locator, registry: &RegistryOnce) -> Option<ResolvedLa
         }
         Locator::File { candidates, args } => {
             for candidate in *candidates {
-                let Some(path) = expand_candidate(candidate) else { continue };
+                let Some(path) = expand_candidate(candidate) else {
+                    continue;
+                };
                 let path = PathBuf::from(path);
                 if is_file(&path).await {
                     return Some(argv_launch(
@@ -1281,7 +1305,11 @@ async fn locate(locator: &Locator, registry: &RegistryOnce) -> Option<ResolvedLa
             } else {
                 resolve_executable(&candidate).await?
             };
-            Some(argv_launch(launcher.to_string_lossy().into_owned(), args, None))
+            Some(argv_launch(
+                launcher.to_string_lossy().into_owned(),
+                args,
+                None,
+            ))
         }
     }
 }
@@ -1300,12 +1328,12 @@ async fn record_launcher(record: &InstallRecord, relative: Option<&str>) -> Opti
     }
     if let Some(display_icon) = record.display_icon.as_deref() {
         let bare = strip_icon_index(display_icon).trim_matches('"');
-        if let Some(expanded) = expand_registry_value(bare) {
-            if expanded.to_lowercase().ends_with(".exe") {
-                let path = PathBuf::from(expanded);
-                if is_file(&path).await {
-                    return Some(path);
-                }
+        if let Some(expanded) = expand_registry_value(bare)
+            && expanded.to_lowercase().ends_with(".exe")
+        {
+            let path = PathBuf::from(expanded);
+            if is_file(&path).await {
+                return Some(path);
             }
         }
     }
@@ -1351,9 +1379,14 @@ enum LaunchOutcome {
 fn substitute_path(args: &[String], path: &Path) -> Vec<String> {
     let directory = path.to_string_lossy().into_owned();
     if args.iter().any(|arg| arg.contains(PATH_TOKEN)) {
-        args.iter().map(|arg| arg.replace(PATH_TOKEN, &directory)).collect()
+        args.iter()
+            .map(|arg| arg.replace(PATH_TOKEN, &directory))
+            .collect()
     } else {
-        args.iter().cloned().chain(std::iter::once(directory)).collect()
+        args.iter()
+            .cloned()
+            .chain(std::iter::once(directory))
+            .collect()
     }
 }
 
@@ -1526,7 +1559,10 @@ async fn output_command(
         const CREATE_NO_WINDOW: u32 = 0x0800_0000;
         command.creation_flags(CREATE_NO_WINDOW);
     }
-    let output = tokio::time::timeout(timeout, command.output()).await.ok()?.ok()?;
+    let output = tokio::time::timeout(timeout, command.output())
+        .await
+        .ok()?
+        .ok()?;
     output
         .status
         .success()
@@ -1656,7 +1692,10 @@ async fn read_icon_file(path: &Path) -> Option<Icon> {
         _ => return None,
     };
     let bytes = tokio::fs::read(path).await.ok()?;
-    Some(Icon { content_type, bytes })
+    Some(Icon {
+        content_type,
+        bytes,
+    })
 }
 
 /// Linux:desktop entry 的 `Icon=` 键——绝对路径直读,否则走 hicolor
@@ -1686,9 +1725,11 @@ async fn linux_desktop_icon(desktop_id: &str) -> Option<Icon> {
                 }
             }
         }
-        if let Some(icon) =
-            read_icon_file(&dir.join("icons/hicolor/scalable/apps").join(format!("{name}.svg")))
-                .await
+        if let Some(icon) = read_icon_file(
+            &dir.join("icons/hicolor/scalable/apps")
+                .join(format!("{name}.svg")),
+        )
+        .await
         {
             return Some(icon);
         }
@@ -1721,9 +1762,12 @@ async fn extract_icon(entry: &'static AppEntry, resolved: ResolvedLaunch) -> Opt
             #[cfg(target_os = "macos")]
             {
                 match resolved.icon? {
-                    IconSource::AppBundle(bundle) => macos_bundle_icon(&bundle)
-                        .await
-                        .map(|bytes| Icon { content_type: "image/png", bytes }),
+                    IconSource::AppBundle(bundle) => {
+                        macos_bundle_icon(&bundle).await.map(|bytes| Icon {
+                            content_type: "image/png",
+                            bytes,
+                        })
+                    }
                     IconSource::Executable(_) => None,
                 }
             }
@@ -1737,9 +1781,12 @@ async fn extract_icon(entry: &'static AppEntry, resolved: ResolvedLaunch) -> Opt
             #[cfg(windows)]
             {
                 match resolved.icon? {
-                    IconSource::Executable(executable) => windows_exe_icon_png(&executable)
-                        .await
-                        .map(|bytes| Icon { content_type: "image/png", bytes }),
+                    IconSource::Executable(executable) => {
+                        windows_exe_icon_png(&executable).await.map(|bytes| Icon {
+                            content_type: "image/png",
+                            bytes,
+                        })
+                    }
                     IconSource::AppBundle(_) => None,
                 }
             }
@@ -1787,7 +1834,11 @@ impl OpenInAppState {
         let remote = self.remote;
         self.resolutions
             .get_or_init(|| async move {
-                let map = if remote { HashMap::new() } else { resolve_all().await };
+                let map = if remote {
+                    HashMap::new()
+                } else {
+                    resolve_all().await
+                };
                 std::sync::RwLock::new(map)
             })
             .await
@@ -1844,7 +1895,9 @@ impl OpenInAppState {
                 .or_insert_with(|| Arc::new(tokio::sync::OnceCell::new()))
                 .clone()
         };
-        cell.get_or_init(|| extract_icon(entry, resolved)).await.clone()
+        cell.get_or_init(|| extract_icon(entry, resolved))
+            .await
+            .clone()
     }
 
     /// 用一个已解析应用打开目录;启动器消失(自探测后被卸载)时重解析
@@ -1956,7 +2009,13 @@ mod tests {
         );
         assert_eq!(entry.try_exec.as_deref(), Some("code"));
         assert_eq!(entry.icon.as_deref(), Some("visual-studio-code"));
-        assert!(entry.exec.as_deref().unwrap().starts_with("\"'/opt/code/code'\""));
+        assert!(
+            entry
+                .exec
+                .as_deref()
+                .unwrap()
+                .starts_with("\"'/opt/code/code'\"")
+        );
     }
 
     #[test]
@@ -1999,7 +2058,9 @@ mod tests {
     #[test]
     fn linux_specs_with_desktop_locators_own_an_icon_entry() {
         for entry in CATALOG {
-            let Some(spec) = entry.linux.as_ref() else { continue };
+            let Some(spec) = entry.linux.as_ref() else {
+                continue;
+            };
             let has_desktop_locator = spec
                 .locators
                 .iter()

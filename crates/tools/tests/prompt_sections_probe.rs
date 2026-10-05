@@ -53,7 +53,10 @@ fn print_full_model_prompt() {
         println!("{}\n", section.text);
     }
     println!("\n========== 运行时快照 ==========\n");
-    println!("{}", denia_system_prompt::render_context_snapshot(&assembly));
+    println!(
+        "{}",
+        denia_system_prompt::render_context_snapshot(&assembly)
+    );
     println!("\n========== 拼接结果(模型可见,不含工具定义) ==========\n");
     println!("{}", render_prompt(&assembly));
     println!("\n========== 用户可见副本 ==========\n");
