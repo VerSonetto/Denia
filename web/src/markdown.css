@@ -1,68 +1,38 @@
-/* markdown — 黑白语法高亮 */
+/* markdown — 语法高亮（vitesse-dark / vitesse-light，见 highlight.ts 的 THEME） */
 
 :root {
   --md-inline-code: rgba(255, 255, 255, 0.08);
   --md-code-banner: #111111;
-  --shiki-foreground: #e5e5e5;
+  /*
+   * 代码块底色。shiki 的 `pre` 会被强制成这个值（见下方 `.shiki` 规则），
+   * 主题自带的前景色/背景色在这里被覆盖掉——为的是与文件阅读器、终端等
+   * 其它代码容器共用同一个底色变量。
+   *
+   * 注意：**代码块在浅色模式下也保持深底**。token 颜色由 vitesse-dark 一套
+   * 主题决定，它是为深底调的；深色 token 落到浅底上对比度会崩。要在浅色
+   * 模式下也做彩色高亮，得让 [highlight.ts](markdown/highlight.ts) 按
+   * `data-theme` 在 vitesse-dark / vitesse-light 之间切两套主题——那是另一
+   * 件事，不是调这几个变量能做到的。
+   */
   --shiki-background: var(--code-block);
-  --shiki-token-constant: #d4d4d4;
-  --shiki-token-string: #a3a3a3;
-  --shiki-token-comment: #525252;
-  --shiki-token-keyword: #f5f5f5;
-  --shiki-token-function: #d4d4d4;
-  --shiki-token-number: #a3a3a3;
-  --shiki-token-operator: #737373;
-  --shiki-token-parameter: #a3a3a3;
-  --shiki-token-regexp: #737373;
-  --shiki-token-annotation: #737373;
-  --shiki-token-entity: #d4d4d4;
-  --shiki-token-strong: #f5f5f5;
-  --shiki-token-error: #e5e5e5;
-  --shiki-token-string-expression: #a3a3a3;
+  --shiki-foreground: #dbd7ca;
 }
 
 @media (prefers-color-scheme: light) {
   :root:not([data-theme='dark']) {
     --md-inline-code: rgba(0, 0, 0, 0.06);
     --md-code-banner: #f5f5f5;
-    --shiki-foreground: #171717;
-    --shiki-background: var(--code-block);
-    --shiki-token-constant: #404040;
-    --shiki-token-string: #525252;
-    --shiki-token-comment: #a3a3a3;
-    --shiki-token-keyword: #0a0a0a;
-    --shiki-token-function: #404040;
-    --shiki-token-number: #525252;
-    --shiki-token-operator: #737373;
-    --shiki-token-parameter: #525252;
-    --shiki-token-regexp: #737373;
-    --shiki-token-annotation: #737373;
-    --shiki-token-entity: #404040;
-    --shiki-token-strong: #0a0a0a;
-    --shiki-token-error: #262626;
-    --shiki-token-string-expression: #525252;
+    /* 浅色模式同样保持深底：见上面 --shiki-background 的说明。 */
+    --shiki-background: #1e1e1e;
+    --shiki-foreground: #dbd7ca;
   }
 }
 
 :root[data-theme='light'] {
   --md-inline-code: rgba(0, 0, 0, 0.06);
   --md-code-banner: #f5f5f5;
-  --shiki-foreground: #171717;
-  --shiki-background: var(--code-block);
-  --shiki-token-constant: #404040;
-  --shiki-token-string: #525252;
-  --shiki-token-comment: #a3a3a3;
-  --shiki-token-keyword: #0a0a0a;
-  --shiki-token-function: #404040;
-  --shiki-token-number: #525252;
-  --shiki-token-operator: #737373;
-  --shiki-token-parameter: #525252;
-  --shiki-token-regexp: #737373;
-  --shiki-token-annotation: #737373;
-  --shiki-token-entity: #404040;
-  --shiki-token-strong: #0a0a0a;
-  --shiki-token-error: #262626;
-  --shiki-token-string-expression: #525252;
+  --shiki-background: #1e1e1e;
+  --shiki-foreground: #dbd7ca;
 }
 
 .markdown {

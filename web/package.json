@@ -14,6 +14,7 @@
   "dependencies": {
     "@radix-ui/react-slider": "^1.4.7",
     "@shikijs/langs": "^4.4.3",
+    "@shikijs/themes": "4.4.3",
     "@tauri-apps/api": "^2.11.1",
     "@xterm/addon-fit": "^0.11.0",
     "@xterm/addon-web-links": "^0.12.0",

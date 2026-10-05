@@ -23,11 +23,13 @@ export interface CodeBlockProps {
 }
 
 /**
- * The `pre` attributes shiki's HTML arm emits for the css-variables theme,
- * mirrored so the streaming arm's tree is interchangeable with the settled arm.
+ * The `pre` attributes shiki's HTML arm emits, mirrored so the streaming arm's
+ * tree is interchangeable with the settled arm. The class name must stay in sync
+ * with the theme name in `highlight.ts` (shiki stamps it onto the `<pre>` it
+ * generates, and the CSS in `markdown.css` keys off it).
  */
 const SHIKI_PRE_PROPS = {
-  className: 'shiki css-variables',
+  className: 'shiki vitesse-dark',
   style: { backgroundColor: 'var(--shiki-background)', color: 'var(--shiki-foreground)' },
   tabIndex: 0,
 } as const

@@ -26,6 +26,11 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/api/fs/mentions", get(list_mentions))
         .route("/api/fs/tree", get(list_tree))
         .route("/api/fs/file", get(read_workspace_file))
+        // 路径式而非查询式：HTML 里的 `./a.css`、`../img/b.png` 只能靠
+        // **URL 路径**解析——查询串不参与路径拼接。首段是 base64url 编码的
+        // 工作区根，其后是文件在该根下的真实相对路径，目录结构因此完整存在
+        // 于 URL 里，浏览器自行拼接即命中本端点。详见 preview_asset 的说明。
+        .route("/api/fs/preview/{root}/{*file}", get(preview_asset))
 }
 
 /// 目录选择器 seam 的能力决策(抄 dsh directory-picker-auto):
@@ -671,6 +676,221 @@ async fn read_workspace_file(
     Ok(Json(inner?))
 }
 
+/// 预览资源（文件阅读器的 HTML 预览用）：把工作区里的文件按**浏览器资源**
+/// 返回，而不是文本视图。
+///
+/// # 为什么不复用 `/api/fs/file`
+///
+/// HTML 预览要能解析同目录的 `./style.css`、`../img/a.png` 这类相对引用，
+/// 所以 iframe 拿到的是一个**路径式 URL**（`/api/fs/preview?path=…&file=…`），
+/// 浏览器据此自行拼出兄弟资源的地址；`srcDoc` 做不到这一点（它没有基址）。
+/// 相对引用要能解析，iframe 就必须与 Denia 同源，于是这个端点的安全边界
+/// 完全落在下面几处，缺一不可：
+///
+/// 1. **路径校验复用** [`resolve_relative_file`] + 根前缀复查 + 拒绝符号链接，
+///    与 `/api/fs/file` 同一套口径（读不到工作区外的任何字节）。
+/// 2. **只放行扩展名白名单**的静态资源，且**永不返回可执行类型**
+///    （`.js`/`.mjs`/`.wasm`/`.php` 一律 404）：预览页引不到能跑的脚本。
+/// 3. **HTML 走严格 CSP**（见 [`PREVIEW_CSP`]），`script-src 'none'`、
+///    `object-src 'none'`，文档无法执行脚本、无法外发数据。
+///
+/// 配合前端 `<iframe sandbox>`（不给 `allow-scripts`），即使文档里带
+/// `<script>` 也不会执行。各层互相独立，任一层失效仍不会读到工作区外的东西。
+async fn preview_asset(
+    axum::extract::Path((root_token, file)): axum::extract::Path<(String, String)>,
+) -> Result<axum::response::Response, ApiError> {
+    tokio::task::spawn_blocking(move || {
+        // 首段是 base64url 编码的工作区根。解码失败直接拒，不做猜测。
+        let Some(root_text) = decode_workspace_token(&root_token) else {
+            return Err(ApiError::bad_request(
+                "fs/preview-bad-root",
+                "预览地址里的工作区标识无法解码",
+            ));
+        };
+        let root = PathBuf::from(&root_text);
+        if !root.is_dir() {
+            return Err(ApiError::bad_request(
+                "fs/preview-not-a-directory",
+                format!("'{}' is not a directory", root.display()),
+            ));
+        }
+        let rel = file.trim().trim_end_matches('/').to_string();
+        let Some(abs) = resolve_relative_file(&root, &rel) else {
+            return Err(ApiError::bad_request(
+                "fs/preview-bad-path",
+                format!("'{rel}' is not a readable file under the workspace root"),
+            ));
+        };
+        if !abs.starts_with(&root) {
+            return Err(ApiError::bad_request(
+                "fs/preview-bad-path",
+                format!("'{rel}' is not a readable file under the workspace root"),
+            ));
+        }
+        let metadata =
+            std::fs::symlink_metadata(&abs).map_err(|error| file_io_error(error, &rel))?;
+        if metadata.file_type().is_symlink() {
+            return Err(ApiError::bad_request(
+                "fs/preview-symlink",
+                format!("'{rel}' 是符号链接，不跟随打开"),
+            ));
+        }
+        if metadata.is_dir() {
+            return Err(ApiError::bad_request(
+                "fs/preview-is-directory",
+                format!("'{rel}' 是一个目录，无法作为预览资源"),
+            ));
+        }
+        // 资源类型先按扩展名定；定不出来的（无扩展名的文件、约定文件名）不作为预览资源。
+        let Some(content_type) = preview_content_type(&abs) else {
+            return Err(ApiError::new(
+                axum::http::StatusCode::NOT_FOUND,
+                "fs/preview-unsupported-type",
+                format!("'{rel}' 不是可预览的资源类型"),
+            ));
+        };
+        // 体积上限比文本读取宽松些（图/字体/CSS 本来就大），但仍要有界。
+        if metadata.len() > PREVIEW_MAX_BYTES {
+            return Err(ApiError::new(
+                axum::http::StatusCode::PAYLOAD_TOO_LARGE,
+                "fs/preview-too-large",
+                format!(
+                    "资源 {} MiB，超过 {} MiB 的预览上限",
+                    metadata.len() / (1024 * 1024),
+                    PREVIEW_MAX_BYTES / (1024 * 1024)
+                ),
+            ));
+        }
+        let bytes = std::fs::read(&abs).map_err(|error| file_io_error(error, &rel))?;
+
+        if content_type == "text/html; charset=utf-8" {
+            return Ok(preview_html_response(&bytes));
+        }
+        let mut response = axum::response::Response::new(axum::body::Body::from(bytes));
+        response.headers_mut().insert(
+            axum::http::header::CONTENT_TYPE,
+            axum::http::HeaderValue::from_static(content_type),
+        );
+        // 静态资源同样锁死 CSP：一张 SVG 也能内嵌脚本。
+        response.headers_mut().insert(
+            axum::http::header::CONTENT_SECURITY_POLICY,
+            axum::http::HeaderValue::from_static(PREVIEW_CSP),
+        );
+        response.headers_mut().insert(
+            axum::http::header::CACHE_CONTROL,
+            axum::http::HeaderValue::from_static("no-store"),
+        );
+        Ok(response)
+    })
+    .await
+    .map_err(|e| {
+        ApiError::new(
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            "fs/preview-failed",
+            e.to_string(),
+        )
+    })?
+}
+
+/// 预览用的 CSP。
+///
+/// `script-src 'none'` 是这行的全部意义：HTML 与 SVG 里任何形式的脚本
+/// （内联、外链、`javascript:` URL、事件属性）都被挡下。`connect-src 'none'`
+/// 与 `form-action 'none'` 断掉外发通道，文档无法把工作区内容 POST 出去。
+/// `img-src`/`style-src`/`font-src` 保留，且允许 `data:`——预览页要能显示
+/// 内联样式与 data URI 图片。`default-src 'none'` 兜住其余所有类型。
+const PREVIEW_CSP: &str = "default-src 'none'; script-src 'none'; object-src 'none'; \
+form-action 'none'; connect-src 'none'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; \
+font-src 'self' data:";
+
+/// 预览资源体积上限（8 MiB），比文本读取的 [`FILE_MAX_BYTES`] 宽，
+/// 因为图片与字体天然比源码大。
+const PREVIEW_MAX_BYTES: u64 = 8 * 1024 * 1024;
+
+/// 工作区根 → URL 首段（base64url，无 padding）。
+///
+/// 用 base64url 是因为工作区路径里有 `\`、`:`、空格等在 URL 路径里必须转义
+/// 的字符，而转义后的形式还要再解码回来才拿得到原路径。base64url 的字母表
+/// （`A-Za-z0-9-_`）本身就是 URL 安全字符集，无需转义，前端也能用
+/// `btoa` 之外的手段复现。
+pub fn encode_workspace_token(root: &str) -> String {
+    use base64::Engine as _;
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(root.as_bytes())
+}
+
+/// URL 首段 → 工作区根。解码失败或不是合法 UTF-8 返回 `None`（调用方 400）。
+fn decode_workspace_token(token: &str) -> Option<String> {
+    use base64::Engine as _;
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(token.as_bytes())
+        .ok()?;
+    String::from_utf8(bytes).ok()
+}
+
+/// HTML 文档的响应：逐字节回显用户文件（预览就是给浏览器解析它），
+/// 但带上严格 CSP 与 no-store。
+///
+/// **不改写文档**：相对引用由路径式 URL 天然解析 ——
+/// `/api/fs/preview/{wsId}/src/a/index.html` 里的 `./style.css` 会解析成
+/// `/api/fs/preview/{wsId}/src/a/style.css`，目录结构在 URL 路径里，
+/// 浏览器自行拼接。曾试过注入 `<base href>` 指向查询串，**无效**：查询串
+/// 不参与路径拼接，`/api/fs/preview` + `./x.css` 仍是 `/api/fs/x.css`。
+///
+/// 刻意**不加**响应头 `sandbox` 指令——那会让文档连同它的相对资源一起被
+/// 当成不透明源处理，正是前端 iframe sandbox 已经在做的事；服务端再加一层
+/// 会让同源相对引用失效。
+fn preview_html_response(bytes: &[u8]) -> axum::response::Response {
+    let mut response = axum::response::Response::new(axum::body::Body::from(bytes.to_vec()));
+    response.headers_mut().insert(
+        axum::http::header::CONTENT_TYPE,
+        axum::http::HeaderValue::from_static("text/html; charset=utf-8"),
+    );
+    response.headers_mut().insert(
+        axum::http::header::CONTENT_SECURITY_POLICY,
+        axum::http::HeaderValue::from_static(PREVIEW_CSP),
+    );
+    // 预览是工作区当前状态的一次快照；缓存住会让用户改了文件却看不到变化。
+    response.headers_mut().insert(
+        axum::http::header::CACHE_CONTROL,
+        axum::http::HeaderValue::from_static("no-store"),
+    );
+    response
+}
+
+
+/// 扩展名 → 预览用的 MIME。**白名单**，且不含任何可执行类型：
+/// `.js`/`.mjs`/`.cjs`/`.wasm`/`.php`/`.py` 之类一律不出现，
+/// 预览页因此永远拿不到可运行的脚本源。
+fn preview_content_type(abs: &Path) -> Option<&'static str> {
+    let name = abs.file_name()?.to_str()?;
+    // 约定文件名（`Dockerfile`、`Makefile`、`.env`）在预览里没有意义，直接拒。
+    if basename_hint(name).is_some() {
+        return None;
+    }
+    let ext = name.rsplit_once('.')?.1.to_lowercase();
+    Some(match ext.as_str() {
+        "html" | "htm" => "text/html; charset=utf-8",
+        "css" => "text/css; charset=utf-8",
+        "svg" => "image/svg+xml",
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "ico" => "image/x-icon",
+        "avif" => "image/avif",
+        "bmp" => "image/bmp",
+        "woff" => "font/woff",
+        "woff2" => "font/woff2",
+        "ttf" => "font/ttf",
+        "otf" => "font/otf",
+        "eot" => "application/vnd.ms-fontobject",
+        "txt" | "md" | "markdown" => "text/plain; charset=utf-8",
+        "json" => "application/json",
+        "pdf" => "application/pdf",
+        _ => return None,
+    })
+}
+
 fn read_file_impl(root_path: &str, raw_file: &str) -> Result<FileView, ApiError> {
     let root = PathBuf::from(root_path.trim());
     if !root.is_dir() {
@@ -816,8 +1036,17 @@ fn file_io_error(error: std::io::Error, rel: &str) -> ApiError {
     }
 }
 
-/// 由扩展名推语言提示（语法高亮用）。推不出返回 None，前端按纯文本渲染。
+/// 由扩展名（或无扩展名的约定文件名）推语言提示（语法高亮用）。推不出返回 None，前端按纯文本渲染。
+///
+/// 返回的每个标签都必须能在前端 `web/src/markdown/highlight.ts` 的
+/// `LANG_ALIASES` 里解析到语法，否则该扩展名在文件阅读器里会退化成纯文本
+/// ——而同样的语言在对话流的代码块里是高亮的。扩展名缺失的约定文件
+/// （`Dockerfile`、`Makefile`）走 `basename_hint`，否则 `rsplit_once('.')`
+/// 永远推不出它们。
 fn language_hint(name: &str) -> Option<&'static str> {
+    if let Some(hint) = basename_hint(name) {
+        return Some(hint);
+    }
     let ext = name.rsplit_once('.')?.1.to_lowercase();
     let language = match ext.as_str() {
         "rs" => "rust",
@@ -825,7 +1054,7 @@ fn language_hint(name: &str) -> Option<&'static str> {
         "js" | "jsx" | "mjs" | "cjs" => "javascript",
         "json" | "jsonc" => "json",
         "md" | "markdown" => "markdown",
-        "py" => "python",
+        "py" | "pyi" => "python",
         "go" => "go",
         "java" => "java",
         "c" | "h" => "c",
@@ -834,13 +1063,14 @@ fn language_hint(name: &str) -> Option<&'static str> {
         "rb" => "ruby",
         "php" => "php",
         "sh" | "bash" | "zsh" => "bash",
-        "ps1" | "psm1" => "powershell",
+        "ps1" | "psm1" | "psd1" => "powershell",
         "toml" => "toml",
         "yaml" | "yml" => "yaml",
-        "xml" => "xml",
+        "xml" | "xsd" | "xsl" => "xml",
         "html" | "htm" => "html",
         "css" => "css",
-        "scss" | "less" => "scss",
+        "scss" => "scss",
+        "less" => "less",
         "sql" => "sql",
         "kt" | "kts" => "kotlin",
         "swift" => "swift",
@@ -852,10 +1082,40 @@ fn language_hint(name: &str) -> Option<&'static str> {
         "proto" => "protobuf",
         "graphql" | "gql" => "graphql",
         "ini" | "cfg" | "conf" => "ini",
-        "dockerfile" => "dockerfile",
+        "properties" => "properties",
+        "prisma" => "prisma",
+        "diff" | "patch" => "diff",
+        "env" => "dotenv",
+        "vim" => "vim",
         _ => return None,
     };
     Some(language)
+}
+
+/// 无扩展名或扩展名不参与识别的约定文件名 → 语言（`language_hint` 的前置分支）。
+///
+/// 覆盖两类：`Dockerfile` / `Makefile` 这类本身没有扩展名的构建文件，
+/// 以及 `docker-compose.yml` / `xdebug.ini` 这类靠固定前缀才能认出的文件
+/// ——后者带扩展名，若只按扩展名判断会落到 `yaml`/`ini` 之外或直接推不出。
+/// 大小写不敏感：Windows 与容器里 `Dockerfile`、`dockerfile` 都有。
+fn basename_hint(name: &str) -> Option<&'static str> {
+    let base = name.rsplit(['/', '\\']).next().unwrap_or(name);
+    match base.to_ascii_lowercase().as_str() {
+        "dockerfile" | "dockerfile.dev" | "dockerfile.prod" => Some("dockerfile"),
+        "makefile" | "gnumakefile" | "makefile.am" | "makefile.in" => Some("makefile"),
+        ".env" | ".env.local" | ".env.production" | ".env.development" | ".env.example" => {
+            Some("dotenv")
+        }
+        _ => {
+            if base.to_ascii_lowercase().starts_with("docker-compose")
+                || base.to_ascii_lowercase().starts_with("compose.")
+            {
+                Some("yaml")
+            } else {
+                None
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -997,6 +1257,276 @@ mod file_read_tests {
                 .is_none()
         );
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// 每个 `language_hint` 可能输出的标签都取样一遍。
+    ///
+    /// 这是一条**跨语言契约**：这里的每个断言值都必须能在前端
+    /// `web/src/markdown/highlight.ts` 的 `LANG_ALIASES` 里解析到语法。
+    /// 前端漏一个别名，对应扩展名就会在文件阅读器里静默退化成纯文本
+    /// （而同样的语言在对话流代码块里是正常高亮的），只能靠这个测试拦住。
+    #[test]
+    fn every_emitted_language_tag_is_covered() {
+        // 覆盖每个 match 分支，外加约定文件名分支。
+        for (name, expected) in [
+            ("a.rs", "rust"),
+            ("a.ts", "typescript"),
+            ("a.tsx", "typescript"),
+            ("a.jsx", "javascript"),
+            ("a.json", "json"),
+            ("a.md", "markdown"),
+            ("a.py", "python"),
+            ("a.go", "go"),
+            ("a.java", "java"),
+            ("a.h", "c"),
+            ("a.hpp", "cpp"),
+            ("a.cs", "csharp"),
+            ("a.rb", "ruby"),
+            ("a.php", "php"),
+            ("a.sh", "bash"),
+            ("a.ps1", "powershell"),
+            ("a.toml", "toml"),
+            ("a.yml", "yaml"),
+            ("a.xsd", "xml"),
+            ("a.htm", "html"),
+            ("a.css", "css"),
+            ("a.scss", "scss"),
+            ("a.less", "less"),
+            ("a.sql", "sql"),
+            ("a.kt", "kotlin"),
+            ("a.swift", "swift"),
+            ("a.lua", "lua"),
+            ("a.r", "r"),
+            ("a.dart", "dart"),
+            ("a.vue", "vue"),
+            ("a.svelte", "svelte"),
+            ("a.proto", "protobuf"),
+            ("a.gql", "graphql"),
+            ("a.ini", "ini"),
+            ("a.properties", "properties"),
+            ("a.prisma", "prisma"),
+            ("a.patch", "diff"),
+            ("a.env", "dotenv"),
+            ("a.vim", "vim"),
+            // 无扩展名 / 靠前缀识别的约定文件。
+            ("Dockerfile", "dockerfile"),
+            ("dockerfile", "dockerfile"),
+            ("Dockerfile.prod", "dockerfile"),
+            ("Makefile", "makefile"),
+            ("GNUmakefile", "makefile"),
+            (".env", "dotenv"),
+            (".env.production", "dotenv"),
+            ("docker-compose.yml", "yaml"),
+            ("compose.yaml", "yaml"),
+            // 带目录前缀时只看基名。
+            ("src/nested/Dockerfile", "dockerfile"),
+        ] {
+            assert_eq!(language_hint(name), Some(expected), "文件 {name} 的语言提示");
+        }
+    }
+
+    /// `.less` 必须是独立语法，不能并进 `scss`（两者关键字集不同）。
+    #[test]
+    fn less_is_not_folded_into_scss() {
+        assert_eq!(language_hint("theme.less"), Some("less"));
+        assert_ne!(language_hint("theme.less"), language_hint("theme.scss"));
+    }
+
+    /// 无扩展名的约定文件走 `basename_hint`；`name` 只有基名部分时也要正确。
+    #[test]
+    fn basename_hints_ignore_directories() {
+        assert_eq!(language_hint("Dockerfile"), Some("dockerfile"));
+        assert_eq!(language_hint("web\\Dockerfile"), Some("dockerfile"));
+        assert_eq!(language_hint("a/b/c/Makefile"), Some("makefile"));
+        // 普通扩展名文件不受 basename 分支影响。
+        assert_eq!(language_hint("a/b/c/main.rs"), Some("rust"));
+    }
+}
+
+#[cfg(test)]
+mod preview_tests {
+    use super::*;
+    use axum::http::HeaderValue;
+
+    fn scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("denia-preview-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create scratch dir");
+        dir
+    }
+
+    /// 响应里的 CSP 必须禁掉脚本，并且不含可执行类型。
+    fn csp_of(response: &axum::response::Response) -> String {
+        response
+            .headers()
+            .get(axum::http::header::CONTENT_SECURITY_POLICY)
+            .and_then(|value: &HeaderValue| value.to_str().ok())
+            .unwrap_or_default()
+            .to_string()
+    }
+
+    /// HTML 预览页必须带 `script-src 'none'`。
+    ///
+    /// 这是预览安全的第一道服务端防线：即使前端 iframe 少配了一个
+    /// `sandbox` 属性，文档里的 `<script>` 也不会执行。
+    #[test]
+    fn html_response_carries_script_blocking_csp() {
+        let response = preview_html_response(b"<script>alert(1)</script>");
+        let csp = csp_of(&response);
+        assert!(csp.contains("script-src 'none'"), "CSP 必须禁脚本: {csp}");
+        assert!(csp.contains("object-src 'none'"), "CSP 必须禁 object: {csp}");
+        // 外发通道也要断，文档不能把工作区内容发出去。
+        assert!(csp.contains("connect-src 'none'"), "CSP 必须禁 connect: {csp}");
+        assert_eq!(
+            response.headers().get(axum::http::header::CONTENT_TYPE).unwrap(),
+            "text/html; charset=utf-8"
+        );
+        // 预览是即时快照，不许缓存。
+        assert_eq!(
+            response.headers().get(axum::http::header::CACHE_CONTROL).unwrap(),
+            "no-store"
+        );
+    }
+
+    /// 白名单里**不能有任何可执行类型**。
+    ///
+    /// 这是第二道防线：即使 CSP 配漏了，预览页也拿不到能跑的脚本源。
+    #[test]
+    fn preview_whitelist_excludes_executable_types() {
+        for ext in [
+            "js", "mjs", "cjs", "jsx", "ts", "tsx", "wasm", "php", "py", "rb", "sh", "exe",
+            "dll", "jar", "ps1",
+        ] {
+            let path = PathBuf::from(format!("a.{ext}"));
+            assert_eq!(
+                preview_content_type(&path),
+                None,
+                ".{ext} 不应作为预览资源返回"
+            );
+        }
+    }
+
+    /// 白名单内的静态资源与图片要有正确 MIME。
+    #[test]
+    fn preview_whitelist_covers_static_assets() {
+        for (name, expected) in [
+            ("a.html", "text/html; charset=utf-8"),
+            ("a.htm", "text/html; charset=utf-8"),
+            ("a.css", "text/css; charset=utf-8"),
+            ("a.svg", "image/svg+xml"),
+            ("a.png", "image/png"),
+            ("a.jpg", "image/jpeg"),
+            ("a.woff2", "font/woff2"),
+            ("a.md", "text/plain; charset=utf-8"),
+        ] {
+            assert_eq!(
+                preview_content_type(Path::new(name)),
+                Some(expected),
+                "{name} 的 MIME"
+            );
+        }
+    }
+
+    /// 约定文件名（无扩展名）不作为预览资源。
+    #[test]
+    fn preview_rejects_basename_only_files() {
+        for name in ["Dockerfile", "Makefile", ".env"] {
+            assert_eq!(
+                preview_content_type(Path::new(name)),
+                None,
+                "{name} 不应作为预览资源"
+            );
+        }
+    }
+
+    /// 路径逃逸与绝对路径必须被拒 —— 预览端点不得比文本读取更宽松。
+    #[test]
+    fn preview_path_escape_is_rejected() {
+        let root = scratch("escape");
+        std::fs::write(root.join("a.html"), "<p>ok</p>").unwrap();
+        let root_str = root.to_str().unwrap();
+        for bad in [
+            "../outside.html",
+            "a/../../outside.html",
+            "/etc/passwd",
+            "C:/Windows/win.ini",
+        ] {
+            assert!(
+                resolve_relative_file(Path::new(root_str), bad).is_none()
+                    || !resolve_relative_file(Path::new(root_str), bad)
+                        .unwrap()
+                        .starts_with(root_str),
+                "{bad} 不该解析到工作区内"
+            );
+        }
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// 路径里的 `..` 段与绝对路径必须被拒（与文本读取同一套口径）。
+    ///
+    /// 路径式 URL 把用户可控的片段拼进了 URL，因此这里比查询串版本更需要
+    /// 逐段校验 —— `%2e%2e` 解码后同样是 `..`。
+    #[test]
+    fn preview_path_segments_cannot_escape() {
+        let root = Path::new("/ws");
+        for bad in [
+            "../../../etc/passwd",
+            "src/../../outside.css",
+            "/absolute.css",
+            "C:/Windows/win.ini",
+            "a:b",
+        ] {
+            assert!(
+                resolve_relative_file(root, bad).is_none(),
+                "{bad} 不该解析出路径"
+            );
+        }
+        // 正常相对路径仍要通过
+        assert!(resolve_relative_file(root, "src/a/style.css").is_some());
+    }
+
+    /// 工作区 token 必须能无损往返 —— 前端按同一套算法拼 URL。
+    ///
+    /// 路径含 Windows 反斜杠、盘符冒号与空格，这些在 URL 路径里都得转义，
+    /// 所以走 base64url。往返不保真会让预览读错根目录（静默 404）。
+    #[test]
+    fn workspace_token_round_trips() {
+        for root in [
+            r"D:\my proj",
+            "D:/Denia",
+            "/home/me/项目",
+            r"C:\Users\a b\c-d_e",
+        ] {
+            let token = encode_workspace_token(root);
+            // base64url 字母表必须全是 URL 安全字符，不能出现需要转义的。
+            assert!(
+                token
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'),
+                "{token} 含 URL 不安全字符"
+            );
+            assert_eq!(
+                decode_workspace_token(&token).as_deref(),
+                Some(root),
+                "{root} 往返失败"
+            );
+        }
+    }
+
+    /// 非法 token 必须被拒，而不是解出垃圾路径。
+    ///
+    /// 空串不在此列：它是**合法的** base64（解出空串），随后会被
+    /// `root.is_dir()` 判否 —— 空路径不是目录，第一层就挡掉了。
+    #[test]
+    fn workspace_token_rejects_garbage() {
+        for bad in ["!!!!", "not-valid-base64!!", "a", "////"] {
+            assert!(
+                decode_workspace_token(bad).is_none(),
+                "{bad} 不该解出内容"
+            );
+        }
+        // 空 token 解出空根，不是目录，同样会被上层拒绝。
+        assert_eq!(decode_workspace_token("").as_deref(), Some(""));
     }
 }
 

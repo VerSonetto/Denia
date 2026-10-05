@@ -1,9 +1,8 @@
 /**
  * The console's ONE syntax highlighter: a synchronous fine-grained shiki core
  * (JavaScript regex engine — no oniguruma WASM, bundle-friendly) with an
- * explicit grammar allowlist and a CSS-variables theme. Colors live in the
- * design sheet as `--shiki-*` custom properties (light and dark blocks),
- * never here.
+ * explicit grammar allowlist and the vitesse-dark theme (see {@link THEME} for
+ * why colors come from the theme rather than the design sheet).
  *
  * Only the three markdown-fence grammars (TypeScript, shell, JSON) load into
  * the singleton at boot — the set every session renders. The wider extension
@@ -13,10 +12,16 @@
  * of a lazy language falls back to plain text while its grammar loads, then
  * subscribers re-render with highlighting. An unknown or absent language
  * falls back to plain text (no highlighting, still monospace) — never an error.
+ *
+ * Coverage note: the file reader highlights whole files, so this allowlist
+ * also has to cover every extension the backend tags (see `language_hint` in
+ * `crates/server/src/api/fs.rs`). A file type missing here degrades to plain
+ * text in that panel only — markdown fences are unaffected.
  */
 
-import { createHighlighterCoreSync, createCssVariablesTheme } from 'shiki/core'
+import { createHighlighterCoreSync } from 'shiki/core'
 import { createJavaScriptRegexEngine, defaultJavaScriptRegexConstructor } from 'shiki/engine/javascript'
+import themeVitesseDark from '@shikijs/themes/vitesse-dark'
 import langTs from '@shikijs/langs/typescript'
 import langBash from '@shikijs/langs/shellscript'
 import langJson from '@shikijs/langs/json'
@@ -52,9 +57,18 @@ const LAZY_GRAMMARS = new Map<string, () => Promise<LangModule>>([
   ['kotlin', () => import('@shikijs/langs/kotlin')],
   ['swift', () => import('@shikijs/langs/swift')],
   ['php', () => import('@shikijs/langs/php')],
+  ['powershell', () => import('@shikijs/langs/powershell')],
+  ['r', () => import('@shikijs/langs/r')],
+  ['dart', () => import('@shikijs/langs/dart')],
+  ['vue', () => import('@shikijs/langs/vue')],
+  ['svelte', () => import('@shikijs/langs/svelte')],
+  ['protobuf', () => import('@shikijs/langs/protobuf')],
+  ['graphql', () => import('@shikijs/langs/graphql')],
+  ['dockerfile', () => import('@shikijs/langs/dockerfile')],
   ['yaml', () => import('@shikijs/langs/yaml')],
   ['toml', () => import('@shikijs/langs/toml')],
   ['ini', () => import('@shikijs/langs/ini')],
+  ['properties', () => import('@shikijs/langs/properties')],
   ['markdown', () => import('@shikijs/langs/markdown')],
   ['mdx', () => import('@shikijs/langs/mdx')],
   ['html', () => import('@shikijs/langs/html')],
@@ -64,6 +78,12 @@ const LAZY_GRAMMARS = new Map<string, () => Promise<LangModule>>([
   ['sql', () => import('@shikijs/langs/sql')],
   ['xml', () => import('@shikijs/langs/xml')],
   ['lua', () => import('@shikijs/langs/lua')],
+  ['diff', () => import('@shikijs/langs/diff')],
+  ['dotenv', () => import('@shikijs/langs/dotenv')],
+  ['makefile', () => import('@shikijs/langs/makefile')],
+  ['vim', () => import('@shikijs/langs/vim')],
+  ['nginx', () => import('@shikijs/langs/nginx')],
+  ['prisma', () => import('@shikijs/langs/prisma')],
 ])
 
 /**
@@ -71,6 +91,12 @@ const LAZY_GRAMMARS = new Map<string, () => Promise<LangModule>>([
  * plain. A Map, not an object: fence info strings are assistant-authored, so
  * a label like `constructor` or `__proto__` must miss instead of resolving an
  * inherited property and crashing the renderer inside shiki.
+ *
+ * The file reader's tags come from the backend's `language_hint`
+ * (`crates/server/src/api/fs.rs`), which maps a file extension to one of these
+ * ids. Every id that function can emit MUST resolve here, or the file reader
+ * silently renders plain text for that extension — a `.proto` or `.ps1` would
+ * look broken while markdown fences around the same language highlight fine.
  */
 const LANG_ALIASES = new Map<string, string>([
   ['typescript', 'typescript'],
@@ -84,6 +110,9 @@ const LANG_ALIASES = new Map<string, string>([
   ['sh', 'shellscript'],
   ['shell', 'shellscript'],
   ['zsh', 'shellscript'],
+  ['powershell', 'powershell'],
+  ['pwsh', 'powershell'],
+  ['ps1', 'powershell'],
   ['json', 'json'],
   ['jsonc', 'json'],
   ['py', 'python'],
@@ -101,10 +130,20 @@ const LANG_ALIASES = new Map<string, string>([
   ['kotlin', 'kotlin'],
   ['swift', 'swift'],
   ['php', 'php'],
+  ['r', 'r'],
+  ['dart', 'dart'],
+  ['vue', 'vue'],
+  ['svelte', 'svelte'],
+  ['proto', 'protobuf'],
+  ['protobuf', 'protobuf'],
+  ['graphql', 'graphql'],
+  ['gql', 'graphql'],
+  ['dockerfile', 'dockerfile'],
   ['yaml', 'yaml'],
   ['yml', 'yaml'],
   ['toml', 'toml'],
   ['ini', 'ini'],
+  ['properties', 'properties'],
   ['md', 'markdown'],
   ['markdown', 'markdown'],
   ['mdx', 'mdx'],
@@ -115,14 +154,32 @@ const LANG_ALIASES = new Map<string, string>([
   ['sql', 'sql'],
   ['xml', 'xml'],
   ['lua', 'lua'],
+  ['diff', 'diff'],
+  ['patch', 'diff'],
+  ['env', 'dotenv'],
+  ['dotenv', 'dotenv'],
+  ['makefile', 'makefile'],
+  ['make', 'makefile'],
+  ['vim', 'vim'],
+  ['viml', 'vim'],
+  ['nginx', 'nginx'],
+  ['prisma', 'prisma'],
 ])
 
-/** All token colors resolve through `--shiki-*` custom properties (design sheet). */
-const cssVariablesTheme = createCssVariablesTheme({
-  name: 'css-variables',
-  variablePrefix: '--shiki-',
-  fontStyle: true,
-})
+/**
+ * 唯一的主题：vitesse-dark 的实际色值。
+ *
+ * 早先这里用 `createCssVariablesTheme` 把 token 颜色外置成 `--shiki-token-*`
+ * 交由 [markdown.css](markdown.css) 定调，但那张表定的是**纯灰阶**（文件头
+ * 当时写着「黑白语法高亮」）。灰阶在 token 种类少的语言上够用，一旦文件
+ * 阅读器开始渲染 Go/Rust 这类 token 密集的语言，`constant`/`function`/
+ * `entity`/`string` 四档撞成同一个灰，关键字又与前景色同白，整段代码看上去
+ * 「像没高亮」——实际分词是对的，坏的是配色。
+ *
+ * 现在改为内置彩色主题：token 颜色由主题自带，CSS 不再参与着色，
+ * 只保留 `--shiki-background`（见 markdown.css）给代码块底色用。
+ */
+const THEME = 'vitesse-dark'
 
 /**
  * The JS regex engine compiles each TextMate pattern when its scanner is
@@ -150,14 +207,14 @@ const BOOT_GRAMMAR_WARMUPS = [
 /** Construct and pre-tokenize the boot grammars outside the user-content scan budget. */
 function createHighlighter(): HighlighterCore {
   const instance = createHighlighterCoreSync({
-    themes: [cssVariablesTheme],
+    themes: [themeVitesseDark],
     langs: LANGS,
     engine: regexEngine,
   })
   for (const sample of BOOT_GRAMMAR_WARMUPS) {
     instance.codeToTokens(sample.code, {
       lang: sample.lang,
-      theme: 'css-variables',
+      theme: THEME,
       tokenizeTimeLimit: 0,
     })
   }
@@ -239,14 +296,14 @@ export function highlightToHtml(code: string, lang: string | undefined): string 
   const resolved = lang === undefined ? undefined : LANG_ALIASES.get(lang.toLowerCase())
   if (resolved === undefined) return undefined
   if (!ensureGrammar(resolved)) return undefined
-  return highlighter().codeToHtml(code, { lang: resolved, theme: 'css-variables' })
+  return highlighter().codeToHtml(code, { lang: resolved, theme: THEME })
 }
 
 /**
  * One highlighted run of a line: the text and the inline style shiki assigned
- * it. The css-variables theme colors every run through a `--shiki-*` custom
- * property, so `style.color` is always present; it is held as a style object
- * rather than a bare color so a run spreads onto a `<span style>` uniformly.
+ * it. The theme gives every run an explicit color, so `style.color` is always
+ * present; it is held as a style object rather than a bare color so a run
+ * spreads onto a `<span style>` uniformly.
  */
 export interface HighlightSpan {
   text: string
@@ -257,9 +314,9 @@ export interface HighlightSpan {
 const DECORATION_BITS: readonly (readonly [number, string])[] = [[4, 'underline'], [8, 'line-through']]
 
 /**
- * The inline style shiki's HTML arm assigns one token: the css-variables
- * color plus the vscode-textmate font-style bits the theme lets through —
- * italic (1), bold (2), and the {@link DECORATION_BITS} decorations.
+ * The inline style shiki's HTML arm assigns one token: the theme color plus the
+ * vscode-textmate font-style bits the theme lets through — italic (1), bold
+ * (2), and the {@link DECORATION_BITS} decorations.
  */
 function spanStyle(token: ThemedToken): CSSProperties {
   const style: CSSProperties = { color: token.color }
@@ -326,7 +383,7 @@ export class StreamingHighlightSession {
   private tokenize(resolved: string, text: string): ThemedToken[][] {
     return highlighter().codeToTokensBase(text, {
       lang: resolved,
-      theme: 'css-variables',
+      theme: THEME,
       ...(this.state === undefined ? {} : { grammarState: this.state }),
     })
   }

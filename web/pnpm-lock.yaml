@@ -14,6 +14,9 @@ importers:
       '@shikijs/langs':
         specifier: ^4.4.3
         version: 4.4.3
+      '@shikijs/themes':
+        specifier: 4.4.3
+        version: 4.4.3
       '@tauri-apps/api':
         specifier: ^2.11.1
         version: 2.11.1
