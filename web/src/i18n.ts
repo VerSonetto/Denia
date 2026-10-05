@@ -1001,6 +1001,9 @@ const zh = {
   sidePaneFileRetry: '重试',
   sidePaneFileReload: '重新读取',
   sidePaneFileLines: '{count} 行',
+  sidePaneFilePreview: '预览',
+  sidePaneFileCode: '代码',
+  sidePaneFileViewMode: '文件视图',
   openInFileReader: '在文件读取中打开',
 
   /* ---- 终端面板 ---- */
@@ -2076,6 +2079,9 @@ const en: typeof zh = {
   sidePaneFileRetry: 'Retry',
   sidePaneFileReload: 'Reload',
   sidePaneFileLines: '{count} lines',
+  sidePaneFilePreview: 'Preview',
+  sidePaneFileCode: 'Code',
+  sidePaneFileViewMode: 'File view',
   openInFileReader: 'Open in file reader',
 
   /* ---- Terminal panel ---- */

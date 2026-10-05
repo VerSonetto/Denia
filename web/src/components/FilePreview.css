@@ -1,0 +1,44 @@
+/* 文件阅读器的「预览」态。
+ *
+ * HTML 预览是一块白/浅底的独立画布：文档自带配色，不该被暗色主题的
+ * --bg-base 染色（否则作者写的浅色页面整片发灰）。底色只给 iframe 内部，
+ * 容器本身跟着主题走，保持边框与外层一致。 */
+
+.file-preview {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  /* 必须显式高 100%：父级 .file-reader-body 不是 flex 容器，
+   * 只写 flex:1 不会生效，内容一短整块就塌成内容高度（iframe 只剩
+   * min-height，下面拖出一大片空白）。 */
+  min-height: 0;
+  overflow: hidden;
+}
+
+/* ---- HTML:真实渲染的文档 ---- */
+
+.file-preview-frame {
+  display: block;
+  width: 100%;
+  height: 100%;
+  /* 撑满容器而不是内容高：预览页往往比面板高，也往往比面板短，
+   * 两种都不该出现空白。 */
+  flex: 1 1 auto;
+  min-height: 0;
+  border: 0;
+  background: #ffffff;
+}
+
+/* ---- Markdown:复用对话流的排版 ---- */
+
+.file-preview-markdown {
+  overflow: auto;
+  padding: 16px 18px 28px;
+  background: var(--bg-base);
+}
+
+.file-preview-markdown .markdown {
+  max-width: 100%;
+}

@@ -121,6 +121,40 @@
   white-space: nowrap;
 }
 
+/* ---- 视图切换(预览 / 代码),仅在文件支持预览时出现 ---- */
+
+.file-reader-switch {
+  display: inline-flex;
+  flex: 0 0 auto;
+  gap: 2px;
+  padding: 2px;
+  border: 1px solid var(--border-l1);
+  border-radius: var(--r-xs);
+  background: var(--bg-layer-1);
+}
+
+.file-reader-switch-btn {
+  padding: 3px 10px;
+  border: 0;
+  border-radius: calc(var(--r-xs) - 1px);
+  background: transparent;
+  color: var(--label-tertiary);
+  font-size: 11px;
+  line-height: 1.5;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.file-reader-switch-btn:hover {
+  color: var(--label-secondary);
+}
+
+.file-reader-switch-btn.active {
+  background: var(--bg-layer-2);
+  color: var(--label-primary);
+  font-weight: 500;
+}
+
 .file-reader-icon-btn {
   display: inline-flex;
   flex: 0 0 auto;
@@ -144,9 +178,17 @@
 /* ---- 正文 ---- */
 
 .file-reader-body {
+  display: flex;
+  flex-direction: column;
   flex: 1 1 auto;
   min-height: 0;
   overflow: auto;
+}
+
+/* 预览态由 .file-preview 自己接管滚动与高度（内部 iframe / markdown 区），
+ * 这里不能留 auto 滚动容器，否则预览块只按内容高度渲染、下面留一大片空白。 */
+.file-reader-body:has(> .file-preview) {
+  overflow: hidden;
 }
 
 .file-reader-code {

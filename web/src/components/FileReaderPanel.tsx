@@ -26,6 +26,7 @@ import { t } from '../i18n'
 import * as api from '../api'
 import type { OpenedFile } from '../sidePane'
 import { CodeBlock } from '../markdown/CodeBlock'
+import { FilePreview, previewKindOf } from './FilePreview'
 import { IconClose, IconFile, IconRefresh, IconSpinner } from './icons'
 import './FileReaderPanel.css'
 
@@ -34,6 +35,12 @@ type FileState =
   | { kind: 'loading' }
   | { kind: 'ready'; view: api.WorkspaceFileView }
   | { kind: 'error'; message: string; code: string }
+
+/**
+ * 正文视图。`code` 是高亮源码；`preview` 只在文件支持预览时可用
+ * （见 [previewKindOf]），由 `viewMode` 决定当前停在哪一个。
+ */
+type ViewMode = 'code' | 'preview'
 
 export interface FileReaderPanelProps {
   /** 工作区绝对路径(文件读取的根)。 */
@@ -59,6 +66,15 @@ export function FileReaderPanel({
    * 只驻留当前文件的正文;后台标签仅保留路径与名称。
    */
   const [states, setStates] = useState<Record<string, FileState>>({})
+  /**
+   * 每个文件停在哪一视图,**按文件分别记**。
+   *
+   * 记成 `Record<path, ViewMode>` 而不是单个 state:HTML 默认落在预览,
+   * 但用户切到源码后如果换成另一个文件再切回来,不该被重置回预览 ——
+   * 那是同一个文件、同一份内容,用户的阅读位置属于这个文件。
+   * 缺省取 `preview`（由下面的 `supportsPreview` 判定是否真能预览）。
+   */
+  const [viewModes, setViewModes] = useState<Record<string, ViewMode>>({})
   /**
    * 单调递增的请求代号:快速切换和重试时,慢响应不能覆盖新状态。
    */
@@ -127,6 +143,31 @@ export function FileReaderPanel({
     () => files.find((file) => file.path === active) ?? null,
     [files, active],
   )
+
+  /**
+   * 当前文件能不能预览。判定只认文件名(扩展名),不依赖是否已加载 ——
+   * 切换器该在正文到达之前就在,否则用户会看到"先渲染一遍源码、再跳预览"。
+   * 用已加载视图的 name 优先(它是权威),拿不到就退回条目的 name。
+   */
+  const previewName = state?.kind === 'ready' ? state.view.name : activeEntry?.name
+  const supportsPreview = previewName !== undefined && previewKindOf(previewName) !== null
+  /**
+   * 当前视图。不支持预览的文件恒为 `code`;支持的默认 `preview`。
+   * `viewModes` 里显式记过的优先(用户为这个文件选过)。
+   */
+  const viewMode: ViewMode = !supportsPreview
+    ? 'code'
+    : viewModes[active] === 'code'
+      ? 'code'
+      : 'preview'
+  const setViewMode = useCallback(
+    (path: string, mode: ViewMode) => {
+      setViewModes((current) => (current[path] === mode ? current : { ...current, [path]: mode }))
+    },
+    [],
+  )
+  // 重新读取时回到预览态:用户点刷新多半是想看最新效果,而不是盯着旧源码。
+  const showPreview = supportsPreview && viewMode === 'preview'
 
   useEffect(() => {
     const tabs = tabsRef.current
@@ -208,6 +249,23 @@ export function FileReaderPanel({
             {formatBytes(state.view.size)}
           </span>
         )}
+        {supportsPreview && (
+          <div className="file-reader-switch" role="tablist" aria-label={t('sidePaneFileViewMode')}>
+            {(['preview', 'code'] as const).map((mode) => (
+              <button
+                key={mode}
+                type="button"
+                role="tab"
+                aria-selected={viewMode === mode}
+                className={`file-reader-switch-btn${viewMode === mode ? ' active' : ''}`}
+                data-file-reader-mode={mode}
+                onClick={() => active && setViewMode(active, mode)}
+              >
+                {mode === 'preview' ? t('sidePaneFilePreview') : t('sidePaneFileCode')}
+              </button>
+            ))}
+          </div>
+        )}
         <button
           type="button"
           className="file-reader-icon-btn"
@@ -245,17 +303,26 @@ export function FileReaderPanel({
             </button>
           </div>
         ) : (
-          <div className="file-reader-code">
-            {/* 复用对话流那套 shiki 高亮:同一份主题变量、同一套按需加载
-                语法(见 markdown/highlight.ts),不引第二个高亮器。
-                语言推不出时传空串 → 按纯文本渲染,仍然是等宽。 */}
-            <CodeBlock
-              code={state.view.content}
-              lang={state.view.language ?? ''}
-              copyLabel={t('copy')}
-              copiedLabel={t('copied')}
+          showPreview ? (
+            <FilePreview
+              workspacePath={workspacePath}
+              file={active}
+              name={state.view.name}
+              content={state.view.content}
             />
-          </div>
+          ) : (
+            <div className="file-reader-code">
+              {/* 复用对话流那套 shiki 高亮:同一份主题、同一套按需加载
+                  语法(见 markdown/highlight.ts),不引第二个高亮器。
+                  语言推不出时传空串 → 按纯文本渲染,仍然是等宽。 */}
+              <CodeBlock
+                code={state.view.content}
+                lang={state.view.language ?? ''}
+                copyLabel={t('copy')}
+                copiedLabel={t('copied')}
+              />
+            </div>
+          )
         )}
       </div>
     </div>

@@ -711,6 +711,50 @@ export function fetchWorkspaceFile(
   return http(`/api/fs/file?${params.toString()}`, { signal })
 }
 
+/**
+ * 预览资源的 URL（`/api/fs/preview/…`），给 iframe 的 `src` 用。
+ *
+ * # 必须是路径式，不能用查询串
+ *
+ * HTML 文档里的 `./style.css`、`../img/a.png` 这类相对引用，浏览器只按
+ * **URL 路径**解析——查询串不参与路径拼接。早期版本把文件放在
+ * `?path=…&file=src/a/index.html`，实测 `./style.css` 被解析成
+ * `/api/fs/style.css`，`src/a/` 这一层静默丢失，关联资源全 404。
+ * 改成 `/api/fs/preview/{rootToken}/src/a/index.html` 后，目录结构真实存在于
+ * 路径里，浏览器自行拼接即命中同一个端点。
+ *
+ * 工作区根放在首段、base64url 编码（`D:\my proj` 这类路径含 `\`/`:`/空格，
+ * 在 URL 路径里都得转义）。服务端解码后走与文本读取**完全相同**的路径校验，
+ * 所以仍然读不到工作区外的任何字节。
+ *
+ * # 为什么不用 fetch + srcDoc
+ *
+ * `srcDoc` 落在 `about:srcdoc`，没有基址，相对引用一律断；图片/字体绕成
+ * base64 再塞回内存也只是把同一份字节读两遍。路径式 URL 让浏览器自己管。
+ *
+ * @param workspacePath - 工作区根绝对路径。
+ * @param file - 相对根的路径（以 `/` 分隔）。
+ * @returns 可直接赋给 `iframe.src` 的地址。
+ */
+export function workspacePreviewUrl(workspacePath: string, file: string): string {
+  const segments = file.split('/').filter((s) => s !== '' && s !== '.')
+  const encoded = segments.map(encodeURIComponent).join('/')
+  return `/api/fs/preview/${base64Url(workspacePath)}/${encoded}`
+}
+
+/**
+ * UTF-8 → base64url（无 padding），与服务端 `encode_workspace_token` 对称。
+ *
+ * 不能直接用 `btoa`：它只接受 Latin-1，中文工作区路径会抛异常。工作区路径
+ * 含中文是常态（`D:\项目\app`），这里必须走 UTF-8 字节。
+ */
+function base64Url(value: string): string {
+  const bytes = new TextEncoder().encode(value)
+  let binary = ''
+  for (const byte of bytes) binary += String.fromCharCode(byte)
+  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
+}
+
 export function getSession(id: string, signal?: AbortSignal): Promise<{
   header: SessionHeader
   events: SessionEnvelope[]
