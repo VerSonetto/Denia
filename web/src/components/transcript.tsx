@@ -1021,6 +1021,7 @@ function TurnChrome({
         <TurnDiffCard
           files={node.produced}
           cwd={cwd}
+          turn={node.turn}
           interrupted={reason.kind !== 'completed'}
         />
       )}

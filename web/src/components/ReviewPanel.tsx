@@ -45,6 +45,10 @@ import {
   type GitStatus,
 } from '../gitApi'
 import { IconBranch, IconChevronDown, IconFile, IconRefresh, IconSparkles, IconSpinner } from './icons'
+import { DiffCard, DiffStat } from './DiffCard'
+import { useTurnChanges } from '../turnChangesStore'
+import { scopeKey } from '../sidePane'
+import type { TurnProducedFile } from '../fold'
 import './ReviewPanel.css'
 
 /** 单个文件行的展开态。 */
@@ -75,18 +79,36 @@ export function ReviewPanel({ workspacePath, sessionId, selection }: ReviewPanel
   const [status, setStatus] = useState<GitStatus | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
-  const [source, setSource] = useState<GitSource>('unstaged')
+  /**
+   * 来源。`turn` 是**不依赖 git** 的那一个:数据来自对话里那张变更卡片
+   * (工具参数算出的行级 diff),工作区不是仓库时它是唯一还能看到 diff
+   * 的地方。三个 git 来源覆盖工作区全量改动,两者并存不替代。
+   */
+  const [source, setSource] = useState<GitSource | 'turn'>('unstaged')
   const [rows, setRows] = useState<Record<string, RowState>>({})
   const [filter, setFilter] = useState('')
+  /** 本轮来源的展开态(与 git 来源的行状态分开存,避免键互相覆盖)。 */
+  const [turnOpen, setTurnOpen] = useState<Record<string, boolean>>({})
+  /** 本轮改动的内存快照:由变更卡片点击时写入(见 turnChangesStore)。 */
+  const turnChanges = useTurnChanges(scopeKey(sessionId))
   /** 请求代号:防止慢响应覆盖新状态(切来源/刷新时的竞态)。 */
   const revisionRef = useRef(0)
   /** 提交信息草稿:跨刷新保留(用户可能写了半天才提交)。 */
   const [message, setMessage] = useState('')
   /** 正在跑的写操作:提交与推送互斥,期间按钮禁用。 */
   const [busy, setBusy] = useState<'commit' | 'push' | 'generate' | null>(null)
-  const [feedback, setFeedback] = useState<ActionFeedback | null>(null)
+  const [feedback, setFeedback] = useState<{ kind: 'ok' | 'error'; text: string; hint?: string } | null>(null)
   /** 生成请求的中止句柄(切工作区/卸载时取消在途请求)。 */
   const generateAbortRef = useRef<AbortController | null>(null)
+
+  const isRepo = status?.isRepository === true
+
+  // 工作区不是仓库时,三个 git 来源全是空的:默认落在「本轮」,否则用户点
+  // 开面板只看到一个"不是 Git 仓库"的空态,而本轮改动就在手边。
+  // 有本轮数据时才这么落;否则维持原样(空态里由 turn 按钮兜底)。
+  const onTurn = source === 'turn'
+  const hasTurn = turnChanges !== null && turnChanges.files.length > 0
+  const effectiveGitSource: GitSource = source === 'turn' ? 'unstaged' : source
 
   const refresh = useCallback(async () => {
     revisionRef.current += 1
@@ -111,6 +133,25 @@ export function ReviewPanel({ workspacePath, sessionId, selection }: ReviewPanel
   useEffect(() => {
     void refresh()
   }, [refresh, sessionId])
+
+  // 非仓库工作区:自动落到「本轮」。git 状态到位后才知道是不是仓库,而三个
+  // git 来源在非仓库里必然是空的 —— 停在默认的"未暂存"就等于对着空面板。
+  // 有本轮数据才落;没有就维持原样,让"不是 Git 仓库"的空态说话。
+  useEffect(() => {
+    if (!loading && status !== null && !status.isRepository && hasTurn && source !== 'turn') {
+      setSource('turn')
+    }
+  }, [loading, status, hasTurn, source])
+
+  // 切会话:来源回到默认。原因有两个 —— 新会话的「本轮」数据还没写进来,
+  // 停在 turn 上只会看到一句"本轮没有文件改动";而且上一个会话选的是
+  // 「已暂存」之类,直接套到新工作区是错位的默认。
+  useEffect(() => {
+    setSource('unstaged')
+    setFilter('')
+    setTurnOpen({})
+    setRows({})
+  }, [sessionId, workspacePath])
 
   /* ---- 提交 / 推送 / AI 生成 ---- */
 
@@ -213,8 +254,8 @@ export function ReviewPanel({ workspacePath, sessionId, selection }: ReviewPanel
   }, [busy, selection, workspacePath])
 
   const sections = useMemo(
-    () => (status?.isRepository ? sectionize(status.entries, source) : []),
-    [status, source],
+    () => (isRepo ? sectionize(status!.entries, effectiveGitSource) : []),
+    [isRepo, status, effectiveGitSource],
   )
 
   const visibleSections = useMemo(() => {
@@ -231,6 +272,14 @@ export function ReviewPanel({ workspacePath, sessionId, selection }: ReviewPanel
   }, [sections, filter])
 
   const totalFiles = useMemo(() => flattenSections(sections).length, [sections])
+
+  /** 本轮来源的文件列表(按当前筛选词过滤,空筛选即全量)。 */
+  const visibleTurnFiles = useMemo<readonly TurnProducedFile[]>(() => {
+    if (turnChanges === null) return []
+    const query = filter.trim().toLowerCase()
+    if (!query) return turnChanges.files
+    return turnChanges.files.filter((file) => file.path.toLowerCase().includes(query))
+  }, [turnChanges, filter])
 
   /** 展开/收起一行,首次展开时懒加载 diff。 */
   const toggle = useCallback(
@@ -252,7 +301,7 @@ export function ReviewPanel({ workspacePath, sessionId, selection }: ReviewPanel
       }))
       if (current?.diff) return
       const revision = revisionRef.current
-      fetchGitDiff(workspacePath, entry.path, source)
+      fetchGitDiff(workspacePath, entry.path, effectiveGitSource)
         .then((diff) => {
           // 期间刷新过状态:结果已过期,丢弃。
           if (revisionRef.current !== revision) return
@@ -288,6 +337,20 @@ export function ReviewPanel({ workspacePath, sessionId, selection }: ReviewPanel
     <div className="review-panel">
       <div className="review-head">
         <div className="review-sources" role="tablist" aria-label={t('sidePaneReviewSource')}>
+          {/* 「本轮」排在最前:它是变更卡片的直达入口,也是非仓库工作区里
+              唯一有内容的来源。 */}
+          <button
+            type="button"
+            role="tab"
+            aria-selected={onTurn}
+            className="review-source"
+            onClick={() => {
+              setSource('turn')
+              setFilter('')
+            }}
+          >
+            {t('reviewSourceTurn')}
+          </button>
           {GIT_SOURCES.map((value) => (
             <button
               key={value}
@@ -309,14 +372,14 @@ export function ReviewPanel({ workspacePath, sessionId, selection }: ReviewPanel
           className="review-refresh"
           title={t('sidePaneReviewRefresh')}
           aria-label={t('sidePaneReviewRefresh')}
-          disabled={loading}
+          disabled={loading || onTurn}
           onClick={() => void refresh()}
         >
           {loading ? <IconSpinner size={14} /> : <IconRefresh size={14} />}
         </button>
       </div>
 
-      {status?.isRepository && (
+      {isRepo && !onTurn && (
         <div className="review-meta">
           <span className="review-branch" title={status.branch ?? undefined}>
             <IconBranch size={12} />
@@ -338,7 +401,23 @@ export function ReviewPanel({ workspacePath, sessionId, selection }: ReviewPanel
         </p>
       )}
 
-      {status && !status.isRepository && !loading && (
+      {onTurn && (
+        <TurnChangesList
+          files={visibleTurnFiles}
+          open={turnOpen}
+          onToggle={(path) => setTurnOpen((prev) => ({ ...prev, [path]: !prev[path] }))}
+          emptyLabel={
+            hasTurn
+              ? filter.trim().length > 0
+                ? t('sidePaneReviewNoMatch')
+                : null
+              : t('reviewTurnEmpty')
+          }
+        />
+      )}
+
+      {/* 非仓库 + 未选本轮来源:给一条能走过去的路,而不是只说"不是仓库"。 */}
+      {status && !isRepo && !loading && !onTurn && (
         <div className="review-empty">
           <IconFile size={28} />
           <p className="review-empty-title">{t('sidePaneReviewNotRepo')}</p>
@@ -346,7 +425,7 @@ export function ReviewPanel({ workspacePath, sessionId, selection }: ReviewPanel
         </div>
       )}
 
-      {status?.isRepository && totalFiles > 0 && (
+      {isRepo && !onTurn && totalFiles > 0 && (
         <div className="review-filter">
           <input
             type="search"
@@ -358,7 +437,7 @@ export function ReviewPanel({ workspacePath, sessionId, selection }: ReviewPanel
         </div>
       )}
 
-      {status?.isRepository && totalFiles === 0 && !loading && (
+      {isRepo && !onTurn && totalFiles === 0 && !loading && (
         <div className="review-empty">
           <IconFile size={28} />
           <p className="review-empty-title">{t('sidePaneReviewClean')}</p>
@@ -366,7 +445,7 @@ export function ReviewPanel({ workspacePath, sessionId, selection }: ReviewPanel
         </div>
       )}
 
-      {status?.isRepository && totalFiles > 0 && (
+      {isRepo && !onTurn && totalFiles > 0 && (
         <div className="review-list">
           {visibleSections.length === 0 && (
             <p className="review-empty-line">{t('sidePaneReviewNoMatch')}</p>
@@ -444,7 +523,7 @@ export function ReviewPanel({ workspacePath, sessionId, selection }: ReviewPanel
           放在底部而不是顶部,是因为阅读顺序是"先看改动、再写信息、最后提交";
           常驻而不是点击展开,是因为它就是这个面板的主操作 —— 藏起来会让人
           以为审查面板仍然只读。 */}
-      {status?.isRepository && (
+      {isRepo && !onTurn && (
         <CommitArea
           message={message}
           onMessageChange={setMessage}
@@ -714,6 +793,80 @@ function diffLines(left: string[], right: string[]): DiffRow[] {
     j += 1
   }
   return out
+}
+
+/**
+ * 「本轮」来源的文件列表。
+ *
+ * 复用面板既有的行样式(`.review-row*`),但 diff 不用 git 的 patch 渲染,
+ * 而是直接用对话流算出的 `EditDiff[]` —— 那些数据在点击卡片时就交过来了,
+ * 不必再问后端要一次,也不必要求工作区是 git 仓库。
+ *
+ * 行内不重复显示路径(外层标题已有),与卡片内的悬停预览同一种取舍。
+ */
+function TurnChangesList({
+  files,
+  open,
+  onToggle,
+  emptyLabel,
+}: {
+  files: readonly TurnProducedFile[]
+  open: Record<string, boolean>
+  onToggle: (path: string) => void
+  /** 空态文案;null 表示"有筛选但无匹配"由调用方决定是否渲染。 */
+  emptyLabel: string | null
+}) {
+  if (files.length === 0) {
+    if (emptyLabel === null) return null
+    return (
+      <div className="review-empty">
+        <IconFile size={28} />
+        <p className="review-empty-title">{emptyLabel}</p>
+      </div>
+    )
+  }
+  return (
+    <div className="review-list">
+      {files.map((file) => {
+        const expanded = open[file.path] ?? false
+        return (
+          <div className="review-row" key={file.path}>
+            <button
+              type="button"
+              className="review-row-head"
+              aria-expanded={expanded}
+              onClick={() => onToggle(file.path)}
+            >
+              <span className="review-row-icon" aria-hidden="true">
+                <IconFile size={14} />
+              </span>
+              <span className="review-row-path" title={file.path}>
+                {file.path}
+              </span>
+              <span className="review-row-status" aria-hidden="true">
+                <DiffStat added={file.added} removed={file.removed} compact />
+              </span>
+              <IconChevronDown
+                size={14}
+                className={`review-row-chevron${expanded ? ' open' : ''}`}
+              />
+            </button>
+            {expanded && (
+              <div className="review-diff">
+                {file.diffs.length === 0 ? (
+                  <div className="review-diff-hint">{t('reviewTurnNoDiff')}</div>
+                ) : (
+                  file.diffs.map((diff, index) => (
+                    <DiffCard key={index} diff={diff} hidePath />
+                  ))
+                )}
+              </div>
+            )}
+          </div>
+        )
+      })}
+    </div>
+  )
 }
 
 export default ReviewPanel

@@ -28,6 +28,7 @@ import {
   IconChevronDown,
   IconCode,
   IconFile,
+  IconFiles,
   IconFolder,
   IconImage,
   IconWrite,
@@ -199,15 +200,24 @@ function TurnDiffPreview({
 export function TurnDiffCard({
   files,
   cwd,
+  turn,
   /** 本轮结局(非正常结束时才传):卡片据此挂一道"这轮没跑完"的标记。 */
   interrupted,
 }: {
   files: readonly TurnProducedFile[]
   cwd: string | null
+  /** 轮次号:面板标题里用来说"第几轮"。 */
+  turn?: number
   interrupted?: boolean
 }) {
   const openFile = useFileOpen()
   const openReview = useOpenReview()
+  // 打开审查面板时把本轮文件一并交出去:面板据此多一个不依赖 git 的
+  // 来源。没有这一步,工作区不是仓库时点开就是空面板。
+  const showChanges = useCallback(
+    (focusPath?: string) => openReview({ files, turn, focusPath }),
+    [openReview, files, turn],
+  )
   const [expanded, setExpanded] = useState(false)
   const [preview, setPreview] = useState<{ file: TurnProducedFile; anchor: HTMLElement } | null>(null)
   // 浮层不是触发器的 DOM 子节点(它 portal 在 body 上),指针从行移到
@@ -260,7 +270,7 @@ export function TurnDiffCard({
           type="button"
           className="turn-diff-head-hit"
           aria-label={t('turnDiffViewAll')}
-          onClick={() => openReview()}
+          onClick={() => showChanges()}
         />
         <span className="turn-diff-icon" aria-hidden>
           <IconWrite size={13} />
@@ -292,7 +302,7 @@ export function TurnDiffCard({
           className="turn-diff-view-btn"
           onClick={(event) => {
             event.stopPropagation()
-            openReview()
+            showChanges()
           }}
         >
           {t('turnDiffViewChanges')}
@@ -325,8 +335,19 @@ export function TurnDiffCard({
                   </span>
                   <DiffStat added={file.added} removed={file.removed} compact />
                 </button>
-                {/* 「在文件管理器里定位」与「读内容」是两个意图,合成一个按钮
-                    必有一方被牺牲,所以独立成 hover 才显形的小按钮。 */}
+                {/* 两个次级入口都与主按钮不同意图,所以各占一个点击区,
+                    并在 hover 该行时才显形,不去和主按钮争视线:
+                    - 在审查面板看这个文件的改动(与本轮 diff 同一份数据);
+                    - 在文件管理器里定位。 */}
+                <button
+                  type="button"
+                  className="turn-diff-file-folder"
+                  title={t('turnDiffViewInReview', { name })}
+                  aria-label={t('turnDiffViewInReview', { name })}
+                  onClick={() => showChanges(file.path)}
+                >
+                  <IconFiles size={12} />
+                </button>
                 <button
                   type="button"
                   className="turn-diff-file-folder"

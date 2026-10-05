@@ -36,7 +36,9 @@ import { useBrowserSidebar } from './hooks/useBrowserSidebar'
 import { useIsMobile } from './hooks/useIsMobile'
 import { useSidePaneController, useTerminalReconcile } from './hooks/useSidePane'
 import { registerOpenFile } from './fileOpen'
-import { registerOpenReview } from './reviewOpen'
+import { registerOpenReview, type OpenReviewOptions } from './reviewOpen'
+import { setTurnChanges } from './turnChangesStore'
+import { scopeKey } from './sidePane'
 import { SidePane } from './components/SidePane'
 import { TerminalHost } from './components/TerminalHost'
 import { closeTerminal } from './terminalApi'
@@ -150,16 +152,32 @@ export default function App() {
   useEffect(() => registerOpenFile(pane.openFile), [pane.openFile])
 
   /**
-   * 收尾变更卡片的「查看变更」:打开审查面板。
+   * 收尾变更卡片的「查看变更」:打开审查面板,并把本轮改动交给它。
    *
    * 走 `pane.openPanel('review')` 而不是新建标签 —— 审查是单例面板,里面
    * 已经有工作区的全部改动与逐文件 diff,本轮文件是它们的子集,再开一个
    * 面板只会让人对不上"哪份是权威"。
+   *
+   * 本轮文件另存到 `turnChangesStore`(内存态,不进 localStorage):审查
+   * 面板据此多出一个**不依赖 git** 的来源。理由是审查面板的其余来源全
+   * 走 `git status`/`git diff`,工作区不是仓库时它们只有空态 —— 那时
+   * 本轮这张卡就是唯一还讲得清"改了什么"的地方,却会因为点开的是空面板
+   * 而白做。点文件行进来时额外传 focusPath,面板定位到该文件。
    */
-  const openReviewPanel = useCallback(() => {
-    pane.openPanel('review')
-    return true
-  }, [pane.openPanel])
+  const openReviewPanel = useCallback(
+    (options: OpenReviewOptions = {}) => {
+      if (options.files !== undefined && options.files.length > 0) {
+        setTurnChanges(scopeKey(activeId), {
+          turn: options.turn ?? 0,
+          files: options.files,
+          at: Date.now(),
+        })
+      }
+      pane.openPanel('review')
+      return true
+    },
+    [pane.openPanel, activeId],
+  )
   useEffect(() => registerOpenReview(openReviewPanel), [openReviewPanel])
 
   /** 终端进程退出:抄 ZCode 的 `lMt` —— 最后一个终端退出时连带收起面板。 */

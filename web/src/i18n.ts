@@ -619,6 +619,12 @@ const zh = {
   // —— 半路的产物与跑完的产物不是一回事。
   turnDiffPartial: '· 中断前',
   turnDiffPartialHint: '本轮未正常结束,以上是中断前已落盘的改动',
+  turnDiffViewInReview: '在审查面板查看 {name} 的改动',
+  // 审查面板的「本轮」来源:不依赖 git,数据来自对话里的变更卡片。
+  // 非 git 工作区里它是唯一能看到 diff 的地方。
+  reviewSourceTurn: '本轮',
+  reviewTurnEmpty: '本轮没有文件改动',
+  reviewTurnNoDiff: '这一轮没有留下可展示的差异',
   currentModel: '当前模型',
 
   messageBranch: '在新对话中分支',
@@ -1691,6 +1697,10 @@ const en: typeof zh = {
   turnDiffOpenFile: 'Open {name}',
   turnDiffPartial: '· before interrupt',
   turnDiffPartialHint: "This turn didn't finish; these are the changes written before it stopped",
+  turnDiffViewInReview: "View {name}'s changes in the review panel",
+  reviewSourceTurn: 'This turn',
+  reviewTurnEmpty: 'No file changes this turn',
+  reviewTurnNoDiff: 'No diff to show for this file',
   currentModel: 'Current model',
 
   messageBranch: 'Branch into a new conversation',

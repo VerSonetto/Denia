@@ -16,9 +16,20 @@
  */
 
 import { useSyncExternalStore } from 'react'
+import type { TurnProducedFile } from './fold'
+
+/** 打开审查面板时可一并带上的本轮上下文。 */
+export interface OpenReviewOptions {
+  /** 本轮改动的文件:面板据此提供不依赖 git 的「本轮」来源。 */
+  files?: readonly TurnProducedFile[]
+  /** 轮次号:面板标题里说"第几轮"。 */
+  turn?: number
+  /** 定位到某个文件(点文件行进来时用)。 */
+  focusPath?: string
+}
 
 /** 打开审查面板的处理函数:接手返回 true,无法接手返回 false。 */
-export type OpenReviewHandler = () => boolean
+export type OpenReviewHandler = (options?: OpenReviewOptions) => boolean
 
 let handler: OpenReviewHandler = () => false
 const listeners = new Set<() => void>()
