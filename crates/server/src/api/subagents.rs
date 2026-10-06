@@ -401,7 +401,7 @@ async fn list_tools(
             "source": if name.starts_with("mcp__") { "mcp" } else { "builtin" },
             "category": category_label(capability),
             "effect": effect_note(name, capability),
-            "readOnlyCompatible": read_only_compatible(capability),
+            "readOnlyDenied": read_only_denied(name),
             "granted": context.as_ref().map(|context| context.grant.contains(name)),
             "grantable": grantable,
             "hardDenied": hard_denied,
@@ -416,36 +416,50 @@ async fn list_tools(
 }
 
 /// 工具的副作用说明：写/shell/MCP 的影响必须一句话说清（选工具时看得见）。
+///
+/// 先按**具体工具**判，再退到能力分类：同一能力下不同工具的副作用差别很大
+/// （`todo_write` 只改会话待办，`write_file`/`edit` 改磁盘），拿分类文案套
+/// 具体工具会给出误导性的说明。
 fn effect_note(name: &str, capability: ToolCapability) -> &'static str {
-    if name.starts_with("mcp__") {
+    if name.starts_with("mcp__") || name == "mcp_list" {
         return "外部 MCP 服务器操作：副作用由该服务器决定，可能改远端数据。";
     }
-    match capability {
-        ToolCapability::Read => "只读取工作区或网络内容，不改动文件。",
-        ToolCapability::Write => "会修改工作区文件（`write_file` 覆盖整份、`edit` 局部替换）。",
-        ToolCapability::Shell => "会启动进程：命令可读写文件、访问网络、承担超时与清理义务。",
-        ToolCapability::Delegation => "与其他代理通信（子代理只能用 send_message 汇报）。",
-        ToolCapability::HostAdministration => "改动 denia 宿主配置，属人类配置面。",
-        ToolCapability::SessionControl => "改变会话主控模式或操作主会话目标。",
-        ToolCapability::Interaction => "阻塞等待用户作答（有超时与结局区分）。",
-        ToolCapability::Jobs => "启动后台任务：进程在子代理结束后仍需收尾。",
-        ToolCapability::Browser => "驱动常驻浏览器实例，会产生 tab 资源。",
-        ToolCapability::Mcp => "外部 MCP 服务器操作。",
-        ToolCapability::Other => "副作用取决于工具实现。",
+    match name {
+        "write_file" => "覆盖整份工作区文件（写入前需先读过且内容新鲜）。",
+        "edit" => "局部替换工作区文件内容。",
+        "todo_write" => "只更新本会话的待办清单，不改动文件。",
+        "bash" => "启动进程：可读写文件、访问网络，并承担超时与清理义务。",
+        "job_start" => "启动后台进程：会话结束后仍需收尾（会随子代理结束被终止）。",
+        "job_output" | "job_kill" | "job_list" => "读取或终止本会话的后台任务。",
+        "read_file" | "read_tool_output" | "ls" | "glob" | "grep" => "只读工作区内容。",
+        "web_fetch" => "只读网络内容（会发起外部请求）。",
+        "skill" => "只读技能文件。",
+        "send_message" => "向直接父/子代理发送消息，进入对方收件箱。",
+        "ask" => "阻塞等待用户作答（有超时与明确结局）。",
+        "browser" => "驱动常驻浏览器实例，会产生 tab 资源。",
+        _ => match capability {
+            ToolCapability::Read => "只读取工作区或网络内容，不改动文件。",
+            ToolCapability::Write => "会改写会话或工作区数据。",
+            ToolCapability::Shell => "会启动进程：命令可读写文件、访问网络、承担超时与清理义务。",
+            ToolCapability::Delegation => "与其他代理通信（子代理只能用 send_message 汇报）。",
+            ToolCapability::HostAdministration => "改动 denia 宿主配置，属人类配置面。",
+            ToolCapability::SessionControl => "改变会话主控模式或操作主会话目标。",
+            ToolCapability::Interaction => "阻塞等待用户作答（有超时与结局区分）。",
+            ToolCapability::Jobs => "启动后台任务：进程在子代理结束后仍需收尾。",
+            ToolCapability::Browser => "驱动常驻浏览器实例，会产生 tab 资源。",
+            ToolCapability::Mcp => "外部 MCP 服务器操作。",
+            ToolCapability::Other => "副作用取决于工具实现。",
+        },
     }
 }
 
-/// 只读上限下是否仍然可用：写、命令、后台任务与派遣/宿主控制类都不兼容。
-/// `ask`（提问）不改动任何东西，与只读兼容。
-fn read_only_compatible(capability: ToolCapability) -> bool {
-    !matches!(
-        capability,
-        ToolCapability::Write
-            | ToolCapability::Shell
-            | ToolCapability::Jobs
-            | ToolCapability::Delegation
-            | ToolCapability::HostAdministration
-            | ToolCapability::SessionControl
+/// 只读上限下是否被拒——**与执行面同源**（[`resolver::ceiling_denied_tool`]），
+/// 不按能力分类猜：`send_message`（派遣类）与 `ask` 在只读档仍然可用，而
+/// `todo_write` 虽然在会话内，也随写/命令一起被拒。
+fn read_only_denied(name: &str) -> bool {
+    crate::subagents::resolver::ceiling_denied_tool(
+        denia_core::subagent::PermissionCeiling::ReadOnly,
+        name,
     )
 }
 
@@ -642,4 +656,50 @@ fn parent_context(
         selection,
         mode,
     }))
+}
+
+#[cfg(test)]
+mod catalog_tests {
+    use super::*;
+    use denia_core::subagent::PermissionCeiling;
+
+    /// 每条副作用说明必须说清"改不改磁盘/起不起进程"；按能力分类套用的通用
+    /// 文案会把 `todo_write` 说成改文件，这里钉住具体工具的口径。
+    #[test]
+    fn effect_notes_are_specific_for_write_and_shell_tools() {
+        assert!(effect_note("write_file", tool_capability("write_file")).contains("覆盖整份"));
+        assert!(effect_note("edit", tool_capability("edit")).contains("局部替换"));
+        let todo = effect_note("todo_write", tool_capability("todo_write"));
+        assert!(todo.contains("待办"), "{todo}");
+        assert!(
+            !todo.contains("write_file"),
+            "不得拿写文件文案套待办工具：{todo}"
+        );
+        assert!(effect_note("bash", tool_capability("bash")).contains("启动进程"));
+        assert!(effect_note("read_file", tool_capability("read_file")).contains("只读"));
+        assert!(effect_note("mcp__fs__write", tool_capability("mcp__fs__write")).contains("MCP"));
+    }
+
+    /// 只读上限的工具级判定必须与执行面同源：拒绝五个写/命令类，放行
+    /// `send_message` 与 `ask`（只读子代理仍要能汇报与提问）。
+    #[test]
+    fn read_only_denial_matches_the_runtime_ceiling() {
+        for denied in ["write_file", "edit", "bash", "job_start", "todo_write"] {
+            assert!(read_only_denied(denied), "{denied} 在只读上限下必须被拒");
+            assert!(crate::subagents::resolver::ceiling_denied_tool(
+                PermissionCeiling::ReadOnly,
+                denied
+            ));
+        }
+        for allowed in [
+            "read_file",
+            "grep",
+            "send_message",
+            "ask",
+            "browser",
+            "web_fetch",
+        ] {
+            assert!(!read_only_denied(allowed), "{allowed} 在只读上限下应当可用");
+        }
+    }
 }

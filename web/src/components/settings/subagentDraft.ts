@@ -89,7 +89,12 @@ export function unknownToolNames(names: string[], rows: SubagentToolRow[]): stri
 }
 
 /**
- * 只读上限与工具选择的冲突项（写/命令/后台任务/派遣/宿主控制类）。
+ * 只读上限与工具选择的冲突项。
+ *
+ * 判定与执行面同源：服务端按 `ceiling_denied_tool` 给出 `readOnlyDenied`
+ * （只读档拒绝 `write_file`/`edit`/`bash`/`job_start`/`todo_write`），UI 只做
+ * 展示与拦截，不自己按能力分类猜——否则会拦下只读档本来可用的
+ * `send_message`/`ask`。
  *
  * 冲突不由系统自动修：要么显式改为 `inherit` 上限，要么移除这些工具
  * （计划 7：不偷偷解除只读上限）。
@@ -104,7 +109,7 @@ export function readOnlyConflicts(
   return names.filter((name) => {
     const row = byName.get(name)
     // 未注册的工具在只读上限下也无法验证副作用，一并按冲突提示。
-    return row === undefined || row.readOnlyCompatible === false
+    return row === undefined || row.readOnlyDenied === true
   })
 }
 

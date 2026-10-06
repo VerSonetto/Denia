@@ -3,7 +3,8 @@ import { SubagentSettings } from './settings/SubagentSettings'
 import { RemoteAccessSettings } from './settings/RemoteAccessSettings'
 import { RuntimeSettings } from './settings/RuntimeSettings'
 import { MemorySettings } from './settings/MemorySettings'
-import { useCallback, useEffect, useState, type ReactNode } from 'react'
+import { SetmActions, SetmBtn, SetmCard, SetmTiles } from './settings/setm'
+import { useCallback, useEffect, useState } from 'react'
 import * as api from '../api'
 import { t } from '../i18n'
 import { subscribeServerEvents } from '../serverEvents'
@@ -194,111 +195,6 @@ function paneDesc(tab: SettingsTab): string {
   }
 }
 
-function SetmActions({ children }: { children: ReactNode }) {
-  return <div className="setm-actions">{children}</div>
-}
-
-function SetmBtn({
-  children,
-  variant = 'primary',
-  disabled,
-  onClick,
-}: {
-  children: ReactNode
-  variant?: 'primary' | 'ghost' | 'danger'
-  disabled?: boolean
-  onClick?: () => void
-}) {
-  return (
-    <button
-      type="button"
-      className={`setm-btn ${variant}`}
-      disabled={disabled}
-      onClick={onClick}
-    >
-      {children}
-    </button>
-  )
-}
-
-/**
- * 面板内的卡片(标题 + 可选说明 + 可折叠正文)。
- *
- * 一个 pane 里可能堆多块内容(系统提示词、全局规则…),默认折叠只留
- * 标题行 + 状态摘要,展开才占面积 —— 块多了也不会把面板顶成长条。
- * 后续加内容:再套一层 `SetmCard`,样式与节奏自动对齐。
- */
-function SetmCard({
-  title,
-  hint,
-  summary,
-  open,
-  onToggle,
-  children,
-}: {
-  title: string
-  hint?: string
-  /** 折叠时标题行右侧的一句话状态(如"未设置"/"已自定义")。 */
-  summary?: string
-  open: boolean
-  onToggle: () => void
-  children: ReactNode
-}) {
-  const bodyId = `setm-card-${title}`
-  return (
-    <section className={`setm-card${open ? ' open' : ''}`}>
-      <button
-        type="button"
-        className="setm-card-head"
-        aria-expanded={open}
-        aria-controls={bodyId}
-        onClick={onToggle}
-      >
-        <span className="setm-card-copy">
-          <span className="setm-card-title">{title}</span>
-          {hint && !open && <span className="setm-card-hint">{hint}</span>}
-        </span>
-        {summary && !open && <span className="setm-card-summary">{summary}</span>}
-        <span className="setm-card-chevron">
-          <IconChevron size={13} />
-        </span>
-      </button>
-      {open && (
-        <div className="setm-card-body" id={bodyId}>
-          {hint && <p className="setm-card-desc">{hint}</p>}
-          {children}
-        </div>
-      )}
-    </section>
-  )
-}
-
-function SetmTiles<T extends string>({
-  value,
-  options,
-  onChange,
-}: {
-  value: T
-  options: { id: T; label: string }[]
-  onChange: (next: T) => void
-}) {
-  return (
-    <div className="setm-tiles" role="radiogroup">
-      {options.map((option) => (
-        <button
-          key={option.id}
-          type="button"
-          role="radio"
-          aria-checked={value === option.id}
-          className={`setm-tile${value === option.id ? ' active' : ''}`}
-          onClick={() => onChange(option.id)}
-        >
-          {option.label}
-        </button>
-      ))}
-    </div>
-  )
-}
 
 export function SettingsModal({ notify, onClose }: { notify: Notify; onClose: () => void }) {
   const [tab, setTab] = useState<SettingsTab>('general')

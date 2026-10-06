@@ -110,15 +110,23 @@ check('硬禁用行不可选', draft.rowIsDisabled({ hardDenied: true }), true)
 check('普通行可选', draft.rowIsDisabled({ hardDenied: false }), false)
 
 const rows = [
-  { name: 'read_file', source: 'builtin', category: '读取', effect: '', readOnlyCompatible: true, granted: true, grantable: true, hardDenied: false, reason: '' },
-  { name: 'bash', source: 'builtin', category: '命令与后台任务', effect: '', readOnlyCompatible: false, granted: true, grantable: true, hardDenied: false, reason: '' },
-  { name: 'mcp__fs__write', source: 'mcp', category: 'MCP', effect: '', readOnlyCompatible: true, granted: null, grantable: true, hardDenied: false, reason: '' },
+  { name: 'read_file', source: 'builtin', category: '读取', effect: '', readOnlyDenied: false, granted: true, grantable: true, hardDenied: false, reason: '' },
+  { name: 'bash', source: 'builtin', category: '命令与后台任务', effect: '', readOnlyDenied: true, granted: true, grantable: true, hardDenied: false, reason: '' },
+  { name: 'mcp__fs__write', source: 'mcp', category: 'MCP', effect: '', readOnlyDenied: false, granted: null, grantable: true, hardDenied: false, reason: '' },
 ]
 check('未知工具被点名（离线 MCP 不静默丢）', draft.unknownToolNames(['read_file', 'mcp__off__x'], rows), ['mcp__off__x'])
 check('全部已知时无未知项', draft.unknownToolNames(['bash'], rows), [])
 check('只读上限下写/命令类算冲突', draft.readOnlyConflicts('read-only', ['read_file', 'bash'], rows), ['bash'])
 check('继承上限下不算冲突', draft.readOnlyConflicts('inherit', ['bash'], rows), [])
 check('未注册工具在只读上限下也按冲突提示', draft.readOnlyConflicts('read-only', ['gone'], rows), ['gone'])
+check(
+  '只读上限不误伤 send_message（判定只认服务端 readOnlyDenied）',
+  draft.readOnlyConflicts('read-only', ['send_message'], [
+    ...rows,
+    { name: 'send_message', source: 'builtin', category: '代理派遣', effect: '', readOnlyDenied: false, granted: true, grantable: true, hardDenied: false, reason: '' },
+  ]),
+  [],
+)
 check('allowlist 取值', draft.allowlistOf({ tools: { mode: 'allowlist', names: ['a'] } }), ['a'])
 check('inherit 无 allowlist', draft.allowlistOf({ tools: { mode: 'inherit' } }), null)
 
@@ -300,8 +308,19 @@ for (const point of ['"create"', '"snapshot"', '"pre-enqueue"', '"enqueue"', '"p
 
 // 缺口 6：工具目录的副作用说明与只读冲突约束。
 assert('工具目录带副作用说明', routes.includes('"effect": effect_note('))
-assert('工具目录带只读兼容标记', routes.includes('"readOnlyCompatible"'))
-assert('只读兼容判定排除写与命令', routes.includes('ToolCapability::Shell'))
+assert('工具目录带只读拒绝标记', routes.includes('"readOnlyDenied"'))
+assert(
+  '只读拒绝判定与执行面同源',
+  routes.includes('crate::subagents::resolver::ceiling_denied_tool'),
+)
+assert(
+  '副作用说明按具体工具细化（不拿写文件文案套待办）',
+  routes.includes('"todo_write" => "只更新本会话的待办清单'),
+)
+assert(
+  '编辑器删掉按能力猜的只读兼容字段',
+  !settings.includes('readOnlyCompatible') && !read('web/src/types.ts').includes('readOnlyCompatible'),
+)
 assert(
   '编辑器拦住只读冲突而不是偷偷放宽',
   settings.includes('readOnlyConflicts(') && settings.includes('subagentsUseInheritCeiling'),

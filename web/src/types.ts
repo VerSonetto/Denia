@@ -24,8 +24,8 @@ export interface SubagentToolRow {
   category: string
   /** 副作用说明（写/shell/MCP 的影响必须看得见）。 */
   effect: string
-  /** 只读上限下是否仍可用（写/命令/后台/派遣/宿主控制类为 false）。 */
-  readOnlyCompatible: boolean
+  /** 只读上限下是否被拒（与执行面 `ceiling_denied_tool` 同源）。 */
+  readOnlyDenied: boolean
   granted: boolean | null
   grantable: boolean
   /** 子代理硬禁用（禁止派遣 / 宿主配置 / 会话主控）：UI 显示为不可选。 */
