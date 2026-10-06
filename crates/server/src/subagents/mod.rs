@@ -11,11 +11,13 @@
 //!
 //! 运行事实（快照、事件、终态）归会话日志所有，绝不写回定义文件。
 
+pub mod catalog;
 pub mod migration;
 pub mod policy;
 pub mod profiles;
 pub mod resolver;
 
+pub use catalog::{ToolCatalogEntry, catalog};
 pub use policy::{EffectiveToolGrant, GrantRequest, grant_for};
 pub use profiles::{ProfileRow, SubagentError, SubagentProfileStore};
 pub use resolver::{DispatchDefinition, policy_grant, resolve_definition};

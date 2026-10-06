@@ -1,0 +1,176 @@
+/* 子代理设置页:名册 + 编辑器 + 调度区。沿用设置面板的克制的视觉语言。 */
+
+.error {
+  margin: 0 0 12px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: var(--danger-soft, rgba(220, 38, 38, 0.12));
+  color: var(--danger, #dc2626);
+  font-size: 13px;
+}
+
+.saved {
+  margin: 0 0 12px;
+  color: var(--ok, #16a34a);
+  font-size: 13px;
+}
+
+.hint {
+  margin: 0 0 10px;
+  color: var(--text-dim, #6b7280);
+  font-size: 12px;
+  line-height: 1.6;
+  word-break: break-all;
+}
+
+.toolbar {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 12px;
+}
+
+.list {
+  list-style: none;
+  margin: 0 0 16px;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.row {
+  display: flex;
+  gap: 8px;
+  align-items: stretch;
+  border: 1px solid var(--border, #e5e7eb);
+  border-radius: 10px;
+  padding: 6px 8px;
+}
+
+.row.active {
+  border-color: var(--accent, #2563eb);
+}
+
+.rowMain {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  align-items: flex-start;
+  background: none;
+  border: none;
+  padding: 4px;
+  text-align: left;
+  cursor: pointer;
+  color: inherit;
+}
+
+.rowName {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.rowMeta {
+  color: var(--text-dim, #6b7280);
+  font-size: 12px;
+}
+
+.rowDesc {
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text, #111827);
+}
+
+.rowActions {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  justify-content: center;
+}
+
+.empty {
+  color: var(--text-dim, #6b7280);
+  font-size: 13px;
+  padding: 12px 4px;
+}
+
+.editor {
+  border: 1px solid var(--border, #e5e7eb);
+  border-radius: 10px;
+  padding: 12px;
+  margin-bottom: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 10px;
+}
+
+.select,
+.textarea {
+  width: 100%;
+  font: inherit;
+  font-size: 13px;
+  padding: 6px 8px;
+  border-radius: 8px;
+  border: 1px solid var(--border, #e5e7eb);
+  background: var(--surface, #fff);
+  color: inherit;
+}
+
+.textarea {
+  resize: vertical;
+  line-height: 1.6;
+}
+
+.tools {
+  border: 1px solid var(--border, #e5e7eb);
+  border-radius: 8px;
+  padding: 8px 10px;
+  max-height: 260px;
+  overflow: auto;
+}
+
+.tools legend {
+  font-size: 12px;
+  color: var(--text-dim, #6b7280);
+  padding: 0 4px;
+}
+
+.toolRow {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  font-size: 13px;
+  padding: 2px 0;
+}
+
+.toolName {
+  font-family: var(--mono, ui-monospace, monospace);
+}
+
+.actions {
+  display: flex;
+  gap: 8px;
+}
+
+.policy {
+  border-top: 1px solid var(--border, #e5e7eb);
+  padding-top: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.policy h4 {
+  margin: 0;
+  font-size: 13px;
+}

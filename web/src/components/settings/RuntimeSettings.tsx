@@ -5,7 +5,6 @@ import { Button, Field, NumberInput } from '../llm/atoms/form'
 import styles from './RuntimeSettings.module.css'
 
 const fields = [
-  ['maxAgents', 'runtimeMaxAgents'], ['maxDepth', 'runtimeMaxDepth'],
   ['maxJobs', 'runtimeMaxJobs'], ['retainedJobs', 'runtimeRetainedJobs'],
   ['outputBytes', 'runtimeOutputBytes'],
   ['jobTimeoutMs', 'runtimeJobTimeout'], ['maxPendingMessages', 'runtimePending'],

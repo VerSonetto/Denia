@@ -22,6 +22,7 @@ import {
 } from './icons'
 import { LlmPanel } from './llm/LlmPanel'
 import { AgentPresetSettings } from './settings/AgentPresetSettings'
+import { SubagentSettings } from './settings/SubagentSettings'
 import { normalizePermissionMode, type PermissionMode } from '../types'
 import { PERMISSION_LEVELS, storePermission } from './PermissionSelector'
 
@@ -29,6 +30,7 @@ type SettingsTab =
   | 'runtime'
   | 'general'
   | 'presets'
+  | 'subagents'
   | 'prompts'
   | 'models'
   | 'mcp'
@@ -41,6 +43,7 @@ const CONSOLE_NS = 'console'
 const TABS: SettingsTab[] = [
   'general',
   'presets',
+  'subagents',
   'prompts',
   'models',
   'mcp',
@@ -93,6 +96,8 @@ function tabLabel(tab: SettingsTab): string {
   switch (tab) {
     case 'runtime':
       return t('runtimeSettings')
+    case 'subagents':
+      return t('subagentsSettings')
     case 'general':
       return t('settingsTabGeneral')
     case 'presets':
@@ -116,6 +121,8 @@ function tabNavDesc(tab: SettingsTab): string {
   switch (tab) {
     case 'runtime':
       return t('runtimeSettingsHint')
+    case 'subagents':
+      return t('subagentsSettingsHint')
     case 'general':
       return t('settingsTabGeneralDesc')
     case 'presets':
@@ -139,6 +146,8 @@ function paneTitle(tab: SettingsTab): string {
   switch (tab) {
     case 'runtime':
       return t('runtimeSettings')
+    case 'subagents':
+      return t('subagentsSettings')
     case 'general':
       return t('settingsPaneGeneralTitle')
     case 'presets':
@@ -162,6 +171,8 @@ function paneDesc(tab: SettingsTab): string {
   switch (tab) {
     case 'runtime':
       return t('runtimeSettingsHint')
+    case 'subagents':
+      return t('subagentsSettingsHint')
     case 'general':
       return t('settingsPaneGeneralDesc')
     case 'presets':
@@ -671,6 +682,7 @@ export function SettingsModal({ notify, onClose }: { notify: Notify; onClose: ()
                 )}
 
                 {tab === 'presets' && <AgentPresetSettings notify={notify} />}
+                {tab === 'subagents' && <SubagentSettings />}
                 {tab === 'models' && <LlmPanel notify={notify} />}
 
                 {tab === 'mcp' && <McpSettings notify={notify} />}

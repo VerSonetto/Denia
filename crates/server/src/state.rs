@@ -43,6 +43,8 @@ pub struct AppState {
     pub agent_presets: Arc<crate::agent_presets::PresetStore>,
     /// 子代理定义名册:内置预设 + 用户/项目自定义定义(派遣与设置页共用)。
     pub subagents: Arc<crate::subagents::SubagentProfileStore>,
+    /// `settings.yaml` 一次性迁移留下的已废弃字段说明(无迁移时为 None)。
+    pub subagent_migration_note: Option<String>,
     pub file_history: Arc<crate::file_history::FileHistoryStore>,
     /// 内嵌浏览器中枢(工具与 REST API 共用)。
     pub browser: Arc<denia_browser::BrowserManager>,
@@ -930,6 +932,7 @@ pub async fn build_state(
         system_prompt,
         agent_presets,
         subagents,
+        subagent_migration_note: migration.deprecated_note(),
         file_history,
         browser,
         terminals,

@@ -1,5 +1,5 @@
 // Shared wire types are generated from Rust/serde; UI-only types stay here.
-import type { ModelSelection, LlmFailure, TokenUsage, StreamChunk, FinishReason, ContentBlock, TurnEndReason, TodoItem, AskOption, AskQuestion, AskAnswer, AskOutcome, AskResolution, PermissionMode, GoalStatus, GoalOp, SessionEnvelope, PresetFeatures, SessionHeader as WireSessionHeader, ImageData as UserMessageImage } from './generated/core'
+import type { ModelSelection, LlmFailure, TokenUsage, StreamChunk, FinishReason, ContentBlock, TurnEndReason, TodoItem, AskOption, AskQuestion, AskAnswer, AskOutcome, AskResolution, PermissionMode, GoalStatus, GoalOp, SessionEnvelope, PresetFeatures, SessionHeader as WireSessionHeader, ImageData as UserMessageImage, SubagentProfile as SubagentProfileWire } from './generated/core'
 export type { ModelSelection, LlmFailure, TokenUsage, StreamChunk, FinishReason, ContentBlock, TurnEndReason, TodoItem, AskOption, AskQuestion, AskAnswer, AskOutcome, AskResolution, PermissionMode, GoalStatus, GoalOp, SessionEnvelope, PresetFeatures, UserMessageImage }
 export type SessionHeader = WireSessionHeader & { agent_preset?: string }
 /** Wire types shared with the Rust backend. camelCase mirrors serde. */
@@ -181,8 +181,44 @@ export interface AgentPresetRow {
   broken?: string
 }
 
-export interface AgentPresetsView {
-  /** 新建会话未显式指定时使用的默认 preset id。 */
+/** 子代理定义名册里的一行(服务端生成的元数据 + 定义本体)。 */
+export interface SubagentProfileRow {
+  qualifiedId: string
+  id: string
+  source: 'builtin' | 'user' | 'project'
+  revision: string
+  editable: boolean
+  /** 内置 id 在用户/项目作用域存在覆盖。 */
+  overridesBuiltin: boolean
+  overridesUser: boolean
+  /** 是否是本逻辑 id 的有效定义。 */
+  effective: boolean
+  /** 被同名高优先级定义遮蔽:可查看/复制,不可直接派遣。 */
+  shadowed: boolean
+  profile?: SubagentProfileWire
+  path?: string
+  broken?: string
+  diagnostics: { code: string; field?: string; reason: string }[]
+}
+
+export interface SubagentProfilesView {
+  userRoot: string
+  projectRoot?: string
+  profiles: SubagentProfileRow[]
+  /** 旧配置迁移后留下的已废弃字段说明。 */
+  deprecations?: string
+}
+
+/** 工具目录里的一行(后端真实注册表)。 */
+export interface SubagentToolEntry {
+  name: string
+  description: string
+  category: string
+  grantable: boolean
+  reason?: string
+}
+
+export interface AgentPresetsView {  /** 新建会话未显式指定时使用的默认 preset id。 */
   default: string
   /** 是否显示模式选择器;关闭时空白会话固定用部署默认组装。 */
   modeSelection: boolean

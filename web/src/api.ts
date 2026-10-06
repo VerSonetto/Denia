@@ -1,6 +1,9 @@
 import type {
   AgentPresetRow,
   AgentPresetsView,
+  SubagentProfileRow,
+  SubagentProfilesView,
+  SubagentToolEntry,
   AskAnswer,
   CredentialInfo,
   DiscoveredModel,
@@ -21,6 +24,13 @@ import { subscribeServerEvents } from './serverEvents'
 import { noteSseFrame } from './pushChannel'
 
 export type { AgentPresetRow, AgentPresetsView } from './types'
+export type {
+  SubagentProfileRow,
+  SubagentProfilesView,
+  SubagentToolEntry,
+} from './types'
+/** 名册行的别名：设置页读起来更顺的写法。 */
+export type { SubagentProfileRow as SubagentProfileRowView } from './types'
 
 export class ApiError extends Error {
   constructor(
@@ -550,6 +560,80 @@ export function setSessionAgentPreset(
   return http(`/api/sessions/${encodeURIComponent(id)}/agent-preset`, {
     method: 'PUT',
     body: JSON.stringify({ preset }),
+  })
+}
+
+/** 子代理定义名册;`sessionId` 决定项目级定义的解析根。 */
+export function listSubagentProfiles(sessionId?: string): Promise<SubagentProfilesView> {
+  const query = sessionId ? `?sessionId=${encodeURIComponent(sessionId)}` : ''
+  return http(`/api/subagent-profiles${query}`)
+}
+
+/** 后端真实工具目录(名字、分类、可授予性与原因)。 */
+export function listSubagentTools(): Promise<{ tools: SubagentToolEntry[] }> {
+  return http('/api/subagent-tools')
+}
+
+export interface SubagentWriteBody {
+  scope: 'user' | 'project'
+  profile: Record<string, unknown>
+  expectedRevision?: string
+  sessionId?: string
+}
+
+export function createSubagentProfile(
+  body: SubagentWriteBody,
+): Promise<{ profile: SubagentProfileRow }> {
+  return http('/api/subagent-profiles', { method: 'POST', body: JSON.stringify(body) })
+}
+
+export function updateSubagentProfile(
+  qualifiedId: string,
+  body: SubagentWriteBody,
+): Promise<{ profile: SubagentProfileRow }> {
+  return http(`/api/subagent-profiles/${encodeURIComponent(qualifiedId)}`, {
+    method: 'PUT',
+    body: JSON.stringify(body),
+  })
+}
+
+/** 删除该作用域的定义(内置 id 走 reset 恢复默认)。 */
+export function deleteSubagentProfile(
+  qualifiedId: string,
+  sessionId?: string,
+): Promise<{ effective?: SubagentProfileRow }> {
+  const query = sessionId ? `?sessionId=${encodeURIComponent(sessionId)}` : ''
+  return http(`/api/subagent-profiles/${encodeURIComponent(qualifiedId)}${query}`, {
+    method: 'DELETE',
+  })
+}
+
+/** 恢复内置默认:删掉该 id 的用户/项目覆盖。 */
+export function resetSubagentProfile(
+  qualifiedId: string,
+  sessionId?: string,
+): Promise<{ effective?: SubagentProfileRow }> {
+  const query = sessionId ? `?sessionId=${encodeURIComponent(sessionId)}` : ''
+  return http(`/api/subagent-profiles/${encodeURIComponent(qualifiedId)}/reset${query}`, {
+    method: 'POST',
+  })
+}
+
+/** 派遣预览:必须给父会话,才能说"最终实际拿到什么工具"。 */
+export function previewSubagent(body: {
+  sessionId: string
+  profileId?: string
+  inline?: unknown
+}): Promise<{
+  profile: { id: string; qualifiedId?: string; name: string }
+  tools: string[]
+  parentGrant: string[]
+  permissionCeiling: string
+  diagnostics?: string[]
+}> {
+  return http('/api/subagent-profiles/preview', {
+    method: 'POST',
+    body: JSON.stringify(body),
   })
 }
 

@@ -17,6 +17,7 @@ mod remote;
 mod runtime;
 mod sessions;
 mod settings;
+mod subagents;
 mod system_prompt;
 mod terminals;
 mod uploads;
@@ -88,6 +89,7 @@ pub fn router() -> Router<Arc<AppState>> {
         .merge(system_prompt::router())
         .merge(global_rules::router())
         .merge(mcp::router())
+        .merge(subagents::router())
         .merge(memories::router())
         .merge(open_in_app::router())
         .merge(remote::router())
