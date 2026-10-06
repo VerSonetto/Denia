@@ -759,6 +759,12 @@ fn assemble_step(driver: &SessionDriver, state: &TurnState) -> Result<PromptAsse
         // 工具面与纪律段同进退：冻结快照的有效工具集合是唯一依据。
         let allowed = child.effective_tools();
         crate::preset::apply_tool_allowlist(&mut assembly, &allowed);
+        // 没拿到 jobs 工具的子代理不能后台跑命令：schema 与执行层同时拒绝
+        // （只禁 job_start 不足以关闭 `bash.run_in_background` 这条旁路）。
+        let has_jobs = allowed.iter().any(|name| name == "job_start");
+        if !has_jobs {
+            crate::preset::strip_run_in_background(&mut assembly);
+        }
     }
     // 只读档工具面收窄:bash 与写文件工具不开放(只留 ls/read_file/glob/grep
     // 等只读类),纪律段同步摘除。执行层 decide 矩阵仍兜底幻觉调用。子代理

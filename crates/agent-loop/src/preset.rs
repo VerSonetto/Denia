@@ -50,6 +50,24 @@ pub(crate) fn apply_tool_allowlist(assembly: &mut PromptAssembly, allowed: &[Str
     retain_tools(assembly, |name| allowed.iter().any(|a| a == name));
 }
 
+/// 摘掉 bash 的 `run_in_background` 参数:没有后台任务能力时,参数留在面
+/// 上等于给模型一个会落到 jobs 注册表的旋钮。
+pub(crate) fn strip_run_in_background(assembly: &mut PromptAssembly) {
+    if let Some(bash) = assembly
+        .tools
+        .iter_mut()
+        .find(|schema| schema.name == "bash")
+        && let Some(object) = bash.parameters.as_object_mut()
+    {
+        if let Some(properties) = object.get_mut("properties").and_then(|p| p.as_object_mut()) {
+            properties.remove("run_in_background");
+        }
+        if let Some(required) = object.get_mut("required").and_then(|r| r.as_array_mut()) {
+            required.retain(|value| value.as_str() != Some("run_in_background"));
+        }
+    }
+}
+
 /// 工具黑名单收窄:只读权限档摘除 bash 与写文件工具时用。
 pub(crate) fn apply_tool_blocklist(assembly: &mut PromptAssembly, blocked: &[&str]) {
     retain_tools(assembly, |name| !blocked.contains(&name));
@@ -89,19 +107,8 @@ pub(crate) fn apply_preset(assembly: &mut PromptAssembly, preset: &AgentPreset) 
     }
     // jobs 关闭:bash 的 run_in_background 参数一并摘除——参数仍在时模型
     // 后台跑一条命令会落到 jobs 注册表,与"没有后台任务功能"矛盾。
-    if !preset.features.jobs
-        && let Some(bash) = assembly
-            .tools
-            .iter_mut()
-            .find(|schema| schema.name == "bash")
-        && let Some(object) = bash.parameters.as_object_mut()
-    {
-        if let Some(properties) = object.get_mut("properties").and_then(|p| p.as_object_mut()) {
-            properties.remove("run_in_background");
-        }
-        if let Some(required) = object.get_mut("required").and_then(|r| r.as_array_mut()) {
-            required.retain(|value| value.as_str() != Some("run_in_background"));
-        }
+    if !preset.features.jobs {
+        strip_run_in_background(assembly);
     }
     // compaction 关闭:摘上下文管理纪律段;自动压缩 gate 与手动 /compact 由
     // request 层按同一开关跳过。

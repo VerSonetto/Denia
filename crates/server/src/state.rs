@@ -775,6 +775,8 @@ pub async fn build_state(
     let live = Arc::new(LiveSessions::default());
     let browser = Arc::new(denia_browser::BrowserManager::new(home.to_path_buf()));
     let browser_hub: denia_tools::BrowserHub = browser.clone();
+    // tab 归属表:工具登记、Runtime 收尾共用同一份(subagent 只清自己的 tab)。
+    let browser_tabs = denia_tools::BrowserOwnership::default();
     // 面板终端中枢:交互式 PTY,与 `bash` 工具的非交互进程互不影响。
     let terminals = denia_terminal::TerminalManager::new();
     // agent preset 名册:随附集合 + 用户目录。driver 每个 step 装配时读它,
@@ -800,8 +802,13 @@ pub async fn build_state(
         registry.clone(),
         workspaces.clone(),
         subagents.clone(),
+        Some((browser_tabs.clone(), browser_hub.clone())),
     )?;
-    let mut tools = denia_tools::default_registry_with_browser(Some(browser_hub));
+    let mut tools = denia_tools::default_registry_with_browser(Some(browser_hub.clone()));
+    tools.replace(Arc::new(denia_tools::BrowserTool::with_ownership(
+        browser_hub.clone(),
+        browser_tabs.clone(),
+    )));
     denia_tools::capabilities::register(&mut tools, runtime.clone());
     tools.replace(Arc::new(
         denia_tools::BashTool::new().with_runtime(runtime.clone()),

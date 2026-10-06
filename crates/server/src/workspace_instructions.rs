@@ -10,6 +10,38 @@ use std::path::{Path, PathBuf};
 pub struct InstructionFile {
     pub display_path: String,
     pub content: String,
+    /// 真实来源（不是靠 `~/AGENTS.md` 显示字符串反推）。
+    pub scope: InstructionSource,
+    /// 规范化后的绝对源路径（去重与别名识别的依据）。
+    pub source_path: PathBuf,
+}
+
+/// 一份指令文件的来源作用域。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InstructionSource {
+    /// 用户全局 `$DENIA_HOME/AGENTS.md`。
+    Global,
+    /// 项目链上的 AGENTS.md。
+    Project,
+}
+
+/// 指令发现的作用域。
+///
+/// 根会话是 `GlobalAndProject`（用户全局 → 项目链）；子代理是 `ProjectOnly`：
+/// 全局规则只属于"用户与主代理之间的约定"，不随派遣自动进入子代理上下文。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InstructionScope {
+    GlobalAndProject,
+    ProjectOnly,
+}
+
+impl InstructionScope {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::GlobalAndProject => "global+project",
+            Self::ProjectOnly => "project-only",
+        }
+    }
 }
 
 /// 渲染预算之外的单文件读取上限；超过即整份跳过（对齐 dsh readBounded）。
@@ -19,7 +51,28 @@ pub fn discover(
     touched: &[PathBuf],
     max_source_bytes: u64,
 ) -> Vec<InstructionFile> {
+    discover_scoped(
+        InstructionScope::GlobalAndProject,
+        home,
+        cwd,
+        touched,
+        max_source_bytes,
+    )
+}
+
+/// 按作用域发现:`ProjectOnly` 从候选目录里整体剔除用户全局那一环。
+///
+/// 同时按**规范化路径**去重:home 恰好落在项目链上(或经 junction/大小写
+/// 别名指到同一份文件)时,同一个全局规则文件不会被当作项目规则再注入一次。
+pub fn discover_scoped(
+    scope: InstructionScope,
+    home: &Path,
+    cwd: &Path,
+    touched: &[PathBuf],
+    max_source_bytes: u64,
+) -> Vec<InstructionFile> {
     let cwd = cwd.to_path_buf();
+    let global_path = normalize_path(&home.join("AGENTS.md"));
     let mut dirs: Vec<PathBuf> = Vec::new();
     let push_dir = |dirs: &mut Vec<PathBuf>, dir: PathBuf| {
         if !dirs.contains(&dir) {
@@ -27,7 +80,9 @@ pub fn discover(
         }
     };
     // 用户全局最宽，排最前。
-    push_dir(&mut dirs, home.to_path_buf());
+    if scope == InstructionScope::GlobalAndProject {
+        push_dir(&mut dirs, home.to_path_buf());
+    }
     // 项目根：cwd 向上找 .git（skills.rs 同款）；祖先链从宽到窄。
     let project_root = cwd
         .ancestors()
@@ -45,7 +100,14 @@ pub fn discover(
     }
     dirs.into_iter()
         .filter_map(|dir| load_file(&dir, &project_root, home, max_source_bytes))
+        .filter(|file| scope == InstructionScope::GlobalAndProject
+            || normalize_path(&file.source_path) != global_path)
         .collect()
+}
+
+/// 规范化的绝对路径；文件不存在或不可解析时退回原路径（大小写归一仅 Windows）。
+fn normalize_path(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
 /// 根到 cwd 的目录链（含两端），从宽到窄。
@@ -105,9 +167,16 @@ fn load_file(
             .to_string_lossy()
             .replace('\\', "/")
     };
+    let scope = if dir == home {
+        InstructionSource::Global
+    } else {
+        InstructionSource::Project
+    };
     Some(InstructionFile {
         display_path,
         content,
+        scope,
+        source_path: path.clone(),
     })
 }
 
@@ -204,6 +273,65 @@ mod tests {
     }
 
     #[test]
+    fn project_only_scope_drops_global_rules_and_path_aliases() {
+        let root = setup("scope");
+        let home = root.join("home");
+        let project = root.join("project");
+        let cwd = project.join("a");
+        std::fs::create_dir_all(&cwd).unwrap();
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(project.join(".git")).unwrap();
+        std::fs::write(home.join("AGENTS.md"), "global rules").unwrap();
+        std::fs::write(project.join("AGENTS.md"), "root rules").unwrap();
+        std::fs::write(cwd.join("AGENTS.md"), "cwd rules").unwrap();
+
+        // 根会话:全局 + 项目链。
+        let files = discover(&home, &cwd, &[], 1_048_576);
+        let displays: Vec<&str> = files.iter().map(|f| f.display_path.as_str()).collect();
+        assert_eq!(displays, vec!["~/AGENTS.md", "AGENTS.md", "a/AGENTS.md"]);
+        assert_eq!(files[0].scope, InstructionSource::Global);
+        assert_eq!(files[1].scope, InstructionSource::Project);
+
+        // 子代理:只有项目链，全局规则不经自动通道进入。
+        let files = discover_scoped(
+            InstructionScope::ProjectOnly,
+            &home,
+            &cwd,
+            &[],
+            1_048_576,
+        );
+        let displays: Vec<&str> = files.iter().map(|f| f.display_path.as_str()).collect();
+        assert_eq!(displays, vec!["AGENTS.md", "a/AGENTS.md"]);
+        assert!(
+            files.iter().all(|file| file.content != "global rules"),
+            "全局规则不得出现在子代理的自动注入里"
+        );
+
+        // 路径别名:home 恰好是项目链上的一环时,同一个全局文件不能被当作
+        // 项目规则再注入一次。
+        let aliased = project.join("a");
+        std::fs::create_dir_all(&aliased).unwrap();
+        let home_inside = aliased.clone();
+        std::fs::write(home_inside.join("AGENTS.md"), "global rules").unwrap();
+        let files = discover_scoped(
+            InstructionScope::ProjectOnly,
+            &home_inside,
+            &aliased,
+            &[],
+            1_048_576,
+        );
+        assert!(
+            files.iter().all(|file| file.content != "global rules"),
+            "全局文件经路径别名不得重新作为项目规则注入:{:?}",
+            files
+                .iter()
+                .map(|file| file.display_path.clone())
+                .collect::<Vec<_>>()
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn discovers_user_global_project_chain_and_touched_descendants() {
         let root = setup("chain");
         let home = root.join("home");
@@ -264,6 +392,8 @@ mod tests {
         let files = vec![InstructionFile {
             display_path: "AGENTS.md".into(),
             content: "rules".into(),
+            scope: InstructionSource::Project,
+            source_path: PathBuf::from("AGENTS.md"),
         }];
         let baseline = render(&files, 65536, None).unwrap();
         // 文件全部消失 → 空替换声明;再算一步幂等。
@@ -278,6 +408,8 @@ mod tests {
         let files = vec![InstructionFile {
             display_path: "AGENTS.md".into(),
             content: "rules".into(),
+            scope: InstructionSource::Project,
+            source_path: PathBuf::from("AGENTS.md"),
         }];
         let first = render(&files, 65536, None).unwrap();
         assert!(first.contains(INTRO_BASELINE));
@@ -288,6 +420,8 @@ mod tests {
         let changed = vec![InstructionFile {
             display_path: "AGENTS.md".into(),
             content: "new rules".into(),
+            scope: InstructionSource::Project,
+            source_path: PathBuf::from("AGENTS.md"),
         }];
         let replaced = render(&changed, 65536, Some(&first)).unwrap();
         assert!(replaced.contains(INTRO_REPLACEMENT));
@@ -299,6 +433,8 @@ mod tests {
         let files = vec![InstructionFile {
             display_path: "AGENTS.md".into(),
             content: "x".repeat(100),
+            scope: InstructionSource::Project,
+            source_path: PathBuf::from("AGENTS.md"),
         }];
         let text = render(&files, 30, None).unwrap();
         assert!(text.contains(TRUNCATED_NOTICE));

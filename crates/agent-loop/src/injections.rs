@@ -116,7 +116,12 @@ pub(crate) async fn refresh_background_injections(
     // 行的组装完全不注入)。
     if preset_features.agents_md {
         match runtime
-            .workspace_instructions(&cwd, touched, baselines.workspace_baseline.as_deref())
+            .workspace_instructions(
+                session.id(),
+                &cwd,
+                touched,
+                baselines.workspace_baseline.as_deref(),
+            )
             .await
         {
             Ok(Some(text)) => {

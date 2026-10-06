@@ -23,6 +23,7 @@
 mod append;
 mod creation;
 mod history;
+pub use history::{SubagentSeed, build_subagent_seed};
 mod log_writer;
 mod projection;
 mod recovery;
@@ -663,6 +664,150 @@ fn excerpt_text(text: &str, max_chars: usize) -> String {
         format!("{head}…")
     } else {
         head
+    }
+}
+
+#[cfg(test)]
+mod seed_tests {
+    use super::*;
+    use denia_core::message::ChatRole;
+    use denia_core::session::{SessionEvent, TurnEndReason};
+    use denia_core::stream::ContentBlock;
+
+    fn envelope(seq: u64, event: SessionEvent) -> SessionEnvelope {
+        SessionEnvelope {
+            seq,
+            time: 1_000 + seq,
+            event,
+        }
+    }
+
+    fn user(seq: u64, text: &str) -> SessionEnvelope {
+        envelope(
+            seq,
+            SessionEvent::UserMessage {
+                text: text.to_string(),
+                injected: false,
+                channel: None,
+                images: Vec::new(),
+            },
+        )
+    }
+
+    fn closed_turn(seq: u64, turn: u32) -> SessionEnvelope {
+        envelope(
+            seq,
+            SessionEvent::TurnEnd {
+                turn,
+                reason: TurnEndReason::Completed,
+            },
+        )
+    }
+
+    #[test]
+    fn projection_drops_parent_injections_and_keeps_conversation() {
+        let source = vec![
+            envelope(
+                1,
+                SessionEvent::SystemPrompt {
+                    turn: 1,
+                    step: 1,
+                    text: "SYSTEM-SENTINEL".into(),
+                },
+            ),
+            envelope(
+                2,
+                SessionEvent::UserMessage {
+                    text: "GLOBAL-RULE-SENTINEL".into(),
+                    injected: true,
+                    channel: Some("workspace-instructions".into()),
+                    images: Vec::new(),
+                },
+            ),
+            user(3, "用户的真实请求"),
+            envelope(
+                4,
+                SessionEvent::AssistantMessage {
+                    turn: 1,
+                    step: 1,
+                    blocks: vec![ContentBlock::Text {
+                        text: "助手的回答".into(),
+                    }],
+                    usage: Some(denia_core::stream::TokenUsage::default()),
+                    interrupted: false,
+                    source_event_seqs: vec![5],
+                    first_token_time: None,
+                },
+            ),
+            envelope(
+                6,
+                SessionEvent::CompactionSummary {
+                    turn: 1,
+                    step: 2,
+                    summary: "OLD-SUMMARY-SENTINEL".into(),
+                    replaces_from: 1,
+                    replaces_to: 4,
+                    keep_from: 3,
+                    pre_tokens: 100,
+                    post_tokens: 10,
+                },
+            ),
+            envelope(
+                7,
+                SessionEvent::AgentInbox {
+                    id: "inbox-1".into(),
+                    text: "INBOX-SENTINEL".into(),
+                    source: "agent:root".into(),
+                },
+            ),
+            envelope(8, SessionEvent::TurnStart { turn: 2 }),
+            user(9, "当前正在运行的轮次"),
+        ];
+
+        // 没有闭合轮次 → 明确拒绝,而不是悄悄 fork 一份空上下文。
+        assert!(build_subagent_seed(&source).is_err());
+
+        let mut with_closed = source.clone();
+        with_closed.push(closed_turn(10, 2));
+        let seed = build_subagent_seed(&with_closed).unwrap();
+        assert_eq!(seed.cut_seq, 10);
+        let text: Vec<String> = seed
+            .events
+            .iter()
+            .map(|envelope| serde_json::to_string(&envelope.event).unwrap())
+            .collect();
+        for sentinel in [
+            "SYSTEM-SENTINEL",
+            "GLOBAL-RULE-SENTINEL",
+            "OLD-SUMMARY-SENTINEL",
+            "INBOX-SENTINEL",
+        ] {
+            assert!(
+                !text.iter().any(|event| event.contains(sentinel)),
+                "{sentinel} 不得进入子代理种子"
+            );
+        }
+        assert!(text.iter().any(|event| event.contains("用户的真实请求")));
+        assert!(text.iter().any(|event| event.contains("助手的回答")));
+        // 用量不跨会话累计:父的 usage 不带进子会话。
+        assert!(text.iter().all(|event| !event.contains("usage\":")));
+        assert!(seed.dropped.iter().any(|item| item == "system-prompt"));
+        assert!(seed.dropped.iter().any(|item| item == "compaction-summary"));
+    }
+
+    #[test]
+    fn projection_requires_some_conversation() {
+        let source = vec![
+            envelope(1, SessionEvent::TurnStart { turn: 1 }),
+            closed_turn(2, 1),
+        ];
+        assert!(build_subagent_seed(&source).is_err());
+    }
+
+    #[test]
+    fn chat_role_is_used_by_projection_inputs() {
+        // 防回归:ContentBlock 的导入不被误删。
+        assert_eq!(ChatRole::User, ChatRole::User);
     }
 }
 

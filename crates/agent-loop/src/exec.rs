@@ -252,11 +252,30 @@ fn reject_before_dispatch(
                 call.name
             )));
         }
-        if !child.effective_tools().iter().any(|name| name == &call.name) {
+        let tools = child.effective_tools();
+        if !tools.iter().any(|name| name == &call.name) {
             return Some(ToolOutput::error(format!(
                 "该工具不在当前子代理允许的工具集合中：{}",
                 call.name
             )));
+        }
+        // `bash.run_in_background` 是 jobs 能力的旁路：没有 job_start 就一并
+        // 关掉这个参数（schema 已摘除，这里兜底幻觉调用）。
+        if call.name == "bash"
+            && !tools.iter().any(|name| name == "job_start")
+            && serde_json::from_str::<serde_json::Value>(&call.arguments)
+                .ok()
+                .and_then(|args| {
+                    args.get("run_in_background")
+                        .and_then(serde_json::Value::as_bool)
+                })
+                .unwrap_or(false)
+        {
+            return Some(ToolOutput::error(
+                "当前子代理没有后台任务能力，不能用 run_in_background 启动后台命令；\
+                 请同步执行，或改用具备 jobs 工具的定义。"
+                    .to_string(),
+            ));
         }
     }
     if driver.tools().get(&call.name).is_none() {

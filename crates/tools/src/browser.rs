@@ -59,11 +59,58 @@ pub trait BrowserExecute {
 pub struct BrowserTool {
     schema: ToolSchema,
     hub: BrowserHub,
+    ownership: BrowserOwnership,
+}
+
+/// 浏览器 tab 的会话归属表。
+///
+/// 浏览器只有一个实例，tab 却属于开它的那个会话。子代理收尾时只能清理
+/// **自己**开的 tab——没有这张表就只能在"全清"（会关掉父代理的页面）与
+/// "全不清"（子代理留下的 tab 永久常驻）之间二选一。
+#[derive(Clone, Default)]
+pub struct BrowserOwnership {
+    inner: Arc<std::sync::Mutex<std::collections::BTreeMap<String, std::collections::BTreeSet<String>>>>,
+}
+
+impl BrowserOwnership {
+    pub fn record(&self, session: &str, tab_id: &str) {
+        self.inner
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .entry(session.to_string())
+            .or_default()
+            .insert(tab_id.to_string());
+    }
+
+    pub fn forget(&self, session: &str, tab_id: &str) {
+        if let Some(set) = self
+            .inner
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .get_mut(session)
+        {
+            set.remove(tab_id);
+        }
+    }
+
+    pub fn owned_by(&self, session: &str) -> Vec<String> {
+        self.inner
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .get(session)
+            .map(|set| set.iter().cloned().collect())
+            .unwrap_or_default()
+    }
 }
 
 impl BrowserTool {
     pub fn new(hub: BrowserHub) -> Self {
+        Self::with_ownership(hub, BrowserOwnership::default())
+    }
+
+    pub fn with_ownership(hub: BrowserHub, ownership: BrowserOwnership) -> Self {
         Self {
+            ownership,
             schema: ToolSchema {
                 name: "browser".to_string(),
                 description: TOOL_DESCRIPTION.to_string(),
@@ -239,9 +286,34 @@ impl Tool for BrowserTool {
             self.hub.request_visual_mode().await;
         }
         let wants_screenshot = command_is_screenshot(&command);
+        let closing = match &command {
+            BrowserCommand::Close { tab_id } => tab_id.clone(),
+            _ => None,
+        };
         let outcome = self.hub.execute(command).await;
+        // 归属登记:开 tab 的会话记名,关 tab 的会话除名。tab id 从命令或
+        // 结果里取(open/newTab 的返回带 tabId;activate/navigate 指向已有 tab)。
+        if let Some(session) = ctx.session_id.as_deref() {
+            if let Some(tab_id) = closing {
+                self.ownership.forget(session, &tab_id);
+            } else if outcome.ok
+                && let Some(tab_id) = result_tab_id(&outcome)
+            {
+                self.ownership.record(session, &tab_id);
+            }
+        }
         render_outcome(outcome, ctx, wants_screenshot)
     }
+}
+
+/// 从命令结果里取出被操作的 tab id。
+fn result_tab_id(outcome: &CommandOutcome) -> Option<String> {
+    outcome
+        .value
+        .as_ref()
+        .and_then(|value| value.get("tabId"))
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string)
 }
 
 fn command_is_screenshot(command: &BrowserCommand) -> bool {

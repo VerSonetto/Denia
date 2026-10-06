@@ -46,13 +46,17 @@ pub trait AgentRuntime: Send + Sync {
     /// 发现、单文件源上限、总预算截断与替换语义都在实现方完成；
     /// `previous` 是日志中最后一条本通道注入文本（内容未变时实现方必须
     /// 返回 None，引导语由正文是否变化决定）。
+    ///
+    /// `session` 是宿主传入的会话身份:**作用域由宿主按真实会话头决定**,
+    /// 模型与定义都无权选择(子代理只发现项目级指令,不含用户全局规则)。
     async fn workspace_instructions(
         &self,
+        session: &str,
         cwd: &std::path::Path,
         touched: &[std::path::PathBuf],
         previous: Option<&str>,
     ) -> Result<Option<String>, String> {
-        let _ = (cwd, touched, previous);
+        let _ = (session, cwd, touched, previous);
         Ok(None)
     }
 

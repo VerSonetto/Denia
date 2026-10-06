@@ -38,7 +38,7 @@ use tokio_util::sync::CancellationToken;
 
 pub use ask::{AskTool, DEFAULT_TIMEOUT_MS as ASK_DEFAULT_TIMEOUT_MS};
 pub use bash::BashTool;
-pub use browser::{BrowserExecute, BrowserHub, BrowserTool};
+pub use browser::{BrowserExecute, BrowserHub, BrowserOwnership, BrowserTool};
 pub use edit::EditTool;
 pub use files::{ReadFileTool, WriteFileTool};
 pub use glob::GlobTool;

@@ -1,6 +1,174 @@
 //! Session history responsibilities.
 use super::*;
 
+/// fork 到子代理时的历史投影结果。
+#[derive(Debug, Clone, Default)]
+pub struct SubagentSeed {
+    /// 投影后的闭合对话事件（已重新编号前的原始 seq 顺序）。
+    pub events: Vec<SessionEnvelope>,
+    /// 截取到的截止 seq（最后一个闭合轮次）。
+    pub cut_seq: u64,
+    /// 被丢弃的来源类别（审计与迁移诊断用）。
+    pub dropped: Vec<String>,
+}
+
+/// 子代理 fork 的历史投影：**只**保留闭合轮次里的普通对话内容。
+///
+/// 与 [`Session::seed_from`]（用户分支原样复制前缀）不同，子代理种子不能
+/// 携带父会话的运行态与自动注入，否则子代理会在自己的作用域里看到：
+///
+/// - 用户全局 `AGENTS.md` 的注入文本（父会话的自动通道，子代理不该有）；
+/// - 父 SystemPrompt / 能力快照 / 定义目录 / 技能目录 / 记忆索引；
+/// - goal、权限模式、preset、审批与提问等父侧交互历史；
+/// - 旧 `CompactionSummary` 及其压缩状态（区间引用在新日志里没有意义）。
+///
+/// 丢掉这些之后，子代理的 token-meter 与基线由新会话自己从零建立。
+/// 模型历史里保留的是真实用户消息、助手回复与完整的工具调用/结果对。
+pub fn build_subagent_seed(source: &[SessionEnvelope]) -> Result<SubagentSeed, String> {
+    let cut = source
+        .iter()
+        .rposition(|envelope| matches!(envelope.event, SessionEvent::TurnEnd { .. }))
+        .map(|index| index + 1)
+        .unwrap_or(0);
+    if cut == 0 {
+        return Err(
+            "subagent/no-closed-turn: 父会话没有已闭合的轮次可供 fork；\
+             请改用 spawn_agent 并把需要的上下文写进 prompt。"
+                .to_string(),
+        );
+    }
+    let mut events: Vec<SessionEnvelope> = Vec::new();
+    let mut dropped: Vec<String> = Vec::new();
+    let note_dropped = |name: &str, dropped: &mut Vec<String>| {
+        if !dropped.iter().any(|item| item == name) {
+            dropped.push(name.to_string());
+        }
+    };
+    for envelope in &source[..cut] {
+        let event = match &envelope.event {
+            // 真实用户消息与助手回复：保留（usage 去掉，Billing 不跨会话累计）。
+            SessionEvent::UserMessage {
+                injected: false,
+                text,
+                images,
+                ..
+            } => SessionEvent::UserMessage {
+                text: text.clone(),
+                injected: false,
+                channel: None,
+                images: images.clone(),
+            },
+            SessionEvent::UserMessage { channel, .. } => {
+                note_dropped(
+                    channel.as_deref().unwrap_or("injected-user-message"),
+                    &mut dropped,
+                );
+                continue;
+            }
+            SessionEvent::AssistantMessage {
+                turn,
+                step,
+                blocks,
+                interrupted,
+                first_token_time,
+                ..
+            } => SessionEvent::AssistantMessage {
+                turn: *turn,
+                step: *step,
+                blocks: blocks.clone(),
+                usage: None,
+                interrupted: *interrupted,
+                // chunk 事件不复制，指向它们的引用一并清空。
+                source_event_seqs: Vec::new(),
+                first_token_time: *first_token_time,
+            },
+            SessionEvent::ToolCall { .. }
+            | SessionEvent::ToolResult { .. }
+            | SessionEvent::ArgsCleared { .. }
+            | SessionEvent::TurnStart { .. }
+            | SessionEvent::TurnEnd { .. }
+            | SessionEvent::StepStart { .. }
+            | SessionEvent::StepEnd { .. } => envelope.event.clone(),
+            SessionEvent::SystemPrompt { .. } => {
+                note_dropped("system-prompt", &mut dropped);
+                continue;
+            }
+            SessionEvent::AssistantChunk { .. } => continue,
+            SessionEvent::CompactionSummary { .. } => {
+                note_dropped("compaction-summary", &mut dropped);
+                continue;
+            }
+            SessionEvent::TodoWrite { .. } => {
+                note_dropped("todo-write", &mut dropped);
+                continue;
+            }
+            SessionEvent::Goal { .. } => {
+                note_dropped("goal", &mut dropped);
+                continue;
+            }
+            SessionEvent::CommandRun { .. } => {
+                note_dropped("command-run", &mut dropped);
+                continue;
+            }
+            SessionEvent::PermissionMode { .. } => {
+                note_dropped("permission-mode", &mut dropped);
+                continue;
+            }
+            SessionEvent::SessionTitle { .. } => {
+                note_dropped("session-title", &mut dropped);
+                continue;
+            }
+            SessionEvent::AgentPreset { .. } => {
+                note_dropped("agent-preset", &mut dropped);
+                continue;
+            }
+            SessionEvent::ApprovalPolicy { .. }
+            | SessionEvent::ApprovalAsked { .. }
+            | SessionEvent::ApprovalDecided { .. } => {
+                note_dropped("approval", &mut dropped);
+                continue;
+            }
+            SessionEvent::AskRequested { .. } | SessionEvent::AskResolved { .. } => {
+                note_dropped("ask", &mut dropped);
+                continue;
+            }
+            SessionEvent::RequestHeader { .. }
+            | SessionEvent::RequestContext { .. }
+            | SessionEvent::RetryAttempt { .. } => {
+                note_dropped("request-metadata", &mut dropped);
+                continue;
+            }
+            SessionEvent::AgentInbox { .. } | SessionEvent::AgentDelivery { .. } => {
+                note_dropped("agent-inbox", &mut dropped);
+                continue;
+            }
+        };
+        events.push(SessionEnvelope {
+            seq: envelope.seq,
+            time: envelope.time,
+            event,
+        });
+    }
+    let has_conversation = events.iter().any(|envelope| {
+        matches!(
+            envelope.event,
+            SessionEvent::UserMessage { .. } | SessionEvent::AssistantMessage { .. }
+        )
+    });
+    if !has_conversation {
+        return Err(
+            "subagent/empty-projection: 父会话闭合轮次里没有可投影的对话内容；\
+             请改用 spawn_agent 并把需要的上下文写进 prompt。"
+                .to_string(),
+        );
+    }
+    Ok(SubagentSeed {
+        events,
+        cut_seq: source[cut - 1].seq,
+        dropped,
+    })
+}
+
 impl Session {
     /// 分支种子回放:把源日志前缀原样写入新会话(重新从 1 连续编号,
     /// 保留源事件时间戳),last_turn/last_system_prompt/token-meter 随
@@ -14,7 +182,6 @@ impl Session {
     }
 
     /// 本会话的子代理运行快照(普通会话与旧日志都没有)。
-    ///
     /// 快照含角色补充提示正文(上限 64 KiB),因此它落在会话目录的
     /// [`denia_core::subagent::SNAPSHOT_FILE`] 里,不进会话头——头部只留引用,
     /// 冷扫描与会话列表都不会把这段正文读出来。引用不存在或校验失败时

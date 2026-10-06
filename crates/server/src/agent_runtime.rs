@@ -147,6 +147,9 @@ struct Inner {
     registry: Arc<denia_llm::LlmRegistry>,
     workspaces: Arc<crate::workspace::WorkspaceRegistry>,
     subagents: Arc<crate::subagents::SubagentProfileStore>,
+    /// 浏览器资源回收用：tab 归属表 + 中枢句柄（无浏览器部署为 None）。
+    browser_tabs: Option<denia_tools::BrowserOwnership>,
+    browser: Option<denia_tools::BrowserHub>,
     pub jobs: Arc<Jobs>,
 }
 #[derive(Clone)]
@@ -163,6 +166,7 @@ impl Runtime {
         registry: Arc<denia_llm::LlmRegistry>,
         workspaces: Arc<crate::workspace::WorkspaceRegistry>,
         subagents: Arc<crate::subagents::SubagentProfileStore>,
+        browser: Option<(denia_tools::BrowserOwnership, denia_tools::BrowserHub)>,
     ) -> Result<Arc<Self>, String> {
         let mut children = BTreeMap::new();
         // 只读会话头，不加载/修复另一个实例正在写入的日志。
@@ -211,6 +215,8 @@ impl Runtime {
                 registry,
                 workspaces,
                 subagents,
+                browser_tabs: browser.as_ref().map(|(ownership, _)| ownership.clone()),
+                browser: browser.map(|(_, hub)| hub),
                 jobs: Jobs::new(),
             }),
         }))
@@ -438,6 +444,40 @@ impl Runtime {
             return Ok(());
         }
         let live = self.live(id).await?;
+        // 旧子代理(升级前创建、没有运行快照)的模型历史里可能带着全局规则
+        // 注入与旧摘要。计划口径:不能可靠区分来源时**不直接继续**——宁可
+        // 明确拒绝并给出可执行的替代路径,也不把带全局规则的旧上下文送模型。
+        if let Some(descriptor) = live.session.header().subagent.clone()
+            && descriptor.is_legacy()
+        {
+            {
+                self.inner.paused.lock().unwrap().insert(id.to_string());
+            }
+            let parent = self
+                .inner
+                .children
+                .lock()
+                .unwrap()
+                .get(id)
+                .map(|child| child.parent_id.clone());
+            if let Some(parent) = parent
+                && let Err(error) = self
+                    .enqueue(
+                        &parent,
+                        format!("agent-migration:{id}"),
+                        format!(
+                            "[子代理迁移诊断]\n旧子代理 {id}（升级前创建，没有运行快照）不能直接继续：\
+                             它的历史里可能含有父会话的全局规则注入与旧摘要，无法可靠剥离。\n\
+                             请用 spawn_agent 提供一份自包含 prompt 重新派遣；旧会话仍可查看。"
+                        ),
+                        "agent-migration".into(),
+                    )
+                    .await
+            {
+                tracing::error!(session=%id,%error,"迁移诊断投递失败");
+            }
+            return Ok(());
+        }
         let pending = {
             let mut inboxes = self.inner.inboxes.lock().unwrap();
             let inbox = inboxes.entry(id.into()).or_default();
@@ -863,10 +903,11 @@ impl Runtime {
                     }
                 });
                 let summary = format!(
-                    "[子代理执行结束] {} ({})\n状态：{}\n{}",
+                    "[子代理执行结束] {} ({})\n状态：{}{}\n{}",
                     child.descriptor.label,
                     current,
                     serde_json::to_string(&reason).unwrap_or_default(),
+                    runtime.release_child_resources(&current).await,
                     text.chars()
                         .take(runtime.config().output_bytes / 4)
                         .collect::<String>()
@@ -884,6 +925,60 @@ impl Runtime {
                 }
             }
         });
+    }
+    /// 子代理收尾:清掉它自己的后台任务与浏览器资源,返回要写进汇报的说明。
+    ///
+    /// 规则是"不得脱离 child 遗留任务":子代理结束后不该留下无人认领的写
+    /// 进程或常驻 tab。用户要的长期服务应交给主代理启动。
+    pub async fn release_child_resources(&self, id: &str) -> String {
+        let mut notes: Vec<String> = Vec::new();
+        let running: Vec<String> = self
+            .inner
+            .jobs
+            .list(id)
+            .iter()
+            .filter(|job| job.status == "running")
+            .map(|job| job.id.clone())
+            .collect();
+        if !running.is_empty() {
+            self.inner.jobs.cancel_owner(id).await;
+            notes.push(format!("已取消未完成的后台任务:{}", running.join("、")));
+        }
+        notes.push(self.release_browser_tabs(id).await);
+        let notes: Vec<String> = notes.into_iter().filter(|note| !note.is_empty()).collect();
+        if notes.is_empty() {
+            String::new()
+        } else {
+            format!("\n收尾：{}", notes.join("；"))
+        }
+    }
+    /// 关闭该会话打开的浏览器 tab（只动自己的，不碰父/兄弟的资源）。
+    async fn release_browser_tabs(&self, id: &str) -> String {
+        let Some(ownership) = &self.inner.browser_tabs else {
+            return String::new();
+        };
+        let Some(hub) = &self.inner.browser else {
+            return String::new();
+        };
+        let tabs = ownership.owned_by(id);
+        if tabs.is_empty() {
+            return String::new();
+        }
+        let mut closed: Vec<String> = Vec::new();
+        for tab_id in tabs {
+            let command = denia_browser::BrowserCommand::Close {
+                tab_id: Some(tab_id.clone()),
+            };
+            let outcome = hub.execute(command).await;
+            if outcome.ok {
+                closed.push(tab_id);
+            }
+        }
+        if closed.is_empty() {
+            String::new()
+        } else {
+            format!("已关闭本子代理打开的浏览器 tab:{}", closed.join("、"))
+        }
     }
     pub async fn interrupt(&self, owner: &str, target: &str) -> Result<(), String> {
         let _admission = self.inner.admission.lock().await;
@@ -1119,6 +1214,24 @@ impl Runtime {
             .chars()
             .take(200)
             .collect();
+        // fork 的历史投影先算好：快照要记录投影版本与丢弃类别，而快照又是
+        // 建会话时写进会话头的东西。
+        let seed = if fork {
+            let events = parent.session.events();
+            Some(
+                denia_session::build_subagent_seed(&events)
+                    .map_err(|error| format!("fork 失败：{error}"))?,
+            )
+        } else {
+            None
+        };
+        let fork_projection = seed.as_ref().map(|seed| denia_core::subagent::ForkProjectionRef {
+            source_session_id: owner.to_string(),
+            cut_seq: seed.cut_seq,
+            projection_version: denia_core::subagent::SUBAGENT_SNAPSHOT_VERSION,
+            dropped: seed.dropped.clone(),
+            migration_version: 0,
+        });
         let mut snapshot = SubagentSnapshotRef {
             version: denia_core::subagent::SUBAGENT_SNAPSHOT_VERSION,
             // 先占位，下面按落盘内容回填（哈希覆盖的字段此刻都已确定）。
@@ -1137,7 +1250,7 @@ impl Runtime {
             // 审计信息：真正的禁止派遣判定按会话身份做，不信磁盘布尔值。
             delegation_allowed: false,
             instruction_scope: "project-only".into(),
-            fork: None,
+            fork: fork_projection,
         };
         let snapshot_file = {
             let provisional = denia_core::subagent::SubagentSnapshotFile {
@@ -1171,26 +1284,12 @@ impl Runtime {
         // 子代理加入父代理的组装(抄 dsh:subagent 与创建它的 agent 看到同一
         // 份工具面与 persona),因此 preset 随血缘继承,而不是悄悄用部署默认值。
         let parent_preset = parent.session.agent_preset();
-        // fork 只取闭合轮次，不复制正在产生的 tool-call 半截历史。
-        let source = if name == "fork_agent" {
-            let e = parent.session.events();
-            let cut = e
-                .iter()
-                .rposition(|e| matches!(e.event, SessionEvent::TurnEnd { .. }))
-                .map_or(0, |i| i + 1);
-            e[..cut]
-                .iter()
-                .filter(|e| {
-                    !matches!(
-                        e.event,
-                        SessionEvent::AgentInbox { .. } | SessionEvent::AgentDelivery { .. }
-                    )
-                })
-                .cloned()
-                .collect()
-        } else {
-            Vec::new()
-        };
+        // fork 的历史投影：父的自动注入（全局规则、能力快照、目录、旧摘要）
+        // 与运行态不随种子进入子会话。
+        let source = seed
+            .as_ref()
+            .map(|seed| seed.events.clone())
+            .unwrap_or_default();
         let id = tokio::task::spawn_blocking(move || {
             let child = sessions
                 .create_subagent(&cwd, sandbox, &parent_id, desc)
@@ -1279,6 +1378,13 @@ impl Runtime {
             }
         }
         Ok(result)
+    }
+    /// 子代理身份判定（工作区指令作用域用）：按真实会话头，不按是否有父会话。
+    fn is_child_session(&self, id: &str) -> bool {
+        if let Some(live) = self.inner.live.get(id) {
+            return live.session.header().subagent.is_some();
+        }
+        self.inner.children.lock().unwrap().contains_key(id)
     }
     pub async fn skills(&self, cwd: PathBuf) -> Result<Vec<crate::skills::Skill>, String> {
         let home = self.inner.home.clone();
@@ -1504,6 +1610,7 @@ impl AgentRuntime for Runtime {
     }
     async fn workspace_instructions(
         &self,
+        session: &str,
         cwd: &Path,
         touched: &[PathBuf],
         previous: Option<&str>,
@@ -1512,11 +1619,20 @@ impl AgentRuntime for Runtime {
         if config.workspace_instructions_max_bytes == 0 {
             return Ok(None);
         }
+        // 作用域由宿主按**真实会话头**决定:子代理只发现项目级指令,用户
+        // 全局的 `$DENIA_HOME/AGENTS.md` 不经自动通道进入子代理上下文。
+        // 模型与定义都无法请求 includeGlobal。
+        let scope = if self.is_child_session(session) {
+            crate::workspace_instructions::InstructionScope::ProjectOnly
+        } else {
+            crate::workspace_instructions::InstructionScope::GlobalAndProject
+        };
         let home = self.inner.home.clone();
         let cwd = cwd.to_path_buf();
         let touched = touched.to_vec();
         let files = tokio::task::spawn_blocking(move || {
-            crate::workspace_instructions::discover(
+            crate::workspace_instructions::discover_scoped(
+                scope,
                 &home,
                 &cwd,
                 &touched,
@@ -2092,6 +2208,7 @@ mod tests {
             state.registry.clone(),
             state.workspaces.clone(),
             state.subagents.clone(),
+            None,
         )
         .unwrap();
         assert_eq!(restored.list(owner).as_array().unwrap().len(), 1);
