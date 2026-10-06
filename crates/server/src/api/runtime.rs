@@ -75,6 +75,13 @@ async fn message(
         // 与 agent-loop 共享同一张读状态表:这个入口发起的工具调用
         // 也参与重复读取去重,不会在会话历史里留下"假新鲜"的标记。
         read_state: Some(state.driver.read_state_for(&id)),
+        // 控制台代理控制入口按该会话本身的有效授权计算。
+        granted_tools: live
+            .session
+            .header()
+            .subagent
+            .as_ref()
+            .map(|child| std::sync::Arc::new(child.effective_tools())),
     };
     Ok(Json(
         state

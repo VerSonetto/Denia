@@ -362,8 +362,34 @@ impl Tool for McpListTool {
             Err(_) => None,
         };
         let snapshot = self.manager.snapshot();
-        ToolOutput::text(render_tool_catalog(&snapshot.servers, only.as_deref()))
+        // 授权投影：子代理只看到自己有效授权内的 MCP 工具。目录是发现的唯一
+        // 入口，这里不按授权裁剪的话，"未授权工具"会以清单形式重新暴露。
+        let mut text = render_tool_catalog(&snapshot.servers, only.as_deref());
+        if let Some(granted) = &_ctx.granted_tools {
+            text = filter_catalog(text, granted);
+        }
+        ToolOutput::text(text)
     }
+}
+
+/// 目录文本里剔除未授权条目：`render_tool_catalog` 的每条工具行都以
+/// `- <qualified>` 开头，按行首名字过滤即可，不猜 MCP 的服务端分组结构。
+fn filter_catalog(text: String, granted: &[String]) -> String {
+    text.split('\n')
+        .filter(|line| {
+            let trimmed = line.trim_start();
+            if !trimmed.starts_with("- ") {
+                return true;
+            }
+            let name = trimmed
+                .trim_start_matches("- ")
+                .split_whitespace()
+                .next()
+                .unwrap_or_default();
+            !name.starts_with("mcp__") || granted.iter().any(|tool| tool == name)
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 #[cfg(test)]

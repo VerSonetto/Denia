@@ -31,6 +31,7 @@ pub mod remote;
 pub mod session_title;
 pub mod skills;
 pub mod state;
+pub mod subagents;
 pub mod system_prompt_store;
 pub mod web_assets;
 pub mod workspace;

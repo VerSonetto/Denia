@@ -13,6 +13,21 @@ impl Session {
         Ok(())
     }
 
+    /// 本会话的子代理运行快照(普通会话与旧日志都没有)。
+    ///
+    /// 快照含角色补充提示正文(上限 64 KiB),因此它落在会话目录的
+    /// [`denia_core::subagent::SNAPSHOT_FILE`] 里,不进会话头——头部只留引用,
+    /// 冷扫描与会话列表都不会把这段正文读出来。引用不存在或校验失败时
+    /// 返回 `None`,由装配层拒绝启动而不是回退默认。
+    pub fn subagent_snapshot(&self) -> Option<denia_core::subagent::SubagentSnapshotFile> {
+        let path = self
+            .directory()
+            .join(denia_core::subagent::SNAPSHOT_FILE);
+        let text = std::fs::read_to_string(path).ok()?;
+        let file: denia_core::subagent::SubagentSnapshotFile = serde_json::from_str(&text).ok()?;
+        (file.hash() == file.profile.hash).then_some(file)
+    }
+
     /// 物理回退:截断会话日志到目标用户消息**之前**,并把回退审计追加到
     /// `rewinds.jsonl`。内存事件/token-meter/计数器同步重建。
     ///

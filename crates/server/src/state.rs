@@ -41,6 +41,8 @@ pub struct AppState {
     pub system_prompt: Arc<crate::system_prompt_store::SystemPromptState>,
     /// agent preset 名册:随附组装 + 用户自定义组装(会话按它组装工具面)。
     pub agent_presets: Arc<crate::agent_presets::PresetStore>,
+    /// 子代理定义名册:内置预设 + 用户/项目自定义定义(派遣与设置页共用)。
+    pub subagents: Arc<crate::subagents::SubagentProfileStore>,
     pub file_history: Arc<crate::file_history::FileHistoryStore>,
     /// 内嵌浏览器中枢(工具与 REST API 共用)。
     pub browser: Arc<denia_browser::BrowserManager>,
@@ -496,20 +498,21 @@ impl denia_tools::AskBridge for ServerAskBridge {
                 reason: Some("会话不在运行中".to_string()),
             };
         };
-        // 子代理不与用户交互:提问语义不成立。
+        // 提问通道按授权开放：选中的定义包含 `ask` 才能提问。
         //
-        // 主机制在工具授予层——子代理默认只拿到只读工具集
-        // (`denia_tools::SUBAGENT_READ_ONLY_TOOLS`,不含 ask),正常路径
-        // 根本调不到本函数。这里保留一道服务层兜底:万一将来有路径绕过
-        // 授予(如外部直接调用),也不至于把提问挂到一个没人看的会话上。
-        // 与 dsh 的区别:dsh 把这种情况做成终局错误(DELEGATED_CALLER),
-        // 这里按 unavailable 结算并给出可执行的下一步,模型自行决策继续。
-        if live.session.header().subagent.is_some() {
+        // 主机制在工具授予层（schema 与执行层同一份 EffectiveToolGrant），
+        // 这里按同一份冻结快照兜底：万一有路径绕过授予，也不至于把提问挂到
+        // 一个没人看的会话上。未授予时按 unavailable 结算并给出可执行的
+        // 下一步，模型自行决策继续（对齐 dsh 的 DELEGATED_CALLER 终局语义，
+        // 但保留可继续的出口）。
+        if let Some(child) = live.session.header().subagent.as_ref()
+            && !child.effective_tools().iter().any(|name| name == "ask")
+        {
             return AskResolution {
                 outcome: AskOutcome::Unavailable,
                 answers: Vec::new(),
                 reason: Some(
-                    "子代理不与用户交互,不能提问;请自行决策,并在最终结果中说明未决问题与采用的假设"
+                    "当前子代理没有被授予 ask 工具，无法向用户提问；请自行决策，并在最终结果中说明未决问题与采用的假设"
                         .to_string(),
                 ),
             };
@@ -708,6 +711,22 @@ pub async fn build_state(
     let settings_events = broadcast::channel::<SettingsEvent>(64);
     let credentials_events = broadcast::channel::<CredentialEvent>(64);
 
+    // 旧子代理配置的一次性迁移必须在 SettingsStore 打开与命名空间注册之前
+    // 完成:`RuntimeConfig` 是 deny_unknown_fields 的,旧 maxAgents/maxDepth
+    // 留在文件里会让启动直接失败。
+    let migration = crate::subagents::migration::migrate_settings_file(&home.join("settings.yaml"))
+        .map_err(|error| format!("设置迁移失败:{error}"))?;
+    if let Some(diagnostic) = &migration.diagnostic {
+        return Err(diagnostic.clone().into());
+    }
+    if migration.changed {
+        tracing::info!(
+            removed = ?migration.removed,
+            max_concurrent_runs = ?migration.migrated_max_agents,
+            "子代理旧配置已迁移"
+        );
+    }
+
     let settings = Arc::new(SettingsStore::open(home)?.with_events(settings_events.0.clone()));
     let credentials =
         Arc::new(CredentialStore::open(home)?.with_events(credentials_events.0.clone()));
@@ -762,6 +781,8 @@ pub async fn build_state(
     // 因此文件热刷新后新 step 即生效。先于系统提示词构建:create_preset 的
     // schema 要在 system prompt 的 tools provider 里与纪律段同步挂载。
     let agent_presets = crate::agent_presets::PresetStore::load(home, settings.clone());
+    // 子代理定义名册:内置三预设 + 用户目录 + 项目目录(项目根按会话推导)。
+    let subagents = crate::subagents::SubagentProfileStore::load(home);
     let system_prompt = Arc::new(crate::system_prompt_store::SystemPromptState::load(
         home,
         Some(browser_hub.clone()),
@@ -778,12 +799,17 @@ pub async fn build_state(
         events.clone(),
         registry.clone(),
         workspaces.clone(),
+        subagents.clone(),
     )?;
     let mut tools = denia_tools::default_registry_with_browser(Some(browser_hub));
     denia_tools::capabilities::register(&mut tools, runtime.clone());
     tools.replace(Arc::new(
         denia_tools::BashTool::new().with_runtime(runtime.clone()),
     ));
+    // 工具名册注入定义仓库:引用不存在工具的定义会被标成损坏,而不是静默
+    // 少给工具。`mcp__` 前缀动态工具不在此列。
+    agent_presets.set_known_tools(tools.names());
+    subagents.set_known_tools(tools.names());
     // `ask` 工具:控制台部署有应答通道,注册工具并挂桥。
     tools.register(Arc::new(denia_tools::AskTool::new()));
     // `create_preset` 工具:创造模式(creator preset)的落盘入口,只在有
@@ -896,6 +922,7 @@ pub async fn build_state(
         workspaces,
         system_prompt,
         agent_presets,
+        subagents,
         file_history,
         browser,
         terminals,
@@ -926,6 +953,18 @@ fn register_namespaces(
         NamespaceSpec {
             defaults: serde_json::to_value(crate::agent_runtime::GoalsConfig::default())?,
             validate: crate::agent_runtime::validate_goals_config,
+            secrets: &[],
+            applies: Applies::Live,
+        },
+        json!({}),
+    )?;
+    settings.register(
+        crate::subagents::SETTINGS_NS,
+        NamespaceSpec {
+            defaults: serde_json::to_value(
+                crate::subagents::SubagentPolicyConfig::default(),
+            )?,
+            validate: crate::subagents::validate_subagent_policy,
             secrets: &[],
             applies: Applies::Live,
         },
@@ -1406,9 +1445,9 @@ mod tests {
         std::fs::remove_dir_all(&root).unwrap();
     }
 
-    /// 子代理不与用户交互:提问一律 unavailable,并给出可执行的下一步。
+    /// 未授予 ask 的子代理提问一律 unavailable,并给出可执行的下一步。
     #[tokio::test]
-    async fn ask_bridge_refuses_subagent_sessions() {
+    async fn ask_bridge_refuses_subagent_sessions_without_grant() {
         use denia_core::session::{AskOutcome, SubagentDescriptor};
         let root = temp_root();
         let cwd = root.join("work");
@@ -1431,6 +1470,7 @@ mod tests {
                     },
                     persona: None,
                     allowed_tools: None,
+                    snapshot: None,
                 },
             )
             .unwrap();
@@ -1448,7 +1488,7 @@ mod tests {
             )
             .await;
         assert_eq!(resolution.outcome, AskOutcome::Unavailable);
-        let reason = resolution.reason.expect("子代理拒绝必须给出原因");
+        let reason = resolution.reason.expect("未授予 ask 的拒绝必须给出原因");
         assert!(reason.contains("子代理"), "{reason}");
         assert!(reason.contains("自行决策"), "{reason}");
         std::fs::remove_dir_all(&root).unwrap();

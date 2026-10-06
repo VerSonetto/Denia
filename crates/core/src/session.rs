@@ -39,6 +39,10 @@ pub struct SessionHeader {
 }
 
 /// 子代理身份与恢复配置随会话头持久化；普通用户分支没有此描述符。
+///
+/// `persona` / `allowed_tools` 是旧日志字段，只用于读取历史会话；新子代理
+/// 一律写 [`SubagentSnapshotRef`]（`snapshot`），角色正文落在会话目录的
+/// `subagent.json` 里，不把 64 KiB 提示塞进每条会话的头行。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "bindings", derive(ts_rs::TS))]
 #[serde(rename_all = "camelCase")]
@@ -53,6 +57,68 @@ pub struct SubagentDescriptor {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "bindings", ts(optional))]
     pub allowed_tools: Option<Vec<String>>,
+    /// 新子代理的运行快照引用（旧日志没有这一段）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "bindings", ts(optional))]
+    pub snapshot: Option<crate::subagent::SubagentSnapshotRef>,
+}
+
+impl SubagentDescriptor {
+    /// 本会话的有效工具集合。
+    ///
+    /// 新快照直接给出冻结列表；旧日志按历史保守上限重建——**缺授权列表
+    /// 绝不等于继承全工具**，否则读一次旧日志就凭空长出一整套写能力。
+    pub fn effective_tools(&self) -> Vec<String> {
+        if let Some(snapshot) = &self.snapshot {
+            return snapshot.effective_tools.clone();
+        }
+        let requested: &[String] = match &self.allowed_tools {
+            Some(names) => names,
+            None => return legacy_tools(crate::subagent::LEGACY_SUBAGENT_READ_ONLY_TOOLS),
+        };
+        let mut out: Vec<String> = Vec::new();
+        for name in requested {
+            if crate::subagent::LEGACY_SUBAGENT_MAX_TOOLS.contains(&name.as_str())
+                && !crate::subagent::is_child_hard_denied(name)
+                && !out.contains(name)
+            {
+                out.push(name.clone());
+            }
+        }
+        out
+    }
+
+    /// 有效权限上限：新快照按定义；旧日志按只读处理（历史子代理写面仅限
+    /// 记忆目录，模型可见工具本来就只有只读集合）。
+    pub fn permission_ceiling(&self) -> crate::subagent::PermissionCeiling {
+        match &self.snapshot {
+            Some(snapshot) => snapshot.permission_ceiling,
+            None => {
+                if self.allowed_tools.as_deref().is_some_and(|names| {
+                    names
+                        .iter()
+                        .any(|name| matches!(name.as_str(), "write_file" | "edit"))
+                }) {
+                    crate::subagent::PermissionCeiling::Inherit
+                } else {
+                    crate::subagent::PermissionCeiling::ReadOnly
+                }
+            }
+        }
+    }
+
+    /// 是否缺少新快照（旧日志子代理，恢复前需要投影迁移）。
+    pub fn is_legacy(&self) -> bool {
+        self.snapshot.is_none()
+    }
+}
+
+fn legacy_tools(names: &[&str]) -> Vec<String> {
+    names
+        .iter()
+        .filter(|name| !crate::subagent::is_child_hard_denied(name))
+        .map(|name| (*name).to_string())
+        .collect()
 }
 
 fn default_true() -> bool {

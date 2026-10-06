@@ -96,6 +96,7 @@ mod tests {
 
     fn ctx() -> ToolContext {
         ToolContext {
+            granted_tools: None,
             output_store: None,
             session_id: None,
             selection: None,

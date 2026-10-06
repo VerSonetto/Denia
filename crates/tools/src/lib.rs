@@ -65,37 +65,6 @@ pub use web_fetch::WebFetchTool;
 /// touch the session handle directly.
 pub type SessionEventSink = Arc<dyn Fn(SessionEvent) + Send + Sync>;
 
-/// 子代理默认工具集:只读类。
-///
-/// 子代理不与用户交互、也不承担工作区写副作用——提问、写文件、跑命令、
-/// 后台任务一律留在父代理。`allowed_tools` 只能在本集合内进一步缩小,
-/// 不能扩大(见 `agent_runtime::delegate` 的校验)。
-///
-/// `ls`/`glob`/`grep` 三件套在此集合内:探索工作区是子代理调研的日常,
-/// 而它们都是只读、进程内、无资源副作用的工具——正好也是父代理最希望
-/// 子代理"别用 bash 去干"的那三件事。
-///
-/// `browser` 在此集合内:网页抓取/查看是只读调查手段,子代理做调研时
-/// 常常需要。它带来的资源副作用(常驻浏览器实例)由父代理统一收尾——
-/// `tool:browser` 纪律段说明"任务完成后彻底清除",子代理同样受该纪律约束。
-///
-/// `web_fetch` 在此集合内:读文档/抓文章是调研日常,纯 HTTP 无进程与
-/// tab 资源,无收尾义务。
-///
-/// 与 dsh 的差异:dsh 让子代理继承父代理的完整工具面,只靠深度与审批兜底;
-/// 这里在授予层直接收口,子代理拿不到交互/写类工具,也就不存在"子代理
-/// 提问没人应答"的问题。
-pub const SUBAGENT_READ_ONLY_TOOLS: &[&str] = &[
-    "read_file",
-    "read_tool_output",
-    "ls",
-    "glob",
-    "grep",
-    "skill",
-    "browser",
-    "web_fetch",
-];
-
 /// 提问通道:宿主实现,把 `ask` 工具的提问挂到会话的挂起表并等待用户应答。
 ///
 /// 与 [`ApprovalBridge`](denia_agent_loop::ApprovalBridge) 同构,但语义更宽:
@@ -127,6 +96,13 @@ pub trait FileHistoryBackend: Send + Sync {
 pub struct ToolContext {
     /// 宿主授予的会话身份，绝不从模型参数接收。
     pub session_id: Option<String>,
+    /// 本会话的**有效工具授权**（子代理为冻结的 effectiveTools，根会话为
+    /// `None` = 部署装配面内不额外收窄）。
+    ///
+    /// 目录类工具（`mcp_list`）与延迟加载拦截都读它，保证“目录里看得到的”
+    /// 与“实际执行得动的”是同一份集合——否则未授权的工具可以绕过目录层
+    /// 被叫到。
+    pub granted_tools: Option<Arc<Vec<String>>>,
     pub selection: Option<denia_core::config::ModelSelection>,
     /// The session's working directory; relative paths anchor here.
     pub cwd: PathBuf,
@@ -160,6 +136,19 @@ pub struct ToolContext {
     /// 测试场景),此时行为与引入该机制之前完全一致。
     pub read_state: Option<read_state::SharedReadState>,
     pub output_store: Option<Arc<output::OutputStore>>,
+}
+
+impl ToolContext {
+    /// 某个工具名在当前会话里是否被授权。
+    ///
+    /// `granted_tools` 为 `None`（根会话）时不做额外收窄：部署装配面已经
+    /// 决定了工具面，这里不再重复一遍。
+    pub fn tool_granted(&self, name: &str) -> bool {
+        match &self.granted_tools {
+            None => true,
+            Some(tools) => tools.iter().any(|tool| tool == name),
+        }
+    }
 }
 
 /// One model-facing tool outcome.

@@ -330,6 +330,7 @@ mod tests {
 
     fn ctx(dir: &std::path::Path) -> ToolContext {
         ToolContext {
+            granted_tools: None,
             output_store: None,
             session_id: None,
             selection: None,
@@ -477,6 +478,7 @@ mod tests {
         let tool = BashTool::new();
         let cancel = CancellationToken::new();
         let context = ToolContext {
+            granted_tools: None,
             output_store: None,
             session_id: None,
             selection: None,

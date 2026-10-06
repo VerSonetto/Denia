@@ -154,7 +154,73 @@ sandbox: boolean,
  */
 parent_session?: string, subagent?: SubagentDescriptor, };
 
-export type SubagentDescriptor = { label: string, depth: number, mode: string, selection: ModelSelection, persona?: string, allowedTools?: Array<string>, };
+export type SubagentDescriptor = { label: string, depth: number, mode: string, selection: ModelSelection, persona?: string, allowedTools?: Array<string>, 
+/**
+ * 新子代理的运行快照引用（旧日志没有这一段）。
+ */
+snapshot?: SubagentSnapshotRef, };
+
+export type SubagentProfileSource = "builtin" | "user" | "project";
+
+export type ToolChoice = { "mode": "inherit" } | { "mode": "allowlist", names: Array<string>, };
+
+export type ModelChoice = { "mode": "inherit" } | { "mode": "explicit", selection: ModelSelection, };
+
+export type PermissionCeiling = "inherit" | "read-only";
+
+export type SubagentProfile = { schemaVersion: number, id: string, name: string, description: string, instructions: string, enabled: boolean, tools: ToolChoice, model: ModelChoice, permissionCeiling: PermissionCeiling, color?: string, };
+
+export type SubagentDiagnostic = { code: string, field?: string, reason: string, };
+
+export type ProfileRef = { qualifiedId: string, id: string, source: SubagentProfileSource, 
+/**
+ * 创建时的定义内容版本；之后编辑定义不会追溯修改这个 child。
+ */
+revision: string, };
+
+export type ForkProjectionRef = { sourceSessionId: string, 
+/**
+ * 截止事件序号（截取到的最后一个闭合轮次）。
+ */
+cutSeq: number, projectionVersion: number, 
+/**
+ * 被丢弃的来源类别（便于审计与排查）。
+ */
+dropped: Array<string>, migrationVersion: number, };
+
+export type SubagentSnapshotRef = { version: number, 
+/**
+ * `subagent.json` 的内容版本；引用不存在或校验失败必须拒绝启动。
+ */
+hash: string, 
+/**
+ * `spawn` | `fork`。
+ */
+creationMode: string, label: string, profile?: ProfileRef, resolvedName: string, resolvedDescription: string, 
+/**
+ * 冻结的工具名列表（已扣硬禁项、已与父可授予集合相交）。
+ */
+effectiveTools: Array<string>, model: ModelSelection, permissionCeiling: PermissionCeiling, 
+/**
+ * 创建时父代理的权限模式（审计；实际判权仍走实时权限引擎）。
+ */
+permissionMode: string, 
+/**
+ * 父代理当时的 agent preset（审计；文件消失不回退全量工具）。
+ */
+parentPreset?: string, 
+/**
+ * 父基础系统提示快照的 hash。
+ */
+parentPromptHash: string, 
+/**
+ * 固定 `false`：禁止派遣是运行时硬规则，这个布尔只是审计。
+ */
+delegationAllowed: boolean, 
+/**
+ * 固定 `project-only`：子代理不自动加载全局 AGENTS.md。
+ */
+instructionScope: string, fork?: ForkProjectionRef, };
 
 export type SessionHeaderKind = "session";
 

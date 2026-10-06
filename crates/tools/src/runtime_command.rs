@@ -1,4 +1,5 @@
 //! Model JSON is parsed at the tool boundary. Hosts dispatch typed operations.
+use denia_core::subagent::DelegateArgs;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -17,7 +18,7 @@ pub enum RuntimeCommand {
     #[serde(skip)]
     Delegate {
         fork: bool,
-        args: Value,
+        args: DelegateArgs,
     },
 }
 
@@ -30,6 +31,14 @@ impl RuntimeCommand {
             return Err("timeout_ms 必须为正整数".into());
         }
         if matches!(name, "spawn_agent" | "fork_agent") {
+            // 派遣参数在这里一次解析成严格类型：`Runtime::delegate` 不再零散
+            // 读 JSON，字段错误在产生任何副作用之前报出。
+            let args: DelegateArgs = serde_json::from_value(args).map_err(|error| {
+                format!("subagent/invalid-args: 派遣参数无效（{error}）；可用字段：prompt、description、profile_id、inline、allowed_tools")
+            })?;
+            if args.prompt.trim().is_empty() {
+                return Err("subagent/invalid-args: prompt 不能为空".into());
+            }
             return Ok(Self::Delegate {
                 fork: name == "fork_agent",
                 args,

@@ -169,8 +169,7 @@ pub(crate) async fn refresh_background_injections(
             .header()
             .subagent
             .as_ref()
-            .and_then(|s| s.allowed_tools.as_ref())
-            .is_none_or(|allowed| allowed.iter().any(|name| name == "skill"));
+            .is_none_or(|child| child.effective_tools().iter().any(|name| name == "skill"));
     if skill_tool_visible {
         match runtime.skill_catalog(session.id(), &cwd).await {
             Ok(entries) => {
@@ -237,8 +236,7 @@ pub(crate) async fn refresh_background_injections(
             .header()
             .subagent
             .as_ref()
-            .and_then(|s| s.allowed_tools.as_ref())
-            .is_none_or(|allowed| allowed.iter().any(|name| name == "get_goal"));
+            .is_none_or(|child| child.effective_tools().iter().any(|name| name == "get_goal"));
     if goal_tool_visible {
         let goal_text = match session.goal() {
             Some(goal) => Some(render_goal_block(

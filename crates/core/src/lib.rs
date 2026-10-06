@@ -10,4 +10,5 @@ pub mod message;
 pub mod preset;
 pub mod session;
 pub mod stream;
+pub mod subagent;
 pub mod tool;

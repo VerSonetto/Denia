@@ -731,21 +731,34 @@ fn assemble_step(driver: &SessionDriver, state: &TurnState) -> Result<PromptAsse
     // 白名单排除的 MCP 工具同样不进请求。
     retain_loaded_mcp_tools(driver, state.session.id(), &mut assembly);
     if let Some(child) = &state.session.header().subagent {
-        if let Some(persona) = &child.persona
-            && let Some(section) = assembly
-                .sections
-                .iter_mut()
-                .find(|s| s.name == "deployment:persona")
-        {
-            section.text = format!("{persona}\n始终使用简体中文回复，除非用户明确要求其他语言。");
+        // 角色提示**追加**成独立段：父的部署 persona / 主 preset persona 是
+        // 基础，子代理的 instructions 与强制约束是增量。旧日志里的 persona
+        // 字段（没有快照的历史子代理）按同样语义追加——历史上它替换父
+        // persona，那正是本轮要消除的行为。
+        let role = state
+            .session
+            .subagent_snapshot()
+            .map(|file| file.instructions)
+            .filter(|text| !text.trim().is_empty())
+            .or_else(|| child.persona.clone().filter(|text| !text.trim().is_empty()));
+        let mut text = String::from(
+            "[子代理约束]\n\
+             你是被派遣的子代理：不能派遣子代理，也不能改变会话主控模式或操作会话目标；\n\
+             自动加载的规则只含项目级 AGENTS.md（不含用户全局规则）。\n\
+             完成后如实汇报：改了什么／跑了什么／结果如何／还剩什么问题；\
+             没有验证过的不要说成验证过。结果要区分「成功」「任务失败」与「需要主代理决策」。",
+        );
+        if let Some(role) = role {
+            text = format!("[子代理角色]\n{role}\n\n{text}");
         }
-        if let Some(allowed) = &child.allowed_tools {
-            // 纪律段与工具同进退(AGENTS.md 的同步要求):子代理拿不到的工具,
-            // 其纪律段不得注入——否则模型读到 bash/ask/write 的纪律却找不到
-            // 对应工具,既浪费 token 又误导。段名到工具的映射见
-            // `section_tools`;context:/harness: 段不受工具集影响。
-            crate::preset::apply_tool_allowlist(&mut assembly, allowed);
-        }
+        assembly.sections.push(denia_system_prompt::AssembledSection {
+            name: "subagent:role".to_string(),
+            text,
+            audience: denia_system_prompt::SectionAudience::Model,
+        });
+        // 工具面与纪律段同进退：冻结快照的有效工具集合是唯一依据。
+        let allowed = child.effective_tools();
+        crate::preset::apply_tool_allowlist(&mut assembly, &allowed);
     }
     // 只读档工具面收窄:bash 与写文件工具不开放(只留 ls/read_file/glob/grep
     // 等只读类),纪律段同步摘除。执行层 decide 矩阵仍兜底幻觉调用。子代理

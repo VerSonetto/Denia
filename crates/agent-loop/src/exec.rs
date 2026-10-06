@@ -233,22 +233,31 @@ fn stub_arguments(arguments: &str) -> Option<String> {
     )
 }
 
-/// 派发前的硬性校验:子代理白名单与未知工具。命中则返回错误结果,
-/// 调用不进入策略判定(子代理绝不能弹出审批)。
+/// 派发前的硬性校验:子代理身份 × 硬禁工具,以及子代理的有效工具集。
+/// 命中则返回错误结果,调用不进入策略判定。
+///
+/// 这一层是三层硬拒里的第二层(第一层是 schema/目录不授予):即使模型
+/// 幻觉出一个派遣工具、或旧日志里带着早已不该有的授权,也在这里按**真实
+/// 会话身份**拦下来——不看参数、不看内存里的谱系表是否已恢复。
 fn reject_before_dispatch(
     driver: &SessionDriver,
     state: &TurnState,
     call: &ToolCallRef,
 ) -> Option<ToolOutput> {
-    if state
-        .session
-        .header()
-        .subagent
-        .as_ref()
-        .and_then(|s| s.allowed_tools.as_ref())
-        .is_some_and(|allowed| !allowed.contains(&call.name))
-    {
-        return Some(ToolOutput::error("该工具不在当前子代理允许的工具集合中"));
+    if let Some(child) = state.session.header().subagent.as_ref() {
+        if denia_core::subagent::is_child_hard_denied(&call.name) {
+            return Some(ToolOutput::error(format!(
+                "{}：该工具对子代理不可用。子代理不能派遣子代理，也不能改变会话主控模式或操作会话目标；\n\
+                 需要拆分的工作请交回主代理。",
+                call.name
+            )));
+        }
+        if !child.effective_tools().iter().any(|name| name == &call.name) {
+            return Some(ToolOutput::error(format!(
+                "该工具不在当前子代理允许的工具集合中：{}",
+                call.name
+            )));
+        }
     }
     if driver.tools().get(&call.name).is_none() {
         return Some(ToolOutput::error(format!(
@@ -309,6 +318,33 @@ fn decide_for(
     }
     let confined = denia_tools::permission::sandbox_applies(mode) && state.session.header().sandbox;
     let class = classify_call(cwd, call, confined, memory_root);
+    // 只读权限上限(permissionCeiling=read-only):写与命令一律拒绝,**包括
+    // MemoryWrite 特例**——上限只能收窄,不能被任何历史放行绕过。这一条按
+    // 冻结快照判定,不靠角色文本自律。
+    let read_only_ceiling = state
+        .session
+        .header()
+        .subagent
+        .as_ref()
+        .is_some_and(|child| child.permission_ceiling().is_read_only());
+    if read_only_ceiling
+        && (matches!(
+            class,
+            ActionClass::WriteInside
+                | ActionClass::WriteOutside
+                | ActionClass::Delete
+                | ActionClass::MemoryWrite
+                | ActionClass::BashWrite
+                | ActionClass::PresetCreate
+        ) || matches!(
+            call.name.as_str(),
+            "bash" | "job_start" | "write_file" | "edit"
+        ))
+    {
+        return Decision::Deny(
+            "当前子代理定义是只读上限（permissionCeiling=read-only）：写文件、改文件与命令都不可用。需要写操作请改用具备写权限的定义。".into(),
+        );
+    }
     let is_memory_write = class == ActionClass::MemoryWrite;
     if is_memory_write {
         // 敏感段(git 钩子/依赖树/其他 harness 的技能目录)直接拒绝,
@@ -322,13 +358,6 @@ fn decide_for(
             ));
         }
         return denia_tools::permission::decide(mode, class);
-    }
-    if state.session.header().subagent.is_some()
-        && matches!(call.name.as_str(), "write_file" | "edit")
-    {
-        return Decision::Deny(
-            "子代理的文件写仅限记忆目录内的 .md 文件(记忆提取);其余写操作留在父代理。".into(),
-        );
     }
     // 自动编辑档的"本窗口放行":用户批准过某类操作(区外写/删除/bash 写)
     // 后,本会话内同类操作直接放行,不再弹审批。
@@ -437,6 +466,14 @@ fn dispatch_tool_call(
     let output_store = state.output_store.clone();
     let ask = driver.ask.clone();
     let call_id = call.id.clone();
+    // 授权投影：子代理的有效工具集冻结在会话头快照里，目录类工具与延迟
+    // 加载拦截靠它把“看得见的”和“执行得动的”对齐。根会话为 None。
+    let granted_tools: Option<Arc<Vec<String>>> = state
+        .session
+        .header()
+        .subagent
+        .as_ref()
+        .map(|child| Arc::new(child.effective_tools()));
     // 记忆域沙箱豁免:锚定记忆目录的读写不受 confined 限制,否则默认
     // 沙箱会话按 tool:memory 纪律读写记忆会在工具路径解析层被拦(权限
     // 层早已放行,纪律段成为空头支票)。豁免口径与权限放行口径一致:
@@ -496,6 +533,7 @@ fn dispatch_tool_call(
                 Some((goal, used))
             })),
             read_state: Some(read_state),
+            granted_tools,
         };
         let execute = tool.execute(&call.arguments, &context);
         if call.name == "bash" {

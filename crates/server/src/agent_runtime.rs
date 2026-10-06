@@ -1,4 +1,5 @@
 //! Rust 原生子代理编排；复用 SessionDriver，只有一份会话日志与运行状态。
+use crate::subagents::{policy_grant, resolve_definition};
 use crate::{
     jobs::Jobs,
     state::{LiveSessions, RunningGuard, ServerEvent},
@@ -7,6 +8,7 @@ use async_trait::async_trait;
 use denia_core::{
     config::ModelSelection,
     session::{GoalOp, SessionEnvelope, SessionEvent, SubagentDescriptor},
+    subagent::{DelegateArgs, SubagentSnapshotRef, stable_hash},
 };
 use denia_tools::{ToolContext, capabilities::AgentRuntime};
 use serde::{Deserialize, Serialize};
@@ -21,8 +23,6 @@ use tokio_util::sync::CancellationToken;
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(default, rename_all = "camelCase", deny_unknown_fields)]
 pub struct RuntimeConfig {
-    pub max_agents: usize,
-    pub max_depth: usize,
     pub max_jobs: usize,
     pub retained_jobs: usize,
     pub output_bytes: usize,
@@ -44,8 +44,6 @@ pub struct RuntimeConfig {
 impl Default for RuntimeConfig {
     fn default() -> Self {
         Self {
-            max_agents: 8,
-            max_depth: 4,
             max_jobs: 8,
             retained_jobs: 64,
             output_bytes: 64 * 1024,
@@ -64,9 +62,7 @@ impl Default for RuntimeConfig {
 pub fn validate_config(value: Value) -> Result<Value, String> {
     let c: RuntimeConfig =
         serde_json::from_value(value).map_err(|e| format!("运行时配置无效：{e}"))?;
-    if !(1..=64).contains(&c.max_agents)
-        || !(1..=16).contains(&c.max_depth)
-        || !(1..=64).contains(&c.max_jobs)
+    if !(1..=64).contains(&c.max_jobs)
         || c.retained_jobs < c.max_jobs
         || c.retained_jobs > 1024
         || !(1024..=1048576).contains(&c.output_bytes)
@@ -150,6 +146,7 @@ struct Inner {
     goal_failures: Mutex<HashMap<String, u32>>,
     registry: Arc<denia_llm::LlmRegistry>,
     workspaces: Arc<crate::workspace::WorkspaceRegistry>,
+    subagents: Arc<crate::subagents::SubagentProfileStore>,
     pub jobs: Arc<Jobs>,
 }
 #[derive(Clone)]
@@ -165,6 +162,7 @@ impl Runtime {
         events: tokio::sync::broadcast::Sender<ServerEvent>,
         registry: Arc<denia_llm::LlmRegistry>,
         workspaces: Arc<crate::workspace::WorkspaceRegistry>,
+        subagents: Arc<crate::subagents::SubagentProfileStore>,
     ) -> Result<Arc<Self>, String> {
         let mut children = BTreeMap::new();
         // 只读会话头，不加载/修复另一个实例正在写入的日志。
@@ -212,6 +210,7 @@ impl Runtime {
                 goal_failures: Mutex::new(HashMap::new()),
                 registry,
                 workspaces,
+                subagents,
                 jobs: Jobs::new(),
             }),
         }))
@@ -248,6 +247,19 @@ impl Runtime {
     }
     pub fn jobs(&self) -> Arc<Jobs> {
         self.inner.jobs.clone()
+    }
+    /// 子代理定义名册（API 与派遣共用同一个所有者）。
+    pub fn subagents(&self) -> Arc<crate::subagents::SubagentProfileStore> {
+        self.inner.subagents.clone()
+    }
+    /// 子代理调度设置：并发上限的唯一来源。
+    pub fn policy_config(&self) -> crate::subagents::SubagentPolicyConfig {
+        self.inner
+            .settings
+            .resolved(crate::subagents::SETTINGS_NS)
+            .ok()
+            .and_then(|value| serde_json::from_value(value).ok())
+            .unwrap_or_default()
     }
     pub fn config(&self) -> RuntimeConfig {
         self.inner
@@ -487,7 +499,9 @@ impl Runtime {
             }
             if live.session.header().subagent.is_some() {
                 let mut slots = self.inner.reserved.lock().unwrap();
-                if !slots.contains(id) && slots.len() >= self.config().max_agents {
+                if !slots.contains(id)
+                    && slots.len() >= self.policy_config().max_concurrent_runs
+                {
                     live.running.store(false, Ordering::SeqCst);
                     return Ok(());
                 }
@@ -940,21 +954,116 @@ impl Runtime {
             tracing::error!(error=%e,"回滚子代理失败");
         }
     }
-    async fn delegate(&self, name: &str, args: Value, ctx: &ToolContext) -> Result<Value, String> {
+    /// 唯一的派遣入口：解析定义 → 计算授权 → 冻结快照 → 建会话 → 投递首条消息。
+    ///
+    /// 三层硬拒的第三层在这里：任何宿主派遣入口都在产生分配副作用之前，
+    /// 先按**真实会话头**判定调用者是不是子代理——不看 depth、不看调用参数、
+    /// 也不看内存里的 children 表是否已经恢复。
+    async fn delegate(
+        &self,
+        name: &str,
+        args: DelegateArgs,
+        ctx: &ToolContext,
+    ) -> Result<Value, String> {
         let owner = ctx.session_id.as_deref().ok_or("缺少会话身份")?;
         let config = self.config();
 
-        let prompt = string(&args, "prompt")?;
+        let prompt = args.prompt.trim().to_string();
+        if prompt.is_empty() {
+            return Err("subagent/invalid-args: prompt 不能为空".into());
+        }
+        if prompt.len() > config.output_bytes {
+            return Err("子代理提示词过大".into());
+        }
         let parent = self.live(owner).await?;
-        let mut selection = ctx.selection.clone().ok_or("子代理无法继承模型选择")?;
-        if let Some(v) = args["provider"].as_str() {
-            selection.provider = v.into();
+        if parent.session.header().subagent.is_some() {
+            return Err(
+                "subagent/nesting-forbidden: 子代理不能派遣子代理（派遣能力是 Denia 管理的委派边界）。\
+                 需要拆分的工作请交回主代理。"
+                    .into(),
+            );
         }
-        if let Some(v) = args["model"].as_str() {
-            selection.model = v.into();
+        let fork = name == "fork_agent";
+        let project_root = crate::subagents::project_root_of(Path::new(&ctx.cwd));
+        let store = self.inner.subagents.clone();
+        let target = args.target()?;
+        // ① 定义解析：已保存定义（含 qualifiedId 校验与遮蔽拒绝）或临时 inline。
+        //    旧式调用（只有 persona / allowed_tools）走保守的兼容适配。
+        let resolved = resolve_definition(&store, &target, project_root.as_deref(), &args)?;
+        let profile = resolved.profile.clone();
+        if !profile.enabled {
+            return Err(format!(
+                "subagent/profile-disabled: 子代理定义 `{}` 已被禁用；请选择其他类型或提供 inline 定义",
+                resolved.display_id
+            ));
         }
-        if let Some(v) = args["reasoning_effort"].as_str() {
-            selection.reasoning_effort = Some(v.into());
+        let diagnostics = profile.validate();
+        if !diagnostics.is_empty() {
+            let reasons: Vec<String> = diagnostics
+                .iter()
+                .map(|diagnostic| diagnostic.reason.clone())
+                .collect();
+            return Err(format!(
+                "subagent/invalid-profile: 定义 `{}` 无法执行：{}",
+                resolved.display_id,
+                reasons.join("；")
+            ));
+        }
+        // 旧式调用的 persona 已在解析层并进 instructions；新调用不允许
+        // persona 与 profile/inline 混用（解析层已拒）。
+        let persona_note = resolved
+            .legacy
+            .then(|| "persona（旧字段）已按兼容规则映射为角色补充提示".to_string());
+        let instructions = profile.instructions.clone();
+        if instructions.len() > denia_core::subagent::SUBAGENT_INSTRUCTIONS_MAX_BYTES {
+            return Err("子代理角色提示词过大".into());
+        }
+        if args.run_in_background.is_some() {
+            tracing::info!(
+                session = owner,
+                "run_in_background 已弃用：Denia 的子代理派遣始终后台执行"
+            );
+        }
+
+        // ② 模型：调用级覆盖 > 定义显式选择 > 父模型。provider/model 必须成套，
+        //    换 provider 时不继承另一个 provider 的 model/effort。
+        let mut selection = profile
+            .explicit_model()
+            .cloned()
+            .or_else(|| ctx.selection.clone())
+            .ok_or("子代理无法继承模型选择")?;
+        let parent_selection = ctx.selection.clone().unwrap_or_else(|| selection.clone());
+        match (args.provider.as_deref(), args.model.as_deref()) {
+            (Some(provider), Some(model)) => {
+                selection = ModelSelection {
+                    provider: provider.to_string(),
+                    model: model.to_string(),
+                    reasoning_effort: args.reasoning_effort.clone(),
+                };
+            }
+            (None, Some(model)) => {
+                // 只换 model：provider 不变，因此保留继承来的 effort。
+                selection.model = model.to_string();
+                if let Some(effort) = &args.reasoning_effort {
+                    selection.reasoning_effort = Some(effort.clone());
+                }
+            }
+            (None, None) => {
+                if let Some(effort) = &args.reasoning_effort {
+                    selection.reasoning_effort = Some(effort.clone());
+                }
+            }
+            (Some(_), None) => {
+                // 只换 provider 不带 model：旧 provider 的 model 名字在新 provider
+                // 下没有意义，必须成套给出。
+                return Err(
+                    "subagent/invalid-model: 指定 provider 时必须同时给出 model（换 provider 不能沿用另一个 provider 的 model/effort）"
+                        .into(),
+                );
+            }
+        }
+        if selection.provider.trim().is_empty() || selection.model.trim().is_empty() {
+            return Err("子代理无法继承模型选择".into());
         }
         self.inner
             .registry
@@ -965,105 +1074,94 @@ impl Runtime {
             )
             .await
             .map_err(|e| e.to_string())?;
-        if prompt.len() > config.output_bytes {
-            return Err("子代理提示词过大".into());
+        if fork
+            && (selection.provider != parent_selection.provider
+                || selection.model != parent_selection.model)
+        {
+            return Err(
+                "subagent/fork-model-mismatch: fork 沿用父模型；需要另一个模型请用 spawn_agent"
+                    .into(),
+            );
         }
-        let depth = parent
-            .session
-            .header()
-            .subagent
+
+        // ③ 工具授权：schema、目录与执行器共用这一份 EffectiveToolGrant。
+        let driver = self
+            .inner
+            .driver
+            .get()
+            .and_then(Weak::upgrade)
+            .ok_or("会话驱动器尚未就绪")?;
+        let preset = driver.preset_for(parent.session.agent_preset().as_deref());
+        let excluded = preset
             .as_ref()
-            .map_or(1, |s| s.depth + 1);
-        let depth_cap = args
-            .get("max_depth")
-            .map(|v| {
-                v.as_u64()
-                    .filter(|n| *n > 0)
-                    .ok_or("max_depth 必须为正整数")
-            })
-            .transpose()?
-            .map_or(config.max_depth, |v| (v as usize).min(config.max_depth));
-        if depth > depth_cap {
-            return Err("子代理委派深度已达上限".into());
-        }
+            .map(|preset| preset.features.excluded_tools())
+            .unwrap_or_default();
+        let parent_grant = crate::subagents::policy::parent_grant(
+            &driver.tools().names(),
+            &excluded,
+            preset.as_ref().and_then(|preset| preset.tools.as_deref()),
+        );
+        let grant = policy_grant(&profile, resolved.narrowing.as_deref(), &parent_grant)?;
+
         let _admission = self.inner.admission.lock().await;
-        if self.inner.reserved.lock().unwrap().len() >= config.max_agents {
-            return Err("子代理并发已达上限".into());
+        if self.inner.reserved.lock().unwrap().len() >= self.policy_config().max_concurrent_runs {
+            return Err("子代理并发已达上限（subagent-policy.maxConcurrentRuns）".into());
         }
         if ctx.cancel.is_cancelled() {
             return Err("子代理启动已取消".into());
         }
-        let descriptor = SubagentDescriptor {
-            label: args["description"]
-                .as_str()
-                .unwrap_or("子代理")
-                .chars()
-                .take(200)
-                .collect(),
-            depth,
-            mode: if name == "fork_agent" {
-                "fork"
-            } else {
-                "spawn"
-            }
-            .into(),
-            selection: selection.clone(),
-            persona: args
-                .get("persona")
-                .map(|v| v.as_str().map(str::to_string).ok_or("persona 必须为文本"))
-                .transpose()?,
-            // 子代理默认只读:不与用户交互、不写工作区、不跑命令。
-            // `allowed_tools` 只能在这个集合内继续缩小;上一级子代理的
-            // 集合是它的上界(继承即收窄,绝不放大)。
-            allowed_tools: Some(match args.get("allowed_tools") {
-                Some(v) => {
-                    let requested: Vec<String> = serde_json::from_value(v.clone())
-                        .map_err(|_| "allowed_tools 必须为工具名称数组")?;
-                    requested
-                }
-                None => denia_tools::SUBAGENT_READ_ONLY_TOOLS
-                    .iter()
-                    .map(|name| (*name).to_string())
-                    .collect(),
-            }),
+        let label: String = args
+            .description
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or(profile.name.as_str())
+            .chars()
+            .take(200)
+            .collect();
+        let mut snapshot = SubagentSnapshotRef {
+            version: denia_core::subagent::SUBAGENT_SNAPSHOT_VERSION,
+            // 先占位，下面按落盘内容回填（哈希覆盖的字段此刻都已确定）。
+            hash: String::new(),
+            creation_mode: if fork { "fork" } else { "spawn" }.into(),
+            label: label.clone(),
+            profile: resolved.reference.clone(),
+            resolved_name: profile.name.clone(),
+            resolved_description: profile.description.clone(),
+            effective_tools: grant.tools.clone(),
+            model: selection.clone(),
+            permission_ceiling: grant.permission_ceiling,
+            permission_mode: parent.session.permission_mode().as_str().to_string(),
+            parent_preset: parent.session.agent_preset(),
+            parent_prompt_hash: parent_prompt_hash(&parent.session),
+            // 审计信息：真正的禁止派遣判定按会话身份做，不信磁盘布尔值。
+            delegation_allowed: false,
+            instruction_scope: "project-only".into(),
+            fork: None,
         };
-        if descriptor
-            .persona
-            .as_ref()
-            .is_some_and(|p| p.len() > config.output_bytes)
-        {
-            return Err("子代理角色提示词过大".into());
-        }
-        {
-            let allowed = descriptor
-                .allowed_tools
-                .as_ref()
-                .expect("子代理工具集已在上面填充");
-            // 未知工具名:拒绝(不静默忽略,否则模型以为授权生效了)。
-            let unknown: Vec<&str> = allowed
-                .iter()
-                .map(String::as_str)
-                .filter(|name| !denia_tools::SUBAGENT_READ_ONLY_TOOLS.contains(name))
-                .collect();
-            if !unknown.is_empty() {
-                return Err(format!(
-                    "子代理只能使用只读工具({});不支持:{}(写文件/命令/提问/子代理委派留在父代理)",
-                    denia_tools::SUBAGENT_READ_ONLY_TOOLS.join("、"),
-                    unknown.join("、"),
-                ));
+        let snapshot_file = {
+            let provisional = denia_core::subagent::SubagentSnapshotFile {
+                version: snapshot.version,
+                profile: snapshot.clone(),
+                instructions: instructions.clone(),
+            };
+            snapshot.hash = provisional.hash();
+            denia_core::subagent::SubagentSnapshotFile {
+                version: snapshot.version,
+                profile: snapshot.clone(),
+                instructions,
             }
-            // 嵌套子代理:不得超出父代理已有的集合。
-            if let Some(parent_allowed) = parent
-                .session
-                .header()
-                .subagent
-                .as_ref()
-                .and_then(|s| s.allowed_tools.as_ref())
-                && let Some(extra) = allowed.iter().find(|name| !parent_allowed.contains(name))
-            {
-                return Err(format!("子代理不能扩大父代理的工具集合:{extra}"));
-            }
-        }
+        };
+        let descriptor = SubagentDescriptor {
+            label,
+            // 新子代理的 depth 恒为 1，只保留为显示与旧数据兼容字段。
+            depth: 1,
+            mode: if fork { "fork" } else { "spawn" }.into(),
+            selection: selection.clone(),
+            persona: None,
+            allowed_tools: None,
+            snapshot: Some(snapshot),
+        };
         let sessions = self.inner.sessions.clone();
         let cwd = ctx.cwd.clone();
         let sandbox = parent.session.header().sandbox;
@@ -1098,6 +1196,9 @@ impl Runtime {
                 .create_subagent(&cwd, sandbox, &parent_id, desc)
                 .map_err(|e| e.to_string())?;
             let result: Result<String, String> = (|| {
+                // 快照必须先于首次模型请求落盘：引用缺失时装配层拒绝启动，
+                // 而不是回退默认工具面。
+                crate::subagents::write_snapshot_file(child.directory(), &snapshot_file)?;
                 child.seed_from(&source).map_err(|e| e.to_string())?;
                 child
                     .set_permission_mode(permission)
@@ -1158,10 +1259,26 @@ impl Runtime {
         };
         let _ = self.inner.events.send(ServerEvent::SessionsUpdated);
         drop(_admission);
-        Ok(background_result(
-            json!({"childId":id,"messageId":message_id}),
+        let mut result = background_result(
+            json!({
+                "childId": id,
+                "messageId": message_id,
+                "profile": resolved.summary(),
+                "tools": grant.tools,
+            }),
             true,
-        ))
+        );
+        if let Some(note) = &resolved.note {
+            result["diagnostics"] = json!([note]);
+        }
+        if let Some(note) = &persona_note {
+            let notes = result["diagnostics"].as_array_mut();
+            match notes {
+                Some(list) => list.push(json!(note)),
+                None => result["diagnostics"] = json!([note]),
+            }
+        }
+        Ok(result)
     }
     pub async fn skills(&self, cwd: PathBuf) -> Result<Vec<crate::skills::Skill>, String> {
         let home = self.inner.home.clone();
@@ -1189,6 +1306,20 @@ fn string(args: &Value, key: &str) -> Result<String, String> {
         .map(str::to_string)
         .ok_or_else(|| format!("缺少非空参数：{key}"))
 }
+/// 父代理基础系统提示的快照摘要（派遣时冻结，用于审计与"不回退默认人格"）。
+fn parent_prompt_hash(session: &denia_session::Session) -> String {
+    let text = session
+        .events()
+        .iter()
+        .rev()
+        .find_map(|envelope| match &envelope.event {
+            SessionEvent::SystemPrompt { text, .. } => Some(text.clone()),
+            _ => None,
+        })
+        .unwrap_or_default();
+    stable_hash(&text)
+}
+
 #[cfg(test)]
 fn validate_wait_timeout(args: &Value) -> Result<(), String> {
     let mut args = args.clone();
@@ -1495,7 +1626,11 @@ mod tests {
             _: &str,
             request: &GenerateRequest,
         ) -> Result<ChunkStream, LlmError> {
-            assert!(request.tools.iter().any(|s| s.name == "skill"));
+            // 根会话的组装必须完整；子代理按自己的工具集收窄，不能一概要求 skill。
+            if request.tools.iter().any(|s| s.name == "spawn_agent") {
+                assert!(request.tools.iter().any(|s| s.name == "skill"));
+                assert!(request.tools.iter().any(|s| s.name == "bash"));
+            }
             if request.model == "hold" {
                 return Ok(Box::pin(futures::stream::pending()));
             }
@@ -1642,6 +1777,7 @@ mod tests {
             call_id: None,
             goal_reader: None,
             read_state: None,
+            granted_tools: None,
         };
         (state, ctx)
     }
@@ -1955,6 +2091,7 @@ mod tests {
             state.events.clone(),
             state.registry.clone(),
             state.workspaces.clone(),
+            state.subagents.clone(),
         )
         .unwrap();
         assert_eq!(restored.list(owner).as_array().unwrap().len(), 1);
@@ -1968,121 +2105,190 @@ mod tests {
             2
         );
     }
-    /// 子代理默认只读:写/命令/提问/再委派类工具不授予;
-    /// allowed_tools 只能在这个集合内缩小,未知或越权一律拒绝。
+    /// 新派遣语义:默认用有效 develop 定义、explore 是只读上限、子代理不能再派遣。
     #[tokio::test]
-    async fn subagents_are_read_only_by_default() {
+    async fn spawn_resolves_profiles_and_enforces_the_nesting_ban() {
         let (state, ctx) = setup().await;
-        // 默认授予:只读集合。
+        // 默认(不给 profile_id/inline):有效 develop 定义。
         let result = state
             .runtime
             .execute(
                 "spawn_agent",
-                json!({"prompt":"读代码","description":"只读子代理"}),
+                json!({"prompt":"改代码","description":"开发子代理"}),
                 &ctx,
             )
             .await
             .unwrap();
+        assert_eq!(result["profile"]["id"], "develop");
         let id = result["childId"].as_str().unwrap();
         let live = state.live.get(id).unwrap();
-        let allowed = live
-            .session
-            .header()
-            .subagent
-            .as_ref()
-            .unwrap()
-            .allowed_tools
-            .clone()
-            .expect("子代理必须显式记录工具集");
-        let mut allowed = allowed;
-        allowed.sort();
-        let mut expected: Vec<String> = denia_tools::SUBAGENT_READ_ONLY_TOOLS
-            .iter()
-            .map(|name| (*name).to_string())
-            .collect();
-        expected.sort();
-        assert_eq!(allowed, expected, "子代理默认工具集应为只读集合");
-        assert!(
-            allowed.contains(&"browser".to_string()),
-            "browser 是只读调查手段,应授予子代理"
-        );
+        let child = live.session.header().subagent.clone().unwrap();
+        assert_eq!(child.depth, 1, "新 child 的 depth 恒为 1");
+        assert!(child.snapshot.is_some(), "新 child 必须带运行快照");
+        let tools = child.effective_tools();
+        for expected in ["read_file", "write_file", "edit", "bash", "todo_write"] {
+            assert!(tools.iter().any(|name| name == expected), "缺少 {expected}");
+        }
         for forbidden in [
-            "ask",
-            "write_file",
-            "edit",
-            "bash",
-            "job_start",
             "spawn_agent",
+            "fork_agent",
+            "exit_plan",
+            "get_goal",
+            "update_goal",
+            "create_preset",
+            "ask",
         ] {
             assert!(
-                !allowed.contains(&forbidden.to_string()),
+                !tools.iter().any(|name| name == forbidden),
                 "{forbidden} 不得授予子代理"
             );
         }
+        // 角色正文落在会话目录的快照文件里(不进会话头)。
+        let snapshot = live.session.subagent_snapshot().expect("快照可读");
+        assert!(snapshot.instructions.contains("先复述要达成的目标"));
 
-        // 显式请求写/交互类工具:拒绝。
-        assert!(
-            state
-                .runtime
-                .execute(
-                    "spawn_agent",
-                    json!({"prompt":"写文件","allowed_tools":["write_file"]}),
-                    &ctx
-                )
-                .await
-                .is_err(),
-            "子代理不得被授予 write_file"
-        );
-        assert!(
-            state
-                .runtime
-                .execute(
-                    "spawn_agent",
-                    json!({"prompt":"提问","allowed_tools":["ask"]}),
-                    &ctx
-                )
-                .await
-                .is_err(),
-            "子代理不得被授予 ask"
-        );
-        // 未知工具名同样拒绝(不静默忽略)。
-        assert!(
-            state
-                .runtime
-                .execute(
-                    "spawn_agent",
-                    json!({"prompt":"未知","allowed_tools":["nope"]}),
-                    &ctx
-                )
-                .await
-                .is_err()
-        );
-        // 在只读集合内缩小:允许。
-        let narrowed = state
+        // explore 预设:只读上限,且不含写/命令类工具。
+        let result = state
             .runtime
             .execute(
                 "spawn_agent",
-                json!({"prompt":"只读","allowed_tools":["read_file"]}),
+                json!({"prompt":"查调用链","profile_id":"builtin:explore"}),
                 &ctx,
             )
             .await
             .unwrap();
-        let narrowed_live = state
+        assert_eq!(result["profile"]["qualifiedId"], "builtin:explore");
+        let explore = state
             .live
-            .get(narrowed["childId"].as_str().unwrap())
+            .get(result["childId"].as_str().unwrap())
             .unwrap();
-        assert_eq!(
-            narrowed_live
-                .session
-                .header()
-                .subagent
-                .as_ref()
-                .unwrap()
-                .allowed_tools
-                .clone()
-                .unwrap(),
-            vec!["read_file".to_string()]
+        let explore_child = explore.session.header().subagent.clone().unwrap();
+        for forbidden in ["write_file", "edit", "bash", "browser", "job_start"] {
+            assert!(
+                !explore_child.effective_tools().iter().any(|n| n == forbidden),
+                "explore 不得持有 {forbidden}"
+            );
+        }
+        assert!(explore_child.permission_ceiling().is_read_only());
+
+        // 子代理不能再派遣子代理:同一份派遣入口按真实会话身份硬拒。
+        let child_ctx = ToolContext {
+            session_id: Some(id.to_string()),
+            ..ctx.clone()
+        };
+        let nested = state
+            .runtime
+            .execute("spawn_agent", json!({"prompt":"再派一个"}), &child_ctx)
+            .await;
+        assert!(nested.is_err(), "子代理派遣必须失败");
+        assert!(
+            nested.unwrap_err().contains("subagent/nesting-forbidden"),
+            "错误码必须指明禁止嵌套"
         );
+
+        // inline 临时定义:不落盘、工具严格按请求。
+        let result = state
+            .runtime
+            .execute(
+                "spawn_agent",
+                json!({
+                    "prompt":"读日志",
+                    "inline":{
+                        "name":"日志调查员",
+                        "description":"只看日志",
+                        "instructions":"先列证据再下结论。",
+                        "tools":{"mode":"allowlist","names":["read_file","grep"]},
+                        "model":{"mode":"inherit"},
+                        "permissionCeiling":"read-only"
+                    }
+                }),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        let inline_child = state
+            .live
+            .get(result["childId"].as_str().unwrap())
+            .unwrap();
+        let descriptor = inline_child.session.header().subagent.clone().unwrap();
+        assert_eq!(descriptor.effective_tools(), vec!["grep", "read_file"]);
+        // inline 不生成永久定义:名册里没有它。
+        assert!(
+            state
+                .subagents
+                .rows_for(None)
+                .iter()
+                .all(|row| row.id != "inline")
+        );
+
+        // 越权工具:显式点名父代理没有的工具 → 失败,不静默少给。
+        let denied = state
+            .runtime
+            .execute(
+                "spawn_agent",
+                json!({
+                    "prompt":"越权",
+                    "inline":{
+                        "name":"越权",
+                        "description":"越权",
+                        "tools":{"mode":"allowlist","names":["mcp__nope__tool"]},
+                        "model":{"mode":"inherit"}
+                    }
+                }),
+                &ctx,
+            )
+            .await;
+        assert!(denied.is_err(), "未授予的工具必须让派遣失败: {denied:?}");
+        // 硬禁项:显式点名也必须失败。
+        let denied = state
+            .runtime
+            .execute(
+                "spawn_agent",
+                json!({
+                    "prompt":"再派遣",
+                    "inline":{
+                        "name":"再派遣",
+                        "description":"再派遣",
+                        "tools":{"mode":"allowlist","names":["spawn_agent"]},
+                        "model":{"mode":"inherit"}
+                    }
+                }),
+                &ctx,
+            )
+            .await;
+        assert!(denied.is_err(), "硬禁工具必须让派遣失败");
+
+        // 旧式调用(persona + allowed_tools)按保守只读映射,不升级成写能力。
+        let legacy = state
+            .runtime
+            .execute(
+                "spawn_agent",
+                json!({"prompt":"兼容","persona":"你只读调查","allowed_tools":["read_file","bash"]}),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        let legacy_child = state
+            .live
+            .get(legacy["childId"].as_str().unwrap())
+            .unwrap();
+        let descriptor = legacy_child.session.header().subagent.clone().unwrap();
+        assert_eq!(descriptor.effective_tools(), vec!["read_file"]);
+        assert!(descriptor.permission_ceiling().is_read_only());
+        assert!(
+            legacy["diagnostics"]
+                .as_array()
+                .is_some_and(|notes| !notes.is_empty()),
+            "被裁掉的工具必须出现在诊断里"
+        );
+
+        // 已弃用的深度参数:明确失败,不让旧调用以为还能改深度。
+        let depth = state
+            .runtime
+            .execute("spawn_agent", json!({"prompt":"深度","max_depth":2}), &ctx)
+            .await;
+        assert!(depth.is_err());
+        assert!(depth.unwrap_err().contains("depth-config-removed"));
     }
 
     #[tokio::test]
@@ -2091,7 +2297,7 @@ mod tests {
         ctx.selection.as_mut().unwrap().model = "hold".into();
         state
             .settings
-            .update("runtime", json!({"maxAgents":1}), None)
+            .update("subagent-policy", json!({"maxConcurrentRuns":1}), None)
             .unwrap();
         let result = state
             .runtime
@@ -2348,7 +2554,14 @@ mod tests {
         assert!(
             state
                 .settings
-                .update("runtime", json!({"maxDepth":0}), None)
+                .update("runtime", json!({"maxAgents":4}), None)
+                .is_err(),
+            "旧字段已从正式 schema 移除，不得再被接受"
+        );
+        assert!(
+            state
+                .settings
+                .update("subagent-policy", json!({"maxConcurrentRuns":0}), None)
                 .is_err()
         );
         // 项目记忆预算:越界拒绝;布尔开关与合法预算放行。

@@ -73,7 +73,7 @@ fn system_prompt_frames_runtime_authority() {
 /// 会失败,而不是让子代理读到不存在的工具纪律。
 #[test]
 fn subagent_sections_follow_tool_grant() {
-    use denia_tools::SUBAGENT_READ_ONLY_TOOLS;
+    use denia_core::subagent::EXPLORE_TOOLS;
     // 用 shipped 基础提示词 + capability 段覆盖段名全集;browser 段由
     // tools 侧的单测覆盖(agent-loop 不依赖 denia-browser)。
     let (mut prompt, _) = denia_tools::default_shipped();
@@ -95,9 +95,9 @@ fn subagent_sections_follow_tool_grant() {
             );
         }
     }
-    // 只读集合下的期望:read/glob/grep/skill/browser 段保留,
-    // bash/write/todo/edit/agents/jobs/ask 段移除。
-    let allowed: Vec<String> = SUBAGENT_READ_ONLY_TOOLS
+    // 只读探索预设下的期望:read/glob/grep/skill/webfetch 段保留,
+    // bash/write/todo/edit/goal/jobs/ask/browser 段移除。
+    let allowed: Vec<String> = EXPLORE_TOOLS
         .iter()
         .map(|name| (*name).to_string())
         .collect();
@@ -111,7 +111,7 @@ fn subagent_sections_follow_tool_grant() {
         .map(|section| section.name.as_str())
         .filter(|name| name.starts_with("tool:"))
         .collect();
-    for expected in ["tool:read", "tool:glob", "tool:grep", "tool:skill"] {
+    for expected in ["tool:read", "tool:glob", "tool:grep", "tool:skill", "tool:agents"] {
         assert!(kept.contains(&expected), "{expected} 应保留:{kept:?}");
     }
     for removed in [
@@ -119,10 +119,10 @@ fn subagent_sections_follow_tool_grant() {
         "tool:write",
         "tool:todo",
         "tool:edit",
-        "tool:agents",
         "tool:jobs",
         "tool:ask",
         "tool:goal",
+        "tool:browser",
     ] {
         assert!(!kept.contains(&removed), "{removed} 应移除:{kept:?}");
     }

@@ -77,14 +77,14 @@ pub fn schemas() -> Vec<ToolSchema> {
     let specs = [
         (
             "spawn_agent",
-            "创建独立子代理会话，继承工作目录、权限与模型。始终后台执行，立即返回 childId 和 pending；完成结果自动通知父会话。pending 后不要循环等待，可以继续独立工作或先回复用户进度并结束本轮。子代理默认只有只读工具（read_file/ls/glob/grep/skill/browser），写文件、命令、提问、再委派都留在父代理；allowed_tools 只能在这个集合内缩小。",
-            json!({"prompt":{"type":"string"},"description":{"type":"string"},"provider":{"type":"string"},"model":{"type":"string"},"reasoning_effort":{"type":"string"},"run_in_background":{"type":"boolean","description":"兼容旧请求；无论 true 或 false 都立即返回并在后台执行。"},"persona":{"type":"string"},"allowed_tools":{"type":"array","items":{"type":"string"},"description":"子代理可用工具；缺省 read_file/ls/glob/grep/skill/browser，只能缩小不能扩大。"},"max_depth":{"type":"integer","minimum":1}}),
+            "创建独立子代理会话执行可并行的工作：继承工作目录与权限，始终后台执行，立即返回 childId 与 pending，完成结果自动通知父会话。指定 profile_id 用已保存定义（builtin:explore 只读探索、builtin:develop 开发执行、builtin:verify 验证），或用 inline 临时定义一组工具与角色；两者都不给时用默认 develop。profile_id 与 inline 互斥。子代理不能派遣子代理。pending 后不要循环等待，可以继续独立工作。",
+            json!({"prompt":{"type":"string","description":"交给子代理的任务；要自包含，写清目标、范围与验收条件。"},"description":{"type":"string","description":"一行任务说明，用于会话列表与通知。"},"profile_id":{"type":"string","description":"已保存定义的 id，如 builtin:explore；与 inline 互斥。"},"inline":{"type":"object","description":"临时定义：{name, description, instructions, tools:{mode:'inherit'|'allowlist', names:[...]}, model:{mode:'inherit'|'explicit', selection:{provider, model, reasoningEffort}}, permissionCeiling:'inherit'|'read-only'}。字段用 camelCase。"},"allowed_tools":{"type":"array","items":{"type":"string"},"description":"对所选定义工具的进一步收窄，只能更小。"},"provider":{"type":"string","description":"覆盖模型 provider；必须与 model 成套给出。"},"model":{"type":"string","description":"覆盖模型 id。"},"reasoning_effort":{"type":"string"}}),
             vec!["prompt"],
         ),
         (
             "fork_agent",
-            "以父会话已完成的历史为种子创建子代理；始终后台执行并立即返回 pending，完成结果自动通知父会话，其余行为同 spawn_agent。",
-            json!({"prompt":{"type":"string"},"description":{"type":"string"},"run_in_background":{"type":"boolean","description":"兼容旧请求；无论 true 或 false 都立即返回并在后台执行。"},"persona":{"type":"string"},"allowed_tools":{"type":"array","items":{"type":"string"},"description":"子代理可用工具；缺省 read_file/ls/glob/grep/skill，只能缩小不能扩大。"},"max_depth":{"type":"integer","minimum":1}}),
+            "以本会话已完成的对话历史为种子创建子代理；始终后台执行并立即返回 pending，完成结果自动通知父会话。参数与 spawn_agent 相同，区别只有历史来源，且 fork 沿用父模型（要换模型请用 spawn_agent）。",
+            json!({"prompt":{"type":"string"},"description":{"type":"string"},"profile_id":{"type":"string"},"inline":{"type":"object"},"allowed_tools":{"type":"array","items":{"type":"string"}}}),
             vec!["prompt"],
         ),
         (
@@ -190,7 +190,35 @@ impl Tool for CapabilityTool {
 fn validate_arguments(schema: &ToolSchema, args: &Value) -> Result<(), String> {
     let values = args.as_object().ok_or("工具参数必须为对象")?;
     let properties = schema.parameters["properties"].as_object().unwrap();
+    let agent_tool = matches!(schema.name.as_str(), "spawn_agent" | "fork_agent");
     for (key, value) in values {
+        // 弃用参数的单一兼容适配器：新 schema 不再暴露它们，但旧调用可能
+        // 仍然带着。`max_depth` 直接失败（深度配置是被删除的能力，不是被
+        // 忽略的开关）；`persona` 按补充提示映射；`run_in_background` 忽略，
+        // 因为 Denia 的派遣本来就是始终后台。
+        if agent_tool {
+            match key.as_str() {
+                "max_depth" => {
+                    return Err(
+                        "subagent/depth-config-removed: 委派深度不再是可配置项，子代理不能派遣子代理；请移除该参数。"
+                            .to_string(),
+                    );
+                }
+                "persona" => {
+                    if !value.is_string() {
+                        return Err("参数类型或范围无效：persona".to_string());
+                    }
+                    continue;
+                }
+                "run_in_background" => {
+                    if !value.is_boolean() {
+                        return Err("参数类型或范围无效：run_in_background".to_string());
+                    }
+                    continue;
+                }
+                _ => {}
+            }
+        }
         let prop = properties
             .get(key)
             .ok_or_else(|| format!("工具不支持参数：{key}"))?;

@@ -1342,6 +1342,7 @@ mod browser_prompt_tests {
         use tokio_util::sync::CancellationToken;
 
         let ctx = crate::ToolContext {
+            granted_tools: None,
             output_store: None,
             session_id: None,
             selection: None,
@@ -1455,13 +1456,13 @@ mod browser_prompt_tests {
         }
     }
 
-    /// 子代理只读集合含 browser:对应的纪律段与 schema 必须一起出现,
+    /// 内置只读探索预设含 browser:对应的纪律段与 schema 必须一起出现,
     /// 否则子代理用 browser 抓网页却不知道收尾义务。
     #[test]
     fn browser_section_and_schema_available_to_subagents() {
         assert!(
-            crate::SUBAGENT_READ_ONLY_TOOLS.contains(&"browser"),
-            "browser 应授予子代理"
+            !denia_core::subagent::EXPLORE_TOOLS.contains(&"browser"),
+            "探索预设默认不授予 browser(可交互能力不该被标成严格只读)"
         );
         let (prompt, registry) = default_shipped_with_browser_and_ask(Some(fake_hub()), true);
         let assembly = prompt
