@@ -13,7 +13,9 @@ impl Session {
             file: file.to_path_buf(),
             inner: Mutex::new(inner),
         };
+        session.load_history_projection()?;
         session.close_orphaned_turn()?;
+        session.close_orphaned_interactions()?;
         session.refresh_meter_from_log()?;
         Ok(session)
     }
@@ -27,11 +29,69 @@ impl Session {
     /// 必先升级,修复因此总在首次写入前落地)。
     pub fn open_cold(file: &Path) -> Result<Session, SessionError> {
         let (header, inner) = Self::parse_file(file, false)?;
-        Ok(Session {
+        let session = Session {
             header,
             file: file.to_path_buf(),
             inner: Mutex::new(inner),
-        })
+        };
+        // 冷态同样读投影文件:它只影响模型面派生，不依赖事件是否驻留；
+        // 之后 ensure_hot 会走 load() 再读一次（幂等）。
+        session.load_history_projection()?;
+        Ok(session)
+    }
+
+    /// 读取 `<session-dir>/history-projection.json`（不存在则保持 None）。
+    pub(super) fn load_history_projection(&self) -> Result<(), SessionError> {
+        let path = self.file.with_file_name(HISTORY_PROJECTION_FILE);
+        let text = match std::fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(SessionError::Io(error)),
+        };
+        let projection: history::HistoryProjection = serde_json::from_str(&text)
+            .map_err(|e| SessionError::Corrupt(format!("bad history projection: {e}")))?;
+        if projection.version != history::LEGACY_HISTORY_PROJECTION_VERSION {
+            return Err(SessionError::Corrupt(format!(
+                "unsupported history projection version {}",
+                projection.version
+            )));
+        }
+        let mut inner = self
+            .inner
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        inner.history_projection = Some(projection);
+        inner.derived_surface = None;
+        Ok(())
+    }
+
+    /// 建立并持久化历史投影（旧子代理首次继续前调用）。
+    ///
+    /// 幂等：已有同版本投影则直接复用（返回 `false`），在线与冷恢复一致。
+    /// 返回 `true` 表示本次新建并落盘。
+    pub fn apply_history_projection(&self) -> Result<bool, SessionError> {
+        if self
+            .inner
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .history_projection
+            .is_some()
+        {
+            return Ok(false);
+        }
+        let projection = self.with_events(|events| history::legacy_subagent_drop_set(events));
+        let path = self.file.with_file_name(HISTORY_PROJECTION_FILE);
+        let text = serde_json::to_string_pretty(&projection)
+            .map_err(|e| SessionError::Corrupt(e.to_string()))?;
+        std::fs::write(&path, text)?;
+        let mut inner = self
+            .inner
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        inner.history_projection = Some(projection);
+        inner.derived_surface = None;
+        inner.log_revision += 1;
+        Ok(true)
     }
 
     /// 流式解析日志:retain=true 全量驻留(热),false 只留聚合(冷)。
@@ -175,6 +235,7 @@ impl Session {
             resident_bytes,
             transient_bytes: 0,
             first_prompt_excerpt,
+            history_projection: None,
         };
         Ok((header, inner))
     }
@@ -271,5 +332,211 @@ impl Session {
             last_time,
         )?;
         Ok(())
+    }
+
+    /// 未决交互的收敛：`ask-requested` 没有 `ask-resolved`、`approval-asked`
+    /// 没有 `approval-decided` 时补一条终局事件。
+    ///
+    /// 应答通道（oneshot）只活在内存里：进程重启或会话重新加载后，日志里的卡片
+    /// 依旧存在，但已经不可能被结算。没有这一步，UI 会一直显示一张"能点提交、
+    /// 提交必然失败"的卡片（规格 10.3）。收敛写成 `unavailable` 并带上可执行的
+    /// 原因，模型与用户都能看到明确结局。
+    ///
+    /// 幂等：收敛后日志里已有终局事件，第二次加载不会再补。
+    pub(super) fn close_orphaned_interactions(&self) -> Result<(), SessionError> {
+        let (pending_asks, pending_approvals, last_time) = {
+            let inner = self
+                .inner
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            let mut asked: Vec<String> = Vec::new();
+            let mut answered: std::collections::HashSet<String> = std::collections::HashSet::new();
+            let mut approval_asked: Vec<String> = Vec::new();
+            let mut approval_settled: std::collections::HashSet<String> =
+                std::collections::HashSet::new();
+            let mut last_time: u64 = 0;
+            for envelope in &inner.events {
+                last_time = envelope.time;
+                match &envelope.event {
+                    SessionEvent::AskRequested { request_id, .. } => {
+                        asked.push(request_id.clone());
+                    }
+                    SessionEvent::AskResolved { request_id, .. } => {
+                        answered.insert(request_id.clone());
+                    }
+                    SessionEvent::ApprovalAsked { request_id, .. } => {
+                        approval_asked.push(request_id.clone());
+                    }
+                    SessionEvent::ApprovalDecided { request_id, .. } => {
+                        approval_settled.insert(request_id.clone());
+                    }
+                    _ => {}
+                }
+            }
+            let pending_asks: Vec<String> = asked
+                .into_iter()
+                .filter(|request_id| !answered.contains(request_id))
+                .collect();
+            let pending_approvals: Vec<String> = approval_asked
+                .into_iter()
+                .filter(|request_id| !approval_settled.contains(request_id))
+                .collect();
+            (pending_asks, pending_approvals, last_time)
+        };
+        if pending_asks.is_empty() && pending_approvals.is_empty() {
+            return Ok(());
+        }
+        for request_id in pending_asks {
+            self.append_with_time(
+                SessionEvent::AskResolved {
+                    request_id,
+                    resolution: AskResolution {
+                        outcome: AskOutcome::Unavailable,
+                        answers: Vec::new(),
+                        reason: Some(ORPHAN_INTERACTION_REASON.to_string()),
+                    },
+                },
+                last_time,
+            )?;
+        }
+        for request_id in pending_approvals {
+            self.append_with_time(
+                SessionEvent::ApprovalDecided {
+                    request_id,
+                    outcome: ApprovalOutcome::Unavailable,
+                },
+                last_time,
+            )?;
+        }
+        Ok(())
+    }
+}
+
+/// 未决交互在加载期收敛时给出的原因（模型与 UI 共用同一句话）。
+pub const ORPHAN_INTERACTION_REASON: &str =
+    "该交互请求在服务重启或会话重新加载前没有被应答,应答通道已失效;请重新发起操作或询问用户。";
+
+/// 未决交互收敛的回归网：重启后不能留下"可提交但必然失败"的卡片。
+#[cfg(test)]
+mod interaction_tests {
+    use super::*;
+
+    fn setup(name: &str) -> (PathBuf, PathBuf) {
+        let root =
+            std::env::temp_dir().join(format!("denia-recovery-{name}-{}", uuid::Uuid::new_v4()));
+        let work = root.join("work");
+        std::fs::create_dir_all(&work).unwrap();
+        (root, work)
+    }
+
+    fn event(value: serde_json::Value) -> SessionEvent {
+        serde_json::from_value(value).expect("测试事件形状合法")
+    }
+
+    fn ask_requested(id: &str) -> SessionEvent {
+        event(serde_json::json!({
+            "type": "ask-requested",
+            "request_id": id,
+            "call_id": "call-1",
+            "questions": [{"id": "q1", "question": "继续吗"}],
+            "timeout_ms": 60_000
+        }))
+    }
+
+    fn approval_asked(id: &str) -> SessionEvent {
+        event(serde_json::json!({
+            "type": "approval-asked",
+            "request_id": id,
+            "call_id": "call-2",
+            "tool": "write_file",
+            "args_preview": "{}"
+        }))
+    }
+
+    /// 未应答的提问与审批在加载时各补一条终局事件（unavailable）。
+    #[test]
+    fn load_settles_orphaned_interactions() {
+        let (root, work) = setup("settle");
+        let store = crate::SessionStore::open(&root).unwrap();
+        let session = store.create(&work, true).unwrap();
+        session.append(ask_requested("ask-1")).unwrap();
+        session.append(approval_asked("appr-1")).unwrap();
+        session.flush().unwrap();
+        let path = session.file().to_path_buf();
+        drop(session);
+
+        let loaded = Session::load(&path).unwrap();
+        let events = loaded.events();
+        let ask_resolution = events.iter().find_map(|item| match &item.event {
+            SessionEvent::AskResolved {
+                request_id,
+                resolution,
+            } if request_id == "ask-1" => Some(resolution.clone()),
+            _ => None,
+        });
+        let resolution = ask_resolution.expect("未决提问必须被收敛");
+        assert_eq!(resolution.outcome, AskOutcome::Unavailable);
+        assert!(resolution.reason.is_some());
+        assert!(
+            events.iter().any(|item| matches!(
+                &item.event,
+                SessionEvent::ApprovalDecided {
+                    request_id,
+                    outcome: ApprovalOutcome::Unavailable,
+                } if request_id == "appr-1"
+            )),
+            "未决审批必须被收敛"
+        );
+
+        // 幂等：再次加载不再追加新的终局事件。
+        let before = events.len();
+        drop(loaded);
+        let reloaded = Session::load(&path).unwrap();
+        assert_eq!(
+            reloaded.events().len(),
+            before,
+            "第二次加载不应再补终局事件"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// 已经结算过的交互不会被二次收敛。
+    #[test]
+    fn already_settled_interactions_are_left_alone() {
+        let (root, work) = setup("settled");
+        let store = crate::SessionStore::open(&root).unwrap();
+        let session = store.create(&work, true).unwrap();
+        session.append(ask_requested("ask-1")).unwrap();
+        session
+            .append(event(serde_json::json!({
+                "type": "ask-resolved",
+                "request_id": "ask-1",
+                "resolution": {"outcome": "answered", "answers": [{"id": "q1", "custom": "好"}]}
+            })))
+            .unwrap();
+        session.append(approval_asked("appr-1")).unwrap();
+        session
+            .append(event(serde_json::json!({
+                "type": "approval-decided",
+                "request_id": "appr-1",
+                "outcome": "allowed-once"
+            })))
+            .unwrap();
+        session.flush().unwrap();
+        let path = session.file().to_path_buf();
+        let before = session.events().len();
+        drop(session);
+
+        let loaded = Session::load(&path).unwrap();
+        assert_eq!(loaded.events().len(), before, "不得改写已结算的交互");
+        assert_eq!(
+            loaded
+                .events()
+                .iter()
+                .filter(|item| matches!(item.event, SessionEvent::AskResolved { .. }))
+                .count(),
+            1
+        );
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

@@ -82,9 +82,12 @@ impl McpRuntime {
         let mut registry = self.base_registry();
         denia_tools::register_mcp_tools(&mut registry, &self.manager);
         if !self.manager.snapshot().tool_defs().is_empty() {
-            registry.register(Arc::new(denia_tools::McpListTool::new(
-                self.manager.clone(),
-            )));
+            let mut catalog = denia_tools::McpListTool::new(self.manager.clone());
+            // 绑定会话授权来源：子代理的 MCP 目录只列它被授予的工具。
+            if let Some(runtime) = self.driver.agent_runtime() {
+                catalog = catalog.with_grant_source(runtime);
+            }
+            registry.register(Arc::new(catalog));
         }
         self.driver.replace_tools(registry);
         self.sync_prompt();

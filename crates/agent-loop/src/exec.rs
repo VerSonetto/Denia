@@ -37,11 +37,7 @@ pub(crate) async fn execute_calls(
         .runtime
         .as_ref()
         .and_then(|runtime| runtime.memory_root_for(&cwd))
-        .filter(|_| {
-            driver
-                .preset_features(state.session.agent_preset().as_deref())
-                .memory
-        });
+        .filter(|_| driver.features_for(&state.session).memory);
     let max_parallel = state.settings.parallel.max_parallel_tool_calls.max(1);
     let mut in_flight: futures::stream::FuturesOrdered<
         futures::future::BoxFuture<'static, (usize, ToolOutput)>,
@@ -233,50 +229,60 @@ fn stub_arguments(arguments: &str) -> Option<String> {
     )
 }
 
-/// 派发前的硬性校验:子代理身份 × 硬禁工具,以及子代理的有效工具集。
-/// 命中则返回错误结果,调用不进入策略判定。
+/// 派发前的硬性校验：子代理硬禁项、会话有效工具面、jobs 授权与未知工具。
 ///
-/// 这一层是三层硬拒里的第二层(第一层是 schema/目录不授予):即使模型
-/// 幻觉出一个派遣工具、或旧日志里带着早已不该有的授权,也在这里按**真实
-/// 会话身份**拦下来——不看参数、不看内存里的谱系表是否已恢复。
+/// 命中则返回错误结果，调用不进入策略判定——拿不到的工具既不该弹审批，
+/// 也不该被执行。
+///
+/// 授权依据是**会话头里冻结的快照**（子代理）或 preset 收窄后的注册表
+/// （其余会话），不是重新解析父 preset：profile 被删、preset 文件损坏或内存
+/// children 表尚未恢复都不会放宽这里。
 fn reject_before_dispatch(
     driver: &SessionDriver,
     state: &TurnState,
     call: &ToolCallRef,
 ) -> Option<ToolOutput> {
-    if let Some(child) = state.session.header().subagent.as_ref() {
-        if denia_core::subagent::is_child_hard_denied(&call.name) {
+    let is_child = state.session.header().subagent.is_some();
+    if is_child {
+        // ① 运行时硬规则：子代理禁止派遣子代理，也不能用宿主配置/会话主控工具。
+        //    schema 层已经不授予，这里是兜底——模型幻觉调用、旧日志里带授权、
+        //    以及未来新增的派遣入口都在此被拦下。
+        if denia_core::subagent::child_hard_denied(&call.name) {
             return Some(ToolOutput::error(format!(
-                "{}：该工具对子代理不可用。子代理不能派遣子代理，也不能改变会话主控模式或操作会话目标；\n\
-                 需要拆分的工作请交回主代理。",
-                call.name
+                "该工具对子代理硬禁用：子代理不能派遣子代理，也不能使用宿主配置与会话主控工具（{}）。请把这类动作交回父代理。",
+                denia_core::subagent::codes::DELEGATION_FORBIDDEN
             )));
         }
-        let tools = child.effective_tools();
-        if !tools.iter().any(|name| name == &call.name) {
-            return Some(ToolOutput::error(format!(
-                "该工具不在当前子代理允许的工具集合中：{}",
-                call.name
-            )));
-        }
-        // `bash.run_in_background` 是 jobs 能力的旁路：没有 job_start 就一并
-        // 关掉这个参数（schema 已摘除，这里兜底幻觉调用）。
-        if call.name == "bash"
-            && !tools.iter().any(|name| name == "job_start")
-            && serde_json::from_str::<serde_json::Value>(&call.arguments)
-                .ok()
-                .and_then(|args| {
-                    args.get("run_in_background")
-                        .and_then(serde_json::Value::as_bool)
-                })
-                .unwrap_or(false)
-        {
-            return Some(ToolOutput::error(
-                "当前子代理没有后台任务能力，不能用 run_in_background 启动后台命令；\
-                 请同步执行，或改用具备 jobs 工具的定义。"
-                    .to_string(),
-            ));
-        }
+    }
+    let face = driver.session_tool_face(&state.session);
+    if let Some(face) = &face
+        && !face.iter().any(|name| name == &call.name)
+    {
+        return Some(ToolOutput::error(if is_child {
+            format!(
+                "该工具不在当前子代理被授予的工具集合中（{}）。可用工具见系统提示的工具列表；需要更多能力请让父代理用更合适的定义重新派遣。",
+                denia_core::subagent::codes::TOOL_NOT_GRANTED
+            )
+        } else {
+            format!(
+                "该工具不在当前会话组装允许的工具面内（{}）。当前 preset 的 features/工具白名单没有开放它；需要时请用户调整组装。",
+                denia_core::subagent::codes::TOOL_NOT_GRANTED
+            )
+        }));
+    }
+    // ② 后台命令的入口是 `job_start`：只禁 job_start 而留下 bash 的
+    //    `run_in_background` 参数，等于给出一条绕过通道。没被授予 job_start
+    //    的会话（子代理按冻结授权；其余会话按 preset features）在这里被拒。
+    if call.name == "bash"
+        && bash_requests_background(&call.arguments)
+        && !face
+            .as_ref()
+            .is_none_or(|face| face.iter().any(|name| name == "job_start"))
+    {
+        return Some(ToolOutput::error(format!(
+            "bash 的 run_in_background 需要 jobs 授权（{}）：当前会话没有被授予 job_start，后台命令不可用。请改为前台执行，或让父代理授予含 job_start 的定义。",
+            denia_core::subagent::codes::TOOL_NOT_GRANTED
+        )));
     }
     if driver.tools().get(&call.name).is_none() {
         return Some(ToolOutput::error(format!(
@@ -285,6 +291,19 @@ fn reject_before_dispatch(
         )));
     }
     None
+}
+
+/// bash 调用是否请求后台执行（参数解析失败按"没有请求"处理，让工具自身的
+/// 参数错误兜底，而不是伪装成授权问题）。
+fn bash_requests_background(arguments: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(arguments.trim())
+        .ok()
+        .and_then(|value| {
+            value
+                .get("run_in_background")
+                .and_then(|flag| flag.as_bool())
+        })
+        .unwrap_or(false)
 }
 
 /// 两段式 MCP 工具面的第二段:未装载的 `mcp__*` 工具首次调用被拦截,
@@ -318,8 +337,13 @@ fn mcp_load_intercept(
 /// 策略判定:当前会话模式 × 调用类别 → Allow/Ask/Deny。
 ///
 /// `memory_root` 是本会话工作区对应的项目记忆目录(None = 记忆未启用):
-/// 命中的 `.md` 写分类为 MemoryWrite(四档放行,敏感段拒绝);子代理的
-/// 其余写一律拒绝(提取子代理不能被诱导写记忆目录之外,子代理也不弹审批)。
+/// 命中的 `.md` 写分类为 MemoryWrite。
+///
+/// 子代理不再有"按身份一刀切拒写"的分支：写能力由**派遣时冻结的授权**决定
+/// （schema 已按授权收窄，这里由 [`reject_before_dispatch`] 兜底），是否放行
+/// 则由与其他会话完全相同的权限引擎判定——执行型子代理因此能正常触发审批。
+/// 唯一的额外约束是 `permissionCeiling=read-only`：它硬禁写与命令，且
+/// **优先于** MemoryWrite 特例。
 fn decide_for(
     driver: &SessionDriver,
     state: &TurnState,
@@ -335,35 +359,21 @@ fn decide_for(
             "当前为只读模式,bash 命令不可用;请改用 ls/glob/grep/read_file 做阅读与检索,或请用户切换权限模式。".into(),
         );
     }
-    let confined = denia_tools::permission::sandbox_applies(mode) && state.session.header().sandbox;
-    let class = classify_call(cwd, call, confined, memory_root);
-    // 只读权限上限(permissionCeiling=read-only):写与命令一律拒绝,**包括
-    // MemoryWrite 特例**——上限只能收窄,不能被任何历史放行绕过。这一条按
-    // 冻结快照判定,不靠角色文本自律。
-    let read_only_ceiling = state
-        .session
-        .header()
-        .subagent
-        .as_ref()
-        .is_some_and(|child| child.permission_ceiling().is_read_only());
-    if read_only_ceiling
-        && (matches!(
-            class,
-            ActionClass::WriteInside
-                | ActionClass::WriteOutside
-                | ActionClass::Delete
-                | ActionClass::MemoryWrite
-                | ActionClass::BashWrite
-                | ActionClass::PresetCreate
-        ) || matches!(
+    // 子代理的只读上限：强制路径，不依赖角色文本，也禁止 MemoryWrite 特例
+    // 越过（计划 6.3 / T13）。放在记忆分派之前，顺序即语义。
+    if let Some(child) = state.session.header().subagent.as_ref()
+        && child.permission_ceiling == denia_core::subagent::PermissionCeiling::ReadOnly
+        && matches!(
             call.name.as_str(),
-            "bash" | "job_start" | "write_file" | "edit"
-        ))
+            "write_file" | "edit" | "bash" | "job_start" | "todo_write"
+        )
     {
         return Decision::Deny(
-            "当前子代理定义是只读上限（permissionCeiling=read-only）：写文件、改文件与命令都不可用。需要写操作请改用具备写权限的定义。".into(),
+            "本次派遣的权限上限是只读（permissionCeiling=read-only）：写文件与命令一律不可用。请只做阅读、检索与验证结论；需要改动请交回父代理或改用其他定义。".into(),
         );
     }
+    let confined = denia_tools::permission::sandbox_applies(mode) && state.session.header().sandbox;
+    let class = classify_call(cwd, call, confined, memory_root);
     let is_memory_write = class == ActionClass::MemoryWrite;
     if is_memory_write {
         // 敏感段(git 钩子/依赖树/其他 harness 的技能目录)直接拒绝,
@@ -485,14 +495,6 @@ fn dispatch_tool_call(
     let output_store = state.output_store.clone();
     let ask = driver.ask.clone();
     let call_id = call.id.clone();
-    // 授权投影：子代理的有效工具集冻结在会话头快照里，目录类工具与延迟
-    // 加载拦截靠它把“看得见的”和“执行得动的”对齐。根会话为 None。
-    let granted_tools: Option<Arc<Vec<String>>> = state
-        .session
-        .header()
-        .subagent
-        .as_ref()
-        .map(|child| Arc::new(child.effective_tools()));
     // 记忆域沙箱豁免:锚定记忆目录的读写不受 confined 限制,否则默认
     // 沙箱会话按 tool:memory 纪律读写记忆会在工具路径解析层被拦(权限
     // 层早已放行,纪律段成为空头支票)。豁免口径与权限放行口径一致:
@@ -510,11 +512,7 @@ fn dispatch_tool_call(
                 .runtime
                 .as_ref()
                 .and_then(|runtime| runtime.memory_root_for(&cwd))
-                .filter(|_| {
-                    driver
-                        .preset_features(state.session.agent_preset().as_deref())
-                        .memory
-                })
+                .filter(|_| driver.features_for(&state.session).memory)
                 .as_deref(),
         );
     Box::pin(async move {
@@ -552,7 +550,6 @@ fn dispatch_tool_call(
                 Some((goal, used))
             })),
             read_state: Some(read_state),
-            granted_tools,
         };
         let execute = tool.execute(&call.arguments, &context);
         if call.name == "bash" {
@@ -631,18 +628,30 @@ async fn dispatch_asked_tool_call(
         return ToolOutput::error(format!("[{}] {}", error.code, error.message));
     }
     match decision.outcome {
-        ApprovalOutcome::AllowedOnce => {
+        ApprovalOutcome::AllowedOnce | ApprovalOutcome::AllowedSession => {
+            // 批准后重新判权（计划 6.3）：等待期间会话权限档可能被收紧（用户把
+            // 会话切成只读/计划档），旧批准不得成为扩权凭证。判权放宽或不变则
+            // 照常执行；收紧为 Deny 则按新结论拒绝。
+            let memory_root = driver
+                .runtime
+                .as_ref()
+                .and_then(|runtime| runtime.memory_root_for(cwd))
+                .filter(|_| driver.features_for(&state.session).memory);
+            if let Decision::Deny(reason) =
+                decide_for(driver, state, cwd, call, memory_root.as_deref())
+            {
+                return ToolOutput::error(format!("批准后重新判权被拒绝：{reason}"));
+            }
             if is_plan {
                 apply_plan_approval(state, decision)
             } else {
+                if decision.outcome == ApprovalOutcome::AllowedSession {
+                    // 本窗口放行:记入会话放行表,本会话内同类操作不再询问;
+                    // 本次调用照常执行。
+                    driver.grant_ask_class(state.session.id(), class);
+                }
                 dispatch_tool_call(driver, state, cwd, call).await
             }
-        }
-        ApprovalOutcome::AllowedSession => {
-            // 本窗口放行:记入会话放行表,本会话内同类操作不再询问;
-            // 本次调用照常执行。
-            driver.grant_ask_class(state.session.id(), class);
-            dispatch_tool_call(driver, state, cwd, call).await
         }
         ApprovalOutcome::Rejected => {
             if is_plan {

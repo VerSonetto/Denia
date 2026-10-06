@@ -179,7 +179,7 @@ pub fn register_capability_prompt_sections(prompt: &mut SystemPrompt) -> Result<
         name: "tool:agents".to_string(),
         order: SectionOrder::ToolAgents.value(),
         text: PromptText::Static(
-            "独立任务用 spawn_agent/fork_agent 委派给子代理;send_message 只能在直接父子代理之间收发消息。把可以独立进行的子任务拆给子代理分工合作,不要全部自己做。所有委派都在后台执行并立即返回;wait_agent 只查看当前结果,不会前台等待。收到 pending 后不要轮询、重复等待或用 sleep 拖住当前轮次;可以继续独立工作,或先向用户回复当前进度并结束本轮,结果到达后会自动接收并继续回复。pending 不代表成功,ready 只表示结果可读取。子代理默认只有只读工具(read_file/glob/grep/skill/browser):它不写文件、不跑命令、不向用户提问、也不再委派——需要落盘改动或与用户确认的任务留在父代理做,或让子代理只做调查并把结论与待办交回。子代理用 browser 抓取网页同样受浏览器收尾纪律约束(任务完成 list 确认无 tab)。"
+            "独立任务用 spawn_agent/fork_agent 委派给子代理;send_message 只能在直接父子代理之间收发消息。把可以独立进行的子任务拆给子代理分工合作,不要全部自己做,并尽量按不重叠的文件/模块分工,最后由你统一集成。所有委派都在后台执行并立即返回;wait_agent 只查看当前结果,不会前台等待。收到 pending 后不要轮询、重复等待或用 sleep 拖住当前轮次;可以继续独立工作,或先向用户回复当前进度并结束本轮,结果到达后会自动接收并继续回复。pending 不代表成功,ready 只表示结果可读取;执行完成前不要宣称工作已完成。\n子代理按定义决定能力：可用类型与用法见系统提示里的「子代理目录」注入。默认用 develop（可写可跑命令，用于实现与修复）；只做调查用 explore（只读）；验证改动用 verify。inline 可在调用时给出临时定义，不落盘。子代理继承你的系统提示基础、工作目录、权限模式与模型默认值，角色提示是追加而不是替换；它不会自动继承全局 AGENTS.md，只自动发现项目级规则。子代理不能再派遣子代理，也不能使用宿主配置与会话主控工具。子代理的最终结果必须区分成功、失败与待你决策三种情形；需要落盘改动或与用户确认的关键决定留在你这里。"
                 .to_string(),
         ),
         complete: false,
@@ -1342,7 +1342,6 @@ mod browser_prompt_tests {
         use tokio_util::sync::CancellationToken;
 
         let ctx = crate::ToolContext {
-            granted_tools: None,
             output_store: None,
             session_id: None,
             selection: None,
@@ -1456,13 +1455,14 @@ mod browser_prompt_tests {
         }
     }
 
-    /// 内置只读探索预设含 browser:对应的纪律段与 schema 必须一起出现,
-    /// 否则子代理用 browser 抓网页却不知道收尾义务。
+    /// 历史只读集合含 browser（旧日志/旧参数的保守上限）：对应的纪律段与
+    /// schema 必须一起出现，否则模型用 browser 抓网页却不知道收尾义务。
+    /// 新定义（含内置 explore）各自声明工具，explore 初始**不**授予 browser。
     #[test]
-    fn browser_section_and_schema_available_to_subagents() {
+    fn browser_section_and_schema_available_with_the_legacy_ceiling() {
         assert!(
-            !denia_core::subagent::EXPLORE_TOOLS.contains(&"browser"),
-            "探索预设默认不授予 browser(可交互能力不该被标成严格只读)"
+            crate::SUBAGENT_READ_ONLY_TOOLS.contains(&"browser"),
+            "历史只读集合应含 browser（旧描述符的保守上限）"
         );
         let (prompt, registry) = default_shipped_with_browser_and_ask(Some(fake_hub()), true);
         let assembly = prompt

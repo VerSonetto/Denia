@@ -1,4 +1,5 @@
 import { McpSettings } from './settings/McpSettings'
+import { SubagentSettings } from './settings/SubagentSettings'
 import { RemoteAccessSettings } from './settings/RemoteAccessSettings'
 import { RuntimeSettings } from './settings/RuntimeSettings'
 import { MemorySettings } from './settings/MemorySettings'
@@ -22,15 +23,14 @@ import {
 } from './icons'
 import { LlmPanel } from './llm/LlmPanel'
 import { AgentPresetSettings } from './settings/AgentPresetSettings'
-import { SubagentSettings } from './settings/SubagentSettings'
 import { normalizePermissionMode, type PermissionMode } from '../types'
 import { PERMISSION_LEVELS, storePermission } from './PermissionSelector'
 
 type SettingsTab =
   | 'runtime'
+  | 'subagents'
   | 'general'
   | 'presets'
-  | 'subagents'
   | 'prompts'
   | 'models'
   | 'mcp'
@@ -42,8 +42,8 @@ const CONSOLE_NS = 'console'
 
 const TABS: SettingsTab[] = [
   'general',
-  'presets',
   'subagents',
+  'presets',
   'prompts',
   'models',
   'mcp',
@@ -73,6 +73,8 @@ function tabIcon(tab: SettingsTab, size = 16) {
   switch (tab) {
     case 'runtime':
       return <IconGear size={size} />
+    case 'subagents':
+      return <IconAgentPreset size={size} />
     case 'general':
       return <IconStack size={size} />
     case 'presets':
@@ -97,7 +99,7 @@ function tabLabel(tab: SettingsTab): string {
     case 'runtime':
       return t('runtimeSettings')
     case 'subagents':
-      return t('subagentsSettings')
+      return t('subagentsTab')
     case 'general':
       return t('settingsTabGeneral')
     case 'presets':
@@ -122,7 +124,7 @@ function tabNavDesc(tab: SettingsTab): string {
     case 'runtime':
       return t('runtimeSettingsHint')
     case 'subagents':
-      return t('subagentsSettingsHint')
+      return t('subagentsTabDesc')
     case 'general':
       return t('settingsTabGeneralDesc')
     case 'presets':
@@ -147,7 +149,7 @@ function paneTitle(tab: SettingsTab): string {
     case 'runtime':
       return t('runtimeSettings')
     case 'subagents':
-      return t('subagentsSettings')
+      return t('subagentsPaneTitle')
     case 'general':
       return t('settingsPaneGeneralTitle')
     case 'presets':
@@ -172,7 +174,7 @@ function paneDesc(tab: SettingsTab): string {
     case 'runtime':
       return t('runtimeSettingsHint')
     case 'subagents':
-      return t('subagentsSettingsHint')
+      return t('subagentsPaneDesc')
     case 'general':
       return t('settingsPaneGeneralDesc')
     case 'presets':
@@ -585,6 +587,7 @@ export function SettingsModal({ notify, onClose }: { notify: Notify; onClose: ()
             ) : (
               <>
                 {tab === 'runtime' && <RuntimeSettings />}
+                {tab === 'subagents' && <SubagentSettings notify={notify} />}
                 {tab === 'general' && (
                   <SetmCard
                     title={t('defaultPermissionTitle')}
@@ -682,7 +685,6 @@ export function SettingsModal({ notify, onClose }: { notify: Notify; onClose: ()
                 )}
 
                 {tab === 'presets' && <AgentPresetSettings notify={notify} />}
-                {tab === 'subagents' && <SubagentSettings />}
                 {tab === 'models' && <LlmPanel notify={notify} />}
 
                 {tab === 'mcp' && <McpSettings notify={notify} />}

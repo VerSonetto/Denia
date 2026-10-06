@@ -4,6 +4,9 @@ import { t } from '../../i18n'
 import { Button, Field, NumberInput } from '../llm/atoms/form'
 import styles from './RuntimeSettings.module.css'
 
+// 旧的子代理字段（maxAgents / maxDepth）已删：并发上限迁到「子代理」页的
+// subagent-policy 命名空间；委派深度不复存在——禁止子代理再派遣是运行时
+// 硬规则，不是可调参数。
 const fields = [
   ['maxJobs', 'runtimeMaxJobs'], ['retainedJobs', 'runtimeRetainedJobs'],
   ['outputBytes', 'runtimeOutputBytes'],
@@ -33,7 +36,12 @@ export function RuntimeSettings() {
     }
     setSaving(true); setError(''); setSaved(false)
     try {
-      await api.replaceNamespace('runtime', value, revision)
+      // 整体替换前剔除已废弃字段：旧客户端带来的 maxAgents/maxDepth 会让
+      // 严格反序列化失败，这里主动不把它们写回配置。
+      const next: Record<string, unknown> = { ...(value ?? {}) }
+      delete next.maxAgents
+      delete next.maxDepth
+      await api.replaceNamespace('runtime', next, revision)
       const ns = (await api.getSettings()).namespaces.find(n => n.ns === 'runtime')
       if (ns) { setRevision(ns.revision); setValue(ns.value) }
       setSaved(true)

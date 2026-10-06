@@ -1,50 +1,52 @@
-//! 子代理定义仓库：内置集合 + 用户目录 + 项目目录，同 id 后者覆盖前者。
+//! 子代理定义仓库：文件、覆盖层、revision 与解析诊断的**唯一所有者**。
 //!
-//! 磁盘格式是严格 YAML frontmatter + Markdown 正文（正文即 `instructions`）。
-//! 三个作用域各自只有一个写入口，没有第二条绕开 revision 的写路径：
+//! 存储格式是严格 YAML frontmatter + Markdown 正文（正文即 `instructions`）。
+//! 目录：
+//! - 内置：程序提供（[`denia_core::subagent::builtin_subagent_profiles`]）；
+//! - 用户级：`$DENIA_HOME/subagents/<id>.md`；
+//! - 项目级：`<projectRoot>/.denia/subagents/<id>.md`，projectRoot 复用 Denia
+//!   当前的项目根发现规则（向父目录找 `.git`）。
 //!
-//! - 内置（程序资源）：不可删、可禁用、可复制；"编辑内置"写的是用户覆盖，
-//!   "恢复默认"删掉覆盖；
-//! - 用户级 `$DENIA_HOME/subagents/<id>.md`；
-//! - 项目级 `<projectRoot>/.denia/subagents/<id>.md`。
+//! 合并顺序 builtin → user → project，同 id 后者覆盖前者。**被覆盖**的定义
+//! 不会被删除，只是不再作为该逻辑 id 的有效项；请求被覆盖的限定 id 会被明确
+//! 拒绝（`subagent/profile-shadowed`）而不是绕过覆盖生效。
 //!
-//! 合并后每个逻辑 id 只有一行**有效定义**。高优先级定义损坏或被禁用时，
-//! 该 id 整体不可派遣——绝不回落到低优先级同名项偷偷启用一份被遮蔽的配置。
+//! 本模块不做任何模型调用，也不创建进程——它只回答"定义是什么"。
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::Mutex;
 
-use arc_swap::ArcSwap;
 use denia_core::subagent::{
-    DEFAULT_SUBAGENT_ID, PermissionCeiling, SubagentDiagnostic, SubagentProfile,
-    SubagentProfileSource, SUBAGENT_SCHEMA_VERSION, builtin_profiles, is_valid_subagent_id,
+    PermissionCeiling, ProfileColor, ProfileDiagnostic, ProfileSource, ProfileWriteScope,
+    QualifiedProfileId, SUBAGENT_SCHEMA_VERSION, SubagentProfile, SubagentProfileView,
+    ToolSelection, codes, is_valid_subagent_id,
 };
-use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
+use serde_json::Value as JsonValue;
+use serde_yaml::Value as YamlValue;
 
-/// 用户级子代理目录名（位于 denia 数据目录下）。
-pub const DIR_NAME: &str = "subagents";
-/// 项目级子代理目录（位于项目根之下）。
+/// 用户级定义目录名（相对 `$DENIA_HOME`）。
+pub const USER_DIR: &str = "subagents";
+/// 项目级定义目录（相对项目根）。
 pub const PROJECT_DIR: &str = ".denia/subagents";
-/// 定义文件后缀。
-pub const FILE_SUFFIX: &str = ".md";
+/// frontmatter 中不允许出现、只属于正文的字段。
+const BODY_FIELDS: &[&str] = &["instructions", "body"];
 
-/// 派遣解析失败：稳定错误码 + 字段 + 可执行原因 + 可用候选。
-#[derive(Debug, Clone, PartialEq)]
-pub struct SubagentError {
+/// 定义仓库的错误：带稳定 code、字段与候选，供 API 与模型侧错误统一消费。
+#[derive(Debug, Clone)]
+pub struct ProfileError {
     pub code: String,
+    pub message: String,
     pub field: Option<String>,
-    pub reason: String,
     pub candidates: Vec<String>,
 }
 
-impl SubagentError {
-    pub fn new(code: &str, reason: impl Into<String>) -> Self {
+impl ProfileError {
+    pub fn new(code: &str, message: impl Into<String>) -> Self {
         Self {
             code: code.to_string(),
+            message: message.into(),
             field: None,
-            reason: reason.into(),
             candidates: Vec::new(),
         }
     }
@@ -58,1164 +60,1460 @@ impl SubagentError {
         self.candidates = candidates;
         self
     }
-}
 
-impl std::fmt::Display for SubagentError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}: {}", self.code, self.reason)?;
+    /// 模型侧错误文本：稳定 code + 原因 + 候选，便于模型自我纠正。
+    pub fn render(&self) -> String {
+        let mut text = format!("{}（{}）", self.message, self.code);
         if let Some(field) = &self.field {
-            write!(f, "（字段：{field}）")?;
+            text.push_str(&format!("；字段：{field}"));
         }
         if !self.candidates.is_empty() {
-            write!(f, "；可用候选：{}", self.candidates.join("、"))?;
+            text.push_str(&format!("；可用候选：{}", self.candidates.join("、")));
         }
-        Ok(())
+        text
     }
 }
 
-impl std::error::Error for SubagentError {}
+impl std::fmt::Display for ProfileError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.render())
+    }
+}
 
-/// 名册里的一行：某个作用域下的一份定义（不论是否有效）。
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ProfileRow {
-    /// `builtin:explore` / `user:api-reviewer` / `project:api-reviewer`。
+/// 一个逻辑 id 的有效定义（供派遣解析）。
+#[derive(Debug, Clone)]
+pub struct ResolvedProfile {
     pub qualified_id: String,
-    pub id: String,
-    pub source: SubagentProfileSource,
-    /// 内容版本；外部编辑文件同样会让旧 revision 失效。
-    pub revision: String,
-    /// 该作用域的定义是否可写（内置定义可写用户覆盖，见 `overridesBuiltin`）。
-    pub editable: bool,
-    /// 内置 id 在用户/项目作用域存在覆盖。
-    pub overrides_builtin: bool,
-    /// 项目覆盖了同名用户定义。
-    pub overrides_user: bool,
-    /// 是否是本逻辑 id 的有效定义。
-    pub effective: bool,
-    /// 被同名高优先级定义遮蔽（可在管理页查看/复制，不可直接派遣）。
-    pub shadowed: bool,
-    /// 健康行才有定义；损坏行为 `None`。
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub profile: Option<SubagentProfile>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub path: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub broken: Option<String>,
-    pub diagnostics: Vec<SubagentDiagnostic>,
+    pub source: ProfileSource,
+    pub revision: u64,
+    pub profile: SubagentProfile,
 }
 
-impl ProfileRow {
-    pub fn enabled(&self) -> bool {
-        self.profile.as_ref().is_some_and(|profile| profile.enabled)
-    }
+/// 目录快照：有效项 + 被覆盖项 + 诊断。
+#[derive(Debug, Clone, Default)]
+pub struct Catalog {
+    /// 每个逻辑 id 的有效项（派遣与父代理目录用这一份）。
+    pub effective: Vec<SubagentProfileView>,
+    /// 被覆盖的底层定义：仅管理页可见/可复制，不可直接派遣。
+    pub shadowed: Vec<SubagentProfileView>,
+    /// 解析诊断（损坏文件、非法字段、目录不可写等）。
+    pub diagnostics: Vec<ProfileDiagnostic>,
+    /// 目录内容版本（内容 hash），供 UI 判断是否需要重载。
+    pub revision: u64,
+    pub user_dir: String,
+    pub project_dir: Option<String>,
+    pub project_root: Option<String>,
 }
 
-/// 磁盘上的 frontmatter；未知键直接拒绝（拼错的键默默不生效比解析失败更难查）。
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct ProfileFile {
-    schema_version: u32,
-    id: String,
-    name: String,
-    description: String,
-    #[serde(default = "default_true")]
-    enabled: bool,
-    tools: denia_core::subagent::ToolChoice,
-    model: denia_core::subagent::ModelChoice,
-    #[serde(default)]
-    permission_ceiling: PermissionCeiling,
-    #[serde(default)]
-    color: Option<String>,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ProfileFileOut<'a> {
-    schema_version: u32,
-    id: &'a str,
-    name: &'a str,
-    description: &'a str,
-    enabled: bool,
-    tools: &'a denia_core::subagent::ToolChoice,
-    model: &'a denia_core::subagent::ModelChoice,
-    permission_ceiling: PermissionCeiling,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    color: Option<&'a str>,
-}
-
-fn default_true() -> bool {
-    true
-}
-
-/// 子代理定义仓库；按项目根分别解析，用户级定义对所有项目可见。
-pub struct SubagentProfileStore {
+/// `$DENIA_HOME/subagents` 等目录的解析与读写的唯一入口。
+pub struct ProfileStore {
     home: PathBuf,
-    /// 部署已注册的工具名（server 组装完注册表后注入）；`None` = 未注入，
-    /// 工具名校验跳过（`mcp__*` 前缀的动态工具始终豁免）。
-    known_tools: ArcSwap<Option<Arc<BTreeSet<String>>>>,
-    /// 根 → 名册；`refresh()` 清空（外部编辑与 CRUD 都走它）。
-    cache: std::sync::Mutex<BTreeMap<PathBuf, Arc<Vec<ProfileRow>>>>,
+    builtin: Vec<SubagentProfile>,
+    /// 写路径互斥：创建/覆盖只有一条写路径，且同目录临时文件 + 原子替换。
+    write_lock: Mutex<()>,
 }
 
-impl SubagentProfileStore {
-    pub fn load(home: &Path) -> Arc<Self> {
-        Arc::new(Self {
+impl ProfileStore {
+    pub fn new(home: &Path) -> Self {
+        Self {
             home: home.to_path_buf(),
-            known_tools: ArcSwap::from_pointee(None),
-            cache: std::sync::Mutex::new(BTreeMap::new()),
-        })
-    }
-
-    /// 注入部署已注册的工具名并清缓存。
-    pub fn set_known_tools(&self, names: impl IntoIterator<Item = String>) {
-        self.known_tools
-            .store(Arc::new(Some(Arc::new(names.into_iter().collect()))));
-        self.refresh();
-    }
-
-    pub fn home(&self) -> &Path {
-        &self.home
-    }
-
-    /// 用户级定义目录。
-    pub fn user_root(&self) -> PathBuf {
-        self.home.join(DIR_NAME)
-    }
-
-    /// 项目级定义目录；`None` = 未解析出项目根。
-    pub fn project_root(&self, project_root: Option<&Path>) -> Option<PathBuf> {
-        project_root.map(|root| root.join(PROJECT_DIR))
-    }
-
-    pub fn refresh(&self) {
-        self.cache
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .clear();
-    }
-
-    /// 某个项目根下的完整名册（含被遮蔽行）。结果按 (有效优先, source, id) 排序。
-    pub fn rows_for(&self, project_root: Option<&Path>) -> Arc<Vec<ProfileRow>> {
-        let key = project_root.map(Path::to_path_buf).unwrap_or_default();
-        if let Some(hit) = self
-            .cache
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .get(&key)
-        {
-            return hit.clone();
+            builtin: denia_core::subagent::builtin_subagent_profiles(),
+            write_lock: Mutex::new(()),
         }
-        let rows = Arc::new(self.build(project_root));
-        self.cache
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .insert(key, rows.clone());
-        rows
     }
 
-    fn build(&self, project_root: Option<&Path>) -> Vec<ProfileRow> {
-        let known = self.known_tools.load_full();
-        let known = known.as_deref();
-        let mut rows: Vec<ProfileRow> = Vec::new();
-        for profile in builtin_profiles() {
-            let diagnostics = profile.validate();
-            rows.push(row_from_profile(
-                profile,
-                SubagentProfileSource::Builtin,
-                None,
-                diagnostics,
-            ));
+    pub fn user_dir(&self) -> PathBuf {
+        self.home.join(USER_DIR)
+    }
+
+    /// 项目根：cwd 向上找 `.git`（与 skills/AGENTS.md 同款规则），找不到就用 cwd。
+    pub fn project_root(cwd: &Path) -> PathBuf {
+        cwd.ancestors()
+            .find(|path| path.join(".git").exists())
+            .unwrap_or(cwd)
+            .to_path_buf()
+    }
+
+    pub fn project_dir_for(&self, cwd: &Path) -> PathBuf {
+        Self::project_root(cwd).join(PROJECT_DIR)
+    }
+
+    /// 读取完整目录（含被覆盖项）。project_root 为 None 时只有内置 + 用户级。
+    pub fn catalog(&self, project_root: Option<&Path>) -> Catalog {
+        let user_dir = self.user_dir();
+        let project_dir = project_root.map(|root| root.join(PROJECT_DIR));
+        let user_files = self.scan_dir(&user_dir, ProfileSource::User);
+        let project_files = match &project_dir {
+            Some(dir) => self.scan_dir(dir, ProfileSource::Project),
+            None => ScanResult::default(),
+        };
+        let mut diagnostics: Vec<ProfileDiagnostic> = Vec::new();
+        diagnostics.extend(user_files.diagnostics.iter().cloned());
+        diagnostics.extend(project_files.diagnostics.iter().cloned());
+        // builtin → user → project：后者覆盖前者，BTreeMap 保证稳定排序。
+        let mut by_id: BTreeMap<String, Layer> = BTreeMap::new();
+        let mut layers: Vec<SubagentProfileView> = Vec::new();
+        let builtin_ids: HashSet<String> = self.builtin.iter().map(|p| p.id.clone()).collect();
+        for profile in &self.builtin {
+            let revision = revision_of_builtin(profile);
+            let view = view_of(
+                profile.clone(),
+                ProfileSource::Builtin,
+                revision,
+                false,
+                project_dir.is_some(),
+                Vec::new(),
+            );
+            layers.push(view.clone());
+            by_id.insert(
+                profile.id.clone(),
+                Layer {
+                    view,
+                    shadowed_by: None,
+                },
+            );
         }
-        let user_root = self.user_root();
-        let user_rows = read_scope(&user_root, SubagentProfileSource::User, known);
-        rows.extend(user_rows);
-        if let Some(project_root) = project_root {
-            rows.extend(read_scope(
-                &project_root.join(PROJECT_DIR),
-                SubagentProfileSource::Project,
-                known,
-            ));
-        }
-        // 有效定义：同 id 取合并顺序里最后出现的那一行（builtin→user→project）。
-        let mut effective: BTreeMap<String, usize> = BTreeMap::new();
-        for (index, row) in rows.iter().enumerate() {
-            effective.insert(row.id.clone(), index);
-        }
-        let overridden_builtin: BTreeSet<String> = rows
-            .iter()
-            .filter(|row| row.source != SubagentProfileSource::Builtin)
-            .map(|row| row.id.clone())
-            .collect();
-        let overridden_user: BTreeSet<String> = rows
-            .iter()
-            .filter(|row| row.source == SubagentProfileSource::Project)
-            .map(|row| row.id.clone())
-            .collect();
-        for (index, row) in rows.iter_mut().enumerate() {
-            let is_effective = effective.get(&row.id) == Some(&index);
-            row.effective = is_effective;
-            row.shadowed = !is_effective;
-            row.overrides_builtin = overridden_builtin.contains(&row.id)
-                && row.source == SubagentProfileSource::User;
-            row.overrides_user = overridden_user.contains(&row.id)
-                && row.source == SubagentProfileSource::User;
-            row.editable = true;
-            if row.source == SubagentProfileSource::Builtin && overridden_builtin.contains(&row.id)
-            {
-                // 内置行被覆盖时，编辑动作落用户覆盖、删除动作针对覆盖。
-                row.editable = true;
-                row.overrides_builtin = true;
+        for layer in [
+            (ProfileSource::User, &user_files.definitions),
+            (ProfileSource::Project, &project_files.definitions),
+        ] {
+            for (profile, revision, extra) in layer.1 {
+                let overrides = builtin_ids.contains(&profile.id);
+                let view = view_of(
+                    profile.clone(),
+                    layer.0,
+                    *revision,
+                    overrides,
+                    project_dir.is_some(),
+                    extra.clone(),
+                );
+                layers.push(view.clone());
+                by_id.insert(
+                    profile.id.clone(),
+                    Layer {
+                        view,
+                        shadowed_by: None,
+                    },
+                );
             }
         }
-        // 有效行在前，其余按 source→id 稳定排序。
-        rows.sort_by(|a, b| {
-            b.effective
-                .cmp(&a.effective)
-                .then(a.source.cmp(&b.source))
-                .then(a.id.cmp(&b.id))
-        });
-        rows
+        // 被覆盖项：同一逻辑 id 有多个 layer 时，除最后一个外都记录为 shadowed。
+        let mut by_logical: BTreeMap<String, Vec<SubagentProfileView>> = BTreeMap::new();
+        for view in &layers {
+            by_logical
+                .entry(view.profile.id.clone())
+                .or_default()
+                .push(view.clone());
+        }
+        let mut effective: Vec<SubagentProfileView> = Vec::new();
+        let mut shadowed: Vec<SubagentProfileView> = Vec::new();
+        for (_id, mut group) in by_logical {
+            // 目录扫描顺序即合并顺序；group 内最后一个为有效项。
+            let winner = group.pop().expect("group is non-empty");
+            shadowed.extend(group);
+            effective.push(winner);
+        }
+        let revision = catalog_revision(&effective, &shadowed);
+        Catalog {
+            effective,
+            shadowed,
+            diagnostics,
+            revision,
+            user_dir: user_dir.display().to_string(),
+            project_dir: project_dir.map(|dir| dir.display().to_string()),
+            project_root: project_root.map(|root| root.display().to_string()),
+        }
     }
 
-    /// 模型可见的定义目录：只含每个逻辑 id 的有效定义，且必须健康、启用。
-    pub fn catalog(&self, project_root: Option<&Path>) -> Vec<CatalogEntry> {
-        self.rows_for(project_root)
+    /// 派遣目录条目：每个逻辑 id 的有效项，只含选型所需摘要。
+    pub fn catalog_entries(
+        &self,
+        project_root: Option<&Path>,
+    ) -> Vec<denia_core::subagent::SubagentCatalogEntry> {
+        let catalog = self.catalog(project_root);
+        let mut out: Vec<denia_core::subagent::SubagentCatalogEntry> = catalog
+            .effective
             .iter()
-            .filter(|row| row.effective && row.enabled())
-            .filter_map(|row| {
-                let profile = row.profile.as_ref()?;
-                Some(CatalogEntry {
-                    qualified_id: row.qualified_id.clone(),
-                    name: profile.name.clone(),
-                    description: profile.description.clone(),
-                    tools: tools_summary(&profile.tools),
-                    model: model_summary(profile),
-                })
+            .filter(|view| view.profile.enabled && view.diagnostics.is_empty())
+            .map(|view| {
+                denia_core::subagent::SubagentCatalogEntry::new(
+                    view.qualified_id.clone(),
+                    &view.profile,
+                )
             })
-            .collect()
+            .collect();
+        out.sort_by(|left, right| left.qualified_id.cmp(&right.qualified_id));
+        out
     }
 
-    /// 按 qualifiedId 或逻辑 id 解析一份可派遣定义。
+    /// 全部可派遣的限定 id（按逻辑 id 排序）。
+    pub fn dispatchable(&self, project_root: Option<&Path>) -> Vec<ResolvedProfile> {
+        let catalog = self.catalog(project_root);
+        let mut out = Vec::new();
+        for view in catalog.effective {
+            if !view.profile.enabled || !view.diagnostics.is_empty() {
+                // 禁用或损坏的有效定义不可派遣（不回落低优先级同名项）。
+                continue;
+            }
+            out.push(ResolvedProfile {
+                qualified_id: view.qualified_id.clone(),
+                source: view.source,
+                revision: view.revision,
+                profile: view.profile,
+            });
+        }
+        out
+    }
+
+    /// 解析一个限定 id。
     ///
-    /// 遮蔽行（`user:x` 被 `project:x` 覆盖）不提供给派遣，返回
-    /// `subagent/profile-shadowed` 并指出有效项；禁用与损坏同样拒绝，
-    /// 不回落到下层同名定义。
+    /// - 请求的是**有效**限定 id → 返回它；
+    /// - 请求的是被覆盖的底层限定 id → `subagent/profile-shadowed` 并指出有效项；
+    /// - 逻辑 id 不存在 → `subagent/profile-not-found`；
+    /// - 有效定义被禁用或损坏 → `subagent/profile-disabled` / `profile-invalid`
+    ///   （**不**回落同名低优先级定义）。
     pub fn resolve(
         &self,
-        target: &str,
         project_root: Option<&Path>,
-    ) -> Result<ResolvedProfile, SubagentError> {
-        let rows = self.rows_for(project_root);
-        let (source, id) = match target.split_once(':') {
-            Some((prefix, id))
-                if matches!(prefix, "builtin" | "user" | "project") && !id.is_empty() =>
-            {
-                let source = match prefix {
-                    "builtin" => SubagentProfileSource::Builtin,
-                    "user" => SubagentProfileSource::User,
-                    _ => SubagentProfileSource::Project,
-                };
-                (Some(source), id.to_string())
-            }
-            _ => (None, target.to_string()),
-        };
-        if !is_valid_subagent_id(&id) {
-            return Err(SubagentError::new(
-                "subagent/invalid-profile-id",
-                format!("非法的子代理定义 id：{id}"),
-            )
-            .field("profileId")
-            .candidates(self.available_ids(&rows)));
-        }
-        if source == Some(SubagentProfileSource::Project) && project_root.is_none() {
-            return Err(SubagentError::new(
-                "subagent/project-scope-unavailable",
-                "当前会话解析不出项目根，无法使用项目级定义",
-            )
-            .field("profileId"));
-        }
-        let candidates = self.available_ids(&rows);
-        let row = match source {
-            Some(source) => rows
-                .iter()
-                .find(|row| row.id == id && row.source == source)
-                .ok_or_else(|| {
-                    SubagentError::new(
-                        "subagent/profile-not-found",
-                        format!("未找到定义：{}:{id}", source.as_str()),
-                    )
-                    .field("profileId")
-                    .candidates(candidates.clone())
-                })?,
-            None => rows
-                .iter()
-                .find(|row| row.id == id && row.effective)
-                .ok_or_else(|| {
-                    SubagentError::new(
-                        "subagent/profile-not-found",
-                        format!("未找到子代理定义：{id}"),
-                    )
-                    .field("profileId")
-                    .candidates(candidates.clone())
-                })?,
-        };
-        if row.shadowed {
-            let effective = rows.iter().find(|row| row.id == id && row.effective);
-            return Err(SubagentError::new(
-                "subagent/profile-shadowed",
+        raw: &str,
+    ) -> Result<ResolvedProfile, ProfileError> {
+        let requested = QualifiedProfileId::parse(raw).map_err(|message| {
+            ProfileError::new(codes::PROFILE_INVALID, message)
+                .field("profile_id")
+                .candidates(self.effective_ids(project_root))
+        })?;
+        let catalog = self.catalog(project_root);
+        let effective = catalog
+            .effective
+            .iter()
+            .find(|view| view.profile.id == requested.id)
+            .ok_or_else(|| {
+                ProfileError::new(codes::PROFILE_NOT_FOUND, format!("未知的子代理定义：{raw}"))
+                    .field("profile_id")
+                    .candidates(self.effective_ids(project_root))
+            })?;
+        if effective.source != requested.source {
+            return Err(ProfileError::new(
+                codes::PROFILE_SHADOWED,
                 format!(
-                    "定义 {} 已被更高优先级定义覆盖，不能直接派遣",
-                    row.qualified_id
+                    "{raw} 已被更高优先级的定义覆盖，不能绕过覆盖直接派遣（有效项：{}）",
+                    effective.qualified_id
                 ),
             )
-            .field("profileId")
-            .candidates(
-                effective
-                    .map(|row| vec![row.qualified_id.clone()])
-                    .unwrap_or(candidates),
-            ));
+            .field("profile_id")
+            .candidates(vec![effective.qualified_id.clone()]));
         }
-        let Some(profile) = row.profile.clone() else {
-            return Err(SubagentError::new(
-                "subagent/profile-broken",
+        if !effective.diagnostics.is_empty() {
+            return Err(ProfileError::new(
+                codes::PROFILE_INVALID,
                 format!(
-                    "定义 {} 无法解析，先修好它再派遣：{}",
-                    row.qualified_id,
-                    row.broken.as_deref().unwrap_or("未知原因")
+                    "{} 的定义文件无法解析，已拒绝使用：{}",
+                    effective.qualified_id,
+                    effective
+                        .diagnostics
+                        .iter()
+                        .map(|issue| issue.message.as_str())
+                        .collect::<Vec<_>>()
+                        .join(";")
                 ),
             )
-            .field("profileId"));
-        };
-        if !profile.enabled {
-            return Err(SubagentError::new(
-                "subagent/profile-disabled",
-                format!("定义 {} 已被禁用，请选择其他类型或先启用它", row.qualified_id),
-            )
-            .field("profileId")
-            .candidates(candidates));
+            .field("profile_id"));
         }
-        let diagnostics = profile.validate();
-        if !diagnostics.is_empty() {
-            return Err(SubagentError::new(
-                "subagent/profile-invalid",
+        if !effective.profile.enabled {
+            return Err(ProfileError::new(
+                codes::PROFILE_DISABLED,
                 format!(
-                    "定义 {} 校验不通过：{}",
-                    row.qualified_id, diagnostics[0].reason
+                    "{} 已被禁用，不能派遣；请选择其他类型或先在设置里启用",
+                    effective.qualified_id
                 ),
             )
-            .field("profileId"));
+            .field("profile_id")
+            .candidates(self.effective_ids(project_root)));
         }
         Ok(ResolvedProfile {
-            profile,
-            qualified_id: row.qualified_id.clone(),
-            source: row.source,
-            revision: row.revision.clone(),
+            qualified_id: effective.qualified_id.clone(),
+            source: effective.source,
+            revision: effective.revision,
+            profile: effective.profile.clone(),
         })
     }
 
-    /// 未指定定义时的默认预设（有效 develop）。
+    /// 省略 `profile_id` 时的默认定义：逻辑 id `develop` 的有效项。
     pub fn resolve_default(
         &self,
         project_root: Option<&Path>,
-    ) -> Result<ResolvedProfile, SubagentError> {
-        self.resolve(DEFAULT_SUBAGENT_ID, project_root).map_err(|error| {
-            SubagentError::new(&error.code, format!(
-                "默认子代理定义 `{DEFAULT_SUBAGENT_ID}` 当前不可用（{}）；请显式选择 profileId 或提供 inline 定义",
-                error.reason
-            ))
-            .field("profileId")
-            .candidates(error.candidates)
+    ) -> Result<ResolvedProfile, ProfileError> {
+        let catalog = self.catalog(project_root);
+        let effective = catalog
+            .effective
+            .iter()
+            .find(|view| view.profile.id == "develop")
+            .ok_or_else(|| {
+                ProfileError::new(
+                    codes::PROFILE_NOT_FOUND,
+                    "默认的 develop 定义不存在；请显式指定 profile_id 或 inline 规格",
+                )
+            })?;
+        let qualified = effective.qualified_id.clone();
+        self.resolve(project_root, &qualified).map_err(|error| {
+            ProfileError::new(
+                codes::PROFILE_DISABLED,
+                format!(
+                    "默认的 develop 定义当前不可用（{}）；请选择其他类型",
+                    error.message
+                ),
+            )
+            .field("profile_id")
+            .candidates(self.effective_ids(project_root))
         })
     }
 
-    fn available_ids(&self, rows: &[ProfileRow]) -> Vec<String> {
-        rows.iter()
-            .filter(|row| row.effective && row.enabled())
-            .map(|row| row.qualified_id.clone())
+    pub fn effective_ids(&self, project_root: Option<&Path>) -> Vec<String> {
+        self.catalog(project_root)
+            .effective
+            .iter()
+            .filter(|view| view.profile.enabled && view.diagnostics.is_empty())
+            .map(|view| view.qualified_id.clone())
             .collect()
     }
 
-    /// 管理页详情：定义 + 磁盘原文（用户/项目定义）。
-    pub fn describe_text(
+    /// 创建定义。`scope` 只允许 user/project（builtin 不可写程序资源）。
+    pub fn create(
         &self,
-        qualified_id: &str,
+        scope: ProfileWriteScope,
         project_root: Option<&Path>,
-    ) -> Result<String, SubagentError> {
-        let rows = self.rows_for(project_root);
-        let row = rows
-            .iter()
-            .find(|row| row.qualified_id == qualified_id)
-            .ok_or_else(|| {
-                SubagentError::new(
-                    "subagent/profile-not-found",
-                    format!("未找到定义：{qualified_id}"),
-                )
-            })?;
-        match &row.path {
-            Some(path) => std::fs::read_to_string(path).map_err(|error| {
-                SubagentError::new(
-                    "subagent/profile-unreadable",
-                    format!("读取定义文件失败：{error}"),
-                )
-            }),
-            None => row
-                .profile
-                .as_ref()
-                .map(render_file)
-                .ok_or_else(|| {
-                    SubagentError::new(
-                        "subagent/profile-broken",
-                        row.broken.clone().unwrap_or_else(|| "定义无法解析".into()),
-                    )
-                }),
-        }
-    }
-
-    /// 创建或覆盖一份定义（写入口唯一）。
-    ///
-    /// `scope` 只允许 user/project；内置定义另走 [`Self::update`] 的覆盖语义。
-    pub fn write(
-        &self,
-        scope: SubagentProfileSource,
-        profile: &SubagentProfile,
-        project_root: Option<&Path>,
-        expected_revision: Option<&str>,
-    ) -> Result<ProfileRow, SubagentError> {
-        if scope == SubagentProfileSource::Builtin {
-            return Err(SubagentError::new(
-                "subagent/builtin-read-only",
-                "内置定义的程序资源不可写：请写用户覆盖或复制成自定义定义",
-            ));
-        }
-        let diagnostics = profile.validate();
-        if !diagnostics.is_empty() {
-            return Err(SubagentError::new(
-                "subagent/profile-invalid",
-                diagnostics[0].reason.clone(),
-            )
-            .field(diagnostics[0].field.as_deref().unwrap_or("profile")));
-        }
-        let root = self.scope_root(scope, project_root)?;
-        let existing = self
-            .rows_for(project_root)
-            .iter()
-            .find(|row| row.id == profile.id && row.source == scope)
-            .cloned();
-        match (&existing, expected_revision) {
-            (Some(row), Some(expected)) if row.revision != expected => {
-                return Err(SubagentError::new(
-                    "subagent/revision-conflict",
-                    format!(
-                        "定义 {} 已被其他窗口或外部编辑修改（期望 {}，实际 {}）",
-                        row.qualified_id, expected, row.revision
-                    ),
-                )
-                .field("expectedRevision"));
-            }
-            (Some(_), None) => {
-                return Err(SubagentError::new(
-                    "subagent/revision-required",
-                    "覆盖已有定义必须带 expectedRevision",
-                )
-                .field("expectedRevision"));
-            }
-            _ => {}
-        }
-        let path = self.definition_path(&root, &profile.id)?;
-        write_definition(&path, profile)?;
-        self.refresh();
-        self.rows_for(project_root)
-            .iter()
-            .find(|row| row.id == profile.id && row.source == scope)
-            .cloned()
-            .ok_or_else(|| {
-                SubagentError::new(
-                    "subagent/profile-write-unverified",
-                    "定义已写入但名册里读不回来，请刷新后重试",
-                )
-            })
-    }
-
-    /// 删除某个作用域下的定义（等价于删除覆盖）；返回删除后生效的定义描述。
-    pub fn remove(
-        &self,
-        scope: SubagentProfileSource,
-        id: &str,
-        project_root: Option<&Path>,
-        expected_revision: Option<&str>,
-    ) -> Result<Option<ProfileRow>, SubagentError> {
-        if scope == SubagentProfileSource::Builtin {
-            return Err(SubagentError::new(
-                "subagent/builtin-read-only",
-                "内置定义不可删除：可禁用它、复制成自定义定义，或删除用户/项目覆盖",
-            ));
-        }
-        let root = self.scope_root(scope, project_root)?;
-        let existing = self
-            .rows_for(project_root)
-            .iter()
-            .find(|row| row.id == id && row.source == scope)
-            .cloned()
-            .ok_or_else(|| {
-                SubagentError::new(
-                    "subagent/profile-not-found",
-                    format!("{} 作用域下没有定义：{id}", scope.as_str()),
-                )
-            })?;
-        if let Some(expected) = expected_revision
-            && existing.revision != expected
-        {
-            return Err(SubagentError::new(
-                "subagent/revision-conflict",
+        mut profile: SubagentProfile,
+        body: String,
+    ) -> Result<SubagentProfileView, ProfileError> {
+        profile.instructions = body;
+        profile.schema_version = SUBAGENT_SCHEMA_VERSION;
+        self.validate_for_write(&profile)?;
+        let target_dir = self.dir_for_write(scope, project_root)?;
+        let _guard = self.write_lock.lock().unwrap_or_else(|p| p.into_inner());
+        let path = definition_path(&target_dir, &profile.id)?;
+        if path.exists() {
+            return Err(ProfileError::new(
+                codes::PROFILE_EXISTS,
                 format!(
-                    "定义 {} 已被其他窗口或外部编辑修改（期望 {}，实际 {}）",
-                    existing.qualified_id, expected, existing.revision
+                    "{} 已存在：{}",
+                    QualifiedProfileId::new(source_for_scope(scope), profile.id.clone()),
+                    path.display()
+                ),
+            )
+            .field("id"));
+        }
+        write_definition(&target_dir, &path, &profile)?;
+        let catalog = self.catalog(project_root);
+        self.view_for(&catalog, &profile.id).ok_or_else(|| {
+            ProfileError::new(
+                codes::PROFILE_INVALID,
+                "定义已写入，但重新读取失败；请检查文件内容",
+            )
+        })
+    }
+
+    /// 全量更新（必须带 expectedRevision）。内置把内容写进用户覆盖层，
+    /// 不修改程序资源。
+    pub fn update(
+        &self,
+        project_root: Option<&Path>,
+        raw: &str,
+        mut profile: SubagentProfile,
+        body: String,
+        expected_revision: u64,
+    ) -> Result<SubagentProfileView, ProfileError> {
+        let catalog = self.catalog(project_root);
+        let qualified = QualifiedProfileId::parse(raw).map_err(|message| {
+            ProfileError::new(codes::PROFILE_INVALID, message).field("qualifiedId")
+        })?;
+        let layer = catalog
+            .effective
+            .iter()
+            .find(|view| view.profile.id == qualified.id)
+            .ok_or_else(|| {
+                ProfileError::new(codes::PROFILE_NOT_FOUND, format!("未知的子代理定义：{raw}"))
+                    .candidates(
+                        catalog
+                            .effective
+                            .iter()
+                            .map(|view| view.qualified_id.clone())
+                            .collect(),
+                    )
+            })?;
+        // 有效项不是调用方指的那个（被覆盖）时拒绝，避免写错层。
+        if layer.source != qualified.source {
+            return Err(ProfileError::new(
+                codes::PROFILE_SHADOWED,
+                format!(
+                    "{raw} 已被 {} 覆盖；请改为编辑有效项，或把 scope 指到覆盖它的作用域",
+                    layer.qualified_id
+                ),
+            )
+            .field("qualifiedId")
+            .candidates(vec![layer.qualified_id.clone()]));
+        }
+        if layer.revision != expected_revision {
+            return Err(ProfileError::new(
+                codes::REVISION_CONFLICT,
+                format!(
+                    "定义已被其他改动更新（当前 revision {}，提交 {expected_revision}）；请重新加载后再保存",
+                    layer.revision
                 ),
             )
             .field("expectedRevision"));
         }
-        let path = self.definition_path(&root, id)?;
-        if path.exists() {
-            std::fs::remove_file(&path).map_err(|error| {
-                SubagentError::new(
-                    "subagent/profile-remove-failed",
-                    format!("删除定义文件失败：{error}"),
+        // 写入作用域：内置写用户覆盖；其余写自身层。
+        let scope = scope_for_source(layer.source);
+        profile.id = qualified.id.clone();
+        profile.instructions = body;
+        profile.schema_version = SUBAGENT_SCHEMA_VERSION;
+        self.validate_for_write(&profile)?;
+        let target_dir = self.dir_for_write(scope, project_root)?;
+        let _guard = self.write_lock.lock().unwrap_or_else(|p| p.into_inner());
+        let path = definition_path(&target_dir, &profile.id)?;
+        // 覆盖写路径同样做 revision 复核：两个窗口并发保存，后到者拿到冲突。
+        if let Some(current) = read_definition(&path, &profile.id) {
+            let current_revision = current.revision;
+            if current_revision != layer.revision && layer.source == source_for_scope(scope) {
+                return Err(ProfileError::new(
+                    codes::REVISION_CONFLICT,
+                    format!(
+                        "文件已在别处被修改（当前 revision {current_revision}）；请重新加载后再保存"
+                    ),
                 )
-            })?;
+                .field("expectedRevision"));
+            }
         }
-        self.refresh();
-        Ok(self
-            .rows_for(project_root)
-            .iter()
-            .find(|row| row.id == id && row.effective)
-            .cloned())
+        write_definition(&target_dir, &path, &profile)?;
+        let catalog = self.catalog(project_root);
+        self.view_for(&catalog, &profile.id).ok_or_else(|| {
+            ProfileError::new(
+                codes::PROFILE_INVALID,
+                "定义已写入，但重新读取失败；请检查文件内容",
+            )
+        })
     }
 
-    /// 复制一份定义到指定作用域：整个定义的显式副本，不继承来源的写权限状态。
-    pub fn copy(
+    /// 删除某个作用域的覆盖/定义，返回恢复后的有效项。
+    pub fn delete(
         &self,
-        qualified_id: &str,
-        scope: SubagentProfileSource,
-        new_id: &str,
-        new_name: Option<&str>,
         project_root: Option<&Path>,
-    ) -> Result<ProfileRow, SubagentError> {
-        if !is_valid_subagent_id(new_id) {
-            return Err(SubagentError::new(
-                "subagent/invalid-id",
-                format!("非法的定义 id：{new_id}（只允许小写字母、数字与连字符）"),
-            )
-            .field("id"));
-        }
-        let rows = self.rows_for(project_root);
-        if rows.iter().any(|row| row.id == new_id && row.source == scope) {
-            return Err(SubagentError::new(
-                "subagent/profile-exists",
-                format!("{} 作用域下已存在同名定义：{new_id}", scope.as_str()),
-            )
-            .field("id"));
-        }
-        let source = rows
-            .iter()
-            .find(|row| row.qualified_id == qualified_id)
-            .ok_or_else(|| {
-                SubagentError::new(
-                    "subagent/profile-not-found",
-                    format!("未找到定义：{qualified_id}"),
-                )
-            })?;
-        let mut profile = source.profile.clone().ok_or_else(|| {
-            SubagentError::new(
-                "subagent/profile-broken",
-                format!("来源定义无法解析：{qualified_id}"),
-            )
+        raw: &str,
+        scope: ProfileWriteScope,
+        expected_revision: Option<u64>,
+    ) -> Result<Option<SubagentProfileView>, ProfileError> {
+        let qualified = QualifiedProfileId::parse(raw).map_err(|message| {
+            ProfileError::new(codes::PROFILE_INVALID, message).field("qualifiedId")
         })?;
-        profile.id = new_id.to_string();
-        if let Some(name) = new_name.map(str::trim).filter(|name| !name.is_empty()) {
-            profile.name = name.to_string();
+        let catalog = self.catalog(project_root);
+        let Some(layer) = catalog
+            .effective
+            .iter()
+            .find(|view| view.profile.id == qualified.id)
+        else {
+            return Err(ProfileError::new(
+                codes::PROFILE_NOT_FOUND,
+                format!("未知的子代理定义：{raw}"),
+            )
+            .candidates(
+                catalog
+                    .effective
+                    .iter()
+                    .map(|view| view.qualified_id.clone())
+                    .collect(),
+            ));
+        };
+        let revision = layer.revision;
+        if let Some(expected) = expected_revision
+            && expected != revision
+        {
+            return Err(ProfileError::new(
+                codes::REVISION_CONFLICT,
+                format!(
+                    "定义已被其他改动更新（当前 revision {revision}，提交 {expected}）；请重新加载后再删除"
+                ),
+            )
+            .field("expectedRevision"));
         }
-        profile.enabled = true;
-        self.write(scope, &profile, project_root, None)
+        let target_dir = self.dir_for_write(scope, project_root)?;
+        let _guard = self.write_lock.lock().unwrap_or_else(|p| p.into_inner());
+        let path = definition_path(&target_dir, &qualified.id)?;
+        if !path.exists() {
+            return Err(ProfileError::new(
+                codes::PROFILE_NOT_FOUND,
+                format!(
+                    "{} 在 {} 作用域下没有可删除的定义",
+                    qualified,
+                    source_for_scope(scope).as_str()
+                ),
+            )
+            .field("scope"));
+        }
+        remove_definition(&path)?;
+        let catalog = self.catalog(project_root);
+        Ok(self.view_for(&catalog, &qualified.id))
     }
 
-    fn scope_root(
+    /// 内置恢复默认：删除指定作用域的覆盖。
+    pub fn reset(
         &self,
-        scope: SubagentProfileSource,
         project_root: Option<&Path>,
-    ) -> Result<PathBuf, SubagentError> {
+        raw: &str,
+        scope: ProfileWriteScope,
+    ) -> Result<Option<SubagentProfileView>, ProfileError> {
+        self.delete(project_root, raw, scope, None)
+    }
+
+    fn view_for(&self, catalog: &Catalog, logical_id: &str) -> Option<SubagentProfileView> {
+        catalog
+            .effective
+            .iter()
+            .find(|view| view.profile.id == logical_id)
+            .cloned()
+    }
+
+    fn validate_for_write(&self, profile: &SubagentProfile) -> Result<(), ProfileError> {
+        if let Err(issues) = profile.validate() {
+            let message = issues
+                .iter()
+                .map(|issue| issue.message.as_str())
+                .collect::<Vec<_>>()
+                .join(";");
+            let field = issues.first().and_then(|issue| issue.field.clone());
+            let mut error = ProfileError::new(codes::PROFILE_INVALID, message);
+            error.field = field;
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    fn dir_for_write(
+        &self,
+        scope: ProfileWriteScope,
+        project_root: Option<&Path>,
+    ) -> Result<PathBuf, ProfileError> {
         match scope {
-            SubagentProfileSource::User => Ok(self.user_root()),
-            SubagentProfileSource::Project => {
+            ProfileWriteScope::User => Ok(self.user_dir()),
+            ProfileWriteScope::Project => {
                 let root = project_root.ok_or_else(|| {
-                    SubagentError::new(
-                        "subagent/project-scope-unavailable",
-                        "当前会话解析不出项目根，无法写项目级定义",
+                    ProfileError::new(
+                        codes::SCOPE_FORBIDDEN,
+                        "当前上下文没有项目根，不能写项目级定义；请指定会话或改用用户作用域",
                     )
+                    .field("scope")
                 })?;
                 Ok(root.join(PROJECT_DIR))
             }
-            SubagentProfileSource::Builtin => Err(SubagentError::new(
-                "subagent/builtin-read-only",
-                "内置定义的资源目录不可写",
-            )),
         }
     }
 
-    /// 定义文件路径：id 已过 slug 语法白名单，再做目录逃逸与符号链接落点校验。
-    fn definition_path(&self, root: &Path, id: &str) -> Result<PathBuf, SubagentError> {
-        if !is_valid_subagent_id(id) {
-            return Err(SubagentError::new(
-                "subagent/invalid-id",
-                format!("非法的定义 id：{id}"),
-            )
-            .field("id"));
-        }
-        std::fs::create_dir_all(root).map_err(|error| {
-            SubagentError::new(
-                "subagent/profile-write-failed",
-                format!("创建定义目录失败：{error}"),
-            )
-        })?;
-        let canonical_root = root.canonicalize().map_err(|error| {
-            SubagentError::new(
-                "subagent/profile-write-failed",
-                format!("解析定义目录失败：{error}"),
-            )
-        })?;
-        let path = canonical_root.join(format!("{id}{FILE_SUFFIX}"));
-        if path.exists() {
-            let resolved = path.canonicalize().map_err(|error| {
-                SubagentError::new(
-                    "subagent/profile-write-failed",
-                    format!("解析定义文件失败：{error}"),
-                )
-            })?;
-            if !resolved.starts_with(&canonical_root) {
-                return Err(SubagentError::new(
-                    "subagent/path-escape",
-                    format!("定义文件落在定义目录之外：{}", resolved.display()),
-                )
-                .field("id"));
+    fn scan_dir(&self, dir: &Path, source: ProfileSource) -> ScanResult {
+        let mut result = ScanResult::default();
+        let entries = match std::fs::read_dir(dir) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return result,
+            Err(error) => {
+                result.diagnostics.push(ProfileDiagnostic::error(
+                    codes::PROFILE_INVALID,
+                    Some("dir"),
+                    format!("无法读取定义目录 {}：{error}", dir.display()),
+                ));
+                return result;
+            }
+        };
+        let mut paths: Vec<PathBuf> = entries
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| path.extension().is_some_and(|ext| ext == "md"))
+            .collect();
+        paths.sort();
+        for path in paths {
+            match parse_definition_file(&path) {
+                Ok((profile, revision)) => {
+                    if profile.id != file_stem(&path) {
+                        result.diagnostics.push(ProfileDiagnostic::error(
+                            codes::PROFILE_INVALID,
+                            Some("id"),
+                            format!(
+                                "{} 里的 id `{}` 与文件名不一致；文件名即 id",
+                                path.display(),
+                                profile.id
+                            ),
+                        ));
+                        continue;
+                    }
+                    result.definitions.push((profile, revision, Vec::new()));
+                }
+                Err(issues) => {
+                    let label = path
+                        .file_name()
+                        .map(|name| name.to_string_lossy().to_string())
+                        .unwrap_or_default();
+                    result
+                        .diagnostics
+                        .extend(issues.into_iter().map(|mut issue| {
+                            issue.message = format!("{label}：{}", issue.message);
+                            issue
+                        }));
+                }
             }
         }
-        Ok(path)
+        let _ = source;
+        result
     }
 }
 
-/// 模型可见目录里的一行：只给挑选所需的信息，不含 instructions 全文。
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CatalogEntry {
-    pub qualified_id: String,
-    pub name: String,
-    pub description: String,
-    pub tools: String,
-    pub model: String,
+/// 管理页看到的写入目标作用域。
+pub fn write_scope_for(view: &SubagentProfileView) -> ProfileWriteScope {
+    scope_for_source(view.source)
 }
 
-/// 解析结果：可执行的定义 + 来源身份。
-#[derive(Debug, Clone)]
-pub struct ResolvedProfile {
-    pub profile: SubagentProfile,
-    pub qualified_id: String,
-    pub source: SubagentProfileSource,
-    pub revision: String,
-}
-
-/// 目录里的工具摘要：只说模式与数量，不铺开全部名字。
-fn tools_summary(tools: &denia_core::subagent::ToolChoice) -> String {
-    match tools {
-        denia_core::subagent::ToolChoice::Inherit => "继承父代理可授予工具".to_string(),
-        denia_core::subagent::ToolChoice::Allowlist { names } => {
-            if names.is_empty() {
-                "无工具".to_string()
-            } else {
-                names.join("、")
-            }
-        }
+fn scope_for_source(source: ProfileSource) -> ProfileWriteScope {
+    match source {
+        // 内置不可写程序资源：编辑写用户覆盖，删除/恢复默认作用域由调用方指定。
+        ProfileSource::Builtin | ProfileSource::User => ProfileWriteScope::User,
+        ProfileSource::Project => ProfileWriteScope::Project,
     }
 }
 
-fn model_summary(profile: &SubagentProfile) -> String {
-    match &profile.model {
-        denia_core::subagent::ModelChoice::Inherit => "继承父代理模型".to_string(),
-        denia_core::subagent::ModelChoice::Explicit { selection } => {
-            match &selection.reasoning_effort {
-                Some(effort) => format!("{}/{} ({effort})", selection.provider, selection.model),
-                None => format!("{}/{}", selection.provider, selection.model),
-            }
-        }
+fn source_for_scope(scope: ProfileWriteScope) -> ProfileSource {
+    match scope {
+        ProfileWriteScope::User => ProfileSource::User,
+        ProfileWriteScope::Project => ProfileSource::Project,
     }
 }
 
-fn row_from_profile(
+#[derive(Default)]
+struct ScanResult {
+    definitions: Vec<(SubagentProfile, u64, Vec<ProfileDiagnostic>)>,
+    diagnostics: Vec<ProfileDiagnostic>,
+}
+
+struct Layer {
+    view: SubagentProfileView,
+    #[allow(dead_code)]
+    shadowed_by: Option<String>,
+}
+
+fn view_of(
     profile: SubagentProfile,
-    source: SubagentProfileSource,
-    path: Option<&Path>,
-    diagnostics: Vec<SubagentDiagnostic>,
-) -> ProfileRow {
-    let revision = revision_of(&profile);
-    ProfileRow {
-        qualified_id: format!("{}:{}", source.prefix(), profile.id),
-        id: profile.id.clone(),
+    source: ProfileSource,
+    revision: u64,
+    overrides_builtin: bool,
+    project_writable: bool,
+    diagnostics: Vec<ProfileDiagnostic>,
+) -> SubagentProfileView {
+    SubagentProfileView {
+        qualified_id: QualifiedProfileId::new(source, profile.id.clone()).to_string(),
+        profile,
         source,
         revision,
         editable: true,
-        overrides_builtin: false,
-        overrides_user: false,
-        effective: false,
-        shadowed: false,
-        profile: Some(profile),
-        path: path.map(|path| path.display().to_string()),
-        broken: None,
+        overrides_builtin,
+        project_writable,
         diagnostics,
     }
 }
 
-fn broken_row(
-    id: &str,
-    source: SubagentProfileSource,
-    path: Option<&Path>,
-    reason: impl Into<String>,
-) -> ProfileRow {
-    let reason = reason.into();
-    ProfileRow {
-        qualified_id: format!("{}:{id}", source.prefix()),
-        id: id.to_string(),
-        source,
-        revision: String::new(),
-        editable: true,
-        overrides_builtin: false,
-        overrides_user: false,
-        effective: false,
-        shadowed: false,
-        profile: None,
-        path: path.map(|path| path.display().to_string()),
-        broken: Some(reason.clone()),
-        diagnostics: vec![SubagentDiagnostic::new(
-            "subagent/profile-broken",
+/// 定义文件路径。id 已通过语法校验，因此不可能含分隔符或 `..`；
+/// 这里再做一次防御性复核，并拒绝把定义写到符号链接上。
+fn definition_path(dir: &Path, id: &str) -> Result<PathBuf, ProfileError> {
+    if !is_valid_subagent_id(id) {
+        return Err(
+            ProfileError::new(codes::PROFILE_INVALID, format!("非法的定义 id：{id}")).field("id"),
+        );
+    }
+    Ok(dir.join(format!("{id}.md")))
+}
+
+fn file_stem(path: &Path) -> String {
+    path.file_stem()
+        .map(|stem| stem.to_string_lossy().to_string())
+        .unwrap_or_default()
+}
+
+/// 解析一份定义文件：严格 frontmatter + 正文。
+fn parse_definition_file(path: &Path) -> Result<(SubagentProfile, u64), Vec<ProfileDiagnostic>> {
+    let bytes = std::fs::read(path).map_err(|error| {
+        vec![ProfileDiagnostic::error(
+            codes::PROFILE_INVALID,
             None,
-            reason,
-        )],
-    }
+            format!("无法读取定义文件：{error}"),
+        )]
+    })?;
+    let revision = hash_bytes(&bytes);
+    let raw = String::from_utf8(bytes).map_err(|_| {
+        vec![ProfileDiagnostic::error(
+            codes::PROFILE_INVALID,
+            None,
+            "定义文件不是合法的 UTF-8".to_string(),
+        )]
+    })?;
+    let normalized = raw.trim_start_matches('\u{feff}').replace("\r\n", "\n");
+    let (frontmatter, body) = split_frontmatter(&normalized)?;
+    let profile = parse_frontmatter(&frontmatter, &file_stem(path), &body)?;
+    Ok((profile, revision))
 }
 
-/// 读一个作用域目录；文件损坏保留诊断而不是隐去。
-fn read_scope(
-    root: &Path,
-    source: SubagentProfileSource,
-    known_tools: Option<&BTreeSet<String>>,
-) -> Vec<ProfileRow> {
-    let Ok(entries) = std::fs::read_dir(root) else {
-        return Vec::new();
-    };
-    let mut rows: Vec<ProfileRow> = Vec::new();
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if !path.is_file() {
-            continue;
-        }
-        let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
-            continue;
-        };
-        let Some(id) = file_name.strip_suffix(FILE_SUFFIX) else {
-            continue;
-        };
-        if !is_valid_subagent_id(id) {
-            rows.push(broken_row(
-                id,
-                source,
-                Some(&path),
-                format!("文件名不是合法的定义 id（小写字母、数字与连字符）：{file_name}"),
-            ));
-            continue;
-        }
-        let raw = match std::fs::read_to_string(&path) {
-            Ok(raw) => raw,
-            Err(error) => {
-                rows.push(broken_row(
-                    id,
-                    source,
-                    Some(&path),
-                    format!("读取定义文件失败：{error}"),
-                ));
-                continue;
-            }
-        };
-        match parse_file(&raw) {
-            Ok(mut profile) => {
-                if profile.id != id {
-                    rows.push(broken_row(
-                        id,
-                        source,
-                        Some(&path),
-                        format!("定义里的 id（{}）与文件名不一致", profile.id),
-                    ));
-                    continue;
-                }
-                let mut diagnostics = profile.validate();
-                if let Some(unknown) = unknown_tools(&profile, known_tools) {
-                    diagnostics.push(SubagentDiagnostic::new(
-                        "subagent/unknown-tool",
-                        Some("tools"),
-                        format!("引用了当前部署不存在的工具：{}", unknown.join("、")),
-                    ));
-                }
-                // 文件名即身份，正文里的 id 与文件名一致才继续。
-                profile.id = id.to_string();
-                rows.push(row_from_profile(profile, source, Some(&path), diagnostics));
-            }
-            Err(reason) => rows.push(broken_row(id, source, Some(&path), reason)),
-        }
-    }
-    rows.sort_by(|a, b| a.id.cmp(&b.id));
-    rows
-}
-
-/// 白名单里引用了部署不存在的工具；`mcp__*` 前缀是动态工具，不校验。
-fn unknown_tools(
-    profile: &SubagentProfile,
-    known_tools: Option<&BTreeSet<String>>,
-) -> Option<Vec<String>> {
-    let known = known_tools?;
-    let names = profile.tools.allowlist()?;
-    let unknown: Vec<String> = names
-        .iter()
-        .filter(|name| !name.starts_with("mcp__") && !known.contains(name.as_str()))
-        .cloned()
-        .collect();
-    (!unknown.is_empty()).then_some(unknown)
-}
-
-/// 解析 frontmatter + 正文；任何结构问题都返回可执行原因。
-pub fn parse_file(raw: &str) -> Result<SubagentProfile, String> {
-    let text = raw.trim_start_matches('\u{feff}').replace("\r\n", "\n");
+/// frontmatter 与正文的分割：`---` 起、`---` 止；缺失 frontmatter 直接报错。
+fn split_frontmatter(text: &str) -> Result<(String, String), Vec<ProfileDiagnostic>> {
     let rest = text
         .strip_prefix("---\n")
-        .ok_or("定义文件必须以 `---` 起始的 YAML frontmatter 开头")?;
-    let (front, body) = rest
-        .split_once("\n---")
-        .ok_or("frontmatter 没有闭合的 `---` 行")?;
-    let body = body.strip_prefix('\n').unwrap_or(body);
-    let file: ProfileFile = serde_yaml::from_str(front)
-        .map_err(|error| format!("frontmatter 解析失败（未知字段会被拒绝）：{error}"))?;
-    Ok(SubagentProfile {
-        schema_version: file.schema_version,
-        id: file.id,
-        name: file.name,
-        description: file.description,
-        instructions: body.trim_end_matches('\n').to_string(),
-        enabled: file.enabled,
-        tools: file.tools,
-        model: file.model,
-        permission_ceiling: file.permission_ceiling,
-        color: file.color,
+        .or_else(|| text.strip_prefix("---\r\n"))
+        .ok_or_else(|| {
+            vec![ProfileDiagnostic::error(
+                codes::PROFILE_INVALID,
+                Some("frontmatter"),
+                "定义文件必须以 `---` 开头的 YAML frontmatter 起始".to_string(),
+            )]
+        })?;
+    let end = rest.find("\n---").ok_or_else(|| {
+        vec![ProfileDiagnostic::error(
+            codes::PROFILE_INVALID,
+            Some("frontmatter"),
+            "定义文件缺少结束的 `---`".to_string(),
+        )]
+    })?;
+    let frontmatter = rest[..end].to_string();
+    let after = &rest[end + 4..];
+    let body = after.strip_prefix('\n').unwrap_or(after);
+    Ok((frontmatter, body.to_string()))
+}
+
+/// 严格解析 frontmatter：每一层的键集合都必须精确匹配，未知键失败。
+fn parse_frontmatter(
+    frontmatter: &str,
+    file_id: &str,
+    body: &str,
+) -> Result<SubagentProfile, Vec<ProfileDiagnostic>> {
+    let value: YamlValue = serde_yaml::from_str(frontmatter).map_err(|error| {
+        vec![ProfileDiagnostic::error(
+            codes::PROFILE_INVALID,
+            Some("frontmatter"),
+            format!("frontmatter 不是合法 YAML：{error}"),
+        )]
+    })?;
+    let mut issues: Vec<ProfileDiagnostic> = Vec::new();
+    let mapping = match &value {
+        YamlValue::Mapping(mapping) => mapping,
+        _ => {
+            return Err(vec![ProfileDiagnostic::error(
+                codes::PROFILE_INVALID,
+                Some("frontmatter"),
+                "frontmatter 必须是一个映射".to_string(),
+            )]);
+        }
+    };
+    let allowed = [
+        "schemaVersion",
+        "id",
+        "name",
+        "description",
+        "enabled",
+        "tools",
+        "model",
+        "permissionCeiling",
+        "color",
+    ];
+    strict_keys(mapping, &allowed, "frontmatter", &mut issues);
+    for field in BODY_FIELDS {
+        if mapping.contains_key(YamlValue::String((*field).to_string())) {
+            issues.push(ProfileDiagnostic::error(
+                codes::PROFILE_INVALID,
+                Some(field),
+                format!("{field} 属于 Markdown 正文，不能写在 frontmatter 里"),
+            ));
+        }
+    }
+    if let Some(tools) = mapping.get(YamlValue::String("tools".into())) {
+        match tools {
+            YamlValue::Mapping(tools) => {
+                strict_keys(tools, &["mode", "names"], "tools", &mut issues);
+                check_mode(tools, &["inherit", "allowlist"], "tools", &mut issues);
+                if tools.get(YamlValue::String("mode".into()))
+                    == Some(&YamlValue::String("inherit".into()))
+                    && tools.contains_key(YamlValue::String("names".into()))
+                {
+                    issues.push(ProfileDiagnostic::error(
+                        codes::PROFILE_INVALID,
+                        Some("tools.names"),
+                        "tools.mode=inherit 时不能同时给出 names".to_string(),
+                    ));
+                }
+            }
+            _ => issues.push(ProfileDiagnostic::error(
+                codes::PROFILE_INVALID,
+                Some("tools"),
+                "tools 必须是映射".to_string(),
+            )),
+        }
+    }
+    if let Some(model) = mapping.get(YamlValue::String("model".into())) {
+        match model {
+            YamlValue::Mapping(model) => {
+                strict_keys(model, &["mode", "selection"], "model", &mut issues);
+                check_mode(model, &["inherit", "explicit"], "model", &mut issues);
+                if let Some(selection) = model.get(YamlValue::String("selection".into())) {
+                    match selection {
+                        YamlValue::Mapping(selection) => {
+                            strict_keys(
+                                selection,
+                                &["provider", "model", "reasoningEffort"],
+                                "model.selection",
+                                &mut issues,
+                            );
+                        }
+                        _ => issues.push(ProfileDiagnostic::error(
+                            codes::PROFILE_INVALID,
+                            Some("model.selection"),
+                            "model.selection 必须是映射".to_string(),
+                        )),
+                    }
+                }
+            }
+            _ => issues.push(ProfileDiagnostic::error(
+                codes::PROFILE_INVALID,
+                Some("model"),
+                "model 必须是映射".to_string(),
+            )),
+        }
+    }
+    if let Some(color) = mapping.get(YamlValue::String("color".into())) {
+        let known = ["blue", "green", "purple", "orange", "red", "gray"];
+        match color.as_str() {
+            Some(name) if known.contains(&name) => {}
+            _ => issues.push(ProfileDiagnostic::error(
+                codes::PROFILE_INVALID,
+                Some("color"),
+                format!("未知的颜色；可选：{}", known.join("、")),
+            )),
+        }
+    }
+    if !issues.is_empty() {
+        return Err(issues);
+    }
+    let json = serde_json::to_value(&value).map_err(|error| {
+        vec![ProfileDiagnostic::error(
+            codes::PROFILE_INVALID,
+            None,
+            error.to_string(),
+        )]
+    })?;
+    let mut profile: SubagentProfile = serde_json::from_value(json).map_err(|error| {
+        vec![ProfileDiagnostic::error(
+            codes::PROFILE_INVALID,
+            None,
+            format!("定义字段无法解析：{error}"),
+        )]
+    })?;
+    let _ = file_id;
+    profile.instructions = body.to_string();
+    profile.validate().map_err(|issues| issues)?;
+    Ok(profile)
+}
+
+fn strict_keys(
+    mapping: &serde_yaml::Mapping,
+    allowed: &[&str],
+    where_: &str,
+    issues: &mut Vec<ProfileDiagnostic>,
+) {
+    for key in mapping.keys() {
+        let Some(name) = key.as_str() else {
+            issues.push(ProfileDiagnostic::error(
+                codes::PROFILE_INVALID,
+                Some(where_),
+                format!("{where_} 的键必须是字符串"),
+            ));
+            continue;
+        };
+        if !allowed.contains(&name) {
+            issues.push(ProfileDiagnostic::error(
+                codes::PROFILE_INVALID,
+                Some(where_),
+                format!(
+                    "{where_} 不支持字段 `{name}`（允许：{}）",
+                    allowed.join("、")
+                ),
+            ));
+        }
+    }
+}
+
+fn check_mode(
+    mapping: &serde_yaml::Mapping,
+    modes: &[&str],
+    where_: &str,
+    issues: &mut Vec<ProfileDiagnostic>,
+) {
+    match mapping
+        .get(YamlValue::String("mode".into()))
+        .and_then(YamlValue::as_str)
+    {
+        Some(mode) if modes.contains(&mode) => {}
+        Some(mode) => issues.push(ProfileDiagnostic::error(
+            codes::PROFILE_INVALID,
+            Some(where_),
+            format!(
+                "{where_}.mode 不支持 `{mode}`（允许：{}）",
+                modes.join("、")
+            ),
+        )),
+        None => issues.push(ProfileDiagnostic::error(
+            codes::PROFILE_INVALID,
+            Some(where_),
+            format!("{where_} 缺少必填的 mode"),
+        )),
+    }
+}
+
+/// 读取一份已存在的定义（用于写前 revision 复核）；解析失败返回 None。
+fn read_definition(path: &Path, _id: &str) -> Option<ResolvedProfile> {
+    if !path.exists() {
+        return None;
+    }
+    let (profile, revision) = parse_definition_file(path).ok()?;
+    Some(ResolvedProfile {
+        qualified_id: profile.id.clone(),
+        source: ProfileSource::User,
+        revision,
+        profile,
     })
 }
 
-/// 渲染定义文件全文（内置定义的"查看原文"与复制落盘共用一份口径）。
-pub fn render_file(profile: &SubagentProfile) -> String {
-    let front = ProfileFileOut {
-        schema_version: if profile.schema_version == 0 {
-            SUBAGENT_SCHEMA_VERSION
-        } else {
-            profile.schema_version
-        },
-        id: &profile.id,
-        name: &profile.name,
-        description: &profile.description,
-        enabled: profile.enabled,
-        tools: &profile.tools,
-        model: &profile.model,
-        permission_ceiling: profile.permission_ceiling,
-        color: profile.color.as_deref(),
-    };
-    let yaml = serde_yaml::to_string(&front).unwrap_or_default();
-    format!("---\n{}---\n{}\n", yaml, profile.instructions)
+/// 序列化一份定义：frontmatter 与正文。
+pub fn serialize_definition(profile: &SubagentProfile) -> Result<String, ProfileError> {
+    let mut front = serde_json::Map::new();
+    front.insert(
+        "schemaVersion".into(),
+        JsonValue::from(profile.schema_version),
+    );
+    front.insert("id".into(), JsonValue::from(profile.id.clone()));
+    front.insert("name".into(), JsonValue::from(profile.name.clone()));
+    front.insert(
+        "description".into(),
+        JsonValue::from(profile.description.clone()),
+    );
+    front.insert("enabled".into(), JsonValue::from(profile.enabled));
+    front.insert(
+        "tools".into(),
+        serde_json::to_value(&profile.tools)
+            .map_err(|error| ProfileError::new(codes::PROFILE_INVALID, error.to_string()))?,
+    );
+    front.insert(
+        "model".into(),
+        serde_json::to_value(&profile.model)
+            .map_err(|error| ProfileError::new(codes::PROFILE_INVALID, error.to_string()))?,
+    );
+    front.insert(
+        "permissionCeiling".into(),
+        JsonValue::from(profile.permission_ceiling.as_str()),
+    );
+    if let Some(color) = profile.color {
+        front.insert(
+            "color".into(),
+            serde_json::to_value(color)
+                .map_err(|error| ProfileError::new(codes::PROFILE_INVALID, error.to_string()))?,
+        );
+    }
+    let front_yaml = serde_yaml::to_string(&front)
+        .map_err(|error| ProfileError::new(codes::PROFILE_INVALID, error.to_string()))?;
+    let mut out = String::from("---\n");
+    out.push_str(&front_yaml);
+    out.push_str("---\n");
+    out.push_str(&profile.instructions);
+    if !out.ends_with('\n') {
+        out.push('\n');
+    }
+    Ok(out)
 }
 
-/// 同目录临时文件 + 原子替换；写的是 UTF-8 明文，外部编辑可随时接管。
-fn write_definition(path: &Path, profile: &SubagentProfile) -> Result<(), SubagentError> {
-    let parent = path.parent().ok_or_else(|| {
-        SubagentError::new("subagent/profile-write-failed", "定义文件路径没有父目录")
-    })?;
-    std::fs::create_dir_all(parent).map_err(|error| {
-        SubagentError::new(
-            "subagent/profile-write-failed",
-            format!("创建定义目录失败：{error}"),
+/// 唯一写路径：同目录临时文件 + 原子替换。
+fn write_definition(
+    dir: &Path,
+    path: &Path,
+    profile: &SubagentProfile,
+) -> Result<(), ProfileError> {
+    std::fs::create_dir_all(dir).map_err(|error| {
+        ProfileError::new(
+            codes::SCOPE_FORBIDDEN,
+            format!("无法创建定义目录 {}：{error}", dir.display()),
         )
     })?;
-    let temp = parent.join(format!(
-        ".{}.tmp-{}",
-        path.file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("subagent"),
-        uuid::Uuid::new_v4()
-    ));
-    let rendered = render_file(profile);
-    std::fs::write(&temp, rendered.as_bytes()).map_err(|error| {
-        SubagentError::new(
-            "subagent/profile-write-failed",
-            format!("写入定义临时文件失败：{error}"),
+    // 目录本身是符号链接时拒绝：否则"写定义"会落到目录外。
+    let meta = std::fs::symlink_metadata(dir).map_err(|error| {
+        ProfileError::new(
+            codes::SCOPE_FORBIDDEN,
+            format!("无法访问定义目录 {}：{error}", dir.display()),
         )
     })?;
-    if let Err(error) = replace_file(&temp, path) {
-        let _ = std::fs::remove_file(&temp);
-        return Err(SubagentError::new(
-            "subagent/profile-write-failed",
-            format!("原子替换定义文件失败：{error}"),
+    if meta.file_type().is_symlink() {
+        return Err(ProfileError::new(
+            codes::SCOPE_FORBIDDEN,
+            format!("定义目录是符号链接，拒绝写入：{}", dir.display()),
         ));
     }
+    if let Ok(existing) = std::fs::symlink_metadata(path)
+        && existing.file_type().is_symlink()
+    {
+        return Err(ProfileError::new(
+            codes::SCOPE_FORBIDDEN,
+            format!("定义文件是符号链接，拒绝覆盖：{}", path.display()),
+        ));
+    }
+    let text = serialize_definition(profile)?;
+    let tmp = path.with_extension("md.tmp");
+    std::fs::write(&tmp, text.as_bytes()).map_err(|error| {
+        ProfileError::new(codes::SCOPE_FORBIDDEN, format!("写入定义失败：{error}"))
+    })?;
+    std::fs::rename(&tmp, path).map_err(|error| {
+        let _ = std::fs::remove_file(&tmp);
+        ProfileError::new(codes::SCOPE_FORBIDDEN, format!("替换定义文件失败：{error}"))
+    })?;
     Ok(())
 }
 
-/// 平台适配的原子替换：Windows 上 `rename` 不能覆盖既有文件。
-fn replace_file(temp: &Path, target: &Path) -> std::io::Result<()> {
-    #[cfg(windows)]
+fn remove_definition(path: &Path) -> Result<(), ProfileError> {
+    if let Ok(meta) = std::fs::symlink_metadata(path)
+        && meta.file_type().is_symlink()
     {
-        if target.exists() {
-            // 先删后改名不是原子操作，但保留旧文件的"改名覆盖"在 Windows
-            // 上根本不存在；同目录改名保证内容完整，宁可短暂缺文件也不写半截。
-            std::fs::remove_file(target)?;
-        }
+        return Err(ProfileError::new(
+            codes::SCOPE_FORBIDDEN,
+            format!("定义文件是符号链接，拒绝删除：{}", path.display()),
+        ));
     }
-    std::fs::rename(temp, target)
+    std::fs::remove_file(path).map_err(|error| {
+        ProfileError::new(codes::SCOPE_FORBIDDEN, format!("删除定义失败：{error}"))
+    })
 }
 
-/// 内容版本：定义规范化 JSON 的 SHA-256 前 16 位十六进制。
-///
-/// 只覆盖"会改变执行语义"的字段——空格与注释不参与，外部编辑器改内容
-/// 也会换出一个新版本，旧 revision 的写入随之失效。
-pub fn revision_of(profile: &SubagentProfile) -> String {
-    let canonical = serde_json::json!({
-        "schemaVersion": profile.schema_version,
-        "id": profile.id,
-        "name": profile.name,
-        "description": profile.description,
-        "instructions": profile.instructions,
-        "enabled": profile.enabled,
-        "tools": profile.tools,
-        "model": profile.model,
-        "permissionCeiling": profile.permission_ceiling,
-        "color": profile.color,
-    });
-    let mut hasher = Sha256::new();
-    hasher.update(canonical.to_string().as_bytes());
-    let digest = hasher.finalize();
-    digest.iter().take(8).map(|byte| format!("{byte:02x}")).collect()
+/// FNV-1a：内容版本（稳定、跨进程一致，外部编辑即刻使旧 revision 失效）。
+fn hash_bytes(bytes: &[u8]) -> u64 {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
+}
+
+fn revision_of_builtin(profile: &SubagentProfile) -> u64 {
+    let text = serialize_definition(profile).unwrap_or_else(|_| profile.id.clone());
+    hash_bytes(text.as_bytes())
+}
+
+fn catalog_revision(effective: &[SubagentProfileView], shadowed: &[SubagentProfileView]) -> u64 {
+    let mut text = String::new();
+    for view in effective.iter().chain(shadowed.iter()) {
+        text.push_str(&view.qualified_id);
+        text.push(':');
+        text.push_str(&view.revision.to_string());
+        text.push(';');
+    }
+    hash_bytes(text.as_bytes())
+}
+
+/// UI 与预览共用的默认颜色列表（前端也读同一份枚举）。
+pub fn color_options() -> Vec<ProfileColor> {
+    ProfileColor::ALL.to_vec()
+}
+
+/// 供测试与诊断：内置定义数量。
+pub fn builtin_count() -> usize {
+    denia_core::subagent::builtin_subagent_profiles().len()
+}
+
+/// 纯函数：把 `ToolSelection` 归一化成稳定排序的显式列表（allowlist 时）；
+/// `inherit` 原样返回 None。
+pub fn explicit_tool_names(selection: &ToolSelection) -> Option<Vec<String>> {
+    match selection {
+        ToolSelection::Inherit => None,
+        ToolSelection::Allowlist { names } => {
+            let mut names = names.clone();
+            names.sort();
+            Some(names)
+        }
+    }
+}
+
+/// 把 `PermissionCeiling` 渲染成模型可见的一句话。
+pub fn ceiling_label(ceiling: PermissionCeiling) -> &'static str {
+    match ceiling {
+        PermissionCeiling::Inherit => "跟随父权限",
+        PermissionCeiling::ReadOnly => "强制只读",
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use denia_core::subagent::{ModelChoice, ToolChoice};
+    use denia_core::subagent::ModelChoice;
 
-    fn temp_home(name: &str) -> PathBuf {
-        let root = std::env::temp_dir().join(format!(
-            "denia-subagent-profiles-{name}-{}",
-            uuid::Uuid::new_v4()
-        ));
-        std::fs::create_dir_all(&root).unwrap();
-        root
+    fn home(name: &str) -> PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("denia-subagent-{name}-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
     }
 
-    fn custom(id: &str, tools: Vec<&str>) -> SubagentProfile {
-        SubagentProfile {
-            schema_version: SUBAGENT_SCHEMA_VERSION,
-            id: id.to_string(),
-            name: format!("定义 {id}"),
-            description: "测试用定义".to_string(),
-            instructions: "只做测试。".to_string(),
-            enabled: true,
-            tools: ToolChoice::Allowlist {
-                names: tools.into_iter().map(str::to_string).collect(),
-            },
-            model: ModelChoice::Inherit,
-            permission_ceiling: PermissionCeiling::Inherit,
-            color: None,
-        }
+    fn project(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "denia-subagent-proj-{name}-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(dir.join(".git")).unwrap();
+        dir
+    }
+
+    fn profile(id: &str) -> SubagentProfile {
+        let mut profile = denia_core::subagent::builtin_subagent_profiles()[0].clone();
+        profile.id = id.to_string();
+        profile.name = format!("自定义 {id}");
+        profile.description = "测试用定义".to_string();
+        profile.tools = ToolSelection::Allowlist {
+            names: vec!["read_file".into()],
+        };
+        profile.permission_ceiling = PermissionCeiling::ReadOnly;
+        profile
     }
 
     #[test]
     fn builtins_are_listed_and_resolvable() {
-        let home = temp_home("builtins");
-        let store = SubagentProfileStore::load(&home);
-        let rows = store.rows_for(None);
-        for id in ["explore", "develop", "verify"] {
-            let row = rows
-                .iter()
-                .find(|row| row.qualified_id == format!("builtin:{id}"))
-                .expect("内置定义必须存在");
-            assert!(row.effective && !row.shadowed);
-            assert!(store.resolve(id, None).is_ok());
-            assert!(store.resolve(&format!("builtin:{id}"), None).is_ok());
-        }
+        let home = home("builtin");
+        let store = ProfileStore::new(&home);
+        let catalog = store.catalog(None);
+        let ids: Vec<&str> = catalog
+            .effective
+            .iter()
+            .map(|view| view.profile.id.as_str())
+            .collect();
+        assert_eq!(ids, vec!["develop", "explore", "verify"]);
+        assert!(catalog.shadowed.is_empty());
+        let resolved = store.resolve(None, "builtin:explore").unwrap();
+        assert_eq!(resolved.profile.id, "explore");
+        assert_eq!(
+            resolved.profile.permission_ceiling,
+            PermissionCeiling::ReadOnly
+        );
         std::fs::remove_dir_all(home).unwrap();
     }
 
     #[test]
-    fn project_overrides_user_and_shadowed_qualified_id_is_rejected() {
-        let home = temp_home("shadow");
-        let project = temp_home("project");
-        let store = SubagentProfileStore::load(&home);
+    fn user_definition_overrides_builtin_and_shadowed_id_is_refused() {
+        let home = home("override");
+        let project = project("override");
+        let store = ProfileStore::new(&home);
+        let mut custom = profile("explore");
+        custom.description = "用户级覆盖".to_string();
         store
-            .write(
-                SubagentProfileSource::User,
-                &custom("api-reviewer", vec!["read_file"]),
+            .create(
+                ProfileWriteScope::User,
                 Some(&project),
-                None,
+                custom,
+                "用户覆盖正文".to_string(),
             )
             .unwrap();
-        store
-            .write(
-                SubagentProfileSource::Project,
-                &custom("api-reviewer", vec!["read_file", "bash"]),
-                Some(&project),
-                None,
-            )
+        let catalog = store.catalog(Some(&project));
+        let explore = catalog
+            .effective
+            .iter()
+            .find(|view| view.profile.id == "explore")
             .unwrap();
-        let effective = store.resolve("api-reviewer", Some(&project)).unwrap();
-        assert_eq!(effective.source, SubagentProfileSource::Project);
+        assert_eq!(explore.source, ProfileSource::User);
+        assert!(explore.overrides_builtin);
+        // 被覆盖的 builtin 仍在列表里（管理页可见），但派遣被明确拒绝。
+        assert!(
+            catalog
+                .shadowed
+                .iter()
+                .any(|view| view.qualified_id == "builtin:explore")
+        );
         let error = store
-            .resolve("user:api-reviewer", Some(&project))
+            .resolve(Some(&project), "builtin:explore")
             .unwrap_err();
-        assert_eq!(error.code, "subagent/profile-shadowed");
-        assert_eq!(error.candidates, vec!["project:api-reviewer".to_string()]);
-        // 不带项目根时用户定义仍是有效项。
-        let user_only = store.resolve("api-reviewer", None).unwrap();
-        assert_eq!(user_only.source, SubagentProfileSource::User);
+        assert_eq!(error.code, codes::PROFILE_SHADOWED);
+        assert_eq!(error.candidates, vec!["user:explore".to_string()]);
+        // 有效项仍可派遣。
+        assert!(store.resolve(Some(&project), "user:explore").is_ok());
         std::fs::remove_dir_all(home).unwrap();
         std::fs::remove_dir_all(project).unwrap();
     }
 
     #[test]
-    fn disabled_high_priority_definition_does_not_fall_back() {
-        let home = temp_home("disabled");
-        let store = SubagentProfileStore::load(&home);
-        let mut profile = custom("explore", vec!["read_file"]);
-        profile.enabled = false;
+    fn project_overrides_user_and_remains_readable_when_removed() {
+        let home = home("project");
+        let project = project("project");
+        let store = ProfileStore::new(&home);
+        let mut user_layer = profile("api-reviewer");
+        user_layer.description = "用户层".to_string();
         store
-            .write(SubagentProfileSource::User, &profile, None, None)
+            .create(
+                ProfileWriteScope::User,
+                Some(&project),
+                user_layer,
+                "用户正文".to_string(),
+            )
             .unwrap();
-        let error = store.resolve("explore", None).unwrap_err();
-        assert_eq!(error.code, "subagent/profile-disabled");
+        let mut project_layer = profile("api-reviewer");
+        project_layer.description = "项目层".to_string();
+        store
+            .create(
+                ProfileWriteScope::Project,
+                Some(&project),
+                project_layer,
+                "项目正文".to_string(),
+            )
+            .unwrap();
+        let resolved = store
+            .resolve(Some(&project), "project:api-reviewer")
+            .unwrap();
+        assert_eq!(resolved.profile.description, "项目层");
+        assert!(store.resolve(Some(&project), "user:api-reviewer").is_err());
+        // 删除项目覆盖后，用户层重新成为有效项——不是"永久消失"。
+        let restored = store
+            .reset(
+                Some(&project),
+                "project:api-reviewer",
+                ProfileWriteScope::Project,
+            )
+            .unwrap()
+            .expect("用户层仍然存在");
+        assert_eq!(restored.source, ProfileSource::User);
+        assert_eq!(restored.profile.description, "用户层");
         std::fs::remove_dir_all(home).unwrap();
+        std::fs::remove_dir_all(project).unwrap();
     }
 
     #[test]
-    fn broken_file_keeps_diagnostics_and_blocks_dispatch() {
-        let home = temp_home("broken");
-        let store = SubagentProfileStore::load(&home);
-        let root = store.user_root();
-        std::fs::create_dir_all(&root).unwrap();
-        std::fs::write(root.join("bad.md"), "---\nid: bad\nnope: 1\n---\n正文\n").unwrap();
-        let row = store
-            .rows_for(None)
-            .iter()
-            .find(|row| row.qualified_id == "user:bad")
-            .cloned()
-            .expect("损坏的定义必须仍然列出来");
-        assert!(row.profile.is_none());
-        assert!(row.broken.is_some());
-        assert_eq!(
-            store.resolve("bad", None).unwrap_err().code,
-            "subagent/profile-broken"
+    fn disabled_effective_definition_does_not_fall_back_to_lower_layer() {
+        let home = home("disabled");
+        let project = project("disabled");
+        let store = ProfileStore::new(&home);
+        let mut custom = profile("explore");
+        custom.enabled = false;
+        store
+            .create(
+                ProfileWriteScope::User,
+                Some(&project),
+                custom,
+                "禁用".to_string(),
+            )
+            .unwrap();
+        let error = store.resolve(Some(&project), "user:explore").unwrap_err();
+        assert_eq!(error.code, codes::PROFILE_DISABLED);
+        // 内置同名项不会因为上层被禁用而重新变成可派遣项。
+        assert!(store.resolve(Some(&project), "builtin:explore").is_err());
+        assert!(
+            !store
+                .effective_ids(Some(&project))
+                .contains(&"builtin:explore".to_string())
         );
         std::fs::remove_dir_all(home).unwrap();
+        std::fs::remove_dir_all(project).unwrap();
     }
 
     #[test]
-    fn revision_conflict_is_reported_and_unknown_fields_rejected() {
-        let home = temp_home("revision");
-        let store = SubagentProfileStore::load(&home);
-        let profile = custom("reviewer", vec!["read_file"]);
-        let row = store
-            .write(SubagentProfileSource::User, &profile, None, None)
+    fn unknown_fields_bad_yaml_and_traversal_fail_loudly() {
+        let home = home("strict");
+        let project = project("strict");
+        let store = ProfileStore::new(&home);
+        std::fs::create_dir_all(store.user_dir()).unwrap();
+        std::fs::write(
+            store.user_dir().join("bad.md"),
+            "---\nschemaVersion: 1\nid: bad\nname: x\ndescription: y\nunknownField: 1\ntools:\n  mode: inherit\n---\nbody\n",
+        )
+        .unwrap();
+        let catalog = store.catalog(Some(&project));
+        assert!(
+            catalog
+                .diagnostics
+                .iter()
+                .any(|issue| issue.message.contains("不支持字段 `unknownField`")),
+            "未知字段必须报错:{:?}",
+            catalog.diagnostics
+        );
+        assert!(
+            !catalog
+                .effective
+                .iter()
+                .any(|view| view.profile.id == "bad")
+        );
+
+        std::fs::write(store.user_dir().join("broken.md"), "---\nid: [\n---\n").unwrap();
+        let catalog = store.catalog(Some(&project));
+        assert!(
+            catalog
+                .diagnostics
+                .iter()
+                .any(|issue| issue.message.contains("YAML"))
+        );
+
+        std::fs::write(
+            store.user_dir().join("escape.md"),
+            "---\nschemaVersion: 1\nid: escape\nname: x\ndescription: y\ntools:\n  mode: allowlist\n  names: ['../../x']\n---\n",
+        )
+        .unwrap();
+        // 非法工具名在这一层不报（需要注册表），但 id 与文件名必须一致；
+        // 路径穿越由 id 语法挡住。
+        assert!(!store.user_dir().join("../escape.md").exists());
+        assert!(
+            store
+                .create(
+                    ProfileWriteScope::User,
+                    Some(&project),
+                    profile("../escape"),
+                    String::new(),
+                )
+                .is_err()
+        );
+        std::fs::remove_dir_all(home).unwrap();
+        std::fs::remove_dir_all(project).unwrap();
+    }
+
+    #[test]
+    fn revision_conflict_is_reported_and_draft_is_kept() {
+        let home = home("revision");
+        let project = project("revision");
+        let store = ProfileStore::new(&home);
+        let created = store
+            .create(
+                ProfileWriteScope::User,
+                Some(&project),
+                profile("api-reviewer"),
+                "第一版".to_string(),
+            )
             .unwrap();
+        let stale = created.revision;
+        // 另一个窗口先保存一次。
+        let mut second = created.profile.clone();
+        second.description = "第二版".to_string();
+        store
+            .update(
+                Some(&project),
+                "user:api-reviewer",
+                second,
+                "第二版正文".to_string(),
+                stale,
+            )
+            .unwrap();
+        // 拿旧 revision 再保存必须失败（旧 revision 保存失败且保留 UI 草稿）。
+        let mut third = created.profile.clone();
+        third.description = "第三版".to_string();
         let error = store
-            .write(
-                SubagentProfileSource::User,
-                &profile,
-                None,
-                Some("deadbeef"),
+            .update(
+                Some(&project),
+                "user:api-reviewer",
+                third,
+                "第三版正文".to_string(),
+                stale,
             )
             .unwrap_err();
-        assert_eq!(error.code, "subagent/revision-conflict");
-        // 带正确 revision 的更新成功，且 revision 随内容变化。
-        let mut updated = profile.clone();
-        updated.description = "改过的描述".to_string();
-        let next = store
-            .write(
-                SubagentProfileSource::User,
-                &updated,
-                None,
-                Some(&row.revision),
+        assert_eq!(error.code, codes::REVISION_CONFLICT);
+        // 磁盘上仍是第二版。
+        let current = store.resolve(Some(&project), "user:api-reviewer").unwrap();
+        assert_eq!(current.profile.description, "第二版");
+        std::fs::remove_dir_all(home).unwrap();
+        std::fs::remove_dir_all(project).unwrap();
+    }
+
+    #[test]
+    fn create_conflicts_on_same_scope_id_but_allows_builtin_override() {
+        let home = home("conflict");
+        let project = project("conflict");
+        let store = ProfileStore::new(&home);
+        store
+            .create(
+                ProfileWriteScope::User,
+                Some(&project),
+                profile("api-reviewer"),
+                String::new(),
             )
             .unwrap();
-        assert_ne!(next.revision, row.revision);
+        let error = store
+            .create(
+                ProfileWriteScope::User,
+                Some(&project),
+                profile("api-reviewer"),
+                String::new(),
+            )
+            .unwrap_err();
+        assert_eq!(error.code, codes::PROFILE_EXISTS);
+        // builtin:explore 覆盖是允许的（内置可覆盖）。
+        store
+            .create(
+                ProfileWriteScope::User,
+                Some(&project),
+                profile("explore"),
+                String::new(),
+            )
+            .unwrap();
+        std::fs::remove_dir_all(home).unwrap();
+        std::fs::remove_dir_all(project).unwrap();
+    }
+
+    #[test]
+    fn editing_a_builtin_writes_a_user_override_without_touching_program_assets() {
+        let home = home("builtin-edit");
+        let project = project("builtin-edit");
+        let store = ProfileStore::new(&home);
+        let builtin = store.resolve(Some(&project), "builtin:explore").unwrap();
+        let mut edited = builtin.profile.clone();
+        edited.instructions = "编辑后的角色".to_string();
+        let view = store
+            .update(
+                Some(&project),
+                "builtin:explore",
+                edited,
+                "编辑后的角色".to_string(),
+                builtin.revision,
+            )
+            .unwrap();
+        assert_eq!(view.source, ProfileSource::User);
+        assert_eq!(view.qualified_id, "user:explore");
+        assert!(store.user_dir().join("explore.md").exists());
+        // 恢复默认后回到内置定义。
+        let restored = store
+            .reset(Some(&project), "user:explore", ProfileWriteScope::User)
+            .unwrap()
+            .unwrap();
+        assert_eq!(restored.source, ProfileSource::Builtin);
+        std::fs::remove_dir_all(home).unwrap();
+        std::fs::remove_dir_all(project).unwrap();
+    }
+
+    #[test]
+    fn definition_round_trips_through_frontmatter_and_body() {
+        let home = home("roundtrip");
+        let store = ProfileStore::new(&home);
+        let mut custom = profile("writer");
+        custom.instructions = "第一行\n第二行\n".to_string();
+        custom.color = Some(ProfileColor::Green);
+        custom.model = ModelChoice::Inherit;
+        std::fs::create_dir_all(store.user_dir()).unwrap();
+        let text = serialize_definition(&custom).unwrap();
+        assert!(text.starts_with("---\n"));
+        let path = store.user_dir().join("writer.md");
+        std::fs::write(&path, text).unwrap();
+        let (parsed, _revision) = parse_definition_file(&path).unwrap();
+        assert_eq!(parsed.instructions, "第一行\n第二行\n");
+        assert_eq!(parsed.color, Some(ProfileColor::Green));
+        assert_eq!(parsed.id, "writer");
         std::fs::remove_dir_all(home).unwrap();
     }
 
     #[test]
-    fn file_round_trip_preserves_definition() {
-        let profile = custom("round-trip", vec!["read_file", "bash"]);
-        let text = render_file(&profile);
-        let parsed = parse_file(&text).unwrap();
-        assert_eq!(parsed, profile);
-    }
-
-    #[test]
-    fn missing_authorization_list_in_legacy_log_is_not_inherit() {
-        use denia_core::session::SubagentDescriptor;
-        let descriptor = SubagentDescriptor {
-            label: "旧子代理".into(),
-            depth: 2,
-            mode: "spawn".into(),
-            selection: denia_core::config::ModelSelection {
-                provider: "p".into(),
-                model: "m".into(),
-                reasoning_effort: None,
-            },
-            persona: None,
-            allowed_tools: None,
-            snapshot: None,
-        };
-        let tools = descriptor.effective_tools();
-        assert!(tools.contains(&"read_file".to_string()));
-        assert!(!tools.contains(&"bash".to_string()));
-        assert!(!tools.contains(&"write_file".to_string()));
-        assert_eq!(
-            descriptor.permission_ceiling(),
-            PermissionCeiling::ReadOnly
-        );
-    }
-
-    #[test]
-    fn explicit_legacy_tools_are_intersected_with_the_historical_ceiling() {
-        use denia_core::session::SubagentDescriptor;
-        let descriptor = SubagentDescriptor {
-            label: "旧子代理".into(),
-            depth: 1,
-            mode: "spawn".into(),
-            selection: denia_core::config::ModelSelection {
-                provider: "p".into(),
-                model: "m".into(),
-                reasoning_effort: None,
-            },
-            persona: None,
-            allowed_tools: Some(vec![
-                "read_file".into(),
-                "write_file".into(),
-                "bash".into(),
-                "spawn_agent".into(),
-            ]),
-            snapshot: None,
-        };
-        let tools = descriptor.effective_tools();
-        assert!(tools.contains(&"read_file".to_string()));
-        assert!(tools.contains(&"write_file".to_string()));
-        assert!(!tools.contains(&"bash".to_string()), "bash 超出历史上限");
-        assert!(!tools.contains(&"spawn_agent".to_string()), "派遣工具必须被扣掉");
+    fn missing_project_root_cannot_write_project_scope() {
+        let home = home("noproject");
+        let store = ProfileStore::new(&home);
+        let error = store
+            .create(
+                ProfileWriteScope::Project,
+                None,
+                profile("x1"),
+                String::new(),
+            )
+            .unwrap_err();
+        assert_eq!(error.code, codes::SCOPE_FORBIDDEN);
+        std::fs::remove_dir_all(home).unwrap();
     }
 }

@@ -281,16 +281,40 @@ pub fn mcp_list_schema() -> ToolSchema {
 
 /// 目录文本渲染(纯函数,便于测试):按服务器分组列出已连接服务器的
 /// 模型可见工具。被关闭/冲突的工具不出现——它们本就不进路由。
-fn render_tool_catalog(servers: &[denia_mcp::McpServerState], only: Option<&str>) -> String {
+///
+/// `granted` 是**当前会话**的冻结授权：`Some` 时未授权的 MCP 工具不出现在
+/// 目录里（目录、首次参数加载与真实执行三处口径一致；计划 6.4）。`None`
+/// 表示该会话没有被定义收窄，按部署全集列出。
+fn render_tool_catalog(
+    servers: &[denia_mcp::McpServerState],
+    only: Option<&str>,
+    granted: Option<&[String]>,
+) -> String {
+    let allowed = |qualified: &str| granted.is_none_or(|list| list.iter().any(|n| n == qualified));
     let visible: Vec<&denia_mcp::McpServerState> = servers
         .iter()
         .filter(|server| {
             server.enabled
                 && server.status == denia_mcp::McpServerStatus::Connected
                 && only.is_none_or(|id| server.id == id)
+                && server
+                    .tools
+                    .iter()
+                    .any(|tool| tool.enabled && allowed(&tool.qualified))
         })
         .collect();
     if visible.is_empty() {
+        if granted.is_some() {
+            return match only {
+                Some(id) => format!(
+                    "当前会话没有被授予服务器 {id} 的任何 MCP 工具；需要外部能力请让父代理用授予了对应工具的定义重新派遣。"
+                ),
+                None => {
+                    "当前会话没有被授予任何 MCP 外部工具；需要外部能力请让父代理用授予了 MCP 工具的定义重新派遣。"
+                        .to_string()
+                }
+            };
+        }
         return match only {
             Some(id) => {
                 format!("没有名为 {id} 的已连接 MCP 服务器;不带 server 参数再调一次可查看全部。")
@@ -306,7 +330,7 @@ fn render_tool_catalog(servers: &[denia_mcp::McpServerState], only: Option<&str>
         body.push_str(&format!("\n[服务器 {}]\n", server.id));
         let mut listed = 0usize;
         for tool in &server.tools {
-            if !tool.enabled {
+            if !tool.enabled || !allowed(&tool.qualified) {
                 continue;
             }
             let description = tool.description.trim();
@@ -334,6 +358,8 @@ fn render_tool_catalog(servers: &[denia_mcp::McpServerState], only: Option<&str>
 pub struct McpListTool {
     manager: Arc<McpManager>,
     schema: ToolSchema,
+    /// 会话授权来源：绑定后目录按当前会话的冻结授权过滤。
+    grants: Option<Arc<dyn crate::capabilities::AgentRuntime>>,
 }
 
 impl McpListTool {
@@ -341,7 +367,14 @@ impl McpListTool {
         Self {
             manager,
             schema: mcp_list_schema(),
+            grants: None,
         }
+    }
+
+    /// 绑定授权来源：子代理只能看到自己冻结授权里的 MCP 工具。
+    pub fn with_grant_source(mut self, source: Arc<dyn crate::capabilities::AgentRuntime>) -> Self {
+        self.grants = Some(source);
+        self
     }
 }
 
@@ -351,7 +384,7 @@ impl Tool for McpListTool {
         &self.schema
     }
 
-    async fn execute(&self, arguments: &str, _ctx: &ToolContext) -> ToolOutput {
+    async fn execute(&self, arguments: &str, ctx: &ToolContext) -> ToolOutput {
         let only: Option<String> = match parse_tool_args::<Value>(arguments) {
             Ok(value) => value
                 .get("server")
@@ -361,35 +394,17 @@ impl Tool for McpListTool {
                 .map(str::to_string),
             Err(_) => None,
         };
+        let granted = match (&self.grants, ctx.session_id.as_deref()) {
+            (Some(source), Some(session)) => source.granted_tools(session),
+            _ => None,
+        };
         let snapshot = self.manager.snapshot();
-        // 授权投影：子代理只看到自己有效授权内的 MCP 工具。目录是发现的唯一
-        // 入口，这里不按授权裁剪的话，"未授权工具"会以清单形式重新暴露。
-        let mut text = render_tool_catalog(&snapshot.servers, only.as_deref());
-        if let Some(granted) = &_ctx.granted_tools {
-            text = filter_catalog(text, granted);
-        }
-        ToolOutput::text(text)
+        ToolOutput::text(render_tool_catalog(
+            &snapshot.servers,
+            only.as_deref(),
+            granted.as_deref(),
+        ))
     }
-}
-
-/// 目录文本里剔除未授权条目：`render_tool_catalog` 的每条工具行都以
-/// `- <qualified>` 开头，按行首名字过滤即可，不猜 MCP 的服务端分组结构。
-fn filter_catalog(text: String, granted: &[String]) -> String {
-    text.split('\n')
-        .filter(|line| {
-            let trimmed = line.trim_start();
-            if !trimmed.starts_with("- ") {
-                return true;
-            }
-            let name = trimmed
-                .trim_start_matches("- ")
-                .split_whitespace()
-                .next()
-                .unwrap_or_default();
-            !name.starts_with("mcp__") || granted.iter().any(|tool| tool == name)
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
 }
 
 #[cfg(test)]
@@ -443,7 +458,7 @@ mod catalog_tests {
             ),
             server("dead", McpServerStatus::Error, true, vec![]),
         ];
-        let text = render_tool_catalog(&servers, None);
+        let text = render_tool_catalog(&servers, None, None);
         assert!(text.contains("mcp__fx__echo — echo 的用途说明"));
         assert!(!text.contains("mcp__fx__off"), "被关闭的工具不得出现在目录");
         assert!(
@@ -460,10 +475,38 @@ mod catalog_tests {
             true,
             vec![tool("echo", "mcp__fx__echo", true)],
         )];
-        assert!(render_tool_catalog(&servers, Some("fx")).contains("mcp__fx__echo"));
-        let miss = render_tool_catalog(&servers, Some("nope"));
+        assert!(render_tool_catalog(&servers, Some("fx"), None).contains("mcp__fx__echo"));
+        let miss = render_tool_catalog(&servers, Some("nope"), None);
         assert!(miss.contains("nope") && miss.contains("没有"));
         let disabled = vec![server("off", McpServerStatus::Connected, false, vec![])];
-        assert!(render_tool_catalog(&disabled, None).contains("没有已连接"));
+        assert!(render_tool_catalog(&disabled, None, None).contains("没有已连接"));
+    }
+
+    /// 子代理的 MCP 目录按**冻结授权**过滤：未授权的工具不出现在目录里，
+    /// 也不把"目录根本没有"与"服务器没连上"混为一谈。
+    #[test]
+    fn catalog_hides_tools_outside_the_session_grant() {
+        let servers = vec![server(
+            "fx",
+            McpServerStatus::Connected,
+            true,
+            vec![
+                tool("echo", "mcp__fx__echo", true),
+                tool("write", "mcp__fx__write", true),
+            ],
+        )];
+        let granted = vec!["mcp__fx__echo".to_string()];
+        let text = render_tool_catalog(&servers, None, Some(&granted));
+        assert!(text.contains("mcp__fx__echo"));
+        assert!(
+            !text.contains("mcp__fx__write"),
+            "未授权的 MCP 工具不得出现在目录里:{text}"
+        );
+        // 授权里一个 MCP 工具都没有：明确说明是授权问题，不是连接问题。
+        let none: Vec<String> = vec!["read_file".to_string()];
+        let text = render_tool_catalog(&servers, None, Some(&none));
+        assert!(text.contains("没有被授予任何 MCP"), "{text}");
+        // 未指定授权（普通会话）：按部署全集列出。
+        assert!(render_tool_catalog(&servers, None, None).contains("mcp__fx__write"));
     }
 }

@@ -857,7 +857,6 @@ fn preview_html_response(bytes: &[u8]) -> axum::response::Response {
     response
 }
 
-
 /// 扩展名 → 预览用的 MIME。**白名单**，且不含任何可执行类型：
 /// `.js`/`.mjs`/`.cjs`/`.wasm`/`.php`/`.py` 之类一律不出现，
 /// 预览页因此永远拿不到可运行的脚本源。
@@ -1321,7 +1320,11 @@ mod file_read_tests {
             // 带目录前缀时只看基名。
             ("src/nested/Dockerfile", "dockerfile"),
         ] {
-            assert_eq!(language_hint(name), Some(expected), "文件 {name} 的语言提示");
+            assert_eq!(
+                language_hint(name),
+                Some(expected),
+                "文件 {name} 的语言提示"
+            );
         }
     }
 
@@ -1374,16 +1377,28 @@ mod preview_tests {
         let response = preview_html_response(b"<script>alert(1)</script>");
         let csp = csp_of(&response);
         assert!(csp.contains("script-src 'none'"), "CSP 必须禁脚本: {csp}");
-        assert!(csp.contains("object-src 'none'"), "CSP 必须禁 object: {csp}");
+        assert!(
+            csp.contains("object-src 'none'"),
+            "CSP 必须禁 object: {csp}"
+        );
         // 外发通道也要断，文档不能把工作区内容发出去。
-        assert!(csp.contains("connect-src 'none'"), "CSP 必须禁 connect: {csp}");
+        assert!(
+            csp.contains("connect-src 'none'"),
+            "CSP 必须禁 connect: {csp}"
+        );
         assert_eq!(
-            response.headers().get(axum::http::header::CONTENT_TYPE).unwrap(),
+            response
+                .headers()
+                .get(axum::http::header::CONTENT_TYPE)
+                .unwrap(),
             "text/html; charset=utf-8"
         );
         // 预览是即时快照，不许缓存。
         assert_eq!(
-            response.headers().get(axum::http::header::CACHE_CONTROL).unwrap(),
+            response
+                .headers()
+                .get(axum::http::header::CACHE_CONTROL)
+                .unwrap(),
             "no-store"
         );
     }
@@ -1394,8 +1409,8 @@ mod preview_tests {
     #[test]
     fn preview_whitelist_excludes_executable_types() {
         for ext in [
-            "js", "mjs", "cjs", "jsx", "ts", "tsx", "wasm", "php", "py", "rb", "sh", "exe",
-            "dll", "jar", "ps1",
+            "js", "mjs", "cjs", "jsx", "ts", "tsx", "wasm", "php", "py", "rb", "sh", "exe", "dll",
+            "jar", "ps1",
         ] {
             let path = PathBuf::from(format!("a.{ext}"));
             assert_eq!(
@@ -1520,10 +1535,7 @@ mod preview_tests {
     #[test]
     fn workspace_token_rejects_garbage() {
         for bad in ["!!!!", "not-valid-base64!!", "a", "////"] {
-            assert!(
-                decode_workspace_token(bad).is_none(),
-                "{bad} 不该解出内容"
-            );
+            assert!(decode_workspace_token(bad).is_none(), "{bad} 不该解出内容");
         }
         // 空 token 解出空根，不是目录，同样会被上层拒绝。
         assert_eq!(decode_workspace_token("").as_deref(), Some(""));

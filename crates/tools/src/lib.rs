@@ -38,7 +38,7 @@ use tokio_util::sync::CancellationToken;
 
 pub use ask::{AskTool, DEFAULT_TIMEOUT_MS as ASK_DEFAULT_TIMEOUT_MS};
 pub use bash::BashTool;
-pub use browser::{BrowserExecute, BrowserHub, BrowserOwnership, BrowserTool};
+pub use browser::{BrowserExecute, BrowserHub, BrowserTool};
 pub use edit::EditTool;
 pub use files::{ReadFileTool, WriteFileTool};
 pub use glob::GlobTool;
@@ -64,6 +64,19 @@ pub use web_fetch::WebFetchTool;
 /// The agent loop wires it to the session append + broadcast; tools never
 /// touch the session handle directly.
 pub type SessionEventSink = Arc<dyn Fn(SessionEvent) + Send + Sync>;
+
+/// 历史只读集合（旧日志与旧参数路径的保守上限）。
+///
+/// **不是**当前子代理策略：现在的子代理按定义（内置 explore/develop/verify
+/// 或用户自定义）声明自己的工具，只受"父可授予工具 ∩ 定义请求 − 硬禁项"约束。
+///
+/// 这个常量只服务两条遗留路径：
+/// 1. 读旧日志里的 `SubagentDescriptor`（缺 `effectiveTools` 时按它保守构造）；
+/// 2. 兼容旧的 `allowed_tools` 参数（显式列表最多与它相交，绝不放开写与命令）。
+///
+/// 权威定义在 `denia_core::subagent::LEGACY_READ_ONLY_TOOLS`；这里只是别名，
+/// 避免两处各写一份导致旧日志的解释漂移。
+pub const SUBAGENT_READ_ONLY_TOOLS: &[&str] = denia_core::subagent::LEGACY_READ_ONLY_TOOLS;
 
 /// 提问通道:宿主实现,把 `ask` 工具的提问挂到会话的挂起表并等待用户应答。
 ///
@@ -96,13 +109,6 @@ pub trait FileHistoryBackend: Send + Sync {
 pub struct ToolContext {
     /// 宿主授予的会话身份，绝不从模型参数接收。
     pub session_id: Option<String>,
-    /// 本会话的**有效工具授权**（子代理为冻结的 effectiveTools，根会话为
-    /// `None` = 部署装配面内不额外收窄）。
-    ///
-    /// 目录类工具（`mcp_list`）与延迟加载拦截都读它，保证“目录里看得到的”
-    /// 与“实际执行得动的”是同一份集合——否则未授权的工具可以绕过目录层
-    /// 被叫到。
-    pub granted_tools: Option<Arc<Vec<String>>>,
     pub selection: Option<denia_core::config::ModelSelection>,
     /// The session's working directory; relative paths anchor here.
     pub cwd: PathBuf,
@@ -136,19 +142,6 @@ pub struct ToolContext {
     /// 测试场景),此时行为与引入该机制之前完全一致。
     pub read_state: Option<read_state::SharedReadState>,
     pub output_store: Option<Arc<output::OutputStore>>,
-}
-
-impl ToolContext {
-    /// 某个工具名在当前会话里是否被授权。
-    ///
-    /// `granted_tools` 为 `None`（根会话）时不做额外收窄：部署装配面已经
-    /// 决定了工具面，这里不再重复一遍。
-    pub fn tool_granted(&self, name: &str) -> bool {
-        match &self.granted_tools {
-            None => true,
-            Some(tools) => tools.iter().any(|tool| tool == name),
-        }
-    }
 }
 
 /// One model-facing tool outcome.

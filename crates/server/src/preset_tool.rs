@@ -247,7 +247,6 @@ mod tests {
             call_id: None,
             goal_reader: None,
             read_state: None,
-            granted_tools: None,
         }
     }
 }

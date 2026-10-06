@@ -47,13 +47,15 @@ pub fn apply_output_budget(text: &str) -> (String, Option<TruncationInfo>) {
 }
 
 /// 数值型参数字段:宽容解析时允许 `"offset": "10"` 这类字符串数字。
+///
+/// 不含 `max_depth`:子代理的委派深度参数已移除（子代理禁止派遣子代理），
+/// 它会在 schema 校验处直接报 `subagent/depth-config-removed`。
 pub const NUMERIC_FIELDS: &[&str] = &[
     "offset",
     "limit",
     "max_results",
     "max_matches",
     "timeout_ms",
-    "max_depth",
 ];
 
 /// `path` 参数的常见别名:模型偶尔把路径放在 file/filepath/filename 里。

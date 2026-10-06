@@ -25,6 +25,25 @@ pub const SYSTEM_UPDATE_CHANNEL: &str = "system-prompt-update";
 /// 项目记忆索引注入通道名(MEMORY.md 全文,记忆启用时主会话可见)。
 pub const MEMORY_CHANNEL: &str = "project-memory";
 
+/// 子代理派遣目录注入通道名（父代理专用；子代理永不注入）。
+pub const SUBAGENT_CATALOG_CHANNEL: &str = "subagent-catalog";
+
+/// 子代理是否被授予某工具。
+///
+/// 优先读派遣时冻结的 `effectiveTools`；旧描述符没有该字段时按历史只读上限
+/// 保守构造。这保证"注入通道的可见性"与"执行层授权"同源。
+fn child_allows(session: &Session, name: &str) -> bool {
+    match session.header().subagent.as_ref() {
+        None => true,
+        Some(child) => match &child.effective_tools {
+            Some(tools) => tools.iter().any(|item| item == name),
+            None => denia_core::subagent::legacy_child_tools(child.allowed_tools.as_deref())
+                .iter()
+                .any(|item| item == name),
+        },
+    }
+}
+
 /// 目标被清除后的终局通知(一次性;此后通道内容与基准一致,不再重发)。
 const GOAL_CLEARED_TEXT: &str = "[denia 目标] 当前会话目标已清除,无需再关注目标。";
 
@@ -40,6 +59,8 @@ pub(crate) struct InjectionBaselines {
     pub project_memory: Option<String>,
     /// 会话目标状态块(`[denia 目标]` 前缀)。
     pub goal: Option<String>,
+    /// 子代理派遣目录（父代理专用）。
+    pub subagent_catalog: Option<String>,
 }
 
 impl InjectionBaselines {
@@ -49,7 +70,9 @@ impl InjectionBaselines {
         // 整条日志的克隆,而这里原本要克隆 4~5 次。
         let session = &state.session;
         let (capability_fallback, workspace_baseline, skill_catalog) =
-            session.with_events(|events| {
+            // 模型面视图：历史投影（旧子代理）丢掉的注入不算"已经注入过"，
+            // 否则投影后既看不到旧规则、也不会补新规则。
+            session.with_model_events(|events| {
                 let capability_fallback = events.iter().rev().find_map(|e| match &e.event {
                     SessionEvent::UserMessage {
                         text,
@@ -71,13 +94,14 @@ impl InjectionBaselines {
             skill_catalog,
             project_memory: last_injected_channel(session, MEMORY_CHANNEL),
             goal: last_injected_channel(session, GOAL_CHANNEL),
+            subagent_catalog: last_injected_channel(session, SUBAGENT_CATALOG_CHANNEL),
         }
     }
 }
 
 /// 按通道名取日志中最后一条注入消息(新事件模型:channel 字段)。
 pub(crate) fn last_injected_channel(session: &Session, channel: &str) -> Option<String> {
-    session.with_events(|events| {
+    session.with_model_events(|events| {
         events
             .iter()
             .rev()
@@ -108,7 +132,7 @@ pub(crate) async fn refresh_background_injections(
     let cwd = state.cwd();
     // 会话组装的功能开关:装配层按它摘工具与纪律段,这里按它关掉纯通道。
     // 两处读的是同一份声明,features 关闭的功能不会以任何形态泄漏给模型。
-    let preset_features = driver.preset_features(session.agent_preset().as_deref());
+    let preset_features = driver.features_for(session);
 
     // ① 工作区指令(AGENTS.md):发现/预算/替换语义在 runtime 侧;
     // restore 的旧文本作为 previous 传入,由正文比较决定幂等与"取代"引导语。
@@ -167,14 +191,9 @@ pub(crate) async fn refresh_background_injections(
         baselines.capability_context = Some(context);
     }
 
-    // ③ 技能目录:仅当组装开启技能且 skill 工具对该会话可见(子代理白名单
-    // 同装配过滤);从未发布且为空则不发消息,整块替换语义同工作区指令。
-    let skill_tool_visible = preset_features.skills
-        && session
-            .header()
-            .subagent
-            .as_ref()
-            .is_none_or(|child| child.effective_tools().iter().any(|name| name == "skill"));
+    // ③ 技能目录:仅当组装开启技能且 skill 工具对该会话可见(子代理按
+    // 冻结授权同装配过滤);从未发布且为空则不发消息,整块替换语义同工作区指令。
+    let skill_tool_visible = preset_features.skills && child_allows(session, "skill");
     if skill_tool_visible {
         match runtime.skill_catalog(session.id(), &cwd).await {
             Ok(entries) => {
@@ -233,15 +252,11 @@ pub(crate) async fn refresh_background_injections(
         }
     }
 
-    // ⑤ 会话目标:状态块仅对开启 goal 且 goal 工具可见的会话注入(子代理
-    // 白名单同装配过滤)。内容不变不重发——turn 运行中用户编辑目标(steering)
-    // 或状态转换后,下一 step 自动带出新状态;目标被清除后发一次终局通知。
-    let goal_tool_visible = preset_features.goal
-        && session
-            .header()
-            .subagent
-            .as_ref()
-            .is_none_or(|child| child.effective_tools().iter().any(|name| name == "get_goal"));
+    // ⑤ 会话目标:状态块仅对开启 goal 且 goal 工具可见的会话注入(子代理按
+    // 冻结授权同装配过滤;子代理默认不含 get_goal)。内容不变不重发——turn
+    // 运行中用户编辑目标(steering)或状态转换后,下一 step 自动带出新状态;
+    // 目标被清除后发一次终局通知。
+    let goal_tool_visible = preset_features.goal && child_allows(session, "get_goal");
     if goal_tool_visible {
         let goal_text = match session.goal() {
             Some(goal) => Some(render_goal_block(
@@ -267,6 +282,35 @@ pub(crate) async fn refresh_background_injections(
                 },
             )?;
             baselines.goal = Some(text);
+        }
+    }
+
+    // ⑥ 子代理派遣目录：只对能派遣的父会话注入（组装关闭 subagents 或本身是
+    // 子代理时整条通道不出现——目录与派遣纪律同进退）。目录内容跟随 profile
+    // revision 变化，整块替换语义同工作区指令。
+    if preset_features.subagents && session.header().subagent.is_none() {
+        match runtime.subagent_catalog(session.id()).await {
+            Ok(Some(text)) => {
+                if baselines.subagent_catalog.as_deref() != Some(&text) {
+                    append(
+                        session,
+                        &state.emit,
+                        SessionEvent::UserMessage {
+                            text: text.clone(),
+                            injected: true,
+                            channel: Some(SUBAGENT_CATALOG_CHANNEL.into()),
+                            images: Vec::new(),
+                        },
+                    )?;
+                    baselines.subagent_catalog = Some(text);
+                }
+            }
+            Ok(None) => {}
+            Err(error) => tracing::warn!(
+                session_id = session.id(),
+                error = %error,
+                "subagent catalog refresh failed"
+            ),
         }
     }
 

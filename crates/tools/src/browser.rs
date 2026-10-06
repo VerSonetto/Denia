@@ -51,6 +51,22 @@ pub type BrowserHub = Arc<dyn BrowserExecute + Send + Sync>;
 pub trait BrowserExecute {
     async fn execute(&self, command: BrowserCommand) -> CommandOutcome;
 
+    /// 带归属执行：把本次命令作用的 tab 记到 `owner`（会话 id）名下。
+    ///
+    /// 默认实现退化为 [`BrowserExecute::execute`]（不支持归属的宿主管不到
+    /// tab 生命周期，但行为不变）。实现方按 `activeTabId` / 显式 `tabId`
+    /// 记录归属，使 child 结束时可以只清理它自己产生的 tab。
+    async fn execute_owned(&self, command: BrowserCommand, owner: Option<&str>) -> CommandOutcome {
+        let _ = owner;
+        self.execute(command).await
+    }
+
+    /// 关闭 `owner` 名下的 tab，返回关闭数量。默认实现不做任何事。
+    async fn close_owned(&self, owner: &str) -> usize {
+        let _ = owner;
+        0
+    }
+
     /// 请求控制台进入可视化模式(展开浏览器侧栏)。默认空实现:
     /// 不支持侧栏的部署静默忽略,不阻断命令。
     async fn request_visual_mode(&self) {}
@@ -59,58 +75,11 @@ pub trait BrowserExecute {
 pub struct BrowserTool {
     schema: ToolSchema,
     hub: BrowserHub,
-    ownership: BrowserOwnership,
-}
-
-/// 浏览器 tab 的会话归属表。
-///
-/// 浏览器只有一个实例，tab 却属于开它的那个会话。子代理收尾时只能清理
-/// **自己**开的 tab——没有这张表就只能在"全清"（会关掉父代理的页面）与
-/// "全不清"（子代理留下的 tab 永久常驻）之间二选一。
-#[derive(Clone, Default)]
-pub struct BrowserOwnership {
-    inner: Arc<std::sync::Mutex<std::collections::BTreeMap<String, std::collections::BTreeSet<String>>>>,
-}
-
-impl BrowserOwnership {
-    pub fn record(&self, session: &str, tab_id: &str) {
-        self.inner
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .entry(session.to_string())
-            .or_default()
-            .insert(tab_id.to_string());
-    }
-
-    pub fn forget(&self, session: &str, tab_id: &str) {
-        if let Some(set) = self
-            .inner
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .get_mut(session)
-        {
-            set.remove(tab_id);
-        }
-    }
-
-    pub fn owned_by(&self, session: &str) -> Vec<String> {
-        self.inner
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .get(session)
-            .map(|set| set.iter().cloned().collect())
-            .unwrap_or_default()
-    }
 }
 
 impl BrowserTool {
     pub fn new(hub: BrowserHub) -> Self {
-        Self::with_ownership(hub, BrowserOwnership::default())
-    }
-
-    pub fn with_ownership(hub: BrowserHub, ownership: BrowserOwnership) -> Self {
         Self {
-            ownership,
             schema: ToolSchema {
                 name: "browser".to_string(),
                 description: TOOL_DESCRIPTION.to_string(),
@@ -286,34 +255,13 @@ impl Tool for BrowserTool {
             self.hub.request_visual_mode().await;
         }
         let wants_screenshot = command_is_screenshot(&command);
-        let closing = match &command {
-            BrowserCommand::Close { tab_id } => tab_id.clone(),
-            _ => None,
-        };
-        let outcome = self.hub.execute(command).await;
-        // 归属登记:开 tab 的会话记名,关 tab 的会话除名。tab id 从命令或
-        // 结果里取(open/newTab 的返回带 tabId;activate/navigate 指向已有 tab)。
-        if let Some(session) = ctx.session_id.as_deref() {
-            if let Some(tab_id) = closing {
-                self.ownership.forget(session, &tab_id);
-            } else if outcome.ok
-                && let Some(tab_id) = result_tab_id(&outcome)
-            {
-                self.ownership.record(session, &tab_id);
-            }
-        }
+        // 归属：把本次命令作用的 tab 记到**当前会话**名下。root 会话同样记账
+        // （父自己收尾），child 则让父代理在它结束时只关掉它自己的 tab
+        //（计划 6.4：浏览器资源绑定 child 身份）。
+        let owner = ctx.session_id.clone();
+        let outcome = self.hub.execute_owned(command, owner.as_deref()).await;
         render_outcome(outcome, ctx, wants_screenshot)
     }
-}
-
-/// 从命令结果里取出被操作的 tab id。
-fn result_tab_id(outcome: &CommandOutcome) -> Option<String> {
-    outcome
-        .value
-        .as_ref()
-        .and_then(|value| value.get("tabId"))
-        .and_then(serde_json::Value::as_str)
-        .map(str::to_string)
 }
 
 fn command_is_screenshot(command: &BrowserCommand) -> bool {
@@ -328,7 +276,98 @@ impl BrowserExecute for denia_browser::BrowserManager {
         denia_browser::BrowserManager::execute(self, command).await
     }
 
+    async fn execute_owned(&self, command: BrowserCommand, owner: Option<&str>) -> CommandOutcome {
+        denia_browser::BrowserManager::execute_owned(self, command, owner).await
+    }
+
+    async fn close_owned(&self, owner: &str) -> usize {
+        denia_browser::BrowserManager::close_owned(self, owner).await
+    }
+
     async fn request_visual_mode(&self) {
         denia_browser::BrowserManager::request_visual_mode(self);
+    }
+}
+
+#[cfg(test)]
+mod ownership_tests {
+    use super::*;
+    use denia_core::session::PermissionMode;
+    use std::sync::{Arc, Mutex};
+    use tokio_util::sync::CancellationToken;
+
+    /// 记录每次调用带上的 owner：浏览器工具必须把**宿主会话身份**传下去。
+    #[derive(Default)]
+    struct OwningHub {
+        owners: Mutex<Vec<Option<String>>>,
+        closed: Mutex<Vec<String>>,
+    }
+
+    #[async_trait]
+    impl BrowserExecute for OwningHub {
+        async fn execute(&self, _command: BrowserCommand) -> CommandOutcome {
+            CommandOutcome::ok_value(serde_json::Value::Null, 0)
+        }
+
+        async fn execute_owned(
+            &self,
+            command: BrowserCommand,
+            owner: Option<&str>,
+        ) -> CommandOutcome {
+            self.owners.lock().unwrap().push(owner.map(str::to_string));
+            self.execute(command).await
+        }
+
+        async fn close_owned(&self, owner: &str) -> usize {
+            self.closed.lock().unwrap().push(owner.to_string());
+            2
+        }
+    }
+
+    fn ctx(session: Option<&str>) -> ToolContext {
+        ToolContext {
+            output_store: None,
+            session_id: session.map(str::to_string),
+            selection: None,
+            cwd: std::env::temp_dir(),
+            cancel: CancellationToken::new(),
+            confined: true,
+            vision_supported: true,
+            emit_event: None,
+            file_history: None,
+            permission_mode: PermissionMode::AutoEdit,
+            ask: None,
+            call_id: None,
+            goal_reader: None,
+            read_state: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn browser_tool_passes_the_session_identity_as_owner() {
+        let hub = Arc::new(OwningHub::default());
+        let tool = BrowserTool::new(hub.clone());
+        let out = Tool::execute(&tool, r#"{"method":"list"}"#, &ctx(Some("child-1"))).await;
+        assert!(!out.is_error, "{}", out.content);
+        assert_eq!(
+            hub.owners.lock().unwrap().as_slice(),
+            &[Some("child-1".to_string())],
+            "浏览器命令必须带会话归属"
+        );
+        // 无会话身份的调用（独立工具调用）仍然工作，只是没有归属。
+        let tool = BrowserTool::new(hub.clone());
+        let out = Tool::execute(&tool, r#"{"method":"list"}"#, &ctx(None)).await;
+        assert!(!out.is_error, "{}", out.content);
+        assert_eq!(hub.owners.lock().unwrap().last().cloned(), Some(None));
+    }
+
+    #[tokio::test]
+    async fn close_owned_only_touches_the_named_owner() {
+        let hub = Arc::new(OwningHub::default());
+        assert_eq!(hub.close_owned("child-1").await, 2);
+        assert_eq!(
+            hub.closed.lock().unwrap().as_slice(),
+            &["child-1".to_string()]
+        );
     }
 }

@@ -154,73 +154,111 @@ sandbox: boolean,
  */
 parent_session?: string, subagent?: SubagentDescriptor, };
 
-export type SubagentDescriptor = { label: string, depth: number, mode: string, selection: ModelSelection, persona?: string, allowedTools?: Array<string>, 
+export type SubagentDescriptor = { label: string, 
 /**
- * 新子代理的运行快照引用（旧日志没有这一段）。
+ * 委派深度。新 child 恒为 1，仅作显示/旧数据兼容；不能作为派遣准入依据。
  */
-snapshot?: SubagentSnapshotRef, };
+depth: number, mode: string, selection: ModelSelection, persona?: string, allowedTools?: Array<string>, 
+/**
+ * 快照版本；0 或缺失 = 本计划之前的旧描述符。
+ */
+snapshotVersion: number, name?: string, description?: string, profile?: SubagentProfileRef, 
+/**
+ * 派遣时冻结的有效工具名（明确列表）。运行期授权只认这一份。
+ */
+effectiveTools?: Array<string>, permissionCeiling: PermissionCeiling, createdPermissionMode?: string, 
+/**
+ * 审计字段：子代理恒为 `false`。硬拒不依赖它。
+ */
+delegationAllowed: boolean, 
+/**
+ * 审计字段：恒为 `project-only`（子代理只自动发现项目级指令）。
+ */
+instructionScope?: string, parentPreset?: string, parentPresetPersona?: string, parentFeatures?: PresetFeatures, 
+/**
+ * 角色正文的会话目录内引用文件名；内容不放 header。
+ */
+instructionsRef?: string, instructionsHash?: string, fork?: SubagentForkProjection, legacy?: LegacySubagentInfo, };
 
-export type SubagentProfileSource = "builtin" | "user" | "project";
+export type SubagentProfileRef = { 
+/**
+ * 限定 id（`builtin:explore` 等）；临时定义用 `inline` 前缀。
+ */
+qualifiedId: string, source?: ProfileSource, 
+/**
+ * 派遣时读到的定义版本；临时定义为 0。
+ */
+revision: number, 
+/**
+ * 是否来自调用时的临时定义（不落盘、不出现在管理目录）。
+ */
+inline: boolean, };
 
-export type ToolChoice = { "mode": "inherit" } | { "mode": "allowlist", names: Array<string>, };
+export type SubagentForkProjection = { sourceSession: string, 
+/**
+ * 截取的最后一个闭合轮次的日志序号。
+ */
+cutSeq: number, projectionVersion: number, 
+/**
+ * 被丢弃的来源类别（审计可见，便于解释"为什么 child 看不到某段父历史"）。
+ */
+dropped: Array<string>, };
+
+export type LegacySubagentInfo = { 
+/**
+ * 迁移版本；0 表示尚未迁移（只能查看，不能直接继续）。
+ */
+migrationVersion: number, 
+/**
+ * 旧日志里没有授权列表：按历史只读集合保守构造。
+ */
+conservative: boolean, 
+/**
+ * 旧日志里的显式列表（最多与历史上限相交后扣硬禁项）。
+ */
+allowedTools?: Array<string>, };
+
+export type ProfileSource = "builtin" | "user" | "project";
+
+export type ToolSelection = { "mode": "inherit" } | { "mode": "allowlist", names: Array<string>, };
 
 export type ModelChoice = { "mode": "inherit" } | { "mode": "explicit", selection: ModelSelection, };
 
 export type PermissionCeiling = "inherit" | "read-only";
 
-export type SubagentProfile = { schemaVersion: number, id: string, name: string, description: string, instructions: string, enabled: boolean, tools: ToolChoice, model: ModelChoice, permissionCeiling: PermissionCeiling, color?: string, };
+export type ProfileColor = "blue" | "green" | "purple" | "orange" | "red" | "gray";
 
-export type SubagentDiagnostic = { code: string, field?: string, reason: string, };
+export type ProfileWriteScope = "user" | "project";
 
-export type ProfileRef = { qualifiedId: string, id: string, source: SubagentProfileSource, 
-/**
- * 创建时的定义内容版本；之后编辑定义不会追溯修改这个 child。
- */
-revision: string, };
+export type SubagentProfile = { schemaVersion: number, id: string, name: string, description: string, instructions: string, enabled: boolean, tools: ToolSelection, model: ModelChoice, permissionCeiling: PermissionCeiling, color?: ProfileColor, };
 
-export type ForkProjectionRef = { sourceSessionId: string, 
-/**
- * 截止事件序号（截取到的最后一个闭合轮次）。
- */
-cutSeq: number, projectionVersion: number, 
-/**
- * 被丢弃的来源类别（便于审计与排查）。
- */
-dropped: Array<string>, migrationVersion: number, };
+export type SubagentInlineSpec = { name: string, description: string, instructions: string, tools: ToolSelection, model: ModelChoice, permissionCeiling: PermissionCeiling, };
 
-export type SubagentSnapshotRef = { version: number, 
+export type ProfileDiagnostic = { code: string, field?: string, message: string, };
+
+export type SubagentProfileView = { profile: SubagentProfile, qualifiedId: string, source: ProfileSource, revision: number, 
 /**
- * `subagent.json` 的内容版本；引用不存在或校验失败必须拒绝启动。
+ * 是否可写（内置定义只能写用户覆盖；项目覆盖只能写到项目目录）。
  */
-hash: string, 
+editable: boolean, 
 /**
- * `spawn` | `fork`。
+ * 是否覆盖了更低优先级的同 id 定义。
  */
-creationMode: string, label: string, profile?: ProfileRef, resolvedName: string, resolvedDescription: string, 
+overridesBuiltin: boolean, 
 /**
- * 冻结的工具名列表（已扣硬禁项、已与父可授予集合相交）。
+ * 该项目作用域是否可写（无项目根时为 false）。
  */
-effectiveTools: Array<string>, model: ModelSelection, permissionCeiling: PermissionCeiling, 
+projectWritable: boolean, diagnostics?: Array<ProfileDiagnostic>, };
+
+export type SubagentCatalogEntry = { qualifiedId: string, name: string, description: string, 
 /**
- * 创建时父代理的权限模式（审计；实际判权仍走实时权限引擎）。
+ * 工具模式摘要（"继承父工具" / "8 个工具" / "无工具"）。
  */
-permissionMode: string, 
+tools: string, 
 /**
- * 父代理当时的 agent preset（审计；文件消失不回退全量工具）。
+ * 模型摘要（"继承父模型" / "provider/model"）。
  */
-parentPreset?: string, 
-/**
- * 父基础系统提示快照的 hash。
- */
-parentPromptHash: string, 
-/**
- * 固定 `false`：禁止派遣是运行时硬规则，这个布尔只是审计。
- */
-delegationAllowed: boolean, 
-/**
- * 固定 `project-only`：子代理不自动加载全局 AGENTS.md。
- */
-instructionScope: string, fork?: ForkProjectionRef, };
+model: string, };
 
 export type SessionHeaderKind = "session";
 

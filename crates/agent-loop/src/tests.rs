@@ -73,7 +73,7 @@ fn system_prompt_frames_runtime_authority() {
 /// 会失败,而不是让子代理读到不存在的工具纪律。
 #[test]
 fn subagent_sections_follow_tool_grant() {
-    use denia_core::subagent::EXPLORE_TOOLS;
+    use denia_tools::SUBAGENT_READ_ONLY_TOOLS;
     // 用 shipped 基础提示词 + capability 段覆盖段名全集;browser 段由
     // tools 侧的单测覆盖(agent-loop 不依赖 denia-browser)。
     let (mut prompt, _) = denia_tools::default_shipped();
@@ -95,9 +95,9 @@ fn subagent_sections_follow_tool_grant() {
             );
         }
     }
-    // 只读探索预设下的期望:read/glob/grep/skill/webfetch 段保留,
-    // bash/write/todo/edit/goal/jobs/ask/browser 段移除。
-    let allowed: Vec<String> = EXPLORE_TOOLS
+    // 只读集合下的期望:read/glob/grep/skill/browser 段保留,
+    // bash/write/todo/edit/agents/jobs/ask 段移除。
+    let allowed: Vec<String> = SUBAGENT_READ_ONLY_TOOLS
         .iter()
         .map(|name| (*name).to_string())
         .collect();
@@ -111,7 +111,7 @@ fn subagent_sections_follow_tool_grant() {
         .map(|section| section.name.as_str())
         .filter(|name| name.starts_with("tool:"))
         .collect();
-    for expected in ["tool:read", "tool:glob", "tool:grep", "tool:skill", "tool:agents"] {
+    for expected in ["tool:read", "tool:glob", "tool:grep", "tool:skill"] {
         assert!(kept.contains(&expected), "{expected} 应保留:{kept:?}");
     }
     for removed in [
@@ -119,10 +119,10 @@ fn subagent_sections_follow_tool_grant() {
         "tool:write",
         "tool:todo",
         "tool:edit",
+        "tool:agents",
         "tool:jobs",
         "tool:ask",
         "tool:goal",
-        "tool:browser",
     ] {
         assert!(!kept.contains(&removed), "{removed} 应移除:{kept:?}");
     }
@@ -2041,6 +2041,26 @@ impl crate::ApprovalBridge for StubApprovalBridge {
     }
 }
 
+/// 批准**之前**把会话权限收紧的桥：模拟"用户在处理审批时切到只读档"。
+struct TighteningBridge {
+    session: Arc<Session>,
+}
+
+#[async_trait]
+impl crate::ApprovalBridge for TighteningBridge {
+    async fn request(
+        &self,
+        _session_id: &str,
+        _request_id: &str,
+        _cancel: CancellationToken,
+    ) -> PlanReviewDecision {
+        self.session
+            .set_permission_mode(PermissionMode::ReadOnly)
+            .expect("收紧权限必须成功");
+        plan_decision(ApprovalOutcome::AllowedOnce, None, None)
+    }
+}
+
 fn plan_decision(
     outcome: ApprovalOutcome,
     execute_mode: Option<PermissionMode>,
@@ -2283,6 +2303,49 @@ async fn auto_edit_allows_inside_write_and_fails_closed_outside_without_bridge()
         "inside write must land"
     );
     assert!(!outside.exists(), "outside write must not land");
+    let _ = std::fs::remove_file(&outside);
+}
+
+/// T12：审批等待期间权限被收紧（切只读档）→ 批准不得成为扩权凭证：
+/// 批准后重新判权，按新档位拒绝执行，且不落盘。
+#[tokio::test]
+async fn approval_is_re_judged_after_the_session_tightens() {
+    let outside = std::env::temp_dir().join(format!(
+        "denia-tighten-{}.txt",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let outside_raw = outside.to_string_lossy().replace('\\', "/");
+    let (driver, _registry) = driver_with_tools(
+        vec![
+            MockScript::Chunks(tool_calls_script(&[(
+                "call_out",
+                "write_file",
+                &format!(r#"{{"path":"{outside_raw}","content":"x"}}"#),
+            )])),
+            MockScript::Chunks(text_script("done")),
+        ],
+        |tools| *tools = denia_tools::default_registry(),
+    );
+    let session = temp_session();
+    let driver = driver.with_approval(Arc::new(TighteningBridge {
+        session: session.clone(),
+    }));
+    run_simple_turn(&driver, &session, "write").await;
+
+    let results = result_texts(&session);
+    assert!(!results.is_empty(), "必须有一条工具结果");
+    assert!(results[0].0, "收紧后批准不得执行：{}", results[0].1);
+    assert!(
+        results[0].1.contains("批准后重新判权被拒绝"),
+        "必须给出明确理由：{}",
+        results[0].1
+    );
+    assert!(!outside.exists(), "被拒绝的写不得落盘");
+    // 会话权威状态确实已收紧（不是只改了内存里的一个副本）。
+    assert_eq!(session.permission_mode(), PermissionMode::ReadOnly);
     let _ = std::fs::remove_file(&outside);
 }
 

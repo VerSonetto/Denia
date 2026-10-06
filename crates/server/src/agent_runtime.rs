@@ -1,5 +1,4 @@
 //! Rust 原生子代理编排；复用 SessionDriver，只有一份会话日志与运行状态。
-use crate::subagents::{policy_grant, resolve_definition};
 use crate::{
     jobs::Jobs,
     state::{LiveSessions, RunningGuard, ServerEvent},
@@ -8,7 +7,6 @@ use async_trait::async_trait;
 use denia_core::{
     config::ModelSelection,
     session::{GoalOp, SessionEnvelope, SessionEvent, SubagentDescriptor},
-    subagent::{DelegateArgs, SubagentSnapshotRef, stable_hash},
 };
 use denia_tools::{ToolContext, capabilities::AgentRuntime};
 use serde::{Deserialize, Serialize};
@@ -36,6 +34,9 @@ pub struct RuntimeConfig {
     pub workspace_instructions_max_source_bytes: u64,
     /// 技能目录里单条描述的最大字符数（对齐 dsh catalogDescriptionMaxLength）。
     pub skill_catalog_description_max_chars: usize,
+    /// 子代理派遣目录的渲染预算（字节）：超限按 UTF-8 边界截断并明示。
+    /// 与工作区指令预算分开：目录是每步注入的固定义务，不能挤占指令预算。
+    pub subagent_catalog_max_bytes: u64,
     /// 项目记忆总闸:关闭后注入与写入同时停(读写两端同步)。
     pub memory_enabled: bool,
     /// MEMORY.md 索引注入的字节预算(超限 UTF-8 边界截断并附告警)。
@@ -54,6 +55,7 @@ impl Default for RuntimeConfig {
             workspace_instructions_max_bytes: 65_536,
             workspace_instructions_max_source_bytes: 1_048_576,
             skill_catalog_description_max_chars: 500,
+            subagent_catalog_max_bytes: 8_192,
             memory_enabled: true,
             project_memory_max_bytes: 25_600,
         }
@@ -73,6 +75,7 @@ pub fn validate_config(value: Value) -> Result<Value, String> {
         || c.workspace_instructions_max_bytes > 1_048_576
         || !(1..=16_777_216).contains(&c.workspace_instructions_max_source_bytes)
         || !(1..=65_536).contains(&c.skill_catalog_description_max_chars)
+        || !(1_024..=1_048_576).contains(&c.subagent_catalog_max_bytes)
         || !(1..=1_048_576).contains(&c.project_memory_max_bytes)
     {
         return Err("运行时配置超出允许范围".into());
@@ -140,16 +143,21 @@ struct Inner {
     selections: Mutex<HashMap<String, ModelSelection>>,
     wakes: Mutex<HashMap<String, usize>>,
     paused: Mutex<HashSet<String>>,
-    admission: tokio::sync::Mutex<()>,
-    reserved: Mutex<HashSet<String>>,
+    /// 统一准入:创建、终态 child 恢复、消息唤醒共用同一份槽位账。
+    admission: crate::subagents::policy::Admission,
     /// goal 轮连续失败计数(会话级内存护栏;成功轮清零,blocked 后移除)。
     goal_failures: Mutex<HashMap<String, u32>>,
     registry: Arc<denia_llm::LlmRegistry>,
     workspaces: Arc<crate::workspace::WorkspaceRegistry>,
-    subagents: Arc<crate::subagents::SubagentProfileStore>,
-    /// 浏览器资源回收用：tab 归属表 + 中枢句柄（无浏览器部署为 None）。
-    browser_tabs: Option<denia_tools::BrowserOwnership>,
-    browser: Option<denia_tools::BrowserHub>,
+    /// 子代理定义仓库（派遣解析的唯一来源）。
+    profiles: Arc<crate::subagents::ProfileStore>,
+    /// 浏览器中枢：child 停止/结束时只关闭它自己的 tab（计划 6.4）。
+    /// 用 `RwLock<Option<..>>` 而不是 OnceLock：装配顺序上浏览器中枢晚于
+    /// Runtime 建立，测试也需要替换成记录型中枢。
+    browser: std::sync::RwLock<Option<denia_tools::BrowserHub>>,
+    /// 测试专用故障注入点（生产构建里不存在这个字段）。
+    #[cfg(test)]
+    faults: Mutex<HashSet<String>>,
     pub jobs: Arc<Jobs>,
 }
 #[derive(Clone)]
@@ -165,8 +173,7 @@ impl Runtime {
         events: tokio::sync::broadcast::Sender<ServerEvent>,
         registry: Arc<denia_llm::LlmRegistry>,
         workspaces: Arc<crate::workspace::WorkspaceRegistry>,
-        subagents: Arc<crate::subagents::SubagentProfileStore>,
-        browser: Option<(denia_tools::BrowserOwnership, denia_tools::BrowserHub)>,
+        profiles: Arc<crate::subagents::ProfileStore>,
     ) -> Result<Arc<Self>, String> {
         let mut children = BTreeMap::new();
         // 只读会话头，不加载/修复另一个实例正在写入的日志。
@@ -209,14 +216,14 @@ impl Runtime {
                 selections: Mutex::new(HashMap::new()),
                 wakes: Mutex::new(HashMap::new()),
                 paused: Mutex::new(HashSet::new()),
-                admission: tokio::sync::Mutex::new(()),
-                reserved: Mutex::new(HashSet::new()),
+                admission: crate::subagents::policy::Admission::new(),
                 goal_failures: Mutex::new(HashMap::new()),
                 registry,
                 workspaces,
-                subagents,
-                browser_tabs: browser.as_ref().map(|(ownership, _)| ownership.clone()),
-                browser: browser.map(|(_, hub)| hub),
+                profiles,
+                browser: std::sync::RwLock::new(None),
+                #[cfg(test)]
+                faults: Mutex::new(HashSet::new()),
                 jobs: Jobs::new(),
             }),
         }))
@@ -254,18 +261,65 @@ impl Runtime {
     pub fn jobs(&self) -> Arc<Jobs> {
         self.inner.jobs.clone()
     }
-    /// 子代理定义名册（API 与派遣共用同一个所有者）。
-    pub fn subagents(&self) -> Arc<crate::subagents::SubagentProfileStore> {
-        self.inner.subagents.clone()
+
+    /// 挂载浏览器中枢：child 停止/结束时按会话归属关闭它自己的 tab。
+    pub fn attach_browser(&self, hub: denia_tools::BrowserHub) {
+        *self
+            .inner
+            .browser
+            .write()
+            .unwrap_or_else(|poison| poison.into_inner()) = Some(hub);
     }
-    /// 子代理调度设置：并发上限的唯一来源。
-    pub fn policy_config(&self) -> crate::subagents::SubagentPolicyConfig {
+
+    /// 当前挂载的浏览器中枢（没有则不返回）。
+    fn browser_hub(&self) -> Option<denia_tools::BrowserHub> {
         self.inner
-            .settings
-            .resolved(crate::subagents::SETTINGS_NS)
-            .ok()
-            .and_then(|value| serde_json::from_value(value).ok())
-            .unwrap_or_default()
+            .browser
+            .read()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .clone()
+    }
+
+    /// 关闭某会话名下的浏览器 tab（父会话与不支持归属的中枢都是 no-op）。
+    async fn close_owned_tabs(&self, id: &str) {
+        let Some(hub) = self.browser_hub() else {
+            return;
+        };
+        let closed = hub.close_owned(id).await;
+        if closed > 0 {
+            tracing::info!(session = id, closed, "已关闭会话名下遗留的浏览器 tab");
+        }
+    }
+
+    /// 测试专用故障注入：在生产构建里恒为 `false`。
+    ///
+    /// 用于覆盖派遣的崩溃窗口——快照落盘后、入队前后、返回 pending 前后，
+    /// 断言"任一步失败都回滚本次新增的会话与槽位，且不丢已持久化的结果"。
+    fn test_fault(&self, point: &str) -> bool {
+        #[cfg(test)]
+        {
+            return self
+                .inner
+                .faults
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .contains(point);
+        }
+        #[cfg(not(test))]
+        {
+            let _ = point;
+            false
+        }
+    }
+
+    /// 设置一个测试故障点（仅测试构建可用）。
+    #[cfg(test)]
+    fn set_test_fault(&self, point: &str) {
+        self.inner
+            .faults
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .insert(point.to_string());
     }
     pub fn config(&self) -> RuntimeConfig {
         self.inner
@@ -273,6 +327,15 @@ impl Runtime {
             .resolved("runtime")
             .ok()
             .and_then(|s| serde_json::from_value(s).ok())
+            .unwrap_or_default()
+    }
+    /// 子代理调度策略：并发上限的唯一来源（`runtime.maxAgents` 已迁移并删除）。
+    pub fn policy(&self) -> crate::subagents::SubagentPolicyConfig {
+        self.inner
+            .settings
+            .resolved(crate::subagents::SETTINGS_NS)
+            .ok()
+            .and_then(|value| serde_json::from_value(value).ok())
             .unwrap_or_default()
     }
     pub fn goals_config(&self) -> GoalsConfig {
@@ -330,9 +393,47 @@ impl Runtime {
     }
     pub fn list(&self, owner: &str) -> Value {
         json!(self.descendants(owner).into_iter().filter(|child| child.descriptor.mode != "memory").map(|child|{
-        let running=self.inner.live.get(&child.id).is_some_and(|l|l.running.load(Ordering::SeqCst));
+        let live=self.inner.live.get(&child.id);
+        let running=live.as_ref().is_some_and(|l|l.running.load(Ordering::SeqCst));
         let waiting=self.descendants(&child.id).iter().any(|c|self.inner.live.get(&c.id).is_some_and(|l|l.running.load(Ordering::SeqCst)));
-        json!({"id":child.id,"parentId":child.parent_id,"label":child.descriptor.label,"depth":child.descriptor.depth,"mode":child.descriptor.mode,"selection":child.descriptor.selection,"status":if running{"running"}else if waiting{"waiting"}else{"settled"}})
+        let descriptor = &child.descriptor;
+        let legacy = descriptor.snapshot_version < denia_core::subagent::SUBAGENT_SNAPSHOT_VERSION;
+        // 等待交互：未结算的审批/提问请求数（等待状态必须能被父代理看见，
+        // 否则卡片只存在于子会话页面里）。同一遍扫描顺带给出最后终态摘要。
+        let (pending_approvals, pending_asks, result) = live
+            .as_ref()
+            .map(|live| pending_interactions(&live.session))
+            .unwrap_or((0, 0, None));
+        let projection_applied = live
+            .as_ref()
+            .is_some_and(|live| live.session.history_projection().is_some());
+        let waiting_interaction = pending_approvals > 0 || pending_asks > 0;
+        json!({"id":child.id,"parentId":child.parent_id,"label":descriptor.label,"depth":descriptor.depth,"mode":descriptor.mode,"selection":descriptor.selection,
+            "status":if running{"running"}else if waiting{"waiting"}else{"settled"},
+            "profile":descriptor.profile,
+            "name":descriptor.name,
+            "description":descriptor.description,
+            "toolCount":descriptor.effective_tools.as_ref().map(Vec::len).unwrap_or_else(|| denia_core::subagent::legacy_child_tools(descriptor.allowed_tools.as_deref()).len()),
+            "tools":descriptor.effective_tools.clone().unwrap_or_else(|| denia_core::subagent::legacy_child_tools(descriptor.allowed_tools.as_deref())),
+            "permissionCeiling":descriptor.permission_ceiling.as_str(),
+            "createdPermissionMode":descriptor.created_permission_mode,
+            "instructionScope":descriptor.instruction_scope,
+            "delegationAllowed":false,
+            "pendingApprovals":pending_approvals,
+            "pendingAsks":pending_asks,
+            "waitingInteraction":waiting_interaction,
+            "result":result,
+            "migration": if legacy { json!({
+                // 旧 child 不再需要重新派遣：首次继续时自动建立模型历史投影
+                // （见 HISTORY_PROJECTION_FILE）。这里只报告投影是否已建立。
+                "needsRedispatch": false,
+                "version": descriptor.snapshot_version,
+                "projection": if projection_applied { "applied" } else { "pending" },
+                "diagnostic": if projection_applied {
+                    "旧子代理已建立模型历史投影：旧父运行态与全部自动注入通道不再进模型历史，审计日志保持不变。"
+                } else {
+                    "旧子代理尚未建立模型历史投影；首次继续（发消息/唤醒）时自动建立，之后在线与冷恢复一致。"
+                }}) } else { Value::Null }})
     }).collect::<Vec<_>>())
     }
     fn authorize(&self, owner: &str, target: &str, ancestor: bool) -> Result<(), String> {
@@ -444,39 +545,55 @@ impl Runtime {
             return Ok(());
         }
         let live = self.live(id).await?;
-        // 旧子代理(升级前创建、没有运行快照)的模型历史里可能带着全局规则
-        // 注入与旧摘要。计划口径:不能可靠区分来源时**不直接继续**——宁可
-        // 明确拒绝并给出可执行的替代路径,也不把带全局规则的旧上下文送模型。
-        if let Some(descriptor) = live.session.header().subagent.clone()
-            && descriptor.is_legacy()
+        // 旧 child（本计划之前的描述符，快照版本 0）没有可复现的指令投影：
+        // 它的历史里是否已混入全局 AGENTS.md 的自动注入无法按正文可靠区分
+        // （计划 9.4 禁止按正文猜）。首次继续前建立**模型历史投影**并落盘：
+        // 明确按事件类别排除旧父运行态与全部自动注入通道，审计 UI 仍看完整
+        // 日志；投影文件使在线加载与冷恢复得到同一结果。建立失败才退回
+        // "拒绝续跑 + 重新派遣"。
+        if let Some(child) = live.session.header().subagent.as_ref()
+            && child.snapshot_version < denia_core::subagent::SUBAGENT_SNAPSHOT_VERSION
         {
-            {
-                self.inner.paused.lock().unwrap().insert(id.to_string());
+            if live.session.history_projection().is_none() {
+                match live.session.apply_history_projection() {
+                    Ok(true) => {
+                        tracing::info!(session = id, "已为旧子代理建立模型历史投影");
+                    }
+                    Ok(false) => {}
+                    Err(error) => {
+                        tracing::error!(%error, session = id, "旧子代理历史投影建立失败");
+                        self.inner.paused.lock().unwrap().insert(id.into());
+                        // 单独取父 id：锁守卫不能跨 await（if-let 临时值活到块尾）。
+                        let parent = self
+                            .inner
+                            .children
+                            .lock()
+                            .unwrap()
+                            .get(id)
+                            .map(|child| child.parent_id.clone());
+                        if let Some(parent) = parent {
+                            let text = format!(
+                                "[子代理 {id} 无法直接继续]\n为旧子代理建立模型历史投影失败：{error}。\
+                                 为不把可能含有全局规则注入的旧上下文继续送模型，已拒绝续跑。\n\
+                                 处理方式：查看它的日志确认结论，然后用 spawn_agent 以自包含 prompt 重新派遣。（{}）",
+                                denia_core::subagent::codes::LEGACY_RESUME_UNSUPPORTED
+                            );
+                            if let Err(error) = self
+                                .enqueue(
+                                    &parent,
+                                    format!("legacy-resume:{id}"),
+                                    text,
+                                    "subagent-legacy".into(),
+                                )
+                                .await
+                            {
+                                tracing::error!(%error, "旧子代理迁移诊断投递失败");
+                            }
+                        }
+                        return Ok(());
+                    }
+                }
             }
-            let parent = self
-                .inner
-                .children
-                .lock()
-                .unwrap()
-                .get(id)
-                .map(|child| child.parent_id.clone());
-            if let Some(parent) = parent
-                && let Err(error) = self
-                    .enqueue(
-                        &parent,
-                        format!("agent-migration:{id}"),
-                        format!(
-                            "[子代理迁移诊断]\n旧子代理 {id}（升级前创建，没有运行快照）不能直接继续：\
-                             它的历史里可能含有父会话的全局规则注入与旧摘要，无法可靠剥离。\n\
-                             请用 spawn_agent 提供一份自包含 prompt 重新派遣；旧会话仍可查看。"
-                        ),
-                        "agent-migration".into(),
-                    )
-                    .await
-            {
-                tracing::error!(session=%id,%error,"迁移诊断投递失败");
-            }
-            return Ok(());
         }
         let pending = {
             let mut inboxes = self.inner.inboxes.lock().unwrap();
@@ -517,7 +634,7 @@ impl Runtime {
                     }
                 })
             });
-        let admission = self.inner.admission.lock().await;
+        let admission = self.inner.admission.enter().await;
         if self.inner.paused.lock().unwrap().contains(id) {
             return Ok(());
         }
@@ -538,14 +655,12 @@ impl Runtime {
                 return Ok(());
             }
             if live.session.header().subagent.is_some() {
-                let mut slots = self.inner.reserved.lock().unwrap();
-                if !slots.contains(id)
-                    && slots.len() >= self.policy_config().max_concurrent_runs
-                {
+                // 终态 child 的消息唤醒同样走统一准入（与创建共用一份槽位账）。
+                let limit = self.policy().max_concurrent_runs;
+                if !self.inner.admission.reserve(id, limit) {
                     live.running.store(false, Ordering::SeqCst);
                     return Ok(());
                 }
-                slots.insert(id.to_string());
             }
             *n += 1;
         }
@@ -644,9 +759,7 @@ impl Runtime {
         // 组装关闭 goal 功能时续跑一并关闭:装配层已摘 goal 工具与纪律段,
         // 注入管线已关状态通道,这里关掉续跑状态机,三个层面读同一份声明。
         if let Some(driver) = self.inner.driver.get().and_then(|weak| weak.upgrade())
-            && !driver
-                .preset_features(live.session.agent_preset().as_deref())
-                .goal
+            && !driver.features_for(&live.session).goal
         {
             return Ok(());
         }
@@ -805,7 +918,7 @@ impl Runtime {
     }
 
     pub fn on_idle(&self, id: &str) {
-        self.inner.reserved.lock().unwrap().remove(id);
+        self.inner.admission.release(id);
         let aborted = self.inner.live.get(id).is_some_and(|l| {
             l.session
                 .events()
@@ -902,16 +1015,81 @@ impl Runtime {
                         None
                     }
                 });
+                // 子代理不得脱离 child 遗留后台任务（计划 10.4）：正常结束前
+                // 检查它仍在运行的 job，取消并在结果里注明被取消的未完成工作。
+                let leftover: Vec<_> = runtime
+                    .inner
+                    .jobs
+                    .list(&current)
+                    .into_iter()
+                    .filter(|job| job.finished_at.is_none())
+                    .collect();
+                let cancelled_note = if leftover.is_empty() {
+                    String::new()
+                } else {
+                    runtime.inner.jobs.cancel_owner(&current).await;
+                    format!(
+                        "\n[已取消的子代理后台工作] 共 {} 项在子代理结束前仍未完成，已终止（长时间服务应交回主代理启动）：{}",
+                        leftover.len(),
+                        leftover
+                            .iter()
+                            .map(|job| job.label.clone())
+                            .collect::<Vec<_>>()
+                            .join("、")
+                    )
+                };
+                // 摘要只放前若干字符并**明示截断**；全文留在子会话日志与产物里。
+                let limit = (runtime.config().output_bytes / 4).max(512);
+                let body: String = text.chars().take(limit).collect();
+                let truncated = if text.chars().count() > limit {
+                    format!(
+                        "\n（摘要已截断：子代理输出共 {} 字符，全文见子会话日志与产物。）",
+                        text.chars().count()
+                    )
+                } else {
+                    String::new()
+                };
+                let usage = live.session.turn_token_usage();
+                let name = child
+                    .descriptor
+                    .name
+                    .clone()
+                    .unwrap_or_else(|| child.descriptor.label.clone());
+                let profile = child
+                    .descriptor
+                    .profile
+                    .as_ref()
+                    .map(|profile| profile.qualified_id.clone())
+                    .unwrap_or_else(|| "-".to_string());
+                let state = match reason {
+                    Some(reason) => turn_end_label(reason),
+                    None => "未知（没有终态事件）".to_string(),
+                };
                 let summary = format!(
-                    "[子代理执行结束] {} ({})\n状态：{}{}\n{}",
-                    child.descriptor.label,
-                    current,
-                    serde_json::to_string(&reason).unwrap_or_default(),
-                    runtime.release_child_resources(&current).await,
-                    text.chars()
-                        .take(runtime.config().output_bytes / 4)
-                        .collect::<String>()
+                    "[子代理执行结束] {name}\n\
+                     子代理：{current}（{profile}）\n\
+                     结果：{state}\n\
+                     本次子代理用量：{} tokens（输入 {} / 输出 {} / 缓存读 {} / 推理 {}）\n\
+                     结果引用：会话 {current} 的日志与产物（read_tool_output 只能读本会话，父代理需要全文时用 wait_agent 查看该子代理）\n\
+                     {body}{truncated}{cancelled_note}",
+                    usage.total(),
+                    usage.uncached_input_tokens,
+                    usage.output_tokens,
+                    usage.cache_read_tokens,
+                    usage.reasoning_tokens,
                 );
+                // 锁守卫不能跨 await：先取出中枢句柄再 await。
+                let hub = runtime.browser_hub();
+                if let Some(hub) = hub {
+                    let closed = hub.close_owned(&current).await;
+                    if closed > 0 {
+                        tracing::info!(
+                            session = %current,
+                            closed,
+                            "子代理结束时关闭了它名下的浏览器 tab"
+                        );
+                    }
+                }
                 if let Err(error) = runtime
                     .enqueue(
                         &child.parent_id,
@@ -926,62 +1104,8 @@ impl Runtime {
             }
         });
     }
-    /// 子代理收尾:清掉它自己的后台任务与浏览器资源,返回要写进汇报的说明。
-    ///
-    /// 规则是"不得脱离 child 遗留任务":子代理结束后不该留下无人认领的写
-    /// 进程或常驻 tab。用户要的长期服务应交给主代理启动。
-    pub async fn release_child_resources(&self, id: &str) -> String {
-        let mut notes: Vec<String> = Vec::new();
-        let running: Vec<String> = self
-            .inner
-            .jobs
-            .list(id)
-            .iter()
-            .filter(|job| job.status == "running")
-            .map(|job| job.id.clone())
-            .collect();
-        if !running.is_empty() {
-            self.inner.jobs.cancel_owner(id).await;
-            notes.push(format!("已取消未完成的后台任务:{}", running.join("、")));
-        }
-        notes.push(self.release_browser_tabs(id).await);
-        let notes: Vec<String> = notes.into_iter().filter(|note| !note.is_empty()).collect();
-        if notes.is_empty() {
-            String::new()
-        } else {
-            format!("\n收尾：{}", notes.join("；"))
-        }
-    }
-    /// 关闭该会话打开的浏览器 tab（只动自己的，不碰父/兄弟的资源）。
-    async fn release_browser_tabs(&self, id: &str) -> String {
-        let Some(ownership) = &self.inner.browser_tabs else {
-            return String::new();
-        };
-        let Some(hub) = &self.inner.browser else {
-            return String::new();
-        };
-        let tabs = ownership.owned_by(id);
-        if tabs.is_empty() {
-            return String::new();
-        }
-        let mut closed: Vec<String> = Vec::new();
-        for tab_id in tabs {
-            let command = denia_browser::BrowserCommand::Close {
-                tab_id: Some(tab_id.clone()),
-            };
-            let outcome = hub.execute(command).await;
-            if outcome.ok {
-                closed.push(tab_id);
-            }
-        }
-        if closed.is_empty() {
-            String::new()
-        } else {
-            format!("已关闭本子代理打开的浏览器 tab:{}", closed.join("、"))
-        }
-    }
     pub async fn interrupt(&self, owner: &str, target: &str) -> Result<(), String> {
-        let _admission = self.inner.admission.lock().await;
+        let _admission = self.inner.admission.enter().await;
         self.authorize(owner, target, true)?;
         self.inner.paused.lock().unwrap().insert(target.into());
         if self
@@ -990,13 +1114,19 @@ impl Runtime {
             .get(target)
             .is_none_or(|l| !l.running.load(Ordering::SeqCst))
         {
-            self.inner.reserved.lock().unwrap().remove(target);
+            self.inner.admission.release(target);
         }
         if let Some(live) = self.inner.live.get(target)
             && let Some(token) = live.cancel.lock().unwrap().as_ref()
         {
             token.cancel();
         }
+        // 停止 child 时一并终止它自己的后台进程树：只释放槽位而让进程继续写
+        // 文件是最坏的结果（计划 10.4）。取消是幂等的，正常结束前重复调用无害。
+        self.inner.jobs.cancel_owner(target).await;
+        // 浏览器资源按 child 归属清理：只关它自己的 tab，不碰父代理与其他
+        // 子代理的（计划 6.4 / L04）。
+        self.close_owned_tabs(target).await;
         Ok(())
     }
     pub fn ensure_removable(&self, owner: &str) -> Result<(), String> {
@@ -1022,6 +1152,7 @@ impl Runtime {
         }
         for child in children.iter().rev() {
             self.inner.jobs.cancel_owner(&child.id).await;
+            self.close_owned_tabs(&child.id).await;
             let sessions = self.inner.sessions.clone();
             let id = child.id.clone();
             tokio::task::spawn_blocking(move || sessions.delete(&id))
@@ -1037,7 +1168,7 @@ impl Runtime {
         Ok(())
     }
     async fn rollback_child(&self, id: &str) {
-        self.inner.reserved.lock().unwrap().remove(id);
+        self.inner.admission.release(id);
         self.inner.children.lock().unwrap().remove(id);
         self.inner.selections.lock().unwrap().remove(id);
         self.inner.inboxes.lock().unwrap().remove(id);
@@ -1049,260 +1180,235 @@ impl Runtime {
             tracing::error!(error=%e,"回滚子代理失败");
         }
     }
-    /// 唯一的派遣入口：解析定义 → 计算授权 → 冻结快照 → 建会话 → 投递首条消息。
+    /// 派遣：解析定义/临时规格 → 校验身份与授权 → 冻结快照 → 持久入队。
     ///
-    /// 三层硬拒的第三层在这里：任何宿主派遣入口都在产生分配副作用之前，
-    /// 先按**真实会话头**判定调用者是不是子代理——不看 depth、不看调用参数、
-    /// 也不看内存里的 children 表是否已经恢复。
+    /// 硬规则（第 6.2 节）在这里做**第一层**服务端判定：任何宿主派遣入口都必须
+    /// 在任何分配副作用之前确认调用者不是子代理。判定依据是真实会话头里的
+    /// `subagent` 身份，不看 label、depth、调用参数，也不依赖内存 children 表。
     async fn delegate(
         &self,
-        name: &str,
-        args: DelegateArgs,
+        fork: bool,
+        args: denia_tools::runtime_command::DelegateArgs,
         ctx: &ToolContext,
     ) -> Result<Value, String> {
+        use denia_core::session::SubagentProfileRef;
+        use denia_core::subagent::codes as subagent_codes;
+
         let owner = ctx.session_id.as_deref().ok_or("缺少会话身份")?;
         let config = self.config();
-
-        let prompt = args.prompt.trim().to_string();
-        if prompt.is_empty() {
-            return Err("subagent/invalid-args: prompt 不能为空".into());
-        }
-        if prompt.len() > config.output_bytes {
-            return Err("子代理提示词过大".into());
-        }
         let parent = self.live(owner).await?;
+
+        // ① 子代理禁止派遣子代理：硬拒，且不产生任何副作用。
         if parent.session.header().subagent.is_some() {
-            return Err(
-                "subagent/nesting-forbidden: 子代理不能派遣子代理（派遣能力是 Denia 管理的委派边界）。\
-                 需要拆分的工作请交回主代理。"
-                    .into(),
-            );
-        }
-        let fork = name == "fork_agent";
-        let project_root = crate::subagents::project_root_of(Path::new(&ctx.cwd));
-        let store = self.inner.subagents.clone();
-        let target = args.target()?;
-        // ① 定义解析：已保存定义（含 qualifiedId 校验与遮蔽拒绝）或临时 inline。
-        //    旧式调用（只有 persona / allowed_tools）走保守的兼容适配。
-        let resolved = resolve_definition(&store, &target, project_root.as_deref(), &args)?;
-        let profile = resolved.profile.clone();
-        if !profile.enabled {
             return Err(format!(
-                "subagent/profile-disabled: 子代理定义 `{}` 已被禁用；请选择其他类型或提供 inline 定义",
-                resolved.display_id
+                "子代理不能派遣子代理（{}）：请把可并行的子任务交回父代理，或在本次任务内自己完成。",
+                subagent_codes::DELEGATION_FORBIDDEN
             ));
         }
-        let diagnostics = profile.validate();
-        if !diagnostics.is_empty() {
-            let reasons: Vec<String> = diagnostics
-                .iter()
-                .map(|diagnostic| diagnostic.reason.clone())
-                .collect();
-            return Err(format!(
-                "subagent/invalid-profile: 定义 `{}` 无法执行：{}",
-                resolved.display_id,
-                reasons.join("；")
-            ));
-        }
-        // 旧式调用的 persona 已在解析层并进 instructions；新调用不允许
-        // persona 与 profile/inline 混用（解析层已拒）。
-        let persona_note = resolved
-            .legacy
-            .then(|| "persona（旧字段）已按兼容规则映射为角色补充提示".to_string());
-        let instructions = profile.instructions.clone();
-        if instructions.len() > denia_core::subagent::SUBAGENT_INSTRUCTIONS_MAX_BYTES {
-            return Err("子代理角色提示词过大".into());
-        }
-        if args.run_in_background.is_some() {
-            tracing::info!(
-                session = owner,
-                "run_in_background 已弃用：Denia 的子代理派遣始终后台执行"
-            );
-        }
+        // ② 参数契约（max_depth、profile/inline 互斥、旧字段歧义、模型成套）。
+        crate::subagents::resolver::validate_delegate_args(&args)
+            .map_err(|error| error.render())?;
 
-        // ② 模型：调用级覆盖 > 定义显式选择 > 父模型。provider/model 必须成套，
-        //    换 provider 时不继承另一个 provider 的 model/effort。
-        let mut selection = profile
-            .explicit_model()
-            .cloned()
-            .or_else(|| ctx.selection.clone())
-            .ok_or("子代理无法继承模型选择")?;
-        let parent_selection = ctx.selection.clone().unwrap_or_else(|| selection.clone());
-        match (args.provider.as_deref(), args.model.as_deref()) {
-            (Some(provider), Some(model)) => {
-                selection = ModelSelection {
-                    provider: provider.to_string(),
-                    model: model.to_string(),
-                    reasoning_effort: args.reasoning_effort.clone(),
-                };
-            }
-            (None, Some(model)) => {
-                // 只换 model：provider 不变，因此保留继承来的 effort。
-                selection.model = model.to_string();
-                if let Some(effort) = &args.reasoning_effort {
-                    selection.reasoning_effort = Some(effort.clone());
-                }
-            }
-            (None, None) => {
-                if let Some(effort) = &args.reasoning_effort {
-                    selection.reasoning_effort = Some(effort.clone());
-                }
-            }
-            (Some(_), None) => {
-                // 只换 provider 不带 model：旧 provider 的 model 名字在新 provider
-                // 下没有意义，必须成套给出。
-                return Err(
-                    "subagent/invalid-model: 指定 provider 时必须同时给出 model（换 provider 不能沿用另一个 provider 的 model/effort）"
-                        .into(),
-                );
-            }
-        }
-        if selection.provider.trim().is_empty() || selection.model.trim().is_empty() {
-            return Err("子代理无法继承模型选择".into());
-        }
-        self.inner
-            .registry
-            .resolve_call(
-                &selection.provider,
-                &selection.model,
-                selection.reasoning_effort.as_deref(),
-            )
-            .await
-            .map_err(|e| e.to_string())?;
-        if fork
-            && (selection.provider != parent_selection.provider
-                || selection.model != parent_selection.model)
-        {
-            return Err(
-                "subagent/fork-model-mismatch: fork 沿用父模型；需要另一个模型请用 spawn_agent"
-                    .into(),
-            );
-        }
-
-        // ③ 工具授权：schema、目录与执行器共用这一份 EffectiveToolGrant。
+        // ③ 父会话授权上下文：注册表 + preset/features/权限档 → parentGrant。
         let driver = self
             .inner
             .driver
             .get()
             .and_then(Weak::upgrade)
-            .ok_or("会话驱动器尚未就绪")?;
-        let preset = driver.preset_for(parent.session.agent_preset().as_deref());
-        let excluded = preset
-            .as_ref()
-            .map(|preset| preset.features.excluded_tools())
-            .unwrap_or_default();
-        let parent_grant = crate::subagents::policy::parent_grant(
-            &driver.tools().names(),
-            &excluded,
-            preset.as_ref().and_then(|preset| preset.tools.as_deref()),
+            .ok_or("会话驱动器尚未就绪，暂时无法派遣子代理")?;
+        let registered = driver.tools().names();
+        let parent_preset_id = parent.session.agent_preset();
+        let preset = driver.preset_for(parent_preset_id.as_deref());
+        let features = driver.preset_features(parent_preset_id.as_deref());
+        let preset_tools = preset.as_ref().and_then(|preset| preset.tools.as_deref());
+        let parent_mode = parent.session.permission_mode();
+        let grant = crate::subagents::resolver::parent_grant(
+            &registered,
+            &features,
+            preset_tools,
+            parent_mode,
         );
-        let grant = policy_grant(&profile, resolved.narrowing.as_deref(), &parent_grant)?;
 
-        let _admission = self.inner.admission.lock().await;
-        if self.inner.reserved.lock().unwrap().len() >= self.policy_config().max_concurrent_runs {
-            return Err("子代理并发已达上限（subagent-policy.maxConcurrentRuns）".into());
+        // ④ 解析规格：profile_id / inline / 默认 develop / 旧参数兼容路径。
+        let cwd = ctx.cwd.clone();
+        let project_root = cwd
+            .is_dir()
+            .then(|| crate::subagents::project_root_for(&cwd));
+        let parent_selection = ctx.selection.clone().ok_or("子代理无法继承模型选择")?;
+        let legacy_path = args.profile_id.is_none()
+            && args.inline.is_none()
+            && (args.persona.is_some() || args.allowed_tools.is_some());
+        let dispatch = if legacy_path {
+            crate::subagents::resolver::legacy_dispatch(&args, fork, &parent_selection, &registered)
+                .map_err(|error| error.render())?
+        } else {
+            let resolved = match (&args.profile_id, &args.inline) {
+                (Some(raw), _) => Some(
+                    self.inner
+                        .profiles
+                        .resolve(project_root.as_deref(), raw)
+                        .map_err(|error| error.render())?,
+                ),
+                (None, Some(_)) => None,
+                (None, None) => Some(
+                    self.inner
+                        .profiles
+                        .resolve_default(project_root.as_deref())
+                        .map_err(|error| error.render())?,
+                ),
+            };
+            crate::subagents::resolver::resolve_dispatch(
+                &args,
+                fork,
+                &parent_selection,
+                &grant,
+                &registered,
+                resolved.as_ref(),
+                args.profile_id.is_none() && args.inline.is_none(),
+            )
+            .map_err(|error| error.render())?
+        };
+        self.inner
+            .registry
+            .resolve_call(
+                &dispatch.selection.provider,
+                &dispatch.selection.model,
+                dispatch.selection.reasoning_effort.as_deref(),
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+        let prompt = args.prompt.clone();
+        if prompt.len() > config.output_bytes {
+            return Err("子代理提示词过大".into());
+        }
+        if dispatch.instructions.len() > denia_core::subagent::INSTRUCTIONS_MAX_BYTES {
+            return Err("子代理角色提示词过大".into());
+        }
+        let mut deprecations: Vec<String> = Vec::new();
+        if args.run_in_background.is_some() {
+            deprecations
+                .push("run_in_background 已废弃：派遣始终后台执行，该参数被忽略".to_string());
+        }
+        if legacy_path {
+            deprecations.push(
+                "persona/allowed_tools 是旧参数（已按保守历史上限解释）；请改用 profile_id 或 inline"
+                    .to_string(),
+            );
+        }
+
+        let label = args
+            .description
+            .as_deref()
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+            .unwrap_or(&dispatch.name)
+            .chars()
+            .take(200)
+            .collect::<String>();
+        let descriptor = SubagentDescriptor {
+            label,
+            // 新 child 恒为 1；谱系展示与旧数据兼容用，不作为派遣准入依据。
+            depth: 1,
+            mode: if fork { "fork" } else { "spawn" }.into(),
+            selection: dispatch.selection.clone(),
+            // 旧字段不再承载新 child 的授权语义。
+            persona: None,
+            allowed_tools: None,
+            snapshot_version: denia_core::subagent::SUBAGENT_SNAPSHOT_VERSION,
+            name: Some(dispatch.name.clone()),
+            description: Some(dispatch.description.clone()),
+            profile: Some(SubagentProfileRef {
+                qualified_id: dispatch.qualified_id.clone(),
+                source: dispatch.source,
+                revision: dispatch.revision,
+                inline: dispatch.inline,
+            }),
+            effective_tools: Some(dispatch.tools.clone()),
+            permission_ceiling: dispatch.permission_ceiling,
+            created_permission_mode: Some(parent_mode.as_str().to_string()),
+            // 审计字段：恒 false。真正的硬拒在服务端身份判定与 exec 层。
+            delegation_allowed: false,
+            instruction_scope: Some("project-only".into()),
+            parent_preset: parent_preset_id.clone(),
+            parent_preset_persona: preset
+                .as_ref()
+                .and_then(|preset| preset.persona.clone())
+                .filter(|text| !text.trim().is_empty()),
+            parent_features: Some(features),
+            instructions_ref: Some(SUBAGENT_SNAPSHOT_FILE.to_string()),
+            instructions_hash: Some(instructions_hash(&dispatch.instructions)),
+            fork: None,
+            legacy: None,
+        };
+        let descriptor = SubagentDescriptor {
+            fork: fork.then(|| denia_core::session::SubagentForkProjection {
+                source_session: owner.to_string(),
+                cut_seq: 0,
+                projection_version: denia_session::SUBAGENT_SEED_VERSION,
+                dropped: Vec::new(),
+            }),
+            ..descriptor
+        };
+
+        // ⑤ 准入：与终态 child 恢复、消息唤醒共用同一份槽位账。
+        let admission = self.inner.admission.enter().await;
+        let limit = self.policy().max_concurrent_runs;
+        if self.inner.admission.reserved_count() >= limit {
+            return Err(format!(
+                "子代理并发已达上限（{limit}）；请等已有子代理结束，或在设置里提高 subagent-policy.maxConcurrentRuns。"
+            ));
         }
         if ctx.cancel.is_cancelled() {
             return Err("子代理启动已取消".into());
         }
-        let label: String = args
-            .description
-            .as_deref()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .unwrap_or(profile.name.as_str())
-            .chars()
-            .take(200)
-            .collect();
-        // fork 的历史投影先算好：快照要记录投影版本与丢弃类别，而快照又是
-        // 建会话时写进会话头的东西。
-        let seed = if fork {
-            let events = parent.session.events();
-            Some(
-                denia_session::build_subagent_seed(&events)
-                    .map_err(|error| format!("fork 失败：{error}"))?,
+
+        // ⑥ fork 投影：只取已闭合轮次，丢弃父注入/摘要/收件箱/运行态。
+        let (source, fork_projection) = if fork {
+            let seed = denia_session::build_subagent_seed(parent.session.events().as_slice());
+            (
+                seed.events,
+                Some(denia_core::session::SubagentForkProjection {
+                    source_session: owner.to_string(),
+                    cut_seq: seed.cut_seq,
+                    projection_version: denia_session::SUBAGENT_SEED_VERSION,
+                    dropped: seed.dropped,
+                }),
             )
         } else {
-            None
-        };
-        let fork_projection = seed.as_ref().map(|seed| denia_core::subagent::ForkProjectionRef {
-            source_session_id: owner.to_string(),
-            cut_seq: seed.cut_seq,
-            projection_version: denia_core::subagent::SUBAGENT_SNAPSHOT_VERSION,
-            dropped: seed.dropped.clone(),
-            migration_version: 0,
-        });
-        let mut snapshot = SubagentSnapshotRef {
-            version: denia_core::subagent::SUBAGENT_SNAPSHOT_VERSION,
-            // 先占位，下面按落盘内容回填（哈希覆盖的字段此刻都已确定）。
-            hash: String::new(),
-            creation_mode: if fork { "fork" } else { "spawn" }.into(),
-            label: label.clone(),
-            profile: resolved.reference.clone(),
-            resolved_name: profile.name.clone(),
-            resolved_description: profile.description.clone(),
-            effective_tools: grant.tools.clone(),
-            model: selection.clone(),
-            permission_ceiling: grant.permission_ceiling,
-            permission_mode: parent.session.permission_mode().as_str().to_string(),
-            parent_preset: parent.session.agent_preset(),
-            parent_prompt_hash: parent_prompt_hash(&parent.session),
-            // 审计信息：真正的禁止派遣判定按会话身份做，不信磁盘布尔值。
-            delegation_allowed: false,
-            instruction_scope: "project-only".into(),
-            fork: fork_projection,
-        };
-        let snapshot_file = {
-            let provisional = denia_core::subagent::SubagentSnapshotFile {
-                version: snapshot.version,
-                profile: snapshot.clone(),
-                instructions: instructions.clone(),
-            };
-            snapshot.hash = provisional.hash();
-            denia_core::subagent::SubagentSnapshotFile {
-                version: snapshot.version,
-                profile: snapshot.clone(),
-                instructions,
-            }
+            (Vec::new(), None)
         };
         let descriptor = SubagentDescriptor {
-            label,
-            // 新子代理的 depth 恒为 1，只保留为显示与旧数据兼容字段。
-            depth: 1,
-            mode: if fork { "fork" } else { "spawn" }.into(),
-            selection: selection.clone(),
-            persona: None,
-            allowed_tools: None,
-            snapshot: Some(snapshot),
+            fork: fork_projection,
+            ..descriptor
         };
+
         let sessions = self.inner.sessions.clone();
-        let cwd = ctx.cwd.clone();
+        let child_cwd = cwd.clone();
         let sandbox = parent.session.header().sandbox;
         let parent_id = owner.to_string();
         let desc = descriptor.clone();
-        let permission = parent.session.permission_mode();
-        // 子代理加入父代理的组装(抄 dsh:subagent 与创建它的 agent 看到同一
-        // 份工具面与 persona),因此 preset 随血缘继承,而不是悄悄用部署默认值。
-        let parent_preset = parent.session.agent_preset();
-        // fork 的历史投影：父的自动注入（全局规则、能力快照、目录、旧摘要）
-        // 与运行态不随种子进入子会话。
-        let source = seed
-            .as_ref()
-            .map(|seed| seed.events.clone())
-            .unwrap_or_default();
+        let instructions = dispatch.instructions.clone();
+        let child_permission = crate::subagents::resolver::effective_permission_mode(
+            dispatch.permission_ceiling,
+            parent_mode,
+        );
+        let child_preset = parent_preset_id.clone();
+        // —— 崩溃窗口（测试注入）：快照落盘后 / 入队前后 / 返回 pending 前后 ——
+        // 任何一个窗口失败都必须回滚本次新增的会话、槽位与目录条目。
+        if self.test_fault("create") {
+            return Err("注入故障：创建子会话前失败".to_string());
+        }
         let id = tokio::task::spawn_blocking(move || {
             let child = sessions
-                .create_subagent(&cwd, sandbox, &parent_id, desc)
+                .create_subagent(&child_cwd, sandbox, &parent_id, desc)
                 .map_err(|e| e.to_string())?;
             let result: Result<String, String> = (|| {
-                // 快照必须先于首次模型请求落盘：引用缺失时装配层拒绝启动，
-                // 而不是回退默认工具面。
-                crate::subagents::write_snapshot_file(child.directory(), &snapshot_file)?;
                 child.seed_from(&source).map_err(|e| e.to_string())?;
+                write_subagent_snapshot(&sessions, child.id(), &instructions)?;
                 child
-                    .set_permission_mode(permission)
+                    .set_permission_mode(child_permission)
                     .map_err(|e| e.to_string())?;
-                if let Some(preset) = &parent_preset {
+                if let Some(preset) = &child_preset {
                     child.set_agent_preset(preset).map_err(|e| e.to_string())?;
                 }
                 child.flush().map_err(|e| e.to_string())?;
@@ -1315,6 +1421,15 @@ impl Runtime {
         })
         .await
         .map_err(|e| e.to_string())??;
+        if self.test_fault("snapshot") {
+            // 会话与快照都已落盘，随后这一步失败：走真实回滚路径。
+            self.rollback_child(&id).await;
+            return Err("注入故障：快照落盘后失败".to_string());
+        }
+        if !self.inner.admission.reserve(&id, limit) {
+            self.rollback_child(&id).await;
+            return Err(format!("子代理并发已达上限（{limit}）"));
+        }
         for workspace in self.inner.workspaces.list() {
             if workspace.session_ids.iter().any(|s| s == owner)
                 && !self.inner.workspaces.attach(&workspace.id, &id)
@@ -1323,68 +1438,69 @@ impl Runtime {
                 return Err("父工作区已删除，子代理创建已回滚".into());
             }
         }
-        self.inner.reserved.lock().unwrap().insert(id.clone());
         self.inner.children.lock().unwrap().insert(
             id.clone(),
             Child {
                 id: id.clone(),
                 parent_id: owner.into(),
-                descriptor,
+                descriptor: descriptor.clone(),
             },
         );
         self.inner
             .selections
             .lock()
             .unwrap()
-            .insert(id.clone(), selection);
+            .insert(id.clone(), dispatch.selection.clone());
         if ctx.cancel.is_cancelled() {
             self.rollback_child(&id).await;
             return Err("子代理启动已取消".into());
         }
-        let message_id = self
-            .enqueue(
+        if self.test_fault("pre-enqueue") {
+            self.rollback_child(&id).await;
+            return Err("注入故障：入队前失败".to_string());
+        }
+        let enqueued = if self.test_fault("enqueue") {
+            Err("注入故障：入队失败".to_string())
+        } else {
+            self.enqueue(
                 &id,
+                // 通知身份按 childId + generation 生成，续跑不复用上一次结果。
                 uuid::Uuid::new_v4().to_string(),
                 format!("[父代理 {owner} 委派任务]\n{prompt}"),
                 format!("agent:{owner}"),
             )
-            .await;
-        let message_id = match message_id {
+            .await
+        };
+        let message_id = match enqueued {
             Ok(id) => id,
             Err(error) => {
                 self.rollback_child(&id).await;
                 return Err(error);
             }
         };
-        let _ = self.inner.events.send(ServerEvent::SessionsUpdated);
-        drop(_admission);
-        let mut result = background_result(
-            json!({
-                "childId": id,
-                "messageId": message_id,
-                "profile": resolved.summary(),
-                "tools": grant.tools,
-            }),
-            true,
-        );
-        if let Some(note) = &resolved.note {
-            result["diagnostics"] = json!([note]);
+        if self.test_fault("post-enqueue") {
+            // 派发已持久化：这里失败**不**回滚——child 的会话、首条 inbox 与
+            // 完成通知都是持久事实，工具结果丢了也不能删掉正在运行的 child。
+            return Err("注入故障：返回 pending 前失败".to_string());
         }
-        if let Some(note) = &persona_note {
-            let notes = result["diagnostics"].as_array_mut();
-            match notes {
-                Some(list) => list.push(json!(note)),
-                None => result["diagnostics"] = json!([note]),
-            }
+        let _ = self.inner.events.send(ServerEvent::SessionsUpdated);
+        drop(admission);
+        let mut result = background_result(json!({"childId":id,"messageId":message_id}), true);
+        // 只回摘要，不回整份提示快照（计划 8.3）。
+        result["profile"] = json!({
+            "qualifiedId": dispatch.qualified_id,
+            "name": dispatch.name,
+            "inline": dispatch.inline,
+            "tools": dispatch.tools,
+            "toolCount": dispatch.tools.len(),
+            "model": dispatch.selection,
+            "permissionCeiling": dispatch.permission_ceiling.as_str(),
+            "fingerprint": dispatch.fingerprint(),
+        });
+        if !deprecations.is_empty() {
+            result["deprecations"] = json!(deprecations);
         }
         Ok(result)
-    }
-    /// 子代理身份判定（工作区指令作用域用）：按真实会话头，不按是否有父会话。
-    fn is_child_session(&self, id: &str) -> bool {
-        if let Some(live) = self.inner.live.get(id) {
-            return live.session.header().subagent.is_some();
-        }
-        self.inner.children.lock().unwrap().contains_key(id)
     }
     pub async fn skills(&self, cwd: PathBuf) -> Result<Vec<crate::skills::Skill>, String> {
         let home = self.inner.home.clone();
@@ -1412,20 +1528,6 @@ fn string(args: &Value, key: &str) -> Result<String, String> {
         .map(str::to_string)
         .ok_or_else(|| format!("缺少非空参数：{key}"))
 }
-/// 父代理基础系统提示的快照摘要（派遣时冻结，用于审计与"不回退默认人格"）。
-fn parent_prompt_hash(session: &denia_session::Session) -> String {
-    let text = session
-        .events()
-        .iter()
-        .rev()
-        .find_map(|envelope| match &envelope.event {
-            SessionEvent::SystemPrompt { text, .. } => Some(text.clone()),
-            _ => None,
-        })
-        .unwrap_or_default();
-    stable_hash(&text)
-}
-
 #[cfg(test)]
 fn validate_wait_timeout(args: &Value) -> Result<(), String> {
     let mut args = args.clone();
@@ -1443,6 +1545,105 @@ fn background_result(mut result: Value, pending: bool) -> Value {
         );
     }
     result
+}
+
+/// 子代理运行快照文件：放在会话目录内的不可变大文本。
+///
+/// header 只保存引用与 hash（否则会话列表每行都会携带最多 64 KiB 的角色全文）。
+/// 引用不存在或 hash 不匹配一律拒绝启动，不回退默认。
+const SUBAGENT_SNAPSHOT_FILE: &str = "subagent.json";
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SubagentSnapshotFile {
+    snapshot_version: u32,
+    instructions: String,
+}
+
+/// 稳定内容 hash（FNV-1a）：校验快照文件与 header 记录是否一致。
+pub(crate) fn instructions_hash(text: &str) -> String {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in text.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("{hash:016x}")
+}
+
+fn write_subagent_snapshot(
+    sessions: &denia_session::SessionStore,
+    id: &str,
+    instructions: &str,
+) -> Result<(), String> {
+    let dir = sessions.root().join(id);
+    std::fs::create_dir_all(&dir).map_err(|error| format!("创建会话目录失败：{error}"))?;
+    let payload = serde_json::to_string(&SubagentSnapshotFile {
+        snapshot_version: denia_core::subagent::SUBAGENT_SNAPSHOT_VERSION,
+        instructions: instructions.to_string(),
+    })
+    .map_err(|error| format!("序列化子代理快照失败：{error}"))?;
+    let tmp = dir.join("subagent.json.tmp");
+    std::fs::write(&tmp, payload.as_bytes()).map_err(|error| {
+        format!(
+            "写入子代理快照失败（{}）：{error}（snapshot/io）",
+            dir.display()
+        )
+    })?;
+    std::fs::rename(&tmp, dir.join(SUBAGENT_SNAPSHOT_FILE))
+        .map_err(|error| format!("替换子代理快照失败：{error}（snapshot/io）"))?;
+    Ok(())
+}
+
+/// 读取并校验一份子代理快照。
+///
+/// - 新快照（`snapshotVersion >= 1`）：文件必须存在，且角色正文 hash 与 header
+///   一致；不一致说明会话目录被外部改动，拒绝启动而不是回退到空角色。
+/// - 旧快照（版本 0）：没有引用文件，角色正文取旧 `persona` 字段（解释为
+///   角色补充），授权按 [`crate::subagents::resolver::legacy_grant`] 保守构造。
+pub(crate) fn read_subagent_snapshot(
+    sessions: &denia_session::SessionStore,
+    id: &str,
+    descriptor: &SubagentDescriptor,
+) -> Result<String, String> {
+    use denia_core::subagent::codes as subagent_codes;
+    if descriptor.snapshot_version < denia_core::subagent::SUBAGENT_SNAPSHOT_VERSION {
+        return Ok(descriptor.persona.clone().unwrap_or_default());
+    }
+    let Some(reference) = descriptor.instructions_ref.as_deref() else {
+        return Err(format!(
+            "子代理快照缺少引用（{}）：拒绝启动，避免以空角色运行",
+            subagent_codes::SNAPSHOT_INVALID
+        ));
+    };
+    if reference != SUBAGENT_SNAPSHOT_FILE {
+        return Err(format!(
+            "子代理快照引用了未知文件 `{reference}`（{}）",
+            subagent_codes::SNAPSHOT_INVALID
+        ));
+    }
+    let path = sessions.root().join(id).join(reference);
+    let raw = std::fs::read_to_string(&path).map_err(|error| {
+        format!(
+            "子代理快照文件不可读（{}）：{}（{error}）",
+            path.display(),
+            subagent_codes::SNAPSHOT_INVALID
+        )
+    })?;
+    let file: SubagentSnapshotFile = serde_json::from_str(&raw).map_err(|error| {
+        format!(
+            "子代理快照文件格式无效（{}）：{error}",
+            subagent_codes::SNAPSHOT_INVALID
+        )
+    })?;
+    if let Some(expected) = descriptor.instructions_hash.as_deref()
+        && expected != instructions_hash(&file.instructions)
+    {
+        return Err(format!(
+            "子代理快照与 header 记录的 hash 不一致（{}）：拒绝启动，不回退默认角色",
+            subagent_codes::SNAPSHOT_INVALID
+        ));
+    }
+    Ok(file.instructions)
 }
 
 #[async_trait]
@@ -1547,9 +1748,8 @@ impl AgentRuntime for Runtime {
             }
             RuntimeCommand::Delegate { fork, args } => {
                 let runtime = self.clone();
-                let name = if fork { "fork_agent" } else { "spawn_agent" }.to_owned();
                 let ctx = ctx.clone();
-                tokio::spawn(async move { runtime.delegate(&name, args, &ctx).await })
+                tokio::spawn(async move { runtime.delegate(fork, args, &ctx).await })
                     .await
                     .map_err(|e| format!("子代理启动任务失败：{e}"))?
             }
@@ -1619,10 +1819,20 @@ impl AgentRuntime for Runtime {
         if config.workspace_instructions_max_bytes == 0 {
             return Ok(None);
         }
-        // 作用域由宿主按**真实会话头**决定:子代理只发现项目级指令,用户
-        // 全局的 `$DENIA_HOME/AGENTS.md` 不经自动通道进入子代理上下文。
-        // 模型与定义都无法请求 includeGlobal。
-        let scope = if self.is_child_session(session) {
+        // 作用域由宿主按**真实会话身份**决定，模型与 profile 都无法指定。
+        // 父 preset 关闭 agentsMd 时整条通道由调用方跳过（全局排除不等于重新
+        // 打开父已禁用的注入能力）。
+        let sessions = self.inner.sessions.clone();
+        let session = session.to_string();
+        let is_child = tokio::task::spawn_blocking(move || {
+            sessions
+                .read_log_header(&session)
+                .map(|header| header.subagent.is_some())
+        })
+        .await
+        .map_err(|error| error.to_string())?
+        .unwrap_or(false);
+        let scope = if is_child {
             crate::workspace_instructions::InstructionScope::ProjectOnly
         } else {
             crate::workspace_instructions::InstructionScope::GlobalAndProject
@@ -1630,13 +1840,15 @@ impl AgentRuntime for Runtime {
         let home = self.inner.home.clone();
         let cwd = cwd.to_path_buf();
         let touched = touched.to_vec();
+        // 每次重新发现并渲染，没有跨会话/跨作用域缓存：root 的项目指令缓存
+        // 不可能被 child 复用（计划 9.2 的缓存键要求在此实现下天然成立）。
         let files = tokio::task::spawn_blocking(move || {
-            crate::workspace_instructions::discover_scoped(
-                scope,
+            crate::workspace_instructions::discover(
                 &home,
                 &cwd,
                 &touched,
                 config.workspace_instructions_max_source_bytes,
+                scope,
             )
         })
         .await
@@ -1676,6 +1888,106 @@ impl AgentRuntime for Runtime {
         .await
         .map_err(|e| e.to_string())?
     }
+    /// 子代理运行快照：角色正文从会话目录内的文件读取并校验，授权取派遣时
+    /// 冻结的显式列表。旧描述符（版本 0）没有文件与显式列表，按历史只读上限
+    /// 保守构造，绝不等于 inherit。
+    async fn subagent_prompt(
+        &self,
+        session: &str,
+    ) -> Result<Option<denia_tools::capabilities::SubagentPrompt>, String> {
+        let live = self.live(session).await?;
+        let Some(descriptor) = live.session.header().subagent.clone() else {
+            return Ok(None);
+        };
+        let sessions = self.inner.sessions.clone();
+        let id = session.to_string();
+        let desc = descriptor.clone();
+        let instructions =
+            tokio::task::spawn_blocking(move || read_subagent_snapshot(&sessions, &id, &desc))
+                .await
+                .map_err(|error| error.to_string())??;
+        let legacy = descriptor.snapshot_version < denia_core::subagent::SUBAGENT_SNAPSHOT_VERSION;
+        let effective_tools = descriptor.effective_tools.clone().unwrap_or_else(|| {
+            crate::subagents::resolver::legacy_grant(descriptor.allowed_tools.as_deref())
+        });
+        Ok(Some(denia_tools::capabilities::SubagentPrompt {
+            name: descriptor
+                .name
+                .clone()
+                .or_else(|| Some(descriptor.label.clone())),
+            instructions,
+            effective_tools,
+            permission_ceiling: Some(descriptor.permission_ceiling.as_str().to_string()),
+            parent_preset_persona: descriptor.parent_preset_persona.clone(),
+            legacy,
+        }))
+    }
+
+    /// 父代理可见的派遣目录 + 派遣纪律。
+    ///
+    /// 只公布限定 id、名称、描述与摘要（不含 instructions 全文）；子代理永不
+    /// 注入；父 preset 关闭 subagents 时不出现（工具与纪律段同进退）。
+    async fn subagent_catalog(&self, session: &str) -> Result<Option<String>, String> {
+        let live = self.live(session).await?;
+        if live.session.header().subagent.is_some() {
+            return Ok(None);
+        }
+        let Some(driver) = self.inner.driver.get().and_then(Weak::upgrade) else {
+            return Ok(None);
+        };
+        if !driver.features_for(&live.session).subagents {
+            return Ok(None);
+        }
+        let cwd = PathBuf::from(live.session.header().cwd.clone());
+        let root = cwd
+            .is_dir()
+            .then(|| crate::subagents::project_root_for(&cwd));
+        let entries = self.inner.profiles.catalog_entries(root.as_deref());
+        if entries.is_empty() {
+            return Ok(None);
+        }
+        let mut lines = vec![
+            "[denia 子代理目录]".to_string(),
+            "可用子代理类型（qualifiedId｜名称｜用途｜工具｜模型）：".to_string(),
+        ];
+        for entry in &entries {
+            lines.push(format!(
+                "- {}｜{}｜{}｜{}｜{}",
+                entry.qualified_id, entry.name, entry.description, entry.tools, entry.model
+            ));
+        }
+        lines.push(String::new());
+        lines.push(
+            "派遣方式：profile_id 用上面的 qualifiedId；inline 在调用时给出临时定义（不落盘）；两者都省略时使用默认的 develop 定义。profile_id 与 inline 互斥。"
+                .to_string(),
+        );
+        lines.push(
+            "分工与等待：按不重叠的文件或模块分工，最终由你统一集成。派遣后立即返回 pending，不要轮询——继续独立工作或先向用户回复进度并结束本轮；完成结果会自动送达。执行完成前不要宣称工作已完成。"
+                .to_string(),
+        );
+        lines.push(
+            "结果汇报区分三种情形：成功结果、任务失败（附失败原因）、等待你决策。子代理不能再派遣子代理；子代理不会自动继承全局 AGENTS.md，只发现项目级规则。"
+                .to_string(),
+        );
+        let text = lines.join("\n");
+        // 独立字节预算：目录每步注入，必须自带上限与诊断，不能挤占指令预算，
+        // 也不能因为超限就静默截断——截断必须明示。
+        let budget = self.config().subagent_catalog_max_bytes as usize;
+        if text.len() > budget {
+            tracing::warn!(
+                session = session,
+                bytes = text.len(),
+                budget,
+                "子代理目录超出预算，已按 UTF-8 边界截断"
+            );
+            return Ok(Some(format!(
+                "{}\n（目录已按 {budget} 字节预算截断，部分定义未列出；未列出的定义仍可直接用 profile_id 指定。）",
+                truncate_utf8(&text, budget)
+            )));
+        }
+        Ok(Some(text))
+    }
+
     async fn drain(&self, session: &str) -> Result<Vec<String>, String> {
         let live = self.live(session).await?;
         let inner = self.inner.clone();
@@ -1698,6 +2010,85 @@ impl AgentRuntime for Runtime {
         })
         .await
         .map_err(|e| e.to_string())?
+    }
+
+    /// 会话的冻结工具授权：MCP 目录等按会话投影的目录必须用它过滤。
+    fn granted_tools(&self, session: &str) -> Option<Vec<String>> {
+        if let Some(live) = self.inner.live.get(session) {
+            return grant_of(live.session.header());
+        }
+        self.inner
+            .sessions
+            .read_log_header(session)
+            .ok()
+            .and_then(|header| grant_of(&header))
+    }
+}
+
+/// 会话头里的冻结授权；非子代理返回 None（= 没有被定义收窄）。
+fn grant_of(header: &denia_core::session::SessionHeader) -> Option<Vec<String>> {
+    let child = header.subagent.as_ref()?;
+    Some(child.effective_tools.clone().unwrap_or_else(|| {
+        denia_core::subagent::legacy_child_tools(child.allowed_tools.as_deref())
+    }))
+}
+
+/// UTF-8 边界截断：预算切在多字节序列中间时回退到前一个字符边界。
+fn truncate_utf8(text: &str, budget: usize) -> &str {
+    if text.len() <= budget {
+        return text;
+    }
+    let mut end = budget;
+    while end > 0 && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    &text[..end]
+}
+
+/// 未结算的审批/提问数量与最后一次终态摘要。///
+/// 扫描窗口限定在最近 [`INTERACTION_SCAN_TAIL`] 条事件：等待中的交互必然是
+/// 最近发生的（进程正阻塞在它上面），而每次列表刷新都全量扫长会话代价太大。
+/// 比窗口更早的未结算请求已由加载期收敛（见 `session::recovery`）补上终态。
+const INTERACTION_SCAN_TAIL: usize = 2000;
+
+fn pending_interactions(session: &denia_session::Session) -> (usize, usize, Option<String>) {
+    let events = session.events();
+    let start = events.len().saturating_sub(INTERACTION_SCAN_TAIL);
+    let mut approvals: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    let mut asks: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    let mut result: Option<String> = None;
+    for envelope in &events[start..] {
+        match &envelope.event {
+            SessionEvent::ApprovalAsked { request_id, .. } => {
+                approvals.insert(request_id.as_str());
+            }
+            SessionEvent::ApprovalDecided { request_id, .. } => {
+                approvals.remove(request_id.as_str());
+            }
+            SessionEvent::AskRequested { request_id, .. } => {
+                asks.insert(request_id.as_str());
+            }
+            SessionEvent::AskResolved { request_id, .. } => {
+                asks.remove(request_id.as_str());
+            }
+            SessionEvent::TurnEnd { reason, .. } => result = Some(turn_end_label(reason)),
+            _ => {}
+        }
+    }
+    (approvals.len(), asks.len(), result)
+}
+
+fn turn_end_label(reason: &denia_core::session::TurnEndReason) -> String {
+    use denia_core::session::TurnEndReason;
+    match reason {
+        TurnEndReason::Completed => "已完成".to_string(),
+        TurnEndReason::Aborted { .. } => "被取消".to_string(),
+        TurnEndReason::MaxTokens => "输出预算耗尽".to_string(),
+        TurnEndReason::LoopDetected { repeats } => format!("检测到死循环（连续 {repeats} 次）"),
+        TurnEndReason::Interrupted => "中断".to_string(),
+        TurnEndReason::Error { failure } => {
+            format!("失败：{}（{}）", failure.message, failure.code)
+        }
     }
 }
 
@@ -1742,11 +2133,8 @@ mod tests {
             _: &str,
             request: &GenerateRequest,
         ) -> Result<ChunkStream, LlmError> {
-            // 根会话的组装必须完整；子代理按自己的工具集收窄，不能一概要求 skill。
-            if request.tools.iter().any(|s| s.name == "spawn_agent") {
-                assert!(request.tools.iter().any(|s| s.name == "skill"));
-                assert!(request.tools.iter().any(|s| s.name == "bash"));
-            }
+            // 不再全局断言"必有 skill"：受限子代理（如只授予 bash/jobs 的
+            // 定义）本来就不该看到 skill。需要它的分支各自断言。
             if request.model == "hold" {
                 return Ok(Box::pin(futures::stream::pending()));
             }
@@ -1804,6 +2192,203 @@ mod tests {
                     }),
                 ])));
             }
+            // —— 执行型子代理的真实副作用链路（无需真实模型）——
+            // exec-parent 派一个 develop 子代理；子代理读→写→跑命令，然后收尾。
+            if request.model == "exec-parent" {
+                let results = request
+                    .messages
+                    .iter()
+                    .filter(|m| m.role == denia_core::message::ChatRole::Tool)
+                    .count();
+                if results == 0 {
+                    return Ok(tool_call_stream(
+                        "exec-spawn",
+                        "spawn_agent",
+                        json!({"prompt":"SUBTASK-EXEC","description":"开发子代理","model":"exec-child"}),
+                    ));
+                }
+                return Ok(text_stream("子代理已完成任务"));
+            }
+            if request.model == "exec-child" {
+                // 子代理的有效工具来自**冻结授权**：develop 含写与命令。
+                assert!(
+                    request.tools.iter().any(|s| s.name == "write_file"),
+                    "develop 子代理必须有 write_file"
+                );
+                assert!(
+                    request.tools.iter().any(|s| s.name == "bash"),
+                    "develop 子代理必须有 bash"
+                );
+                for denied in ["spawn_agent", "fork_agent", "exit_plan", "get_goal"] {
+                    assert!(
+                        !request.tools.iter().any(|s| s.name == denied),
+                        "{denied} 不得出现在子代理工具面"
+                    );
+                }
+                let results = request
+                    .messages
+                    .iter()
+                    .filter(|m| m.role == denia_core::message::ChatRole::Tool)
+                    .count();
+                let call = match results {
+                    0 => Some(("read_file", json!({"path": "existing.txt"}))),
+                    1 => Some((
+                        "write_file",
+                        json!({"path": "child-wrote.txt","content":"子代理写入\n"}),
+                    )),
+                    2 => Some(("bash", json!({"command":"echo child-ran > child-ran.txt"}))),
+                    // 没被授予 job_start 的子代理请求后台执行：必须被拒，且不能
+                    // 真的起一个后台任务（只禁 job_start 不是收口）。
+                    3 => Some((
+                        "bash",
+                        json!({"command":"echo should-not-run","run_in_background":true}),
+                    )),
+                    _ => None,
+                };
+                if let Some((name, args)) = call {
+                    return Ok(tool_call_stream(&format!("exec-{results}"), name, args));
+                }
+                return Ok(text_stream("开发子代理完成"));
+            }
+            // explore 子代理：模型幻觉调用写工具与命令，必须被拒且文件无变化。
+            if request.model == "explore-parent" {
+                let results = request
+                    .messages
+                    .iter()
+                    .filter(|m| m.role == denia_core::message::ChatRole::Tool)
+                    .count();
+                if results == 0 {
+                    return Ok(tool_call_stream(
+                        "explore-spawn",
+                        "spawn_agent",
+                        json!({"prompt":"SUBTASK-EXPLORE","profile_id":"builtin:explore","model":"explore-child"}),
+                    ));
+                }
+                return Ok(text_stream("探索子代理已回结论"));
+            }
+            if request.model == "explore-child" {
+                // explore 的冻结授权只读：写与命令既不在 schema 里，也不可执行。
+                for denied in ["write_file", "edit", "bash", "job_start"] {
+                    assert!(
+                        !request.tools.iter().any(|s| s.name == denied),
+                        "explore 子代理的工具面不得含 {denied}"
+                    );
+                }
+                assert!(
+                    request.tools.iter().any(|s| s.name == "read_file"),
+                    "explore 子代理必须有 read_file"
+                );
+                let results = request
+                    .messages
+                    .iter()
+                    .filter(|m| m.role == denia_core::message::ChatRole::Tool)
+                    .count();
+                let call = match results {
+                    0 => Some((
+                        "write_file",
+                        json!({"path": "explore-wrote.txt","content":"不应写入\n"}),
+                    )),
+                    1 => Some(("bash", json!({"command":"echo nope > explore-wrote.txt"}))),
+                    _ => None,
+                };
+                if let Some((name, args)) = call {
+                    return Ok(tool_call_stream(&format!("explore-{results}"), name, args));
+                }
+                return Ok(text_stream("只读探索完成"));
+            }
+            // 子代理遗留后台任务：正常结束时必须被取消并写进结果通知。
+            if request.model == "jobs-parent" {
+                let results = request
+                    .messages
+                    .iter()
+                    .filter(|m| m.role == denia_core::message::ChatRole::Tool)
+                    .count();
+                if results == 0 {
+                    return Ok(tool_call_stream(
+                        "jobs-spawn",
+                        "spawn_agent",
+                        json!({
+                            "prompt": "SUBTASK-JOBS",
+                            "description": "带后台任务的子代理",
+                            "model": "jobs-child",
+                            "inline": {
+                                "name": "后台任务员",
+                                "description": "启动一个长任务后收尾",
+                                "tools": {"mode": "allowlist", "names": ["bash", "job_start", "job_list"]},
+                                "model": {"mode": "inherit"},
+                                "permissionCeiling": "inherit"
+                            }
+                        }),
+                    ));
+                }
+                return Ok(text_stream("子代理已回结果"));
+            }
+            if request.model == "jobs-child" {
+                // 冻结授权里有 job_start，因此 run_in_background 参数也必须在。
+                assert!(
+                    request.tools.iter().any(|s| s.name == "job_start"),
+                    "被授予的 job_start 必须可见"
+                );
+                assert!(
+                    request.tools.iter().any(|s| s.name == "bash"),
+                    "被授予的 bash 必须可见"
+                );
+                assert!(
+                    !request.tools.iter().any(|s| s.name == "job_kill"),
+                    "未授予的 job_kill 不得出现"
+                );
+                let results = request
+                    .messages
+                    .iter()
+                    .filter(|m| m.role == denia_core::message::ChatRole::Tool)
+                    .count();
+                if results == 0 {
+                    return Ok(tool_call_stream(
+                        "jobs-0",
+                        "job_start",
+                        json!({"command": LONG_RUNNING_PROBE, "label": "leftover-probe"}),
+                    ));
+                }
+                return Ok(text_stream("子代理启动后台任务后收尾"));
+            }
+            if request.model == "legacy-child" {
+                // 旧子代理建立投影后：旧自动注入不得再进模型请求，任务保留。
+                assert!(
+                    !request
+                        .messages
+                        .iter()
+                        .any(|message| message.content.contains("GLOBAL-SENTINEL")),
+                    "旧自动注入不得进入模型请求：{:?}",
+                    request
+                        .messages
+                        .iter()
+                        .map(|message| message.content.clone())
+                        .collect::<Vec<_>>()
+                );
+                assert!(
+                    request
+                        .messages
+                        .iter()
+                        .any(|message| message.content.contains("调查登录流程")),
+                    "child 自己的任务投递必须保留"
+                );
+                // H06：续跑不得扩大快照授权（旧描述符 → 保守只读集合）。
+                for forbidden in ["bash", "write_file", "edit", "job_start", "spawn_agent"] {
+                    assert!(
+                        !request.tools.iter().any(|schema| schema.name == forbidden),
+                        "续跑旧子代理不得扩权到 {forbidden}：{:?}",
+                        request
+                            .tools
+                            .iter()
+                            .map(|schema| schema.name.clone())
+                            .collect::<Vec<_>>()
+                    );
+                }
+                assert!(request.tools.iter().all(|schema| {
+                    denia_core::subagent::LEGACY_READ_ONLY_TOOLS.contains(&schema.name.as_str())
+                }));
+                return Ok(text_stream("旧子代理已按投影继续"));
+            }
             if request.model == "orchestrator" {
                 let results: Vec<_> = request
                     .messages
@@ -1856,6 +2441,47 @@ mod tests {
             ])))
         }
     }
+    /// 长跑探针：足够久，保证子代理结束的那一刻它仍在运行（用于验证
+    /// "子代理不得遗留后台任务"）。
+    const LONG_RUNNING_PROBE: &str = if cfg!(windows) {
+        "ping -n 30 127.0.0.1 > NUL"
+    } else {
+        "sleep 30"
+    };
+
+    /// 单步工具调用流：调用一次工具并结束本轮 step。
+    fn tool_call_stream(id: &str, name: &str, args: Value) -> ChunkStream {
+        Box::pin(futures::stream::iter(vec![
+            Ok(StreamChunk::BlockEnd {
+                index: 0,
+                block: ContentBlock::ToolCall {
+                    id: id.to_string(),
+                    name: name.to_string(),
+                    arguments: args.to_string(),
+                    incomplete: false,
+                },
+            }),
+            Ok(StreamChunk::Finish {
+                reason: FinishReason::ToolCalls,
+            }),
+        ]))
+    }
+
+    /// 纯文本回复流（轮次闭合）。
+    fn text_stream(text: &str) -> ChunkStream {
+        Box::pin(futures::stream::iter(vec![
+            Ok(StreamChunk::BlockEnd {
+                index: 0,
+                block: ContentBlock::Text {
+                    text: text.to_string(),
+                },
+            }),
+            Ok(StreamChunk::Finish {
+                reason: FinishReason::Stop,
+            }),
+        ]))
+    }
+
     async fn setup() -> (crate::state::AppState, ToolContext) {
         let home =
             std::env::temp_dir().join(format!("denia-runtime-test-{}", uuid::Uuid::new_v4()));
@@ -1893,7 +2519,6 @@ mod tests {
             call_id: None,
             goal_reader: None,
             read_state: None,
-            granted_tools: None,
         };
         (state, ctx)
     }
@@ -2207,8 +2832,7 @@ mod tests {
             state.events.clone(),
             state.registry.clone(),
             state.workspaces.clone(),
-            state.subagents.clone(),
-            None,
+            state.subagent_profiles.clone(),
         )
         .unwrap();
         assert_eq!(restored.list(owner).as_array().unwrap().len(), 1);
@@ -2222,190 +2846,1057 @@ mod tests {
             2
         );
     }
-    /// 新派遣语义:默认用有效 develop 定义、explore 是只读上限、子代理不能再派遣。
+    /// 子代理的能力来自**派遣时解析的定义**：默认走 develop（有写能力），
+    /// explore 只读；硬禁项（派遣/会话主控/宿主配置）任何定义都拿不到；
+    /// 旧参数路径按历史只读上限保守解释，绝不自动变全工具。
     #[tokio::test]
-    async fn spawn_resolves_profiles_and_enforces_the_nesting_ban() {
+    async fn subagents_follow_profile_capability_and_hard_denied_rules() {
         let (state, ctx) = setup().await;
-        // 默认(不给 profile_id/inline):有效 develop 定义。
+        // ① 省略 profile_id/inline = 默认 develop 定义。
         let result = state
             .runtime
             .execute(
                 "spawn_agent",
-                json!({"prompt":"改代码","description":"开发子代理"}),
+                json!({"prompt":"实现功能","description":"开发子代理"}),
                 &ctx,
             )
             .await
             .unwrap();
-        assert_eq!(result["profile"]["id"], "develop");
         let id = result["childId"].as_str().unwrap();
+        assert_eq!(result["profile"]["qualifiedId"], "builtin:develop");
         let live = state.live.get(id).unwrap();
-        let child = live.session.header().subagent.clone().unwrap();
-        assert_eq!(child.depth, 1, "新 child 的 depth 恒为 1");
-        assert!(child.snapshot.is_some(), "新 child 必须带运行快照");
-        let tools = child.effective_tools();
-        for expected in ["read_file", "write_file", "edit", "bash", "todo_write"] {
-            assert!(tools.iter().any(|name| name == expected), "缺少 {expected}");
+        let descriptor = live.session.header().subagent.clone().unwrap();
+        assert_eq!(
+            descriptor.snapshot_version,
+            denia_core::subagent::SUBAGENT_SNAPSHOT_VERSION
+        );
+        assert!(
+            !descriptor.delegation_allowed,
+            "delegationAllowed 必须恒为 false（审计字段）"
+        );
+        assert_eq!(
+            descriptor.instruction_scope.as_deref(),
+            Some("project-only")
+        );
+        assert_eq!(
+            descriptor.created_permission_mode.as_deref(),
+            Some("auto-edit")
+        );
+        let tools = descriptor.effective_tools.clone().unwrap();
+        for expected in ["write_file", "edit", "bash", "todo_write", "read_file"] {
+            assert!(
+                tools.contains(&expected.to_string()),
+                "develop 应含 {expected}"
+            );
         }
         for forbidden in [
             "spawn_agent",
             "fork_agent",
+            "list_agents",
+            "wait_agent",
+            "interrupt_agent",
             "exit_plan",
             "get_goal",
             "update_goal",
             "create_preset",
-            "ask",
         ] {
             assert!(
-                !tools.iter().any(|name| name == forbidden),
-                "{forbidden} 不得授予子代理"
+                !tools.contains(&forbidden.to_string()),
+                "{forbidden} 是硬禁项，任何定义都不得授予"
             );
         }
-        // 角色正文落在会话目录的快照文件里(不进会话头)。
-        let snapshot = live.session.subagent_snapshot().expect("快照可读");
-        assert!(snapshot.instructions.contains("先复述要达成的目标"));
+        // 角色正文不放 header，只存引用与 hash。
+        assert_eq!(
+            descriptor.instructions_ref.as_deref(),
+            Some("subagent.json")
+        );
+        assert!(descriptor.instructions_hash.is_some());
+        assert!(descriptor.persona.is_none() && descriptor.allowed_tools.is_none());
 
-        // explore 预设:只读上限,且不含写/命令类工具。
-        let result = state
-            .runtime
-            .execute(
-                "spawn_agent",
-                json!({"prompt":"查调用链","profile_id":"builtin:explore"}),
-                &ctx,
-            )
-            .await
-            .unwrap();
-        assert_eq!(result["profile"]["qualifiedId"], "builtin:explore");
+        // ② explore 定义：只读上限，且不授予 browser/bash/写工具。
         let explore = state
-            .live
-            .get(result["childId"].as_str().unwrap())
-            .unwrap();
-        let explore_child = explore.session.header().subagent.clone().unwrap();
-        for forbidden in ["write_file", "edit", "bash", "browser", "job_start"] {
-            assert!(
-                !explore_child.effective_tools().iter().any(|n| n == forbidden),
-                "explore 不得持有 {forbidden}"
-            );
-        }
-        assert!(explore_child.permission_ceiling().is_read_only());
-
-        // 子代理不能再派遣子代理:同一份派遣入口按真实会话身份硬拒。
-        let child_ctx = ToolContext {
-            session_id: Some(id.to_string()),
-            ..ctx.clone()
-        };
-        let nested = state
-            .runtime
-            .execute("spawn_agent", json!({"prompt":"再派一个"}), &child_ctx)
-            .await;
-        assert!(nested.is_err(), "子代理派遣必须失败");
-        assert!(
-            nested.unwrap_err().contains("subagent/nesting-forbidden"),
-            "错误码必须指明禁止嵌套"
-        );
-
-        // inline 临时定义:不落盘、工具严格按请求。
-        let result = state
             .runtime
             .execute(
                 "spawn_agent",
-                json!({
-                    "prompt":"读日志",
-                    "inline":{
-                        "name":"日志调查员",
-                        "description":"只看日志",
-                        "instructions":"先列证据再下结论。",
-                        "tools":{"mode":"allowlist","names":["read_file","grep"]},
-                        "model":{"mode":"inherit"},
-                        "permissionCeiling":"read-only"
-                    }
-                }),
+                json!({"prompt":"调查","profile_id":"builtin:explore"}),
                 &ctx,
             )
             .await
             .unwrap();
-        let inline_child = state
+        let explore_live = state
             .live
-            .get(result["childId"].as_str().unwrap())
+            .get(explore["childId"].as_str().unwrap())
             .unwrap();
-        let descriptor = inline_child.session.header().subagent.clone().unwrap();
-        assert_eq!(descriptor.effective_tools(), vec!["grep", "read_file"]);
-        // inline 不生成永久定义:名册里没有它。
-        assert!(
-            state
-                .subagents
-                .rows_for(None)
-                .iter()
-                .all(|row| row.id != "inline")
+        let explore_desc = explore_live.session.header().subagent.clone().unwrap();
+        assert_eq!(
+            explore_desc.permission_ceiling,
+            denia_core::subagent::PermissionCeiling::ReadOnly
+        );
+        let explore_tools = explore_desc.effective_tools.clone().unwrap();
+        for forbidden in ["bash", "write_file", "edit", "browser", "ask", "job_start"] {
+            assert!(
+                !explore_tools.contains(&forbidden.to_string()),
+                "explore 不得含 {forbidden}"
+            );
+        }
+        assert!(explore_tools.contains(&"read_file".to_string()));
+        assert!(explore_tools.contains(&"send_message".to_string()));
+
+        // ③ 显式请求父未授予/硬禁的工具 → 逐项报错，不静默少给。
+        let denied = state
+            .runtime
+            .execute(
+                "spawn_agent",
+                json!({"prompt":"越权","inline":{
+                    "name":"越权","description":"尝试拿硬禁工具",
+                    "tools":{"mode":"allowlist","names":["read_file","spawn_agent"]}
+                }}),
+                &ctx,
+            )
+            .await
+            .unwrap_err();
+        assert!(denied.contains("subagent/tool-hard-denied"), "{denied}");
+
+        // ④ inline 临时定义：不落盘、工具严格匹配。
+        let inline = state
+            .runtime
+            .execute(
+                "spawn_agent",
+                json!({"prompt":"查缓存","inline":{
+                    "name":"缓存调查员",
+                    "description":"专注缓存失效链路",
+                    "instructions":"不修改文件",
+                    "tools":{"mode":"allowlist","names":["read_file","grep"]},
+                    "permissionCeiling":"read-only"
+                }}),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            inline["profile"]["qualifiedId"].as_str().unwrap(),
+            "inline:缓存调查员"
+        );
+        assert_eq!(inline["profile"]["toolCount"], 2);
+        let inline_live = state.live.get(inline["childId"].as_str().unwrap()).unwrap();
+        let inline_desc = inline_live.session.header().subagent.clone().unwrap();
+        assert_eq!(
+            inline_desc.effective_tools.clone().unwrap(),
+            vec!["grep".to_string(), "read_file".to_string()]
         );
 
-        // 越权工具:显式点名父代理没有的工具 → 失败,不静默少给。
-        let denied = state
-            .runtime
-            .execute(
-                "spawn_agent",
-                json!({
-                    "prompt":"越权",
-                    "inline":{
-                        "name":"越权",
-                        "description":"越权",
-                        "tools":{"mode":"allowlist","names":["mcp__nope__tool"]},
-                        "model":{"mode":"inherit"}
-                    }
-                }),
-                &ctx,
-            )
-            .await;
-        assert!(denied.is_err(), "未授予的工具必须让派遣失败: {denied:?}");
-        // 硬禁项:显式点名也必须失败。
-        let denied = state
-            .runtime
-            .execute(
-                "spawn_agent",
-                json!({
-                    "prompt":"再派遣",
-                    "inline":{
-                        "name":"再派遣",
-                        "description":"再派遣",
-                        "tools":{"mode":"allowlist","names":["spawn_agent"]},
-                        "model":{"mode":"inherit"}
-                    }
-                }),
-                &ctx,
-            )
-            .await;
-        assert!(denied.is_err(), "硬禁工具必须让派遣失败");
-
-        // 旧式调用(persona + allowed_tools)按保守只读映射,不升级成写能力。
+        // ⑤ 旧参数路径：显式列表最多与历史只读上限相交，绝不自动变全工具。
         let legacy = state
             .runtime
             .execute(
                 "spawn_agent",
-                json!({"prompt":"兼容","persona":"你只读调查","allowed_tools":["read_file","bash"]}),
+                json!({"prompt":"旧参数","allowed_tools":["read_file","write_file","bash"]}),
                 &ctx,
             )
             .await
             .unwrap();
-        let legacy_child = state
-            .live
-            .get(legacy["childId"].as_str().unwrap())
-            .unwrap();
-        let descriptor = legacy_child.session.header().subagent.clone().unwrap();
-        assert_eq!(descriptor.effective_tools(), vec!["read_file"]);
-        assert!(descriptor.permission_ceiling().is_read_only());
+        let legacy_live = state.live.get(legacy["childId"].as_str().unwrap()).unwrap();
+        let legacy_desc = legacy_live.session.header().subagent.clone().unwrap();
+        let legacy_tools = legacy_desc.effective_tools.clone().unwrap();
+        assert!(legacy_tools.contains(&"read_file".to_string()));
         assert!(
-            legacy["diagnostics"]
-                .as_array()
-                .is_some_and(|notes| !notes.is_empty()),
-            "被裁掉的工具必须出现在诊断里"
+            !legacy_tools.contains(&"write_file".to_string())
+                && !legacy_tools.contains(&"bash".to_string()),
+            "旧 allowed_tools 不得放开写与命令:{legacy_tools:?}"
         );
+        assert_eq!(legacy_desc.snapshot_version, 0 + 1);
+        // 旧 persona 映射为角色补充（走快照文件）。
+        assert!(legacy_desc.instructions_ref.is_some());
 
-        // 已弃用的深度参数:明确失败,不让旧调用以为还能改深度。
+        // ⑥ 未知工具名明确失败（不静默忽略）。
+        assert!(
+            state
+                .runtime
+                .execute(
+                    "spawn_agent",
+                    json!({"prompt":"未知","allowed_tools":["nope"]}),
+                    &ctx
+                )
+                .await
+                .is_err()
+        );
+    }
+
+    /// 子代理禁止派遣子代理：模型入口、直接 Runtime 入口、恢复路径一律拒绝，
+    /// 且不产生新会话、不占槽、不发模型请求。
+    #[tokio::test]
+    async fn subagents_cannot_delegate_from_any_entry() {
+        let (state, ctx) = setup().await;
+        let child = state
+            .runtime
+            .execute(
+                "spawn_agent",
+                json!({"prompt":"调查","profile_id":"builtin:explore"}),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        let child_id = child["childId"].as_str().unwrap().to_string();
+        settle(&state.runtime, &child_id).await;
+        let before = state.sessions.list().unwrap().len();
+        let mut child_ctx = ctx.clone();
+        child_ctx.session_id = Some(child_id.clone());
+        let error = state
+            .runtime
+            .execute("spawn_agent", json!({"prompt":"再派一个"}), &child_ctx)
+            .await
+            .unwrap_err();
+        assert!(
+            error.contains("subagent/delegation-forbidden"),
+            "子代理派遣必须返回稳定 code:{error}"
+        );
+        // fork 同样拒绝。
+        assert!(
+            state
+                .runtime
+                .execute("fork_agent", json!({"prompt":"fork"}), &child_ctx)
+                .await
+                .is_err()
+        );
+        // 旧参数里伪造 max_depth 也不放宽：直接报已移除。
         let depth = state
             .runtime
-            .execute("spawn_agent", json!({"prompt":"深度","max_depth":2}), &ctx)
+            .execute("spawn_agent", json!({"prompt":"x","max_depth":3}), &ctx)
+            .await
+            .unwrap_err();
+        assert!(depth.contains("max_depth"), "{depth}");
+        assert_eq!(
+            state.sessions.list().unwrap().len(),
+            before,
+            "拒绝路径不得创建会话"
+        );
+        assert_eq!(state.runtime.inner.admission.reserved_count(), 0);
+    }
+
+    /// 普通用户分支有 parent_session 但没有 subagent 描述符：仍可正常派遣，
+    /// 禁止规则不能以"有父会话"代替"是子代理"。
+    #[tokio::test]
+    async fn user_fork_with_parent_session_can_still_delegate() {
+        let (state, ctx) = setup().await;
+        let parent_id = ctx.session_id.clone().unwrap();
+        // 普通用户分支：create_forked 写 parent_session，不写 subagent。
+        let fork = state
+            .sessions
+            .create_forked(&[], 0, ctx.cwd.as_path(), true, &parent_id)
+            .unwrap();
+        assert!(fork.header().subagent.is_none());
+        let mut fork_ctx = ctx.clone();
+        fork_ctx.session_id = Some(fork.id().to_string());
+        let result = state
+            .runtime
+            .execute("spawn_agent", json!({"prompt":"正常派遣"}), &fork_ctx)
             .await;
-        assert!(depth.is_err());
-        assert!(depth.unwrap_err().contains("depth-config-removed"));
+        assert!(result.is_ok(), "普通分支必须仍可派遣:{result:?}");
+    }
+
+    /// 并发上限走新的 subagent-policy 命名空间；创建与唤醒共用同一份槽位账。
+    /// 子代理未在期限内完成 `want` 个工具结果就失败（防挂死）。
+    async fn wait_for_tool_results(state: &crate::state::AppState, child: &str, want: usize) {
+        for _ in 0..1000 {
+            let done = state
+                .live
+                .get(child)
+                .map(|live| {
+                    let count = live
+                        .session
+                        .events()
+                        .iter()
+                        .filter(|event| matches!(event.event, SessionEvent::ToolResult { .. }))
+                        .count();
+                    count >= want && !live.running.load(Ordering::SeqCst)
+                })
+                .unwrap_or(false);
+            if done {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        panic!("子代理未在期限内产出 {want} 个工具结果");
+    }
+
+    /// 等某个 child 真正开始运行（取消令牌已挂上）。
+    async fn wait_for_running(state: &crate::state::AppState, id: &str) {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while state
+                .live
+                .get(id)
+                .is_none_or(|live| live.cancel.lock().unwrap().is_none())
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+    }
+
+    /// 等父会话的第一个子代理出现并返回其 id。
+    async fn wait_for_child(state: &crate::state::AppState, parent: &str) -> String {
+        for _ in 0..500 {
+            if let Some(entry) = state
+                .runtime
+                .list(parent)
+                .as_array()
+                .and_then(|rows| rows.first())
+                .cloned()
+            {
+                return entry["id"].as_str().unwrap().to_string();
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        panic!("子代理未创建");
+    }
+
+    /// T02 / T01：子代理的执行能力严格来自**派遣时冻结的授权**。
+    ///
+    /// - develop 子代理真实落盘并真的跑了命令（断言文件与命令副作用，不是
+    ///   只断言 schema 字符串）；
+    /// - explore 子代理（只读上限）即使模型幻觉调用 write_file/bash，schema 里
+    ///   没有、执行被拒、文件无任何变化。
+    #[tokio::test]
+    async fn child_execution_side_effects_follow_the_frozen_grant() {
+        let (state, _) = setup().await;
+        let state = Arc::new(state);
+        let workspace = state.home.join("devfixture");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::write(workspace.join("existing.txt"), "旧内容\n").unwrap();
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let router = crate::api::router().with_state(state.clone());
+        tokio::spawn(async move {
+            axum::serve(listener, router).await.unwrap();
+        });
+        let client = reqwest::Client::new();
+        let new_session = |cwd: std::path::PathBuf| {
+            let client = client.clone();
+            let base = base.clone();
+            async move {
+                let created: Value = client
+                    .post(format!("{base}/api/sessions"))
+                    .json(&json!({"cwd": cwd}))
+                    .send()
+                    .await
+                    .unwrap()
+                    .error_for_status()
+                    .unwrap()
+                    .json()
+                    .await
+                    .unwrap();
+                created["session"]["id"].as_str().unwrap().to_string()
+            }
+        };
+
+        // —— develop：真写、真跑 ——
+        let dev_parent = new_session(workspace.clone()).await;
+        // 完全访问档：执行型子代理仍走正常权限引擎，这里避免测试卡在审批上。
+        assert!(
+            client
+                .put(format!("{base}/api/sessions/{dev_parent}/permission"))
+                .json(&json!({"mode": "full"}))
+                .send()
+                .await
+                .unwrap()
+                .status()
+                .is_success()
+        );
+        assert!(
+            client
+                .post(format!("{base}/api/sessions/{dev_parent}/prompt"))
+                .json(&json!({"prompt":"委派开发任务","provider":"runtime-test","model":"exec-parent"}))
+                .send()
+                .await
+                .unwrap()
+                .status()
+                .is_success()
+        );
+        let dev_child = wait_for_child(&state, &dev_parent).await;
+        wait_for_tool_results(&state, &dev_child, 4).await;
+        assert_eq!(
+            std::fs::read_to_string(workspace.join("child-wrote.txt")).unwrap(),
+            "子代理写入\n",
+            "develop 子代理必须真实落盘"
+        );
+        assert!(
+            workspace.join("child-ran.txt").is_file(),
+            "develop 子代理必须真的执行了命令"
+        );
+        // 第 4 条调用是 bash + run_in_background：子代理没有被授予 job_start，
+        // 执行器必须拒绝，并且不得留下任何后台任务。
+        let background_result = state
+            .live
+            .get(&dev_child)
+            .unwrap()
+            .session
+            .events()
+            .iter()
+            .filter_map(|event| match &event.event {
+                SessionEvent::ToolResult {
+                    content, is_error, ..
+                } => Some((content.clone(), *is_error)),
+                _ => None,
+            })
+            .nth(3)
+            .expect("第 4 条工具结果存在");
+        assert!(
+            background_result.1 && background_result.0.contains("job_start"),
+            "未授予 job_start 时 run_in_background 必须被拒：{background_result:?}"
+        );
+        assert!(
+            state.runtime.jobs().list(&dev_child).is_empty(),
+            "被拒的后台命令不得在 jobs 注册表里留下任务"
+        );
+        // 子代理不能派遣子代理：它的工具面里没有派遣入口。
+        let dev_tools = state
+            .live
+            .get(&dev_child)
+            .unwrap()
+            .session
+            .header()
+            .subagent
+            .clone()
+            .unwrap()
+            .effective_tools
+            .unwrap();
+        assert!(!dev_tools.iter().any(|name| name == "spawn_agent"));
+
+        // —— explore：只读上限，幻觉调用也被拒且文件不变 ——
+        let explore_parent = new_session(workspace.clone()).await;
+        assert!(
+            client
+                .put(format!("{base}/api/sessions/{explore_parent}/permission"))
+                .json(&json!({"mode": "full"}))
+                .send()
+                .await
+                .unwrap()
+                .status()
+                .is_success()
+        );
+        assert!(
+            client
+                .post(format!("{base}/api/sessions/{explore_parent}/prompt"))
+                .json(&json!({"prompt":"委派只读探索","provider":"runtime-test","model":"explore-parent"}))
+                .send()
+                .await
+                .unwrap()
+                .status()
+                .is_success()
+        );
+        let explore_child = wait_for_child(&state, &explore_parent).await;
+        wait_for_tool_results(&state, &explore_child, 2).await;
+        let outcomes: Vec<(String, bool)> = state
+            .live
+            .get(&explore_child)
+            .unwrap()
+            .session
+            .events()
+            .iter()
+            .filter_map(|event| match &event.event {
+                SessionEvent::ToolResult {
+                    content, is_error, ..
+                } => Some((content.clone(), *is_error)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(outcomes.len(), 2, "幻觉调用必须各有一条结果为证");
+        for (content, is_error) in &outcomes {
+            assert!(*is_error, "explore 的写与命令必须被拒，实际结果：{content}");
+        }
+        assert!(
+            outcomes
+                .iter()
+                .any(|(content, _)| content.contains("subagent/tool-not-granted")
+                    || content.contains("硬禁用")),
+            "拒绝理由必须可判定：{outcomes:?}"
+        );
+        assert!(
+            !workspace.join("explore-wrote.txt").exists(),
+            "只读子代理不得留下任何文件变化"
+        );
+    }
+
+    /// §10.4/§10.5：子代理正常结束时清理它自己的后台任务并在结果里注明；
+    /// 完成通知必须带 profile、终态、本次用量与结果引用、并明示截断。
+    #[tokio::test]
+    async fn settled_child_cancels_leftover_jobs_and_reports_a_rich_notice() {
+        let (state, _) = setup().await;
+        let state = Arc::new(state);
+        let workspace = state.home.join("jobsfixture");
+        std::fs::create_dir_all(&workspace).unwrap();
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let router = crate::api::router().with_state(state.clone());
+        tokio::spawn(async move {
+            axum::serve(listener, router).await.unwrap();
+        });
+        let client = reqwest::Client::new();
+        let created: Value = client
+            .post(format!("{base}/api/sessions"))
+            .json(&json!({"cwd": workspace}))
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let parent = created["session"]["id"].as_str().unwrap().to_string();
+        assert!(
+            client
+                .put(format!("{base}/api/sessions/{parent}/permission"))
+                .json(&json!({"mode": "full"}))
+                .send()
+                .await
+                .unwrap()
+                .status()
+                .is_success()
+        );
+        assert!(
+            client
+                .post(format!("{base}/api/sessions/{parent}/prompt"))
+                .json(&json!({"prompt":"委派带后台任务的子任务","provider":"runtime-test","model":"jobs-parent"}))
+                .send()
+                .await
+                .unwrap()
+                .status()
+                .is_success()
+        );
+        let child = wait_for_child(&state, &parent).await;
+        // 等子代理结束，并且等它启动的后台任务被清理 + 通知送达父会话。
+        let mut notice = String::new();
+        for _ in 0..1500 {
+            let delivered = state.live.get(&parent).map(|live| {
+                live.session
+                    .events()
+                    .iter()
+                    .filter_map(|event| match &event.event {
+                        SessionEvent::AgentInbox { text, source, .. }
+                        | SessionEvent::AgentDelivery { text, source, .. }
+                            if source == "subagent-settled" && text.contains(&child) =>
+                        {
+                            Some(text.clone())
+                        }
+                        _ => None,
+                    })
+                    .next_back()
+            });
+            if let Some(Some(text)) = delivered {
+                notice = text;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert!(!notice.is_empty(), "子代理结束通知必须送达父会话");
+        assert!(notice.contains("子代理执行结束"), "{notice}");
+        assert!(
+            notice.contains("inline:后台任务员"),
+            "通知必须带 profile：{notice}"
+        );
+        assert!(
+            notice.contains("结果：已完成"),
+            "通知必须带明确终态：{notice}"
+        );
+        assert!(
+            notice.contains("本次子代理用量："),
+            "通知必须带子代理自身用量：{notice}"
+        );
+        assert!(
+            notice.contains("结果引用："),
+            "通知必须带结果引用：{notice}"
+        );
+        assert!(
+            notice.contains("[已取消的子代理后台工作]"),
+            "遗留的后台任务必须被取消并注明：{notice}"
+        );
+        assert!(
+            state
+                .runtime
+                .jobs()
+                .list(&child)
+                .iter()
+                .all(|job| job.finished_at.is_some()),
+            "子代理结束后不得留下未完成的后台任务"
+        );
+    }
+
+    /// §10.1 崩溃窗口：派遣的每一步失败都必须回滚本次新增的会话、槽位与目录
+    /// 条目；而"已入队"之后失败**不**回滚——child 的会话、首条 inbox 与完成
+    /// 通知是持久事实，工具结果丢了也不能删掉正在运行的 child。
+    #[tokio::test]
+    async fn delegate_rolls_back_every_pre_enqueue_window_and_keeps_post_enqueue_state() {
+        for point in ["create", "snapshot", "pre-enqueue", "enqueue"] {
+            let (state, ctx) = setup().await;
+            let parent = ctx.session_id.clone().unwrap();
+            state.runtime.set_test_fault(point);
+            let before = state.sessions.list().unwrap().len();
+            let result = state
+                .runtime
+                .execute("spawn_agent", json!({"prompt":"注入故障"}), &ctx)
+                .await;
+            assert!(result.is_err(), "{point}：派遣必须失败");
+            assert_eq!(
+                state.sessions.list().unwrap().len(),
+                before,
+                "{point}：不得留下新会话"
+            );
+            assert_eq!(
+                state.runtime.inner.admission.reserved_count(),
+                0,
+                "{point}：槽位必须释放"
+            );
+            assert!(
+                state.runtime.list(&parent).as_array().unwrap().is_empty(),
+                "{point}：目录里不得残留 child"
+            );
+        }
+
+        // 返回 pending 之前失败：不回滚，且完成通知仍能送达（结果不丢）。
+        let (state, ctx) = setup().await;
+        let parent = ctx.session_id.clone().unwrap();
+        state.runtime.set_test_fault("post-enqueue");
+        let error = state
+            .runtime
+            .execute("spawn_agent", json!({"prompt":"注入故障"}), &ctx)
+            .await
+            .unwrap_err();
+        assert!(error.contains("返回 pending 前"), "{error}");
+        let child = wait_for_child(&state, &parent).await;
+        assert!(
+            state.sessions.exists(&child),
+            "入队后失败不得删除已存在的 child 会话"
+        );
+        // child 的首条委派消息是持久事实。
+        assert!(
+            state
+                .live
+                .get(&child)
+                .unwrap()
+                .session
+                .events()
+                .iter()
+                .any(|event| matches!(&event.event, SessionEvent::AgentInbox { source, .. } if source.starts_with("agent:"))),
+            "委派消息必须已持久化"
+        );
+        for _ in 0..1000 {
+            let delivered = state.live.get(&parent).is_some_and(|live| {
+                live.session.events().iter().any(|event| {
+                    matches!(&event.event, SessionEvent::AgentInbox { source, .. } if source == "subagent-settled")
+                })
+            });
+            if delivered {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert!(
+            state.live.get(&parent).unwrap().session.events().iter().any(
+                |event| matches!(&event.event, SessionEvent::AgentInbox { source, .. } if source == "subagent-settled")
+            ),
+            "工具结果丢失不能导致完成通知丢失"
+        );
+    }
+
+    /// §8.2：子代理目录有**独立**字节预算，超限按 UTF-8 边界截断并明示；
+    /// 未列出的定义仍可用 profile_id 指定（截断不等于禁用）。
+    #[tokio::test]
+    async fn subagent_catalog_respects_its_own_byte_budget() {
+        use denia_tools::capabilities::AgentRuntime;
+        let (state, ctx) = setup().await;
+        let parent = ctx.session_id.clone().unwrap();
+        let mut profile = denia_core::subagent::builtin_subagent_profiles()[0].clone();
+        profile.id = "budget-probe".to_string();
+        profile.name = "预算探针".to_string();
+        profile.description = "用途".repeat(300);
+        state
+            .subagent_profiles
+            .create(
+                denia_core::subagent::ProfileWriteScope::User,
+                None,
+                profile,
+                "角色".repeat(50),
+            )
+            .unwrap();
+        state
+            .settings
+            .update("runtime", json!({"subagentCatalogMaxBytes": 1024}), None)
+            .unwrap();
+
+        let text = state
+            .runtime
+            .subagent_catalog(&parent)
+            .await
+            .unwrap()
+            .expect("有可用定义时必须注入目录");
+        assert!(
+            text.contains("预算截断"),
+            "超限必须明示截断而不是静默丢弃：{}",
+            &text[..text.len().min(200)]
+        );
+        assert!(
+            text.len() <= 1024 + 200,
+            "截断后长度应贴近预算（含一段说明）：{}",
+            text.len()
+        );
+        // 未列出的定义仍可指定：目录截断不影响派遣解析。
+        assert!(
+            state
+                .subagent_profiles
+                .resolve(None, "user:budget-probe")
+                .is_ok()
+        );
+
+        // 提高预算后目录恢复完整（不是永久截断）。
+        state
+            .settings
+            .update(
+                "runtime",
+                json!({"subagentCatalogMaxBytes": 1_048_576}),
+                None,
+            )
+            .unwrap();
+        let full = state
+            .runtime
+            .subagent_catalog(&parent)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!full.contains("预算截断"));
+        assert!(full.contains("user:budget-probe"));
+    }
+
+    /// §6.4/L04：停止 child 时只关闭**它自己**名下的浏览器 tab。
+    #[tokio::test]
+    async fn stopping_a_child_closes_only_its_own_browser_tabs() {
+        use std::sync::Mutex as StdMutex;
+
+        #[derive(Default)]
+        struct RecordingHub {
+            closed: StdMutex<Vec<String>>,
+        }
+        #[async_trait]
+        impl denia_tools::BrowserExecute for RecordingHub {
+            async fn execute(
+                &self,
+                _command: denia_browser::BrowserCommand,
+            ) -> denia_browser::CommandOutcome {
+                denia_browser::CommandOutcome::ok_value(Value::Null, 0)
+            }
+            async fn close_owned(&self, owner: &str) -> usize {
+                self.closed.lock().unwrap().push(owner.to_string());
+                1
+            }
+        }
+
+        let (state, mut ctx) = setup().await;
+        ctx.selection.as_mut().unwrap().model = "hold".into();
+        let hub = Arc::new(RecordingHub::default());
+        state.runtime.attach_browser(hub.clone());
+        let parent = ctx.session_id.clone().unwrap();
+        let child = state
+            .runtime
+            .execute("spawn_agent", json!({"prompt":"占用浏览器"}), &ctx)
+            .await
+            .unwrap()["childId"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        wait_for_running(&state, &child).await;
+        state.runtime.interrupt(&parent, &child).await.unwrap();
+        assert_eq!(
+            hub.closed.lock().unwrap().as_slice(),
+            &[child.clone()],
+            "只允许关闭该 child 名下的 tab"
+        );
+        assert!(
+            !hub.closed.lock().unwrap().contains(&parent),
+            "父代理的 tab 不得被顺手清掉"
+        );
+        settle(&state.runtime, &child).await;
+    }
+
+    /// §9.4：旧子代理首次继续前建立模型历史投影（在线与冷恢复一致），
+    /// 不再只能"查看后重新派遣"。
+    #[tokio::test]
+    async fn legacy_child_is_projected_and_can_continue() {
+        use denia_core::config::ModelSelection;
+        use denia_core::session::{SessionEvent, SubagentDescriptor};
+
+        let (state, ctx) = setup().await;
+        let parent = ctx.session_id.clone().unwrap();
+        let selection = ModelSelection {
+            provider: "runtime-test".into(),
+            model: "legacy-child".into(),
+            reasoning_effort: None,
+        };
+        let child = state
+            .sessions
+            .create_subagent(
+                &ctx.cwd,
+                true,
+                &parent,
+                SubagentDescriptor::legacy("旧子代理", 1, "default", selection.clone(), None, None),
+            )
+            .unwrap();
+        let child_id = child.id().to_string();
+        // 旧日志：父系统提示 + 混入全局规则的自动注入 + 任务投递 + 一轮对话。
+        child.append(SessionEvent::TurnStart { turn: 1 }).unwrap();
+        child
+            .append(SessionEvent::SystemPrompt {
+                turn: 1,
+                step: 1,
+                text: "父的系统提示".into(),
+            })
+            .unwrap();
+        child
+            .append(SessionEvent::UserMessage {
+                text: "全局规则哨兵 GLOBAL-SENTINEL".into(),
+                injected: true,
+                images: Vec::new(),
+                channel: Some("workspace-instructions".into()),
+            })
+            .unwrap();
+        child
+            .append(SessionEvent::AgentDelivery {
+                id: "m1".into(),
+                text: "[父代理 委派任务]\n调查登录流程".into(),
+                source: format!("agent:{parent}"),
+            })
+            .unwrap();
+        child
+            .append(SessionEvent::AssistantMessage {
+                turn: 1,
+                step: 1,
+                blocks: vec![denia_core::stream::ContentBlock::Text {
+                    text: "先看登录入口".into(),
+                }],
+                usage: None,
+                interrupted: false,
+                source_event_seqs: Vec::new(),
+                first_token_time: None,
+            })
+            .unwrap();
+        child
+            .append(SessionEvent::TurnEnd {
+                turn: 1,
+                reason: denia_core::session::TurnEndReason::Completed,
+            })
+            .unwrap();
+        child.flush().unwrap();
+        // 目录与父子关系：与真实派遣一致。
+        state.runtime.inner.children.lock().unwrap().insert(
+            child_id.clone(),
+            Child {
+                id: child_id.clone(),
+                parent_id: parent.clone(),
+                descriptor: child.header().subagent.clone().unwrap(),
+            },
+        );
+
+        state.runtime.resume_pending(&child_id).await.unwrap();
+
+        // 投影已建立并落盘；父代理不再收到"无法继续"的诊断。
+        let live = state.live.get(&child_id).expect("child 已加载");
+        assert!(
+            live.session.history_projection().is_some(),
+            "首次继续必须建立历史投影"
+        );
+        let projection_path = state
+            .sessions
+            .root()
+            .join(&child_id)
+            .join(denia_session::HISTORY_PROJECTION_FILE);
+        assert!(projection_path.is_file(), "投影必须落盘");
+        assert!(
+            !state
+                .live
+                .get(&parent)
+                .unwrap()
+                .session
+                .events()
+                .iter()
+                .any(|event| matches!(&event.event, SessionEvent::AgentInbox { source, .. } if source == "subagent-legacy")),
+            "不再走'拒绝续跑'分支"
+        );
+        let model_view_has_sentinel = live.session.with_model_events(|events| {
+            events.iter().any(|item| {
+                matches!(
+                    &item.event,
+                    SessionEvent::UserMessage { text, .. } if text.contains("GLOBAL-SENTINEL")
+                )
+            })
+        });
+        assert!(!model_view_has_sentinel, "投影后旧注入退出模型历史");
+        let migration = state.runtime.list(&parent);
+        let entry = migration
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| item["id"] == child_id.as_str())
+            .cloned()
+            .unwrap();
+        assert_eq!(entry["migration"]["needsRedispatch"], false);
+        assert_eq!(entry["migration"]["projection"], "applied");
+
+        // 真的继续一轮：模型请求里不能再出现旧全局规则。
+        state
+            .runtime
+            .enqueue(
+                &child_id,
+                "continue-1".into(),
+                "继续调查".into(),
+                format!("agent:{parent}"),
+            )
+            .await
+            .unwrap();
+        for _ in 0..500 {
+            let done = state.live.get(&child_id).is_some_and(|live| {
+                live.session.events().iter().any(|event| {
+                    matches!(&event.event, SessionEvent::AssistantMessage { blocks, .. }
+                        if blocks.iter().any(|block| matches!(block, denia_core::stream::ContentBlock::Text { text } if text.contains("已按投影继续"))))
+                })
+            });
+            if done {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        let continued = state.live.get(&child_id).unwrap();
+        assert!(
+            continued.session.events().iter().any(|event| matches!(
+                &event.event,
+                SessionEvent::AssistantMessage { blocks, .. }
+                    if blocks.iter().any(|block| matches!(block, denia_core::stream::ContentBlock::Text { text } if text.contains("已按投影继续")))
+            )),
+            "旧子代理必须能真的继续运行"
+        );
+    }
+
+    /// T11：child 可以给**直接父代理**发消息，但发给兄弟或无关会话必须被拒。
+    #[tokio::test]
+    async fn child_messages_parent_but_not_siblings_or_strangers() {
+        use denia_tools::capabilities::AgentRuntime;
+        let (state, mut ctx) = setup().await;
+        ctx.selection.as_mut().unwrap().model = "hold".into();
+        let parent = ctx.session_id.clone().unwrap();
+        let first = state
+            .runtime
+            .execute("spawn_agent", json!({"prompt":"第一个"}), &ctx)
+            .await
+            .unwrap()["childId"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        wait_for_running(&state, &first).await;
+        let second = state
+            .runtime
+            .execute("spawn_agent", json!({"prompt":"第二个"}), &ctx)
+            .await
+            .unwrap()["childId"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        wait_for_running(&state, &second).await;
+
+        // 子 → 直接父：允许。
+        let mut child_ctx = ctx.clone();
+        child_ctx.session_id = Some(first.clone());
+        state
+            .runtime
+            .execute(
+                "send_message",
+                json!({"target": parent, "message": "汇报进度"}),
+                &child_ctx,
+            )
+            .await
+            .unwrap();
+        // 子 → 兄弟：拒绝（只有直接父/子关系可通信）。
+        let sibling = state
+            .runtime
+            .execute(
+                "send_message",
+                json!({"target": second, "message": "越级"}),
+                &child_ctx,
+            )
+            .await;
+        assert!(sibling.is_err(), "兄弟之间不得直接通信：{sibling:?}");
+        // 子 → 无关会话：拒绝。
+        let stranger = state
+            .sessions
+            .create(&ctx.cwd, true)
+            .unwrap()
+            .id()
+            .to_string();
+        let unrelated = state
+            .runtime
+            .execute(
+                "send_message",
+                json!({"target": stranger, "message": "无关"}),
+                &child_ctx,
+            )
+            .await;
+        assert!(unrelated.is_err(), "无关会话不得被子代理发消息");
+        state.runtime.interrupt(&parent, &first).await.unwrap();
+        state.runtime.interrupt(&parent, &second).await.unwrap();
+        settle(&state.runtime, &first).await;
+        settle(&state.runtime, &second).await;
+    }
+
+    /// T03：verify 轨道——授权是"只读+命令"（无写工具），角色正文要求如实
+    /// 报告失败证据；子代理不能靠伪装成功收尾。
+    #[tokio::test]
+    async fn verify_track_grants_commands_without_write_tools() {
+        use denia_tools::capabilities::AgentRuntime;
+        let (state, mut ctx) = setup().await;
+        ctx.selection.as_mut().unwrap().model = "hold".into();
+        let parent = ctx.session_id.clone().unwrap();
+        let child = state
+            .runtime
+            .execute(
+                "spawn_agent",
+                json!({"prompt":"运行测试并如实报告失败","profile_id":"builtin:verify"}),
+                &ctx,
+            )
+            .await
+            .unwrap()["childId"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        wait_for_running(&state, &child).await;
+        let prompt = state
+            .runtime
+            .subagent_prompt(&child)
+            .await
+            .unwrap()
+            .expect("verify child 必须有运行快照");
+        assert!(
+            prompt.effective_tools.iter().any(|name| name == "bash"),
+            "verify 必须能运行真实命令：{:?}",
+            prompt.effective_tools
+        );
+        for forbidden in ["write_file", "edit", "job_start"] {
+            assert!(
+                !prompt.effective_tools.iter().any(|name| name == forbidden),
+                "verify 不得拿到 {forbidden}：{:?}",
+                prompt.effective_tools
+            );
+        }
+        assert!(
+            !prompt
+                .effective_tools
+                .iter()
+                .any(|name| name.starts_with("mcp__")),
+            "verify 默认不拿 MCP 工具"
+        );
+        assert!(prompt.instructions.contains("失败就报失败"));
+        assert_eq!(prompt.permission_ceiling.as_deref(), Some("inherit"));
+        state.runtime.interrupt(&parent, &child).await.unwrap();
+        settle(&state.runtime, &child).await;
     }
 
     #[tokio::test]
@@ -2414,7 +3905,11 @@ mod tests {
         ctx.selection.as_mut().unwrap().model = "hold".into();
         state
             .settings
-            .update("subagent-policy", json!({"maxConcurrentRuns":1}), None)
+            .update(
+                crate::subagents::SETTINGS_NS,
+                json!({"maxConcurrentRuns":1}),
+                None,
+            )
             .unwrap();
         let result = state
             .runtime
@@ -2671,14 +4166,7 @@ mod tests {
         assert!(
             state
                 .settings
-                .update("runtime", json!({"maxAgents":4}), None)
-                .is_err(),
-            "旧字段已从正式 schema 移除，不得再被接受"
-        );
-        assert!(
-            state
-                .settings
-                .update("subagent-policy", json!({"maxConcurrentRuns":0}), None)
+                .update("runtime", json!({"maxDepth":0}), None)
                 .is_err()
         );
         // 项目记忆预算:越界拒绝;布尔开关与合法预算放行。

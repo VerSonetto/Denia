@@ -47,8 +47,9 @@ pub trait AgentRuntime: Send + Sync {
     /// `previous` 是日志中最后一条本通道注入文本（内容未变时实现方必须
     /// 返回 None，引导语由正文是否变化决定）。
     ///
-    /// `session` 是宿主传入的会话身份:**作用域由宿主按真实会话头决定**,
-    /// 模型与定义都无权选择(子代理只发现项目级指令,不含用户全局规则)。
+    /// `session` 是**宿主传入**的会话身份：实现方据此决定作用域——root 会话
+    /// 用"全局 + 项目"，子代理只用项目级。模型与 profile 都不能传
+    /// `includeGlobal=true`，因此这里没有可被绕过的开关参数。
     async fn workspace_instructions(
         &self,
         session: &str,
@@ -75,20 +76,113 @@ pub trait AgentRuntime: Send + Sync {
         let _ = cwd;
         Ok(None)
     }
+
+    /// 子代理运行快照（角色正文 + 冻结授权）。
+    ///
+    /// 宿主负责读取与校验：引用缺失或 hash 不一致必须返回 `Err`，装配层据此
+    /// 拒绝启动，**不**回退到默认角色或更宽的工具面。返回 `Ok(None)` 表示该
+    /// 会话不是子代理（或部署没有定义管理能力，按旧描述符处理）。
+    async fn subagent_prompt(&self, session: &str) -> Result<Option<SubagentPrompt>, String> {
+        let _ = session;
+        Ok(None)
+    }
+
+    /// 父代理可见的子代理派遣目录（只含限定 id、名称、描述与摘要）。
+    /// 子代理永不注入；父不能派遣时也返回 `None`。
+    async fn subagent_catalog(&self, session: &str) -> Result<Option<String>, String> {
+        let _ = session;
+        Ok(None)
+    }
+
+    /// 某会话的**冻结**工具授权。
+    ///
+    /// `None` = 该会话没有被定义收窄（普通会话），调用方按"部署全集"处理。
+    /// `Some(list)` = 子代理派遣时冻结的显式列表（旧描述符由宿主按历史只读
+    /// 上限保守解释）。MCP 目录等"按会话授权的目录投影"必须用它，禁止把
+    /// 未授权的工具列给模型（计划 6.4：目录、首次加载、真实执行三处一致）。
+    fn granted_tools(&self, session: &str) -> Option<Vec<String>> {
+        let _ = session;
+        None
+    }
+}
+
+/// 子代理运行快照的模型可见部分。
+#[derive(Debug, Clone, Default)]
+pub struct SubagentPrompt {
+    /// 定义显示名（结果汇报与身份说明用）。
+    pub name: Option<String>,
+    /// 角色补充提示（定义 instructions）；追加到父基础提示之后。
+    pub instructions: String,
+    /// 派遣时冻结的有效工具名；空表示零业务工具。
+    pub effective_tools: Vec<String>,
+    /// `PermissionCeiling::as_str()`；`None` = 未记录（旧快照）。
+    pub permission_ceiling: Option<String>,
+    /// 父 preset 的 persona 快照：preset 文件后来被删也不回退部署默认人格。
+    pub parent_preset_persona: Option<String>,
+    /// 旧描述符（迁移前）：授权是保守历史集合，只能查看与受限继续。
+    pub legacy: bool,
 }
 
 pub fn schemas() -> Vec<ToolSchema> {
     let specs = [
         (
             "spawn_agent",
-            "创建独立子代理会话执行可并行的工作：继承工作目录与权限，始终后台执行，立即返回 childId 与 pending，完成结果自动通知父会话。指定 profile_id 用已保存定义（builtin:explore 只读探索、builtin:develop 开发执行、builtin:verify 验证），或用 inline 临时定义一组工具与角色；两者都不给时用默认 develop。profile_id 与 inline 互斥。子代理不能派遣子代理。pending 后不要循环等待，可以继续独立工作。",
-            json!({"prompt":{"type":"string","description":"交给子代理的任务；要自包含，写清目标、范围与验收条件。"},"description":{"type":"string","description":"一行任务说明，用于会话列表与通知。"},"profile_id":{"type":"string","description":"已保存定义的 id，如 builtin:explore；与 inline 互斥。"},"inline":{"type":"object","description":"临时定义：{name, description, instructions, tools:{mode:'inherit'|'allowlist', names:[...]}, model:{mode:'inherit'|'explicit', selection:{provider, model, reasoningEffort}}, permissionCeiling:'inherit'|'read-only'}。字段用 camelCase。"},"allowed_tools":{"type":"array","items":{"type":"string"},"description":"对所选定义工具的进一步收窄，只能更小。"},"provider":{"type":"string","description":"覆盖模型 provider；必须与 model 成套给出。"},"model":{"type":"string","description":"覆盖模型 id。"},"reasoning_effort":{"type":"string"}}),
+            "创建独立子代理会话：继承工作目录、权限上限、父系统提示基础与模型默认值；角色提示是追加，不替换父 persona。始终后台执行，立即返回 childId 与 pending，完成结果自动通知父会话；pending 后不要轮询或重复等待，可以继续独立工作。派遣方式三选一：profile_id 用已保存的定义；inline 在调用时给出临时定义；两者都省略时使用默认的 develop 定义。profile_id 与 inline 互斥，也不与旧参数 persona/allowed_tools 混用。子代理禁止派遣子代理，也不能使用宿主配置与会话主控工具，且不会自动继承全局 AGENTS.md。",
+            json!({
+                "prompt": {"type": "string", "description": "交给子代理的完整任务说明（自包含：目标、范围、验收条件）。"},
+                "description": {"type": "string", "description": "一句话说明这次派遣做什么，用于父会话列表与结果通知。"},
+                "profile_id": {"type": "string", "description": "已保存定义的限定 id，如 builtin:explore / builtin:develop / builtin:verify / user:<id> / project:<id>；可用候选见系统提示里的子代理目录。"},
+                "inline": {
+                    "type": "object",
+                    "description": "调用时创建的临时子代理定义（不落盘、不进管理目录）。",
+                    "properties": {
+                        "name": {"type": "string"},
+                        "description": {"type": "string", "description": "用途与选择时机。"},
+                        "instructions": {"type": "string", "description": "角色补充提示：追加在父系统提示之后，不替换父 persona。"},
+                        "tools": {"type": "object", "description": "{mode:\"inherit\"} 继承父可授予工具；或 {mode:\"allowlist\",names:[...]} 显式列表（空数组=无工具，纯推理任务）。"},
+                        "model": {"type": "object", "description": "{mode:\"inherit\"} 或 {mode:\"explicit\",selection:{provider,model,reasoningEffort}}。"},
+                        "permissionCeiling": {"type": "string", "enum": ["inherit", "read-only"], "description": "只允许收窄：read-only 强制禁止写与命令。"}
+                    },
+                    "required": ["name", "description", "tools"],
+                    "additionalProperties": false
+                },
+                "provider": {"type": "string"},
+                "model": {"type": "string"},
+                "reasoning_effort": {"type": "string"},
+                "allowed_tools": {"type": "array", "items": {"type": "string"}, "description": "已废弃：显式工具列表。请改用 profile_id 或 inline.tools；与 profile_id/inline 同时出现会被拒绝。"},
+                "run_in_background": {"type": "boolean", "description": "已废弃：无论 true 或 false 都立即返回并在后台执行。"},
+                "persona": {"type": "string", "description": "已废弃：角色补充提示。请改用 profile_id 或 inline.instructions。"}
+            }),
             vec!["prompt"],
         ),
         (
             "fork_agent",
-            "以本会话已完成的对话历史为种子创建子代理；始终后台执行并立即返回 pending，完成结果自动通知父会话。参数与 spawn_agent 相同，区别只有历史来源，且 fork 沿用父模型（要换模型请用 spawn_agent）。",
-            json!({"prompt":{"type":"string"},"description":{"type":"string"},"profile_id":{"type":"string"},"inline":{"type":"object"},"allowed_tools":{"type":"array","items":{"type":"string"}}}),
+            "以父会话已闭合的历史为种子创建子代理（工具调用与结果成对，不含全局指令与旧摘要注入）；沿用父模型（跨模型 fork 会被拒绝），其余行为同 spawn_agent。始终后台执行并立即返回 pending，完成结果自动通知父会话。",
+            json!({
+                "prompt": {"type": "string", "description": "交给子代理的完整任务说明。"},
+                "description": {"type": "string"},
+                "profile_id": {"type": "string", "description": "已保存定义的限定 id；省略时使用默认的 develop 定义。"},
+                "inline": {
+                    "type": "object",
+                    "description": "调用时创建的临时子代理定义（不落盘）。",
+                    "properties": {
+                        "name": {"type": "string"},
+                        "description": {"type": "string"},
+                        "instructions": {"type": "string"},
+                        "tools": {"type": "object"},
+                        "model": {"type": "object"},
+                        "permissionCeiling": {"type": "string", "enum": ["inherit", "read-only"]}
+                    },
+                    "required": ["name", "description", "tools"],
+                    "additionalProperties": false
+                },
+                "provider": {"type": "string"},
+                "model": {"type": "string"},
+                "reasoning_effort": {"type": "string"},
+                "allowed_tools": {"type": "array", "items": {"type": "string"}, "description": "已废弃：显式工具列表；与 profile_id/inline 同时出现会被拒绝。"},
+                "run_in_background": {"type": "boolean", "description": "已废弃：无论 true 或 false 都立即返回并在后台执行。"},
+                "persona": {"type": "string", "description": "已废弃：角色补充提示。"}
+            }),
             vec!["prompt"],
         ),
         (
@@ -194,38 +288,19 @@ impl Tool for CapabilityTool {
 fn validate_arguments(schema: &ToolSchema, args: &Value) -> Result<(), String> {
     let values = args.as_object().ok_or("工具参数必须为对象")?;
     let properties = schema.parameters["properties"].as_object().unwrap();
-    let agent_tool = matches!(schema.name.as_str(), "spawn_agent" | "fork_agent");
     for (key, value) in values {
-        // 弃用参数的单一兼容适配器：新 schema 不再暴露它们，但旧调用可能
-        // 仍然带着。`max_depth` 直接失败（深度配置是被删除的能力，不是被
-        // 忽略的开关）；`persona` 按补充提示映射；`run_in_background` 忽略，
-        // 因为 Denia 的派遣本来就是始终后台。
-        if agent_tool {
-            match key.as_str() {
-                "max_depth" => {
-                    return Err(
-                        "subagent/depth-config-removed: 委派深度不再是可配置项，子代理不能派遣子代理；请移除该参数。"
-                            .to_string(),
-                    );
-                }
-                "persona" => {
-                    if !value.is_string() {
-                        return Err("参数类型或范围无效：persona".to_string());
-                    }
-                    continue;
-                }
-                "run_in_background" => {
-                    if !value.is_boolean() {
-                        return Err("参数类型或范围无效：run_in_background".to_string());
-                    }
-                    continue;
-                }
-                _ => {}
+        let prop = match properties.get(key) {
+            Some(prop) => prop,
+            // 已移除的参数给出稳定 code，而不是笼统的"不支持参数"：模型与用户
+            // 都需要知道"深度配置"是被删除，不是拼错。
+            None if key == "max_depth" => {
+                return Err(
+                    "max_depth 已移除（subagent/depth-config-removed）：子代理禁止派遣子代理，不存在可配置的委派深度。"
+                        .to_string(),
+                );
             }
-        }
-        let prop = properties
-            .get(key)
-            .ok_or_else(|| format!("工具不支持参数：{key}"))?;
+            None => return Err(format!("工具不支持参数：{key}")),
+        };
         let valid = match prop["type"].as_str() {
             Some("string") => value.is_string(),
             Some("boolean") => value.is_boolean(),

@@ -239,7 +239,6 @@ mod tests {
         goal: Option<(GoalState, u64)>,
     ) -> ToolContext {
         ToolContext {
-            granted_tools: None,
             output_store: None,
             session_id: None,
             selection: None,
@@ -381,7 +380,6 @@ mod tests {
     #[tokio::test]
     async fn tools_reject_callers_without_session() {
         let ctx = ToolContext {
-            granted_tools: None,
             output_store: None,
             session_id: None,
             selection: None,

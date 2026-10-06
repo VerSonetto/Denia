@@ -1,7 +1,67 @@
 // Shared wire types are generated from Rust/serde; UI-only types stay here.
-import type { ModelSelection, LlmFailure, TokenUsage, StreamChunk, FinishReason, ContentBlock, TurnEndReason, TodoItem, AskOption, AskQuestion, AskAnswer, AskOutcome, AskResolution, PermissionMode, GoalStatus, GoalOp, SessionEnvelope, PresetFeatures, SessionHeader as WireSessionHeader, ImageData as UserMessageImage, SubagentProfile as SubagentProfileWire } from './generated/core'
-export type { ModelSelection, LlmFailure, TokenUsage, StreamChunk, FinishReason, ContentBlock, TurnEndReason, TodoItem, AskOption, AskQuestion, AskAnswer, AskOutcome, AskResolution, PermissionMode, GoalStatus, GoalOp, SessionEnvelope, PresetFeatures, UserMessageImage }
+import type { ModelSelection, LlmFailure, TokenUsage, StreamChunk, FinishReason, ContentBlock, TurnEndReason, TodoItem, AskOption, AskQuestion, AskAnswer, AskOutcome, AskResolution, PermissionMode, GoalStatus, GoalOp, SessionEnvelope, PresetFeatures, SessionHeader as WireSessionHeader, ImageData as UserMessageImage, SubagentProfile, SubagentProfileView, SubagentInlineSpec, ToolSelection, ModelChoice, PermissionCeiling, ProfileSource, ProfileWriteScope, ProfileColor, ProfileDiagnostic, SubagentCatalogEntry, SubagentDescriptor } from './generated/core'
+export type { ModelSelection, LlmFailure, TokenUsage, StreamChunk, FinishReason, ContentBlock, TurnEndReason, TodoItem, AskOption, AskQuestion, AskAnswer, AskOutcome, AskResolution, PermissionMode, GoalStatus, GoalOp, SessionEnvelope, PresetFeatures, UserMessageImage, SubagentProfile, SubagentProfileView, SubagentInlineSpec, ToolSelection, ModelChoice, PermissionCeiling, ProfileSource, ProfileWriteScope, ProfileColor, ProfileDiagnostic, SubagentCatalogEntry, SubagentDescriptor }
 export type SessionHeader = WireSessionHeader & { agent_preset?: string }
+
+/** 定义目录响应：有效项 + 被覆盖项 + 诊断（来源元数据由服务端生成）。 */
+export interface SubagentCatalogView {
+  scope: 'user' | 'project'
+  projectRoot?: string | null
+  projectDir?: string | null
+  userDir: string
+  revision: number
+  effective: SubagentProfileView[]
+  shadowed: SubagentProfileView[]
+  diagnostics: ProfileDiagnostic[]
+  colors: ProfileColor[]
+  sources: ProfileSource[]
+}
+
+/** 真实工具目录：来源、能力分类与可授予性。 */
+export interface SubagentToolRow {
+  name: string
+  source: string
+  category: string
+  /** 副作用说明（写/shell/MCP 的影响必须看得见）。 */
+  effect: string
+  /** 只读上限下是否仍可用（写/命令/后台/派遣/宿主控制类为 false）。 */
+  readOnlyCompatible: boolean
+  granted: boolean | null
+  grantable: boolean
+  /** 子代理硬禁用（禁止派遣 / 宿主配置 / 会话主控）：UI 显示为不可选。 */
+  hardDenied: boolean
+  reason: string
+}
+
+export interface SubagentToolsView {
+  sessionId?: string | null
+  registered: number
+  tools: SubagentToolRow[]
+}
+
+/** 派遣预览：只有指定父会话时才宣称"最终可用工具"。 */
+export interface SubagentPreview {
+  sessionId?: string | null
+  final: boolean
+  note?: string
+  requested?: string
+  profile?: {
+    qualifiedId: string
+    name: string
+    description: string
+    inline: boolean
+    revision: number
+  }
+  tools?: string[]
+  toolCount?: number
+  model?: ModelSelection
+  modelOrigin?: 'call-override' | 'profile-explicit' | 'parent'
+  permissionCeiling?: PermissionCeiling
+  effectivePermissionMode?: PermissionMode
+  delegationAllowed?: boolean
+  instructionScope?: string
+  fingerprint?: string
+}
 /** Wire types shared with the Rust backend. camelCase mirrors serde. */
 
 export interface ProviderInfo {
@@ -148,7 +208,8 @@ export function normalizePermissionMode(raw: string): PermissionMode {
 }
 
 export interface SessionSummary {
-  subagent?: { label: string; depth: number; mode: string; selection: ModelSelection }
+  /** 子代理运行快照（wire 类型由 Rust 生成；旧日志由 serde default 补齐）。 */
+  subagent?: SubagentDescriptor
   id: string
   created_at: number
   excerpt: string | null
@@ -181,44 +242,8 @@ export interface AgentPresetRow {
   broken?: string
 }
 
-/** 子代理定义名册里的一行(服务端生成的元数据 + 定义本体)。 */
-export interface SubagentProfileRow {
-  qualifiedId: string
-  id: string
-  source: 'builtin' | 'user' | 'project'
-  revision: string
-  editable: boolean
-  /** 内置 id 在用户/项目作用域存在覆盖。 */
-  overridesBuiltin: boolean
-  overridesUser: boolean
-  /** 是否是本逻辑 id 的有效定义。 */
-  effective: boolean
-  /** 被同名高优先级定义遮蔽:可查看/复制,不可直接派遣。 */
-  shadowed: boolean
-  profile?: SubagentProfileWire
-  path?: string
-  broken?: string
-  diagnostics: { code: string; field?: string; reason: string }[]
-}
-
-export interface SubagentProfilesView {
-  userRoot: string
-  projectRoot?: string
-  profiles: SubagentProfileRow[]
-  /** 旧配置迁移后留下的已废弃字段说明。 */
-  deprecations?: string
-}
-
-/** 工具目录里的一行(后端真实注册表)。 */
-export interface SubagentToolEntry {
-  name: string
-  description: string
-  category: string
-  grantable: boolean
-  reason?: string
-}
-
-export interface AgentPresetsView {  /** 新建会话未显式指定时使用的默认 preset id。 */
+export interface AgentPresetsView {
+  /** 新建会话未显式指定时使用的默认 preset id。 */
   default: string
   /** 是否显示模式选择器;关闭时空白会话固定用部署默认组装。 */
   modeSelection: boolean

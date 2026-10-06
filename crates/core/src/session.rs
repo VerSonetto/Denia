@@ -38,16 +38,26 @@ pub struct SessionHeader {
     pub subagent: Option<SubagentDescriptor>,
 }
 
-/// 子代理身份与恢复配置随会话头持久化；普通用户分支没有此描述符。
+/// 子代理身份与运行快照随会话头持久化；普通用户分支没有此描述符。
 ///
-/// `persona` / `allowed_tools` 是旧日志字段，只用于读取历史会话；新子代理
-/// 一律写 [`SubagentSnapshotRef`]（`snapshot`），角色正文落在会话目录的
-/// `subagent.json` 里，不把 64 KiB 提示塞进每条会话的头行。
+/// 字段分三组：
+/// - **旧日志兼容组**（`depth`/`mode`/`persona`/`allowed_tools`）：只用于读取
+///   本计划之前的日志。旧 `persona` 的解释是"角色补充"，旧 `allowed_tools`
+///   的解释是"显式列表"，两者都**不**等价于 inherit（见
+///   [`LegacySubagentInfo`]）。
+/// - **快照组**（`snapshot_version` 起）：派遣时冻结的事实。运行期只信任它，
+///   不因 profile 被删、preset 损坏或文件丢失而回退到更宽的默认值。
+/// - **审计组**（`delegation_allowed`/`instruction_scope`）：落盘供审计；实际
+///   硬拒由运行时按真实会话身份判定，不只看磁盘上的布尔值。
+///
+/// 大文本（角色正文全文）**不**进 header：它放在会话目录内的版本化文件里，
+/// header 只保存引用与 hash。否则会话列表每行都会携带最多 64 KiB 的提示全文。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[cfg_attr(feature = "bindings", derive(ts_rs::TS))]
 #[serde(rename_all = "camelCase")]
 pub struct SubagentDescriptor {
     pub label: String,
+    /// 委派深度。新 child 恒为 1，仅作显示/旧数据兼容；不能作为派遣准入依据。
     pub depth: usize,
     pub mode: String,
     pub selection: crate::config::ModelSelection,
@@ -57,68 +67,147 @@ pub struct SubagentDescriptor {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "bindings", ts(optional))]
     pub allowed_tools: Option<Vec<String>>,
-    /// 新子代理的运行快照引用（旧日志没有这一段）。
+    /// 快照版本；0 或缺失 = 本计划之前的旧描述符。
+    #[serde(default)]
+    pub snapshot_version: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "bindings", ts(optional))]
-    pub snapshot: Option<crate::subagent::SubagentSnapshotRef>,
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "bindings", ts(optional))]
+    pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "bindings", ts(optional))]
+    pub profile: Option<SubagentProfileRef>,
+    /// 派遣时冻结的有效工具名（明确列表）。运行期授权只认这一份。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "bindings", ts(optional))]
+    pub effective_tools: Option<Vec<String>>,
+    #[serde(default)]
+    pub permission_ceiling: crate::subagent::PermissionCeiling,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "bindings", ts(optional))]
+    pub created_permission_mode: Option<String>,
+    /// 审计字段：子代理恒为 `false`。硬拒不依赖它。
+    #[serde(default)]
+    pub delegation_allowed: bool,
+    /// 审计字段：恒为 `project-only`（子代理只自动发现项目级指令）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "bindings", ts(optional))]
+    pub instruction_scope: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "bindings", ts(optional))]
+    pub parent_preset: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "bindings", ts(optional))]
+    pub parent_preset_persona: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "bindings", ts(optional))]
+    pub parent_features: Option<crate::preset::PresetFeatures>,
+    /// 角色正文的会话目录内引用文件名；内容不放 header。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "bindings", ts(optional))]
+    pub instructions_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "bindings", ts(optional))]
+    pub instructions_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "bindings", ts(optional))]
+    pub fork: Option<SubagentForkProjection>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "bindings", ts(optional))]
+    pub legacy: Option<LegacySubagentInfo>,
 }
 
 impl SubagentDescriptor {
-    /// 本会话的有效工具集合。
+    /// 旧日志/迁移路径的保守描述符。
     ///
-    /// 新快照直接给出冻结列表；旧日志按历史保守上限重建——**缺授权列表
-    /// 绝不等于继承全工具**，否则读一次旧日志就凭空长出一整套写能力。
-    pub fn effective_tools(&self) -> Vec<String> {
-        if let Some(snapshot) = &self.snapshot {
-            return snapshot.effective_tools.clone();
-        }
-        let requested: &[String] = match &self.allowed_tools {
-            Some(names) => names,
-            None => return legacy_tools(crate::subagent::LEGACY_SUBAGENT_READ_ONLY_TOOLS),
+    /// 没有快照版本、没有冻结的显式授权列表：读取方必须按"历史只读上限"解释
+    /// 它（见 `denia-server` 的 `resolver::legacy_grant`），**不能**等价于
+    /// `inherit`。
+    pub fn legacy(
+        label: impl Into<String>,
+        depth: usize,
+        mode: impl Into<String>,
+        selection: crate::config::ModelSelection,
+        persona: Option<String>,
+        allowed_tools: Option<Vec<String>>,
+    ) -> Self {
+        let legacy = LegacySubagentInfo {
+            migration_version: 0,
+            conservative: allowed_tools.is_none(),
+            allowed_tools: allowed_tools.clone(),
         };
-        let mut out: Vec<String> = Vec::new();
-        for name in requested {
-            if crate::subagent::LEGACY_SUBAGENT_MAX_TOOLS.contains(&name.as_str())
-                && !crate::subagent::is_child_hard_denied(name)
-                && !out.contains(name)
-            {
-                out.push(name.clone());
-            }
+        Self {
+            label: label.into(),
+            depth,
+            mode: mode.into(),
+            selection,
+            persona,
+            allowed_tools,
+            snapshot_version: 0,
+            name: None,
+            description: None,
+            profile: None,
+            effective_tools: None,
+            permission_ceiling: crate::subagent::PermissionCeiling::Inherit,
+            created_permission_mode: None,
+            delegation_allowed: false,
+            instruction_scope: None,
+            parent_preset: None,
+            parent_preset_persona: None,
+            parent_features: None,
+            instructions_ref: None,
+            instructions_hash: None,
+            fork: None,
+            legacy: Some(legacy),
         }
-        out
-    }
-
-    /// 有效权限上限：新快照按定义；旧日志按只读处理（历史子代理写面仅限
-    /// 记忆目录，模型可见工具本来就只有只读集合）。
-    pub fn permission_ceiling(&self) -> crate::subagent::PermissionCeiling {
-        match &self.snapshot {
-            Some(snapshot) => snapshot.permission_ceiling,
-            None => {
-                if self.allowed_tools.as_deref().is_some_and(|names| {
-                    names
-                        .iter()
-                        .any(|name| matches!(name.as_str(), "write_file" | "edit"))
-                }) {
-                    crate::subagent::PermissionCeiling::Inherit
-                } else {
-                    crate::subagent::PermissionCeiling::ReadOnly
-                }
-            }
-        }
-    }
-
-    /// 是否缺少新快照（旧日志子代理，恢复前需要投影迁移）。
-    pub fn is_legacy(&self) -> bool {
-        self.snapshot.is_none()
     }
 }
 
-fn legacy_tools(names: &[&str]) -> Vec<String> {
-    names
-        .iter()
-        .filter(|name| !crate::subagent::is_child_hard_denied(name))
-        .map(|name| (*name).to_string())
-        .collect()
+/// 定义引用（审计与诊断用；运行期授权以 `effective_tools` 为准）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "bindings", derive(ts_rs::TS))]
+#[serde(rename_all = "camelCase")]
+pub struct SubagentProfileRef {
+    /// 限定 id（`builtin:explore` 等）；临时定义用 `inline` 前缀。
+    pub qualified_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "bindings", ts(optional))]
+    pub source: Option<crate::subagent::ProfileSource>,
+    /// 派遣时读到的定义版本；临时定义为 0。
+    pub revision: u64,
+    /// 是否来自调用时的临时定义（不落盘、不出现在管理目录）。
+    #[serde(default)]
+    pub inline: bool,
+}
+
+/// fork 投影记录：来源、截止事件、投影版本与被丢弃的来源类别。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "bindings", derive(ts_rs::TS))]
+#[serde(rename_all = "camelCase")]
+pub struct SubagentForkProjection {
+    pub source_session: String,
+    /// 截取的最后一个闭合轮次的日志序号。
+    pub cut_seq: u64,
+    pub projection_version: u32,
+    /// 被丢弃的来源类别（审计可见，便于解释"为什么 child 看不到某段父历史"）。
+    pub dropped: Vec<String>,
+}
+
+/// 旧描述符的迁移事实：缺授权列表时按历史只读集合保守构造，绝不等于 inherit。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "bindings", derive(ts_rs::TS))]
+#[serde(rename_all = "camelCase")]
+pub struct LegacySubagentInfo {
+    /// 迁移版本；0 表示尚未迁移（只能查看，不能直接继续）。
+    pub migration_version: u32,
+    /// 旧日志里没有授权列表：按历史只读集合保守构造。
+    pub conservative: bool,
+    /// 旧日志里的显式列表（最多与历史上限相交后扣硬禁项）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "bindings", ts(optional))]
+    pub allowed_tools: Option<Vec<String>>,
 }
 
 fn default_true() -> bool {

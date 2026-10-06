@@ -41,10 +41,8 @@ pub struct AppState {
     pub system_prompt: Arc<crate::system_prompt_store::SystemPromptState>,
     /// agent preset 名册:随附组装 + 用户自定义组装(会话按它组装工具面)。
     pub agent_presets: Arc<crate::agent_presets::PresetStore>,
-    /// 子代理定义名册:内置预设 + 用户/项目自定义定义(派遣与设置页共用)。
-    pub subagents: Arc<crate::subagents::SubagentProfileStore>,
-    /// `settings.yaml` 一次性迁移留下的已废弃字段说明(无迁移时为 None)。
-    pub subagent_migration_note: Option<String>,
+    /// 子代理定义仓库:文件、覆盖层、revision 与诊断的唯一所有者。
+    pub subagent_profiles: Arc<crate::subagents::ProfileStore>,
     pub file_history: Arc<crate::file_history::FileHistoryStore>,
     /// 内嵌浏览器中枢(工具与 REST API 共用)。
     pub browser: Arc<denia_browser::BrowserManager>,
@@ -500,24 +498,25 @@ impl denia_tools::AskBridge for ServerAskBridge {
                 reason: Some("会话不在运行中".to_string()),
             };
         };
-        // 提问通道按授权开放：选中的定义包含 `ask` 才能提问。
-        //
-        // 主机制在工具授予层（schema 与执行层同一份 EffectiveToolGrant），
-        // 这里按同一份冻结快照兜底：万一有路径绕过授予，也不至于把提问挂到
-        // 一个没人看的会话上。未授予时按 unavailable 结算并给出可执行的
-        // 下一步，模型自行决策继续（对齐 dsh 的 DELEGATED_CALLER 终局语义，
-        // 但保留可继续的出口）。
-        if let Some(child) = live.session.header().subagent.as_ref()
-            && !child.effective_tools().iter().any(|name| name == "ask")
-        {
-            return AskResolution {
-                outcome: AskOutcome::Unavailable,
-                answers: Vec::new(),
-                reason: Some(
-                    "当前子代理没有被授予 ask 工具，无法向用户提问；请自行决策，并在最终结果中说明未决问题与采用的假设"
-                        .to_string(),
-                ),
-            };
+        // 子代理的提问走**统一授权检查**：只有派遣时把 `ask` 授予它的定义才能
+        // 提问（内置预设默认不含 ask，管理页可为定义勾选）。这与"子代理一律
+        // 不能提问"是两件事：授权了就能问；未授权时 schema 层不可见、执行层
+        // 硬拒，这里只是最后一道服务端兜底。
+        if let Some(child) = live.session.header().subagent.as_ref() {
+            let granted = child
+                .effective_tools
+                .as_deref()
+                .is_some_and(|tools| tools.iter().any(|name| name == "ask"));
+            if !granted {
+                return AskResolution {
+                    outcome: AskOutcome::Unavailable,
+                    answers: Vec::new(),
+                    reason: Some(
+                        "本次派遣没有授予 ask 工具，子代理不能向用户提问；请自行决策，并在最终结果中说明未决问题与采用的假设"
+                            .to_string(),
+                    ),
+                };
+            }
         }
         let (tx, rx) = tokio::sync::oneshot::channel();
         {
@@ -713,28 +712,34 @@ pub async fn build_state(
     let settings_events = broadcast::channel::<SettingsEvent>(64);
     let credentials_events = broadcast::channel::<CredentialEvent>(64);
 
-    // 旧子代理配置的一次性迁移必须在 SettingsStore 打开与命名空间注册之前
-    // 完成:`RuntimeConfig` 是 deny_unknown_fields 的,旧 maxAgents/maxDepth
-    // 留在文件里会让启动直接失败。
-    let migration = crate::subagents::migration::migrate_settings_file(&home.join("settings.yaml"))
-        .map_err(|error| format!("设置迁移失败:{error}"))?;
-    if let Some(diagnostic) = &migration.diagnostic {
-        return Err(diagnostic.clone().into());
-    }
-    if migration.changed {
-        tracing::info!(
-            removed = ?migration.removed,
-            max_concurrent_runs = ?migration.migrated_max_agents,
-            "子代理旧配置已迁移"
-        );
-    }
-
     let settings = Arc::new(SettingsStore::open(home)?.with_events(settings_events.0.clone()));
     let credentials =
         Arc::new(CredentialStore::open(home)?.with_events(credentials_events.0.clone()));
     let registry = Arc::new(LlmRegistry::new());
 
+    // settings.yaml 一次性迁移必须在 register_namespaces 之前:严格反序列化
+    // 会让遗留的 runtime.maxAgents/maxDepth 直接阻断启动。失败即中止启动
+    // (不带着半迁移的配置继续跑)。
+    let migration = crate::subagents::migration::migrate_settings(home)?;
+    for diagnostic in &migration.diagnostics {
+        tracing::warn!(target: "subagents", "{diagnostic}");
+    }
+    if let crate::subagents::migration::MigrationOutcome::Migrated {
+        from_max_agents,
+        backup,
+    } = &migration.outcome
+    {
+        tracing::info!(
+            target: "subagents",
+            from_max_agents = ?from_max_agents,
+            backup = ?backup,
+            "settings.yaml 子代理配置已迁移"
+        );
+    }
+
     register_namespaces(&settings)?;
+    // 子代理定义仓库:随 home 固定,项目作用域按会话 cwd 解析。
+    let subagent_profiles = Arc::new(crate::subagents::ProfileStore::new(home));
 
     // OpenAI-compatible routes follow their settings section.
     let openai = Arc::new(OpenAiCompatAdapter::new(
@@ -777,16 +782,12 @@ pub async fn build_state(
     let live = Arc::new(LiveSessions::default());
     let browser = Arc::new(denia_browser::BrowserManager::new(home.to_path_buf()));
     let browser_hub: denia_tools::BrowserHub = browser.clone();
-    // tab 归属表:工具登记、Runtime 收尾共用同一份(subagent 只清自己的 tab)。
-    let browser_tabs = denia_tools::BrowserOwnership::default();
     // 面板终端中枢:交互式 PTY,与 `bash` 工具的非交互进程互不影响。
     let terminals = denia_terminal::TerminalManager::new();
     // agent preset 名册:随附集合 + 用户目录。driver 每个 step 装配时读它,
     // 因此文件热刷新后新 step 即生效。先于系统提示词构建:create_preset 的
     // schema 要在 system prompt 的 tools provider 里与纪律段同步挂载。
     let agent_presets = crate::agent_presets::PresetStore::load(home, settings.clone());
-    // 子代理定义名册:内置三预设 + 用户目录 + 项目目录(项目根按会话推导)。
-    let subagents = crate::subagents::SubagentProfileStore::load(home);
     let system_prompt = Arc::new(crate::system_prompt_store::SystemPromptState::load(
         home,
         Some(browser_hub.clone()),
@@ -803,22 +804,13 @@ pub async fn build_state(
         events.clone(),
         registry.clone(),
         workspaces.clone(),
-        subagents.clone(),
-        Some((browser_tabs.clone(), browser_hub.clone())),
+        subagent_profiles.clone(),
     )?;
     let mut tools = denia_tools::default_registry_with_browser(Some(browser_hub.clone()));
-    tools.replace(Arc::new(denia_tools::BrowserTool::with_ownership(
-        browser_hub.clone(),
-        browser_tabs.clone(),
-    )));
     denia_tools::capabilities::register(&mut tools, runtime.clone());
     tools.replace(Arc::new(
         denia_tools::BashTool::new().with_runtime(runtime.clone()),
     ));
-    // 工具名册注入定义仓库:引用不存在工具的定义会被标成损坏,而不是静默
-    // 少给工具。`mcp__` 前缀动态工具不在此列。
-    agent_presets.set_known_tools(tools.names());
-    subagents.set_known_tools(tools.names());
     // `ask` 工具:控制台部署有应答通道,注册工具并挂桥。
     tools.register(Arc::new(denia_tools::AskTool::new()));
     // `create_preset` 工具:创造模式(creator preset)的落盘入口,只在有
@@ -845,6 +837,8 @@ pub async fn build_state(
     );
 
     runtime.attach(&driver);
+    // 浏览器归属清理：child 停止/结束时只关闭它自己的 tab（计划 6.4）。
+    runtime.attach_browser(browser_hub.clone());
 
     // 会话空闲淘汰:30s 一轮,5 分钟未使用的会话卸载(磁盘日志不受影响)。
     //
@@ -931,8 +925,7 @@ pub async fn build_state(
         workspaces,
         system_prompt,
         agent_presets,
-        subagents,
-        subagent_migration_note: migration.deprecated_note(),
+        subagent_profiles,
         file_history,
         browser,
         terminals,
@@ -968,13 +961,13 @@ fn register_namespaces(
         },
         json!({}),
     )?;
+    // 子代理调度:唯一持有并发上限的命名空间(没有深度配置——禁止子派子是
+    // 运行时硬规则,不是可调参数)。
     settings.register(
         crate::subagents::SETTINGS_NS,
         NamespaceSpec {
-            defaults: serde_json::to_value(
-                crate::subagents::SubagentPolicyConfig::default(),
-            )?,
-            validate: crate::subagents::validate_subagent_policy,
+            defaults: serde_json::to_value(crate::subagents::SubagentPolicyConfig::default())?,
+            validate: crate::subagents::validate_policy,
             secrets: &[],
             applies: Applies::Live,
         },
@@ -1455,9 +1448,9 @@ mod tests {
         std::fs::remove_dir_all(&root).unwrap();
     }
 
-    /// 未授予 ask 的子代理提问一律 unavailable,并给出可执行的下一步。
+    /// 子代理不与用户交互:提问一律 unavailable,并给出可执行的下一步。
     #[tokio::test]
-    async fn ask_bridge_refuses_subagent_sessions_without_grant() {
+    async fn ask_bridge_refuses_subagent_sessions() {
         use denia_core::session::{AskOutcome, SubagentDescriptor};
         let root = temp_root();
         let cwd = root.join("work");
@@ -1469,19 +1462,18 @@ mod tests {
                 &cwd,
                 true,
                 parent.id(),
-                SubagentDescriptor {
-                    label: "worker".to_string(),
-                    depth: 1,
-                    mode: "default".to_string(),
-                    selection: denia_core::config::ModelSelection {
+                SubagentDescriptor::legacy(
+                    "worker",
+                    1,
+                    "default",
+                    denia_core::config::ModelSelection {
                         provider: "test".to_string(),
                         model: "test".to_string(),
                         reasoning_effort: None,
                     },
-                    persona: None,
-                    allowed_tools: None,
-                    snapshot: None,
-                },
+                    None,
+                    None,
+                ),
             )
             .unwrap();
         let live = Arc::new(LiveSessions::new(8, u64::MAX));
@@ -1498,7 +1490,7 @@ mod tests {
             )
             .await;
         assert_eq!(resolution.outcome, AskOutcome::Unavailable);
-        let reason = resolution.reason.expect("未授予 ask 的拒绝必须给出原因");
+        let reason = resolution.reason.expect("子代理拒绝必须给出原因");
         assert!(reason.contains("子代理"), "{reason}");
         assert!(reason.contains("自行决策"), "{reason}");
         std::fs::remove_dir_all(&root).unwrap();

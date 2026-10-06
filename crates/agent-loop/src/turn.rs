@@ -36,6 +36,32 @@ struct TurnAssembly {
     system_frozen: Option<String>,
     /// 已通过系统提示更新通道追加的最新提示词全文(幂等基准)。
     system_update: Option<String>,
+    /// 子代理运行快照（角色补充 + 冻结授权）；非子代理为 None。
+    subagent: Option<denia_tools::capabilities::SubagentPrompt>,
+}
+
+/// 子代理角色段：定义 instructions + 任务职责，**追加**在父基础提示之后。
+pub(crate) const SUBAGENT_ROLE_SECTION: &str = "subagent:role";
+/// 子代理约束段：禁止派遣、汇报方式、身份与权限边界。
+pub(crate) const SUBAGENT_CONSTRAINTS_SECTION: &str = "subagent:constraints";
+
+/// 没有定义管理能力的部署（或旧会话）的降级路径：按旧描述符构造保守快照。
+fn legacy_subagent_prompt(
+    descriptor: &denia_core::session::SubagentDescriptor,
+) -> denia_tools::capabilities::SubagentPrompt {
+    denia_tools::capabilities::SubagentPrompt {
+        name: descriptor
+            .name
+            .clone()
+            .or_else(|| Some(descriptor.label.clone())),
+        instructions: descriptor.persona.clone().unwrap_or_default(),
+        effective_tools: descriptor.effective_tools.clone().unwrap_or_else(|| {
+            denia_core::subagent::legacy_child_tools(descriptor.allowed_tools.as_deref())
+        }),
+        permission_ceiling: Some(descriptor.permission_ceiling.as_str().to_string()),
+        parent_preset_persona: descriptor.parent_preset_persona.clone(),
+        legacy: true,
+    }
 }
 
 pub(crate) async fn run_turn_inner(
@@ -53,6 +79,37 @@ pub(crate) async fn run_turn_inner(
         None => None,
     };
     prepare_turn_input(driver, state, prompt, images, files, quoted, &cwd).await?;
+    // 子代理运行快照：角色正文与冻结授权。**读取校验失败即拒绝本轮**，不回退
+    // 到默认角色或更宽的工具面（计划 5.3）。
+    let subagent = match (
+        driver.runtime.as_ref(),
+        state.session.header().subagent.as_ref(),
+    ) {
+        (Some(runtime), Some(descriptor)) => {
+            match runtime.subagent_prompt(state.session.id()).await {
+                Ok(Some(parts)) => Some(parts),
+                Ok(None) => Some(legacy_subagent_prompt(descriptor)),
+                Err(error) => {
+                    let reason = TurnEndReason::Error {
+                        failure: LlmFailure::new(
+                            codes::UNKNOWN,
+                            format!("子代理运行快照不可用，已拒绝启动：{error}"),
+                        ),
+                    };
+                    append(
+                        &state.session,
+                        &state.emit,
+                        SessionEvent::TurnEnd {
+                            turn: state.turn,
+                            reason: reason.clone(),
+                        },
+                    )?;
+                    return Ok(reason);
+                }
+            }
+        }
+        _ => None,
+    };
     // 路由容量解析一次(解析失败不影响主流程;报错摘要与 request-context 用)。
     state.context_window = driver
         .registry
@@ -76,6 +133,7 @@ pub(crate) async fn run_turn_inner(
             crate::injections::SYSTEM_UPDATE_CHANNEL,
         )
         .and_then(|message| extract_system_update(&message).map(|body| body.to_string())),
+        subagent,
     };
 
     'step_loop: loop {
@@ -113,7 +171,7 @@ pub(crate) async fn run_turn_inner(
         )?;
 
         // —— 装配系统提示 + 工具集 ——
-        let prompt_assembly = match assemble_step(driver, state) {
+        let prompt_assembly = match assemble_step(driver, state, assembly.subagent.as_ref()) {
             Ok(assembly) => assembly,
             Err(error) => {
                 // 日志平衡:step 已开,补 step-end + turn-end(对齐 dsh 的
@@ -604,7 +662,9 @@ async fn detect_gesture_skill(
 /// 提供方缓存前缀的第一段(in-history 追加的冻结基准)。
 /// None = 会话尚未发过任何请求,当前提示词即为基准。
 fn last_request_header_system(session: &Session) -> Option<String> {
-    session.with_events(|events| {
+    // 模型面：历史投影丢掉的旧请求头不作为冻结基准（否则会拿父代理的
+    // 系统提示当本会话前缀）。
+    session.with_model_events(|events| {
         events
             .iter()
             .rev()
@@ -693,9 +753,22 @@ pub(crate) fn retain_loaded_mcp_tools(
 }
 
 /// 装配本 step 的系统提示与工具集。
-/// 系统提示热更新不丢能力(bash schema 回填实际注册表版本);
-/// 子代理 persona 覆盖 + 工具白名单过滤。
-fn assemble_step(driver: &SessionDriver, state: &TurnState) -> Result<PromptAssembly, String> {
+///
+/// 系统提示热更新不丢能力(bash schema 回填实际注册表版本)。
+///
+/// 子代理装配遵循"结构化继承，而非替换 persona"（计划 9.1）：
+/// 1. 父基础提示（部署身份 + 主 preset persona）保持不动；
+/// 2. 按子有效工具重建工具纪律段（拿不到的工具其纪律段不出现）；
+/// 3. 追加 `subagent:role`（定义 instructions，追加不覆盖）；
+/// 4. 追加 `subagent:constraints`（禁止派遣、汇报方式、身份与权限边界）。
+///
+/// 追加发生在 persona 独占过滤之后：即使父 preset 是"persona 独占"，
+/// child 的强制约束段也必须存在。
+fn assemble_step(
+    driver: &SessionDriver,
+    state: &TurnState,
+    subagent: Option<&denia_tools::capabilities::SubagentPrompt>,
+) -> Result<PromptAssembly, String> {
     let cwd = state.session.header().cwd.clone();
     let mut assembly = driver.system_prompt.load().assemble(&AssembleContext {
         cwd: Some(cwd),
@@ -730,41 +803,8 @@ fn assemble_step(driver: &SessionDriver, state: &TurnState) -> Result<PromptAsse
     // 发现、按名调用、首次调用装载。放白名单收窄之后:被 preset/子代理
     // 白名单排除的 MCP 工具同样不进请求。
     retain_loaded_mcp_tools(driver, state.session.id(), &mut assembly);
-    if let Some(child) = &state.session.header().subagent {
-        // 角色提示**追加**成独立段：父的部署 persona / 主 preset persona 是
-        // 基础，子代理的 instructions 与强制约束是增量。旧日志里的 persona
-        // 字段（没有快照的历史子代理）按同样语义追加——历史上它替换父
-        // persona，那正是本轮要消除的行为。
-        let role = state
-            .session
-            .subagent_snapshot()
-            .map(|file| file.instructions)
-            .filter(|text| !text.trim().is_empty())
-            .or_else(|| child.persona.clone().filter(|text| !text.trim().is_empty()));
-        let mut text = String::from(
-            "[子代理约束]\n\
-             你是被派遣的子代理：不能派遣子代理，也不能改变会话主控模式或操作会话目标；\n\
-             自动加载的规则只含项目级 AGENTS.md（不含用户全局规则）。\n\
-             完成后如实汇报：改了什么／跑了什么／结果如何／还剩什么问题；\
-             没有验证过的不要说成验证过。结果要区分「成功」「任务失败」与「需要主代理决策」。",
-        );
-        if let Some(role) = role {
-            text = format!("[子代理角色]\n{role}\n\n{text}");
-        }
-        assembly.sections.push(denia_system_prompt::AssembledSection {
-            name: "subagent:role".to_string(),
-            text,
-            audience: denia_system_prompt::SectionAudience::Model,
-        });
-        // 工具面与纪律段同进退：冻结快照的有效工具集合是唯一依据。
-        let allowed = child.effective_tools();
-        crate::preset::apply_tool_allowlist(&mut assembly, &allowed);
-        // 没拿到 jobs 工具的子代理不能后台跑命令：schema 与执行层同时拒绝
-        // （只禁 job_start 不足以关闭 `bash.run_in_background` 这条旁路）。
-        let has_jobs = allowed.iter().any(|name| name == "job_start");
-        if !has_jobs {
-            crate::preset::strip_run_in_background(&mut assembly);
-        }
+    if let Some(child) = subagent {
+        apply_subagent_context(&mut assembly, child);
     }
     // 只读档工具面收窄:bash 与写文件工具不开放(只留 ls/read_file/glob/grep
     // 等只读类),纪律段同步摘除。执行层 decide 矩阵仍兜底幻觉调用。子代理
@@ -810,6 +850,83 @@ fn assemble_step(driver: &SessionDriver, state: &TurnState) -> Result<PromptAsse
     Ok(assembly)
 }
 
+/// 把子代理上下文落到本 step 的装配上（结构化继承，而非替换 persona）。
+///
+/// 四步，顺序即语义：
+/// 1. 父 preset persona **快照**：父 preset 文件后来被删/损坏时 child 不回退
+///    部署默认人格；
+/// 2. 按有效工具重建工具纪律段（拿不到的工具其纪律段不出现）；
+/// 3. 追加 `subagent:role`（定义 instructions，**追加不覆盖**）；
+/// 4. 追加 `subagent:constraints`（禁止派遣、项目级指令、权限边界、汇报方式）。
+///
+/// 因为 3/4 只做 `push`，父 persona 段（包括"persona 独占"留下的那一段）一定
+/// 保留；约束段也不受任何 persona 设置影响。
+pub(crate) fn apply_subagent_context(
+    assembly: &mut PromptAssembly,
+    child: &denia_tools::capabilities::SubagentPrompt,
+) {
+    if let Some(persona) = child
+        .parent_preset_persona
+        .as_deref()
+        .filter(|text| !text.trim().is_empty())
+        && let Some(section) = assembly
+            .sections
+            .iter_mut()
+            .find(|s| s.name == "deployment:persona")
+    {
+        section.text = format!("{persona}\n始终使用简体中文回复，除非用户明确要求其他语言。");
+    }
+    crate::preset::apply_tool_allowlist(assembly, &child.effective_tools);
+    // 后台命令的入口是 `job_start`：没被授予它时，bash 的 run_in_background
+    // 参数必须一起消失（执行层 `exec::reject_before_dispatch` 同样拒绝），
+    // 否则"只禁 job_start"等于留了一条绕过通道。
+    if !child.effective_tools.iter().any(|name| name == "job_start") {
+        crate::preset::strip_background_param(assembly);
+    }
+    let name = child.name.as_deref().unwrap_or("子代理");
+    let mut role = format!("# 你的角色（子代理）\n名称：{name}\n");
+    if child.instructions.trim().is_empty() {
+        role.push_str("本次派遣只给了任务说明：按用户消息里的任务要求工作。\n");
+    } else {
+        role.push_str(child.instructions.trim_end());
+        role.push('\n');
+    }
+    assembly
+        .sections
+        .push(denia_system_prompt::AssembledSection {
+            name: SUBAGENT_ROLE_SECTION.to_string(),
+            text: role,
+            audience: denia_system_prompt::SectionAudience::Model,
+        });
+    let ceiling = child.permission_ceiling.as_deref().unwrap_or("inherit");
+    let tools_note = if child.effective_tools.is_empty() {
+        "本次没有授予任何工具：只能用你已有的知识完成推理，并在结果里说明需要的工具。".to_string()
+    } else {
+        format!("可用工具仅限：{}。", child.effective_tools.join("、"))
+    };
+    let constraints = format!(
+        "# 子代理约束\n\
+         - 你是子代理，**不能派遣子代理**，也不能使用宿主配置或会话主控工具；\n\
+         - 不会自动加载全局 AGENTS.md，只自动发现项目级规则；工作目录、权限模式与工作区沙箱与父代理一致；\n\
+         - {tools_note}\n\
+         - 权限上限：{ceiling}{}；\n\
+         - 无法完成的动作不要假装完成：把阻塞、未覆盖范围与需要的决策写进最终结果。\n\
+         - 汇报时区分三种情形：成功结果（附证据）、任务失败（附原因）、等待父代理决策。",
+        if ceiling == "read-only" {
+            "（写文件与命令一律被拒绝）"
+        } else {
+            "（写操作仍按当前权限模式走正常审批）"
+        }
+    );
+    assembly
+        .sections
+        .push(denia_system_prompt::AssembledSection {
+            name: SUBAGENT_CONSTRAINTS_SECTION.to_string(),
+            text: constraints,
+            audience: denia_system_prompt::SectionAudience::Model,
+        });
+}
+
 /// 本 turn 的下一个 step 号:反向扫描到 TurnStart 为止,统计本 turn 已有
 /// 的 step 数(通常个位数,扫描成本可忽略)。
 impl TurnState {
@@ -833,3 +950,174 @@ impl TurnState {
 /// 保留对 Session 的类型引用(工具 emit_event sink 由 exec 模块使用)。
 #[allow(unused)]
 fn _session_type_witness(_s: &Session) {}
+
+/// 子代理装配的回归网（H01）：父 persona 保留、角色段与约束段存在、工具说明
+/// 与有效授权一致、零工具与只读上限都有明确文案。不需要 driver 即可断言。
+#[cfg(test)]
+mod subagent_section_tests {
+    use super::*;
+    use denia_system_prompt::{AssembleContext, SectionAudience};
+    use denia_tools::capabilities::SubagentPrompt;
+
+    fn assembly() -> PromptAssembly {
+        let (prompt, _registry) = denia_tools::default_shipped();
+        prompt
+            .assemble(&AssembleContext::default())
+            .expect("出厂组装可装配")
+    }
+
+    fn child(instructions: &str, tools: Vec<&str>, ceiling: &str) -> SubagentPrompt {
+        SubagentPrompt {
+            name: Some("验证员".to_string()),
+            instructions: instructions.to_string(),
+            effective_tools: tools.into_iter().map(str::to_string).collect(),
+            permission_ceiling: Some(ceiling.to_string()),
+            parent_preset_persona: None,
+            legacy: false,
+        }
+    }
+
+    #[test]
+    fn role_and_constraints_are_appended_and_the_parent_persona_survives() {
+        let mut a = assembly();
+        let persona_before = a
+            .sections
+            .iter()
+            .find(|section| section.name == "deployment:persona")
+            .map(|section| section.text.clone())
+            .expect("出厂组装必须有 deployment:persona");
+        apply_subagent_context(
+            &mut a,
+            &child(
+                "角色哨兵 ROLE-SENTINEL",
+                vec!["read_file", "bash"],
+                "inherit",
+            ),
+        );
+        assert_eq!(
+            a.sections
+                .iter()
+                .find(|section| section.name == "deployment:persona")
+                .map(|section| section.text.clone()),
+            Some(persona_before),
+            "子代理角色是追加，绝不替换父 persona"
+        );
+        let role = a
+            .sections
+            .iter()
+            .find(|section| section.name == SUBAGENT_ROLE_SECTION)
+            .expect("角色段必须存在");
+        assert!(role.text.contains("ROLE-SENTINEL"));
+        assert!(role.text.contains("验证员"));
+        assert_eq!(role.audience, SectionAudience::Model);
+        let constraints = a
+            .sections
+            .iter()
+            .find(|section| section.name == SUBAGENT_CONSTRAINTS_SECTION)
+            .expect("约束段必须存在");
+        assert!(constraints.text.contains("不能派遣子代理"));
+        assert!(constraints.text.contains("项目级规则"));
+        assert!(constraints.text.contains("read_file") && constraints.text.contains("bash"));
+        assert!(constraints.text.contains("正常审批"));
+        // 工具纪律段与授权同源：没授予 bash 时 tool:bash 段必须消失。
+        let mut narrowed = assembly();
+        apply_subagent_context(&mut narrowed, &child("", vec!["read_file"], "read-only"));
+        assert!(
+            narrowed
+                .sections
+                .iter()
+                .any(|section| section.name == "tool:read"),
+            "被授予的工具其纪律段保留"
+        );
+        assert!(
+            !narrowed
+                .sections
+                .iter()
+                .any(|section| section.name == "tool:bash"),
+            "未授予的工具其纪律段必须移除"
+        );
+        assert!(
+            !narrowed.tools.iter().any(|schema| schema.name == "bash"),
+            "未授予的工具其 schema 必须移除"
+        );
+    }
+
+    #[test]
+    fn zero_tools_and_read_only_ceiling_are_spelled_out() {
+        let mut a = assembly();
+        apply_subagent_context(&mut a, &child("", Vec::new(), "read-only"));
+        let constraints = a
+            .sections
+            .iter()
+            .find(|section| section.name == SUBAGENT_CONSTRAINTS_SECTION)
+            .expect("约束段必须存在");
+        assert!(constraints.text.contains("没有授予任何工具"));
+        assert!(constraints.text.contains("read-only"));
+        assert!(constraints.text.contains("写文件与命令一律被拒绝"));
+        // 零工具时请求工具面也必须为空（schema 与授权一致）。
+        assert!(a.tools.is_empty(), "零工具定义不得拿到任何 schema");
+    }
+
+    #[test]
+    fn parent_preset_persona_snapshot_wins_over_a_later_preset_change() {
+        let mut a = assembly();
+        let mut child = child("", vec!["read_file"], "inherit");
+        child.parent_preset_persona = Some("父 preset 的快照 persona".to_string());
+        apply_subagent_context(&mut a, &child);
+        let persona = a
+            .sections
+            .iter()
+            .find(|section| section.name == "deployment:persona")
+            .expect("persona 段仍在");
+        assert!(persona.text.starts_with("父 preset 的快照 persona"));
+    }
+
+    /// 后台命令的入口是 `job_start`：没有授予它时，bash 的 `run_in_background`
+    /// 参数必须从 schema 里消失（"只禁 job_start"不是收口）。
+    #[test]
+    fn bash_background_param_follows_the_jobs_grant() {
+        // 出厂 shipped 组装里的 bash schema 不带 run_in_background（它由 server
+        // 侧带 runtime 的 BashTool 注入），这里补上以模拟真实部署的工具面。
+        let with_background_bash = || {
+            let mut a = assembly();
+            if let Some(bash) = a.tools.iter_mut().find(|schema| schema.name == "bash") {
+                bash.parameters["properties"]["run_in_background"] =
+                    serde_json::json!({"type": "boolean"});
+            } else {
+                panic!("出厂组装必须含 bash");
+            }
+            a
+        };
+
+        let mut without_jobs = with_background_bash();
+        apply_subagent_context(&mut without_jobs, &child("", vec!["bash"], "inherit"));
+        let bash = without_jobs
+            .tools
+            .iter()
+            .find(|schema| schema.name == "bash")
+            .expect("bash 仍在工具面内");
+        assert!(
+            bash.parameters["properties"]
+                .get("run_in_background")
+                .is_none(),
+            "未授予 job_start 时 run_in_background 必须消失"
+        );
+
+        let mut with_jobs = with_background_bash();
+        apply_subagent_context(
+            &mut with_jobs,
+            &child("", vec!["bash", "job_start"], "inherit"),
+        );
+        let bash = with_jobs
+            .tools
+            .iter()
+            .find(|schema| schema.name == "bash")
+            .expect("bash 仍在工具面内");
+        assert!(
+            bash.parameters["properties"]
+                .get("run_in_background")
+                .is_some(),
+            "授予 job_start 时后台参数保留"
+        );
+    }
+}

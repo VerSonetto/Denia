@@ -201,7 +201,6 @@ mod tests {
 
     fn ctx_with_sink(collected: Arc<Mutex<Vec<SessionEvent>>>) -> ToolContext {
         ToolContext {
-            granted_tools: None,
             output_store: None,
             session_id: None,
             selection: None,
@@ -223,7 +222,6 @@ mod tests {
 
     fn ctx_without_sink() -> ToolContext {
         ToolContext {
-            granted_tools: None,
             output_store: None,
             session_id: None,
             selection: None,

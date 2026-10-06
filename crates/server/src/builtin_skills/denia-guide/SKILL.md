@@ -20,7 +20,7 @@ metadata:
 ## 读写入口
 
 - 服务地址用**运行时上下文快照里的「本实例 API」行**（每轮注入，就是当前进程的真实地址）。绝不凭默认端口猜：多实例共享数据目录，猜错会把配置写进另一个实例——你这边 HTTP 200 看似成功，用户的面板毫无变化。快照里找不到时才问用户。
-- 读：`GET /api/settings`（全部命名空间快照，含各 `revision`）、`GET /api/llm/catalog`（ live 路由与模型）、`GET /api/mcp`（服务器与工具数）、`GET /api/agent-presets`（名册与健康状态）、`GET /api/system-prompt`。
+- 读：`GET /api/settings`（全部命名空间快照，含各 `revision`）、`GET /api/llm/catalog`（ live 路由与模型）、`GET /api/mcp`（服务器与工具数）、`GET /api/agent-presets`（名册与健康状态）、`GET /api/subagent-profiles?sessionId=`（子代理定义目录）、`GET /api/subagent-tools?sessionId=`（真实工具目录与可授予性）、`GET /api/system-prompt`。
 - 写设置：`PATCH /api/settings/{ns}`（merge patch）或 `PUT`（整段替换，空对象=重置），body `{"value":{...},"expectedRevision":N}`，N 取自刚 GET 到的 revision。未知命名空间 404，revision 对不上 409。
 - 数据目录默认 `~/.denia`（`settings.yaml`、`SYSTEM.md`、`agent-presets/` 等都在这），但走 API 就不用管路径。
 
@@ -50,6 +50,20 @@ metadata:
 - 损坏的 preset 会以 broken 行留在名册里并写明原因：先读原因再修，不要删了重建（id 占着）。
 - 创建只走两条路：调 `create_preset` 工具（先用 ask 分轮收集 persona/工具面/功能开关→再用 ask 展示摘要拿到确认→一次会话只建一个），或 `POST /api/agent-presets` 从既有 preset 复制（`{from, id, name?}`，同名 id/已存在目录都拒绝，绝不覆盖）。改既有 preset 让用户亲手改 `preset.yml`（有 watcher，200ms 防抖热刷新，下一步即生效）；查单个文本走 `GET /api/agent-presets/{id}`，删走 `DELETE`。
 - 默认 preset 在 `agent-presets` 命名空间（`{default, modeSelectionEnabled}`）：写不存在的 id 不报错但读取时回退 `standard`，所以改完默认要 `GET` 名册确认 id 真存在。
+
+## 子代理定义（人类配置面）
+
+- 存储：用户级 `<home>/subagents/<id>.md`、项目级 `<projectRoot>/.denia/subagents/<id>.md`，严格 YAML frontmatter + Markdown 正文（**正文就是角色提示**）。合并顺序 builtin → user → project，同 id 后者覆盖前者；被覆盖的底层 `qualifiedId` 只能查看/复制，不能直接派遣。生效定义被禁用或损坏时整个 id 不可派遣，不回落同名低优先级项。
+- frontmatter 字段：`schemaVersion`(固定 1)、`id`（`^[a-z0-9][a-z0-9-]{0,63}$`，同时是文件名，必须一致）、`name`、`description`、`enabled`、`tools`（`{mode: inherit}` 继承父可授予工具，或 `{mode: allowlist, names: [...]}`；**空 names = 零工具**）、`model`（`{mode: inherit}` 或 `{mode: explicit, selection: {provider, model, reasoningEffort?}}`）、`permissionCeiling`（`inherit | read-only`，只允许收窄）、`color`（可选，仅展示）。未知键、非法 YAML、非法工具名、重复 id 一律失败；`instructions` 写在 frontmatter 里会被拒绝。
+- API：`GET /api/subagent-profiles?sessionId=|cwd=`（有效项 + 被覆盖项 + 诊断 + revision）、`POST /api/subagent-profiles`（创建，体 `{scope: user|project, profile}`；同作用域同 id 已存在 409）、`PUT /api/subagent-profiles/{qualifiedId}`（全量更新，必须带 `expectedRevision`；**内置定义写用户覆盖，不改程序资源**）、`DELETE /api/subagent-profiles/{qualifiedId}?expectedRevision=&scope=`、`POST /api/subagent-profiles/{qualifiedId}/reset`（恢复默认 = 删覆盖）、- `GET /api/subagent-tools?sessionId=`（真实工具目录、能力分类、副作用说明、只读兼容标记与可授予性原因）、`POST /api/subagent-profiles/preview`（不启动模型，返回某父会话下的最终工具/模型/权限；**不选父会话只显示"定义请求集合"**）。
+- 状态码：400 格式/歧义、403 作用域拒绝、404 不存在、409 版本或名称冲突、422 无法解析为可执行定义。
+- 内置三个：`builtin:explore`（`permissionCeiling: read-only`）、`builtin:develop`（父代理省略 `profile_id`/`inline` 时的默认目标）、`builtin:verify`。都可编辑、禁用、复制、恢复默认；`builtin:*` 不能删除程序资源。
+- 不可配置项：子代理**不能**派遣子代理（`spawn_agent`/`fork_agent`/`interrupt_agent`/`list_agents`/`wait_agent`/`exit_plan`/`get_goal`/`update_goal`/宿主配置类工具全部硬禁；没有 `maxDepth`，旧参数返回 `subagent/depth-config-removed`）；子代理**不**自动继承全局 `$DENIA_HOME/AGENTS.md`，只发现项目级规则；角色提示是**追加**，不替换父 persona。
+- 派遣参数（主代理侧）：`profile_id` 用已保存定义、`inline` 在调用时给临时定义（不落盘）、两者都省略用有效 `develop`；`profile_id` 与 `inline` 互斥，也不与旧 `persona`/`allowed_tools` 混用。显式选择父未授予的工具、未知工具名、硬禁项分别明确失败，不会静默少给。
+- 并发上限在 `subagent-policy` 命名空间：`{maxConcurrentRuns}`（1–64，默认 8），创建/恢复/唤醒共用。派遣目录的独立字节预算在 `runtime.subagentCatalogMaxBytes`（默认 8192，超限截断并明示，未列出的定义仍可用 `profile_id` 指定）。
+- 只读上限与工具选择冲突时编辑器**拦住保存**（写/命令/后台类工具在只读档永不执行）：必须显式改成跟随父权限或移除冲突工具，系统不会偷偷放宽。定义里引用了当前部署不存在的工具（离线 MCP/已卸载）会保留原值并给诊断，派遣时以 `subagent/tool-unknown` 失败。
+- 旧版本创建的 child（快照版本 0）首次继续前自动建立 `<会话目录>/history-projection.json` 模型历史投影：旧父运行态与全部自动注入通道退出**模型历史**，审计日志不变，冻结授权不因续跑扩大；投影建立失败才会拒绝续跑并给 `subagent/legacy-resume-unsupported`。
+- 高频坑：把角色正文写进 frontmatter、`tools.mode: inherit` 同时又给 `names`、文件名与 `id` 不一致、项目作用域请求没带 `sessionId`/`cwd`、用 `runtime.maxAgents` 改并发（已迁移到 `subagent-policy`，旧字段写回会被拒绝）、在只读上限下勾选 `bash`/`write_file`（会被保存校验拦下）。
 
 ## MCP 服务（命名空间 `mcp`）
 

@@ -11,7 +11,7 @@ import { optimizePromptText } from '../promptOptimizer';
 import { addSessionLocal, ensureSession, getActiveWorkspace, markStarted, notify, refreshList, markCompacting, setActiveId, setRunningStatus, useCatalogTick, useCompactingFor, useRunningFor, useSessions, useWorkspaces } from '../appStore';
 import { t } from '../i18n';
 import { attach, ensureFollowing, invalidateSession } from '../sessionStreams';
-import { sessionDisplayTitle } from '../sessionDisplay';
+import { sessionDisplayTitle, subagentSnapshotText } from '../sessionDisplay';
 import type { TranscriptNode } from '../fold';
 import type { TrajectoryQuote } from '../trajectory';
 import { SessionView } from '../components/SessionView';
@@ -72,6 +72,12 @@ export default function SessionsPage({
   const activeSession: SessionSummary | null = activeId
     ? (sessions.find((s) => s.id === activeId) ?? null)
     : null
+  // 子代理身份摘要（定义、冻结工具数、权限上限、仅项目级指令、不能派遣）：
+  // 只读运行快照的事实，子会话页与父侧面板共用同一份纯函数。
+  const descriptorText = useMemo(
+    () => subagentSnapshotText(activeSession?.subagent),
+    [activeSession?.subagent],
+  )
 
   // 运行状态直接订阅引擎(侧栏/状态栏同源)。
   const running = useRunningFor(activeId)
@@ -2200,7 +2206,7 @@ export default function SessionsPage({
                   onDecision={handlePlanDecision}
                   onExit={handlePlanExit}
                 />
-              ) : activeSession?.subagent ? <div className="runtime-child-composer"><span>{t('runtimeChildReadonly')}</span><button type="button" className="runtime-child-back-button" onClick={() => activeSession.parent_session && setActiveId(activeSession.parent_session, null)}>{t('runtimeBackParent')}</button></div> : composerCard}
+              ) : activeSession?.subagent ? <div className="runtime-child-composer"><span>{t('runtimeChildReadonly')}</span><small className="runtime-child-snapshot" data-testid="child-snapshot" title={descriptorText}>{descriptorText}</small><button type="button" className="runtime-child-back-button" onClick={() => activeSession.parent_session && setActiveId(activeSession.parent_session, null)}>{t('runtimeBackParent')}</button></div> : composerCard}
               {phase === 'active' && <StatsBar nodes={transcriptNodes} />}
             </div>
           </div>

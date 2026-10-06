@@ -1,5 +1,5 @@
 //! Model JSON is parsed at the tool boundary. Hosts dispatch typed operations.
-use denia_core::subagent::DelegateArgs;
+use denia_core::subagent::SubagentInlineSpec;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -15,6 +15,7 @@ pub enum RuntimeCommand {
     InterruptAgent(TargetArgs),
     SendMessage(SendArgs),
     WaitAgent(TargetArgs),
+    /// 派遣：参数在这里就完成类型化校验，宿主不再零散读取 JSON。
     #[serde(skip)]
     Delegate {
         fork: bool,
@@ -31,14 +32,8 @@ impl RuntimeCommand {
             return Err("timeout_ms 必须为正整数".into());
         }
         if matches!(name, "spawn_agent" | "fork_agent") {
-            // 派遣参数在这里一次解析成严格类型：`Runtime::delegate` 不再零散
-            // 读 JSON，字段错误在产生任何副作用之前报出。
-            let args: DelegateArgs = serde_json::from_value(args).map_err(|error| {
-                format!("subagent/invalid-args: 派遣参数无效（{error}）；可用字段：prompt、description、profile_id、inline、allowed_tools")
-            })?;
-            if args.prompt.trim().is_empty() {
-                return Err("subagent/invalid-args: prompt 不能为空".into());
-            }
+            let args: DelegateArgs = serde_json::from_value(args)
+                .map_err(|error| format!("派遣参数无效（{name}）：{error}"))?;
             return Ok(Self::Delegate {
                 fork: name == "fork_agent",
                 args,
@@ -47,6 +42,45 @@ impl RuntimeCommand {
         serde_json::from_value(json!({"tool": name, "args": args}))
             .map_err(|error| format!("运行时参数无效 ({name}): {error}"))
     }
+}
+
+/// 派遣参数契约（外层工具参数 snake_case；`inline` 内部是 camelCase DTO）。
+///
+/// 未知参数直接拒绝：含糊的混合别名一律不接受，兼容适配集中在这里与
+/// `resolve_dispatch` 的显式分支里。
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DelegateArgs {
+    /// 任务提示（必填，非空）。
+    pub prompt: String,
+    /// 一句话说明这次派遣做什么；缺省时用定义描述。
+    #[serde(default)]
+    pub description: Option<String>,
+    /// 已保存定义的限定 id（`builtin:develop` 等）。
+    #[serde(default)]
+    pub profile_id: Option<String>,
+    /// 调用时创建的临时定义（不落盘）。
+    #[serde(default)]
+    pub inline: Option<SubagentInlineSpec>,
+    /// 调用级模型覆盖（provider/model 必须成套）。
+    #[serde(default)]
+    pub provider: Option<String>,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub reasoning_effort: Option<String>,
+    /// 旧参数：显式工具列表。与 profile/inline 同时出现会被拒绝（歧义）。
+    #[serde(default)]
+    pub allowed_tools: Option<Vec<String>>,
+    /// 旧参数：无论 true/false 都立即返回并在后台执行（兼容语义）。
+    #[serde(default)]
+    pub run_in_background: Option<bool>,
+    /// 旧参数：角色补充提示，映射为 instructions。
+    #[serde(default)]
+    pub persona: Option<String>,
+    /// 已移除的参数：出现即报 `subagent/depth-config-removed`。
+    #[serde(default)]
+    pub max_depth: Option<Value>,
 }
 
 #[derive(Debug, Deserialize)]

@@ -206,8 +206,21 @@ impl Session {
         {
             return cached.clone();
         }
-        let surface: Arc<[denia_core::session::SurfaceMessage]> =
-            denia_core::session::derive_surface(&inner.events).into();
+        let projection = inner.history_projection.clone();
+        let surface: Arc<[denia_core::session::SurfaceMessage]> = match &projection {
+            None => denia_core::session::derive_surface(&inner.events).into(),
+            // 历史投影（旧子代理）：模型面丢掉旧父运行态与自动注入，审计
+            // UI 仍走原始日志。只在这条路径多一次过滤（非旧 child 不付代价）。
+            Some(projection) => {
+                let visible: Vec<SessionEnvelope> = inner
+                    .events
+                    .iter()
+                    .filter(|envelope| !projection.drops(envelope.seq))
+                    .cloned()
+                    .collect();
+                denia_core::session::derive_surface(&visible).into()
+            }
+        };
         inner.derived_surface = Some(surface.clone());
         inner.derived_revision = inner.log_revision;
         surface

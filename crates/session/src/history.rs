@@ -1,172 +1,196 @@
 //! Session history responsibilities.
 use super::*;
 
-/// fork 到子代理时的历史投影结果。
+/// fork 投影版本：投影规则变化时自增，旧快照按版本解释。
+pub const SUBAGENT_SEED_VERSION: u32 = 1;
+
+/// 子代理 fork 种子：只含"重新投影后"的对话事件，以及投影审计。
 #[derive(Debug, Clone, Default)]
 pub struct SubagentSeed {
-    /// 投影后的闭合对话事件（已重新编号前的原始 seq 顺序）。
+    /// 可回放的事件（已重编号由 `seed_from` 负责）。
     pub events: Vec<SessionEnvelope>,
-    /// 截取到的截止 seq（最后一个闭合轮次）。
+    /// 截取到最后一个闭合轮次的日志序号（0 = 没有任何闭合轮次）。
     pub cut_seq: u64,
-    /// 被丢弃的来源类别（审计与迁移诊断用）。
+    /// 被丢弃的来源类别（审计可见，便于解释 child 为什么看不到某段父历史）。
     pub dropped: Vec<String>,
 }
 
-/// 子代理 fork 的历史投影：**只**保留闭合轮次里的普通对话内容。
+/// 子代理专用种子投影（**不**用于普通用户分支）。
 ///
-/// 与 [`Session::seed_from`]（用户分支原样复制前缀）不同，子代理种子不能
-/// 携带父会话的运行态与自动注入，否则子代理会在自己的作用域里看到：
+/// 只保留已闭合轮次里的对话事实：
+/// - 丢弃父 `SystemPrompt`、**所有** `injected: true` 的 UserMessage
+///   （工作区指令/能力快照/技能目录/记忆索引/目标/运行时上下文/系统提示更新
+///   等全部自动注入通道）、`RequestHeader`/`RequestContext`、`CompactionSummary`、
+///   `Goal`/`PermissionMode`/`AgentPreset` 等父运行态；
+/// - 丢弃 `AgentInbox`/`AgentDelivery`（父的持久收件箱与领取记录）；
+/// - 丢弃审批/提问的请求与结局（子代理重新开始自己的交互记录）；
+/// - 复制 `AssistantMessage` 时把用量清零：父历史的 token 不是 child 的新消耗，
+///   否则 fork 后会重复记账；
+/// - 不改动普通用户分支的种子语义（`seed_from` 保持原样）。
 ///
-/// - 用户全局 `AGENTS.md` 的注入文本（父会话的自动通道，子代理不该有）；
-/// - 父 SystemPrompt / 能力快照 / 定义目录 / 技能目录 / 记忆索引；
-/// - goal、权限模式、preset、审批与提问等父侧交互历史；
-/// - 旧 `CompactionSummary` 及其压缩状态（区间引用在新日志里没有意义）。
-///
-/// 丢掉这些之后，子代理的 token-meter 与基线由新会话自己从零建立。
-/// 模型历史里保留的是真实用户消息、助手回复与完整的工具调用/结果对。
-pub fn build_subagent_seed(source: &[SessionEnvelope]) -> Result<SubagentSeed, String> {
-    let cut = source
+/// 当前正在运行的轮次（最后一个 `TurnEnd` 之后的事件）不复制，保证工具调用与
+/// 结果成对。
+pub fn build_subagent_seed(events: &[SessionEnvelope]) -> SubagentSeed {
+    let cut = events
         .iter()
         .rposition(|envelope| matches!(envelope.event, SessionEvent::TurnEnd { .. }))
-        .map(|index| index + 1)
-        .unwrap_or(0);
-    if cut == 0 {
-        return Err(
-            "subagent/no-closed-turn: 父会话没有已闭合的轮次可供 fork；\
-             请改用 spawn_agent 并把需要的上下文写进 prompt。"
-                .to_string(),
-        );
-    }
-    let mut events: Vec<SessionEnvelope> = Vec::new();
+        .map_or(0, |index| index + 1);
+    let closed = &events[..cut];
+    let cut_seq = closed.last().map(|envelope| envelope.seq).unwrap_or(0);
     let mut dropped: Vec<String> = Vec::new();
-    let note_dropped = |name: &str, dropped: &mut Vec<String>| {
+    let mark = |name: &str, dropped: &mut Vec<String>| {
         if !dropped.iter().any(|item| item == name) {
             dropped.push(name.to_string());
         }
     };
-    for envelope in &source[..cut] {
-        let event = match &envelope.event {
-            // 真实用户消息与助手回复：保留（usage 去掉，Billing 不跨会话累计）。
-            SessionEvent::UserMessage {
-                injected: false,
-                text,
-                images,
-                ..
-            } => SessionEvent::UserMessage {
-                text: text.clone(),
-                injected: false,
-                channel: None,
-                images: images.clone(),
-            },
-            SessionEvent::UserMessage { channel, .. } => {
-                note_dropped(
-                    channel.as_deref().unwrap_or("injected-user-message"),
-                    &mut dropped,
-                );
-                continue;
+    let mut out: Vec<SessionEnvelope> = Vec::with_capacity(closed.len());
+    for envelope in closed {
+        match &envelope.event {
+            SessionEvent::SystemPrompt { .. } => mark("system-prompt", &mut dropped),
+            SessionEvent::UserMessage { injected: true, .. } => {
+                mark("workspace-and-runtime-injections", &mut dropped)
             }
-            SessionEvent::AssistantMessage {
-                turn,
-                step,
-                blocks,
-                interrupted,
-                first_token_time,
-                ..
-            } => SessionEvent::AssistantMessage {
-                turn: *turn,
-                step: *step,
-                blocks: blocks.clone(),
-                usage: None,
-                interrupted: *interrupted,
-                // chunk 事件不复制，指向它们的引用一并清空。
-                source_event_seqs: Vec::new(),
-                first_token_time: *first_token_time,
-            },
-            SessionEvent::ToolCall { .. }
-            | SessionEvent::ToolResult { .. }
-            | SessionEvent::ArgsCleared { .. }
-            | SessionEvent::TurnStart { .. }
-            | SessionEvent::TurnEnd { .. }
-            | SessionEvent::StepStart { .. }
-            | SessionEvent::StepEnd { .. } => envelope.event.clone(),
-            SessionEvent::SystemPrompt { .. } => {
-                note_dropped("system-prompt", &mut dropped);
-                continue;
+            SessionEvent::CompactionSummary { .. } => mark("compaction-summary", &mut dropped),
+            SessionEvent::AgentInbox { .. } | SessionEvent::AgentDelivery { .. } => {
+                mark("agent-inbox", &mut dropped)
             }
-            SessionEvent::AssistantChunk { .. } => continue,
-            SessionEvent::CompactionSummary { .. } => {
-                note_dropped("compaction-summary", &mut dropped);
-                continue;
-            }
-            SessionEvent::TodoWrite { .. } => {
-                note_dropped("todo-write", &mut dropped);
-                continue;
-            }
-            SessionEvent::Goal { .. } => {
-                note_dropped("goal", &mut dropped);
-                continue;
-            }
-            SessionEvent::CommandRun { .. } => {
-                note_dropped("command-run", &mut dropped);
-                continue;
-            }
-            SessionEvent::PermissionMode { .. } => {
-                note_dropped("permission-mode", &mut dropped);
-                continue;
-            }
-            SessionEvent::SessionTitle { .. } => {
-                note_dropped("session-title", &mut dropped);
-                continue;
-            }
-            SessionEvent::AgentPreset { .. } => {
-                note_dropped("agent-preset", &mut dropped);
-                continue;
-            }
+            SessionEvent::Goal { .. } => mark("goal-state", &mut dropped),
+            SessionEvent::PermissionMode { .. } => mark("permission-state", &mut dropped),
+            SessionEvent::AgentPreset { .. } => mark("agent-preset", &mut dropped),
             SessionEvent::ApprovalPolicy { .. }
             | SessionEvent::ApprovalAsked { .. }
-            | SessionEvent::ApprovalDecided { .. } => {
-                note_dropped("approval", &mut dropped);
-                continue;
-            }
+            | SessionEvent::ApprovalDecided { .. } => mark("approvals", &mut dropped),
             SessionEvent::AskRequested { .. } | SessionEvent::AskResolved { .. } => {
-                note_dropped("ask", &mut dropped);
-                continue;
+                mark("asks", &mut dropped)
             }
-            SessionEvent::RequestHeader { .. }
-            | SessionEvent::RequestContext { .. }
-            | SessionEvent::RetryAttempt { .. } => {
-                note_dropped("request-metadata", &mut dropped);
-                continue;
+            SessionEvent::RequestHeader { .. } | SessionEvent::RequestContext { .. } => {
+                mark("request-metadata", &mut dropped)
             }
-            SessionEvent::AgentInbox { .. } | SessionEvent::AgentDelivery { .. } => {
-                note_dropped("agent-inbox", &mut dropped);
-                continue;
+            SessionEvent::SessionTitle { .. } => mark("session-title", &mut dropped),
+            SessionEvent::CommandRun { .. } => mark("command-runs", &mut dropped),
+            SessionEvent::AssistantChunk { .. } => mark("transient-chunks", &mut dropped),
+            SessionEvent::AssistantMessage { .. } => {
+                // 复制对话内容，但不复制用量：父历史的计费不是 child 的新消耗。
+                let mut cloned = envelope.clone();
+                if let SessionEvent::AssistantMessage { usage, .. } = &mut cloned.event {
+                    *usage = None;
+                }
+                out.push(cloned);
             }
-        };
-        events.push(SessionEnvelope {
-            seq: envelope.seq,
-            time: envelope.time,
-            event,
-        });
+            _ => out.push(envelope.clone()),
+        }
     }
-    let has_conversation = events.iter().any(|envelope| {
-        matches!(
-            envelope.event,
-            SessionEvent::UserMessage { .. } | SessionEvent::AssistantMessage { .. }
-        )
-    });
-    if !has_conversation {
-        return Err(
-            "subagent/empty-projection: 父会话闭合轮次里没有可投影的对话内容；\
-             请改用 spawn_agent 并把需要的上下文写进 prompt。"
-                .to_string(),
-        );
-    }
-    Ok(SubagentSeed {
-        events,
-        cut_seq: source[cut - 1].seq,
+    SubagentSeed {
+        events: out,
+        cut_seq,
         dropped,
-    })
+    }
+}
+
+/// 旧子代理历史投影的版本：投影规则变化时自增。
+pub const LEGACY_HISTORY_PROJECTION_VERSION: u32 = 1;
+
+/// 旧子代理的**模型历史投影**（计划 9.4）。
+///
+/// 旧 child 的日志里混着父运行态与自动注入（父系统提示、全局/项目 AGENTS.md、
+/// 能力快照、技能目录、记忆索引、目标、运行时上下文、旧压缩摘要），但旧描述符
+/// 没有可复现的指令投影。为了让它能**安全继续**，首次继续前把"哪些事件不再进
+/// 模型历史"落盘成一份显式清单：
+///
+/// - 只影响**模型面**（`derive_messages`/注入基线），审计 UI 仍看完整日志；
+/// - 持久化后在线加载与冷恢复（先冷后热）得到同一投影；
+/// - 与 fork 种子的区别：**保留** `AgentInbox`/`AgentDelivery`——那是这个 child
+///   自己的任务与汇报通道，不是父的运行态。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct HistoryProjection {
+    pub version: u32,
+    /// 被排除进模型历史的事件序号（升序，稳定可审计）。
+    pub drop_seqs: Vec<u64>,
+    /// 计算时的日志末尾序号：比它更新的事件从未在投影计算里出现。
+    pub source_last_seq: u64,
+    /// 被排除的来源类别（解释"这个 child 为什么看不到某段历史"）。
+    pub dropped: Vec<String>,
+    pub created_at: u64,
+}
+
+impl HistoryProjection {
+    pub fn drops(&self, seq: u64) -> bool {
+        self.drop_seqs.binary_search(&seq).is_ok()
+    }
+}
+
+/// 算出旧子代理的模型历史投影选择。
+///
+/// 排除规则与 fork 种子同源（父系统提示、**所有** `injected: true` 的用户
+/// 消息即各自动注入通道、旧压缩摘要、请求元数据、父运行态、交互记录、瞬时
+/// 事件），但**不做闭合轮次截断**（继续运行要保留正在进行的轮次），也**不排除
+/// AgentInbox/AgentDelivery**（child 自己的任务与汇报）。
+///
+/// 按内容判断的一律不做：这里只按事件类别决策，规则可复现、可审计。
+pub fn legacy_subagent_drop_set(events: &[SessionEnvelope]) -> HistoryProjection {
+    let mut dropped: Vec<String> = Vec::new();
+    let mut mark = |name: &str, dropped: &mut Vec<String>| {
+        if !dropped.iter().any(|item| item == name) {
+            dropped.push(name.to_string());
+        }
+    };
+    let mut drop_seqs: Vec<u64> = Vec::new();
+    for envelope in events {
+        match &envelope.event {
+            SessionEvent::SystemPrompt { .. } => {
+                mark("system-prompt", &mut dropped);
+                drop_seqs.push(envelope.seq);
+            }
+            SessionEvent::UserMessage { injected: true, .. } => {
+                // 这里同时覆盖"全局规则可能被写进注入块"的情形：旧日志无法
+                // 区分全局与项目来源，整个自动注入通道都退出模型历史；下一步
+                // 起按当前项目级规则重新注入（基线也按投影读取）。
+                mark("workspace-and-runtime-injections", &mut dropped);
+                drop_seqs.push(envelope.seq);
+            }
+            SessionEvent::CompactionSummary { .. } => {
+                mark("compaction-summary", &mut dropped);
+                drop_seqs.push(envelope.seq);
+            }
+            SessionEvent::RequestHeader { .. } | SessionEvent::RequestContext { .. } => {
+                mark("request-metadata", &mut dropped);
+                drop_seqs.push(envelope.seq);
+            }
+            SessionEvent::Goal { .. }
+            | SessionEvent::PermissionMode { .. }
+            | SessionEvent::AgentPreset { .. }
+            | SessionEvent::ApprovalPolicy { .. } => {
+                mark("parent-runtime-state", &mut dropped);
+                drop_seqs.push(envelope.seq);
+            }
+            SessionEvent::ApprovalAsked { .. }
+            | SessionEvent::ApprovalDecided { .. }
+            | SessionEvent::AskRequested { .. }
+            | SessionEvent::AskResolved { .. } => {
+                mark("interaction-records", &mut dropped);
+                drop_seqs.push(envelope.seq);
+            }
+            SessionEvent::SessionTitle { .. }
+            | SessionEvent::CommandRun { .. }
+            | SessionEvent::AssistantChunk { .. } => {
+                mark("transient-or-log-only", &mut dropped);
+                drop_seqs.push(envelope.seq);
+            }
+            _ => {}
+        }
+    }
+    drop_seqs.sort_unstable();
+    drop_seqs.dedup();
+    HistoryProjection {
+        version: LEGACY_HISTORY_PROJECTION_VERSION,
+        drop_seqs,
+        source_last_seq: events.last().map(|envelope| envelope.seq).unwrap_or(0),
+        dropped,
+        created_at: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0),
+    }
 }
 
 impl Session {
@@ -180,21 +204,6 @@ impl Session {
         }
         Ok(())
     }
-
-    /// 本会话的子代理运行快照(普通会话与旧日志都没有)。
-    /// 快照含角色补充提示正文(上限 64 KiB),因此它落在会话目录的
-    /// [`denia_core::subagent::SNAPSHOT_FILE`] 里,不进会话头——头部只留引用,
-    /// 冷扫描与会话列表都不会把这段正文读出来。引用不存在或校验失败时
-    /// 返回 `None`,由装配层拒绝启动而不是回退默认。
-    pub fn subagent_snapshot(&self) -> Option<denia_core::subagent::SubagentSnapshotFile> {
-        let path = self
-            .directory()
-            .join(denia_core::subagent::SNAPSHOT_FILE);
-        let text = std::fs::read_to_string(path).ok()?;
-        let file: denia_core::subagent::SubagentSnapshotFile = serde_json::from_str(&text).ok()?;
-        (file.hash() == file.profile.hash).then_some(file)
-    }
-
     /// 物理回退:截断会话日志到目标用户消息**之前**,并把回退审计追加到
     /// `rewinds.jsonl`。内存事件/token-meter/计数器同步重建。
     ///
@@ -339,5 +348,480 @@ impl Session {
             to_message,
             removed_events,
         })
+    }
+}
+
+/// 子代理 fork 种子的回归网：注入通道、父运行态、旧摘要与父用量都必须被
+/// 挡在 child 之外，同时工具调用/结果保持成对。
+#[cfg(test)]
+mod seed_tests {
+    use super::*;
+    use denia_core::session::TurnEndReason;
+    use denia_core::stream::TokenUsage;
+
+    fn envelope(seq: u64, event: serde_json::Value) -> SessionEnvelope {
+        SessionEnvelope {
+            seq,
+            time: 1_000 + seq,
+            event: serde_json::from_value(event).expect("test event is well-formed"),
+        }
+    }
+
+    fn user(seq: u64, text: &str, injected: bool) -> SessionEnvelope {
+        envelope(
+            seq,
+            serde_json::json!({
+                "type": "user-message",
+                "text": text,
+                "injected": injected,
+                "channel": if injected { Some("workspace-instructions") } else { None },
+                "images": []
+            }),
+        )
+    }
+
+    fn assistant(seq: u64, text: &str, usage: Option<TokenUsage>) -> SessionEnvelope {
+        envelope(
+            seq,
+            serde_json::json!({
+                "type": "assistant-message",
+                "turn": 1,
+                "step": 1,
+                "blocks": [{"type": "text", "text": text}],
+                "usage": usage,
+                "interrupted": false,
+                "source_event_seqs": []
+            }),
+        )
+    }
+
+    fn turn_end(seq: u64) -> SessionEnvelope {
+        envelope(
+            seq,
+            serde_json::json!({"type": "turn-end", "turn": 1, "reason": {"kind": "completed"}}),
+        )
+    }
+
+    fn kind_of(event: &SessionEvent) -> &'static str {
+        match event {
+            SessionEvent::TurnStart { .. } => "turn-start",
+            SessionEvent::TurnEnd { .. } => "turn-end",
+            SessionEvent::StepStart { .. } => "step-start",
+            SessionEvent::StepEnd { .. } => "step-end",
+            SessionEvent::UserMessage { .. } => "user",
+            SessionEvent::AssistantMessage { .. } => "assistant",
+            SessionEvent::ToolCall { .. } => "tool-call",
+            SessionEvent::ToolResult { .. } => "tool-result",
+            SessionEvent::SystemPrompt { .. } => "system-prompt",
+            SessionEvent::Goal { .. } => "goal",
+            SessionEvent::PermissionMode { .. } => "permission",
+            SessionEvent::AgentPreset { .. } => "agent-preset",
+            SessionEvent::AgentInbox { .. } => "agent-inbox",
+            SessionEvent::AgentDelivery { .. } => "agent-delivery",
+            SessionEvent::CompactionSummary { .. } => "compaction-summary",
+            SessionEvent::RequestHeader { .. } => "request-header",
+            SessionEvent::RequestContext { .. } => "request-context",
+            SessionEvent::SessionTitle { .. } => "session-title",
+            SessionEvent::CommandRun { .. } => "command-run",
+            SessionEvent::ApprovalPolicy { .. } => "approval-policy",
+            SessionEvent::ApprovalAsked { .. } => "approval-asked",
+            SessionEvent::ApprovalDecided { .. } => "approval-decided",
+            SessionEvent::AskRequested { .. } => "ask-requested",
+            SessionEvent::AskResolved { .. } => "ask-resolved",
+            SessionEvent::AssistantChunk { .. } => "chunk",
+            SessionEvent::RetryAttempt { .. } => "retry",
+            SessionEvent::TodoWrite { .. } => "todo",
+            SessionEvent::ArgsCleared { .. } => "args-cleared",
+        }
+    }
+
+    #[test]
+    fn seed_keeps_closed_dialogue_and_drops_every_automatic_channel() {
+        let usage = TokenUsage {
+            input_tokens: 9_000,
+            output_tokens: 500,
+            cache_read_tokens: None,
+            reasoning_tokens: None,
+        };
+        let events = vec![
+            envelope(1, serde_json::json!({"type": "turn-start", "turn": 1})),
+            envelope(
+                2,
+                serde_json::json!({"type": "step-start", "turn": 1, "step": 1}),
+            ),
+            envelope(
+                3,
+                serde_json::json!({"type": "system-prompt", "turn": 1, "step": 1, "text": "父系统提示"}),
+            ),
+            user(4, "全局规则哨兵 GLOBAL-SENTINEL", true),
+            user(5, "真实用户请求", false),
+            assistant(6, "开始调查", Some(usage)),
+            envelope(
+                7,
+                serde_json::json!({
+                    "type": "tool-call", "turn": 1, "step": 1, "call_id": "c1",
+                    "name": "read_file", "arguments": "{}"
+                }),
+            ),
+            envelope(
+                8,
+                serde_json::json!({
+                    "type": "tool-result", "turn": 1, "step": 1, "call_id": "c1",
+                    "content": "文件内容", "is_error": false
+                }),
+            ),
+            envelope(
+                9,
+                serde_json::json!({"type": "step-end", "turn": 1, "step": 1}),
+            ),
+            turn_end(10),
+            // 未闭合的当前轮次：不复制。
+            envelope(11, serde_json::json!({"type": "turn-start", "turn": 2})),
+            user(12, "正在进行的请求", false),
+        ];
+        let seed = build_subagent_seed(&events);
+        assert_eq!(seed.cut_seq, 10, "只截取到最后一个闭合轮次");
+        let kinds: Vec<&'static str> = seed
+            .events
+            .iter()
+            .map(|item| kind_of(&item.event))
+            .collect();
+        assert!(
+            kinds.contains(&"user") && kinds.contains(&"assistant"),
+            "闭合对话必须保留：{kinds:?}"
+        );
+        for forbidden in [
+            "system-prompt",
+            "compaction-summary",
+            "request-header",
+            "agent-inbox",
+            "approval-asked",
+            "ask-requested",
+            "chunk",
+        ] {
+            assert!(
+                !kinds.contains(&forbidden),
+                "{forbidden} 不得进入 child 种子：{kinds:?}"
+            );
+        }
+        // 注入消息（全局规则哨兵）不得出现；真实用户消息必须保留。
+        let texts: Vec<&str> = seed
+            .events
+            .iter()
+            .filter_map(|item| match &item.event {
+                SessionEvent::UserMessage { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(texts, vec!["真实用户请求"]);
+        assert!(
+            !seed
+                .events
+                .iter()
+                .any(|item| serde_json::to_string(&item.event)
+                    .unwrap_or_default()
+                    .contains("GLOBAL-SENTINEL")),
+            "自动通道里的全局规则不得随 fork 进入 child"
+        );
+        // 工具调用与结果成对。
+        assert_eq!(
+            kinds.iter().filter(|kind| **kind == "tool-call").count(),
+            kinds.iter().filter(|kind| **kind == "tool-result").count()
+        );
+        assert!(
+            seed.dropped
+                .iter()
+                .any(|item| item == "workspace-and-runtime-injections")
+        );
+        assert!(seed.dropped.iter().any(|item| item == "system-prompt"));
+    }
+
+    #[test]
+    fn seed_zeroes_parent_usage_and_never_copies_a_summary() {
+        let usage = TokenUsage {
+            input_tokens: 12_345,
+            output_tokens: 678,
+            cache_read_tokens: Some(100),
+            reasoning_tokens: None,
+        };
+        let events = vec![
+            envelope(1, serde_json::json!({"type": "turn-start", "turn": 1})),
+            user(2, "第一轮", false),
+            assistant(3, "回答", Some(usage)),
+            turn_end(4),
+            envelope(
+                5,
+                serde_json::json!({
+                    "type": "compaction-summary", "turn": 1, "step": 1,
+                    "summary": "旧摘要", "replaces_from": 1, "replaces_to": 4,
+                    "keep_from": 3, "pre_tokens": 900, "post_tokens": 100
+                }),
+            ),
+            envelope(6, serde_json::json!({"type": "turn-start", "turn": 2})),
+            user(7, "第二轮", false),
+            assistant(8, "回答二", None),
+            turn_end(9),
+        ];
+        let seed = build_subagent_seed(&events);
+        assert_eq!(
+            seed.events
+                .iter()
+                .filter(|item| matches!(item.event, SessionEvent::CompactionSummary { .. }))
+                .count(),
+            0,
+            "旧压缩摘要不得复制"
+        );
+        assert!(seed.dropped.iter().any(|item| item == "compaction-summary"));
+        for item in &seed.events {
+            if let SessionEvent::AssistantMessage { usage, .. } = &item.event {
+                assert!(usage.is_none(), "父历史用量必须清零，避免 fork 后重复记账");
+            }
+        }
+        assert_eq!(
+            seed.events
+                .iter()
+                .filter(|item| matches!(
+                    &item.event,
+                    SessionEvent::UserMessage {
+                        injected: false,
+                        ..
+                    }
+                ))
+                .count(),
+            2
+        );
+        assert_eq!(
+            seed.events
+                .iter()
+                .filter(|item| matches!(item.event, SessionEvent::TurnEnd { .. }))
+                .count(),
+            2
+        );
+        assert!(seed.events.iter().any(|item| matches!(
+            &item.event,
+            SessionEvent::TurnEnd {
+                reason: TurnEndReason::Completed,
+                ..
+            }
+        )));
+    }
+
+    #[test]
+    fn seed_of_a_session_without_closed_turns_is_empty() {
+        let events = vec![
+            envelope(1, serde_json::json!({"type": "turn-start", "turn": 1})),
+            user(2, "进行中", false),
+        ];
+        let seed = build_subagent_seed(&events);
+        assert!(seed.events.is_empty());
+        assert_eq!(seed.cut_seq, 0);
+        assert_eq!(SUBAGENT_SEED_VERSION, 1);
+    }
+}
+
+/// 旧子代理的历史投影（计划 9.4）：模型面排除、审计面保留、落盘后在线与冷
+/// 恢复一致。
+#[cfg(test)]
+mod projection_tests {
+    use super::*;
+
+    fn envelope(seq: u64, event: serde_json::Value) -> SessionEnvelope {
+        SessionEnvelope {
+            seq,
+            time: 1_000 + seq,
+            event: serde_json::from_value(event).expect("test event is well-formed"),
+        }
+    }
+
+    fn legacy_log() -> Vec<SessionEnvelope> {
+        vec![
+            envelope(1, serde_json::json!({"type": "turn-start", "turn": 1})),
+            envelope(
+                2,
+                serde_json::json!({"type": "system-prompt", "turn": 1, "step": 1, "text": "父系统提示"}),
+            ),
+            envelope(
+                3,
+                serde_json::json!({
+                    "type": "user-message",
+                    "text": "全局规则哨兵 GLOBAL-SENTINEL",
+                    "injected": true,
+                    "channel": "workspace-instructions",
+                    "images": []
+                }),
+            ),
+            envelope(
+                4,
+                serde_json::json!({
+                    "type": "agent-delivery",
+                    "id": "m1",
+                    "text": "[父代理 委派任务]\n调查登录流程",
+                    "source": "agent:parent"
+                }),
+            ),
+            envelope(
+                5,
+                serde_json::json!({
+                    "type": "assistant-message",
+                    "turn": 1,
+                    "step": 1,
+                    "blocks": [{"type": "text", "text": "开始调查"}],
+                    "usage": null,
+                    "interrupted": false,
+                    "source_event_seqs": []
+                }),
+            ),
+            envelope(
+                6,
+                serde_json::json!({
+                    "type": "compaction-summary",
+                    "turn": 1,
+                    "step": 1,
+                    "summary": "压缩摘要 SENTINEL-SUMMARY",
+                    "replaces_from": 1,
+                    "replaces_to": 4,
+                    "keep_from": 5
+                }),
+            ),
+            envelope(
+                7,
+                serde_json::json!({"type": "session-title", "title": "旧会话标题"}),
+            ),
+            envelope(
+                8,
+                serde_json::json!({"type": "permission-mode", "mode": "read-only"}),
+            ),
+            envelope(
+                9,
+                serde_json::json!({"type": "turn-end", "turn": 1, "reason": {"kind": "completed"}}),
+            ),
+        ]
+    }
+
+    #[test]
+    fn drop_set_excludes_parent_state_and_keeps_the_task_channel() {
+        let projection = legacy_subagent_drop_set(&legacy_log());
+        // 排除：父系统提示、自动注入、旧摘要、仅日志事件、父运行态。
+        for seq in [2u64, 3, 6, 7, 8] {
+            assert!(projection.drops(seq), "seq {seq} 必须退出模型历史");
+        }
+        // 保留：child 自己的任务投递、助手消息、轮次闭合。
+        for seq in [1u64, 4, 5, 9] {
+            assert!(!projection.drops(seq), "seq {seq} 必须保留");
+        }
+        assert_eq!(projection.version, LEGACY_HISTORY_PROJECTION_VERSION);
+        assert_eq!(projection.source_last_seq, 9);
+        assert!(projection.dropped.contains(&"system-prompt".to_string()));
+        assert!(
+            projection
+                .dropped
+                .contains(&"workspace-and-runtime-injections".to_string())
+        );
+        assert!(
+            projection
+                .dropped
+                .contains(&"compaction-summary".to_string())
+        );
+        assert!(
+            projection
+                .dropped
+                .contains(&"parent-runtime-state".to_string())
+        );
+        assert!(
+            projection
+                .drop_seqs
+                .windows(2)
+                .all(|pair| pair[0] < pair[1])
+        );
+    }
+
+    /// 落盘 → 重新加载：模型面看不到旧全局规则，审计面完整保留。
+    #[test]
+    fn projection_persists_and_only_filters_the_model_view() {
+        let root = std::env::temp_dir().join(format!("denia-projection-{}", uuid::Uuid::new_v4()));
+        let work = root.join("work");
+        std::fs::create_dir_all(&work).unwrap();
+        let store = crate::SessionStore::open(&root).unwrap();
+        let session = store
+            .create_subagent(
+                &work,
+                true,
+                "parent",
+                denia_core::session::SubagentDescriptor::legacy(
+                    "legacy",
+                    1,
+                    "default",
+                    denia_core::config::ModelSelection {
+                        provider: "p".into(),
+                        model: "m".into(),
+                        reasoning_effort: None,
+                    },
+                    None,
+                    None,
+                ),
+            )
+            .unwrap();
+        session.seed_from(&legacy_log()).unwrap();
+        session.flush().unwrap();
+        let path = session.file().to_path_buf();
+        assert!(session.apply_history_projection().unwrap());
+        // 幂等：同版本投影不重建。
+        assert!(!session.apply_history_projection().unwrap());
+        drop(session);
+
+        let loaded = Session::load(&path).unwrap();
+        assert!(loaded.history_projection().is_some(), "投影必须持久化");
+        let model_text: String = loaded.with_model_events(|events| {
+            events
+                .iter()
+                .filter_map(|item| match &item.event {
+                    SessionEvent::UserMessage {
+                        text,
+                        injected: false,
+                        ..
+                    } => Some(text.clone()),
+                    SessionEvent::UserMessage {
+                        text,
+                        injected: true,
+                        ..
+                    } => Some(text.clone()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        });
+        assert!(
+            !model_text.contains("GLOBAL-SENTINEL"),
+            "旧自动注入不得继续进模型：{model_text}"
+        );
+        // 旧压缩摘要同样退出模型历史（重新投影，而不是把摘要当历史继续送）。
+        let summary_visible = loaded.with_model_events(|events| {
+            events
+                .iter()
+                .any(|item| matches!(&item.event, SessionEvent::CompactionSummary { .. }))
+        });
+        assert!(!summary_visible, "旧压缩摘要不得继续进模型");
+        // 任务投递（agent-delivery）在模型面保留：它是 child 自己的任务。
+        let has_task = loaded.with_model_events(|events| {
+            events
+                .iter()
+                .any(|item| matches!(&item.event, SessionEvent::AgentDelivery { .. }))
+        });
+        assert!(has_task, "child 的任务投递必须保留");
+        // 审计面（with_events / 界面）仍能看到完整日志。
+        let audit_has_sentinel = loaded.with_events(|events| {
+            events.iter().any(|item| {
+                matches!(
+                    &item.event,
+                    SessionEvent::UserMessage { text, .. } if text.contains("GLOBAL-SENTINEL")
+                )
+            })
+        });
+        assert!(audit_has_sentinel, "审计日志必须保留原始注入");
+        // 冷打开同样带上投影（在线/冷恢复一致）。
+        drop(loaded);
+        let cold = Session::open_cold(&path).unwrap();
+        assert!(cold.history_projection().is_some(), "冷打开必须读同一投影");
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

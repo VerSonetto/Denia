@@ -310,9 +310,61 @@ impl SessionDriver {
             .unwrap_or_default()
     }
 
+    /// 某会话实际生效的功能开关。
+    ///
+    /// 子代理优先用**派遣时冻结**的父 features 快照：父 preset 文件后来被删或
+    /// 损坏时，child 不会回退到部署默认（全开）而悄悄扩大能力（计划 H07）。
+    /// 快照缺失（旧会话）时退回按会话记录的 preset 解析。
+    pub fn features_for(&self, session: &Session) -> denia_core::preset::PresetFeatures {
+        if let Some(child) = session.header().subagent.as_ref()
+            && let Some(features) = child.parent_features
+        {
+            return features;
+        }
+        self.preset_features(session.agent_preset().as_deref())
+    }
+
     /// 当前工具注册表(读路径无锁,拿到的是一份自洽快照)。
     pub fn tools(&self) -> Arc<ToolRegistry> {
         Arc::clone(&self.tools.load())
+    }
+
+    /// 宿主能力接口（会话授权查询等）；无 runtime 的部署返回 None。
+    pub fn agent_runtime(&self) -> Option<Arc<dyn denia_tools::capabilities::AgentRuntime>> {
+        self.runtime.clone()
+    }
+
+    /// 会话当前**有效**的可执行工具名；`None` = 没有任何收窄（按注册表全集）。
+    ///
+    /// 子代理用派遣时冻结的授权（旧描述符按历史只读上限保守构造）；其余会话
+    /// 用 preset 的 features 与 tools 白名单收窄。装配（schema）、目录投影与
+    /// 执行派发共用这一个判定，避免"模型看得见却执行不了"或反之。
+    pub fn session_tool_face(&self, session: &Session) -> Option<Vec<String>> {
+        if let Some(child) = session.header().subagent.as_ref() {
+            return Some(child.effective_tools.clone().unwrap_or_else(|| {
+                denia_core::subagent::legacy_child_tools(child.allowed_tools.as_deref())
+            }));
+        }
+        let preset = self.preset_for(session.agent_preset().as_deref())?;
+        if preset.tools.is_none() && preset.features.is_default() {
+            return None;
+        }
+        let excluded = preset.features.excluded_tools();
+        let mut face: Vec<String> = self
+            .tools()
+            .names()
+            .into_iter()
+            .filter(|name| !excluded.contains(&name.as_str()))
+            .filter(|name| {
+                preset
+                    .tools
+                    .as_ref()
+                    .is_none_or(|list| list.iter().any(|item| item == name))
+            })
+            .collect();
+        face.sort();
+        face.dedup();
+        Some(face)
     }
 
     /// 整体替换工具注册表(MCP 服务器配置变更后由 server 调用)。
@@ -369,10 +421,7 @@ impl SessionDriver {
         session: &Arc<Session>,
         cancel: CancellationToken,
     ) -> Result<Option<CompactOutcome>, LlmFailure> {
-        if !self
-            .preset_features(session.agent_preset().as_deref())
-            .compaction
-        {
+        if !self.features_for(session).compaction {
             return Err(LlmFailure::new(
                 codes::UNKNOWN,
                 "本会话的 agent 组装未启用上下文压缩".to_string(),

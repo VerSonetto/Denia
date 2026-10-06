@@ -443,7 +443,6 @@ mod tests {
 
     fn context(cwd: PathBuf) -> ToolContext {
         ToolContext {
-            granted_tools: None,
             output_store: None,
             session_id: None,
             selection: None,

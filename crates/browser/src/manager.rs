@@ -224,6 +224,63 @@ pub struct BrowserManager {
     spec: LaunchSpec,
     /// 用户数据目录(profile 落盘位置)。
     home: PathBuf,
+    /// tab 归属:owner(会话 id) → 它产生/操作过的 tab id。
+    tab_owners: TabOwners,
+}
+
+/// tab 归属登记表。
+///
+/// 唯一用途:子代理结束时只清理**它自己**产生的 tab(计划 6.4)。父会话同样
+/// 记账,但没有对应的清理触发点,记录只是审计数据。
+///
+/// 记录与清理都是幂等的:同一 tab 重复登记只留一份,多个 owner 共用一个 tab 时
+/// 各自持有自己的记录(`take` 只清自己的那一份)。
+#[derive(Default)]
+pub struct TabOwners {
+    inner: std::sync::Mutex<std::collections::BTreeMap<String, std::collections::BTreeSet<String>>>,
+}
+
+impl TabOwners {
+    pub fn record(&self, owner: &str, tab_id: &str) {
+        if let Ok(mut guard) = self.inner.lock() {
+            guard
+                .entry(owner.to_string())
+                .or_default()
+                .insert(tab_id.to_string());
+        }
+    }
+
+    pub fn forget(&self, owner: &str, tab_id: &str) {
+        if let Ok(mut guard) = self.inner.lock()
+            && let Some(tabs) = guard.get_mut(owner)
+        {
+            tabs.remove(tab_id);
+        }
+    }
+
+    /// 取出并清空某 owner 的记录(顺序确定,便于测试与诊断)。
+    pub fn take(&self, owner: &str) -> Vec<String> {
+        let mut guard = match self.inner.lock() {
+            Ok(guard) => guard,
+            Err(poison) => poison.into_inner(),
+        };
+        guard
+            .remove(owner)
+            .map(|tabs| tabs.into_iter().collect())
+            .unwrap_or_default()
+    }
+
+    /// 只读查看(不清理)。
+    pub fn owned(&self, owner: &str) -> Vec<String> {
+        let guard = match self.inner.lock() {
+            Ok(guard) => guard,
+            Err(poison) => poison.into_inner(),
+        };
+        guard
+            .get(owner)
+            .map(|tabs| tabs.iter().cloned().collect())
+            .unwrap_or_default()
+    }
 }
 
 impl BrowserManager {
@@ -243,7 +300,74 @@ impl BrowserManager {
             request_seq: Arc::new(AtomicU64::new(0)),
             spec,
             home,
+            tab_owners: TabOwners::default(),
         }
+    }
+
+    /// 带归属执行:执行后把作用的 tab 记到 `owner` 名下。
+    ///
+    /// 归属判定:显式 `tabId` 优先,否则用结果里的 `activeTabId`,再退到
+    /// `value.tabId`(newTab)。`close` 成功则解除归属,避免重复关闭。
+    pub async fn execute_owned(
+        &self,
+        command: BrowserCommand,
+        owner: Option<&str>,
+    ) -> CommandOutcome {
+        let requested = command.tab_id_probe().map(str::to_string);
+        let closing = matches!(command, BrowserCommand::Close { .. });
+        let outcome = self.execute(command).await;
+        if let Some(owner) = owner {
+            if closing && outcome.ok {
+                if let Some(tab) = &requested {
+                    self.tab_owners.forget(owner, tab);
+                }
+            } else {
+                let acting = requested
+                    .or_else(|| {
+                        outcome
+                            .state
+                            .as_ref()
+                            .and_then(|state| state.get("activeTabId"))
+                            .and_then(Value::as_str)
+                            .map(str::to_string)
+                    })
+                    .or_else(|| {
+                        outcome
+                            .value
+                            .as_ref()
+                            .and_then(|value| value.get("tabId"))
+                            .and_then(Value::as_str)
+                            .map(str::to_string)
+                    });
+                if let Some(tab) = acting {
+                    self.tab_owners.record(owner, &tab);
+                }
+            }
+        }
+        outcome
+    }
+
+    /// 关闭 `owner` 名下的 tab,返回实际关闭数量。
+    ///
+    /// 子代理停止/结束时调用:只清理它自己的 tab,父代理与其他子代理的 tab
+    /// 不受影响(计划 6.4 / L04)。
+    pub async fn close_owned(&self, owner: &str) -> usize {
+        let tabs = self.tab_owners.take(owner);
+        let mut closed = 0;
+        for tab in tabs {
+            let outcome = self
+                .execute(BrowserCommand::Close { tab_id: Some(tab) })
+                .await;
+            if outcome.ok {
+                closed += 1;
+            }
+        }
+        closed
+    }
+
+    /// 归属表的只读视图（集成测试断言"只关自己的 tab"用）。
+    pub fn tab_owners_for_test(&self) -> &TabOwners {
+        &self.tab_owners
     }
 
     /// 订阅浏览器事件。
@@ -1524,6 +1648,38 @@ pub const DEFAULT_COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// tab 归属登记：记录幂等、owner 之间隔离、take 清空、顺序确定。
+    #[test]
+    fn tab_owners_track_and_isolate_per_owner() {
+        let owners = TabOwners::default();
+        owners.record("child-a", "t2");
+        owners.record("child-a", "t1");
+        owners.record("child-a", "t1");
+        owners.record("child-b", "t3");
+        owners.record("parent", "t1");
+        assert_eq!(
+            owners.owned("child-a"),
+            vec!["t1".to_string(), "t2".to_string()]
+        );
+        assert_eq!(owners.owned("child-b"), vec!["t3".to_string()]);
+        // 多个 owner 共用一个 tab：各自持有自己的记录。
+        assert_eq!(owners.owned("parent"), vec!["t1".to_string()]);
+        // take 只清自己的那一份。
+        assert_eq!(
+            owners.take("child-a"),
+            vec!["t1".to_string(), "t2".to_string()]
+        );
+        assert!(owners.owned("child-a").is_empty());
+        assert_eq!(owners.owned("parent"), vec!["t1".to_string()]);
+        assert_eq!(owners.owned("child-b"), vec!["t3".to_string()]);
+        // 重复 take 无害。
+        assert!(owners.take("child-a").is_empty());
+        // 显式关闭后解除归属，避免重复关闭。
+        owners.forget("child-b", "t3");
+        assert!(owners.owned("child-b").is_empty());
+        assert!(owners.owned("unknown").is_empty());
+    }
 
     #[test]
     fn bare_ref_uses_aria_ref_engine() {

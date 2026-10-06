@@ -23,7 +23,6 @@
 mod append;
 mod creation;
 mod history;
-pub use history::{SubagentSeed, build_subagent_seed};
 mod log_writer;
 mod projection;
 mod recovery;
@@ -38,12 +37,19 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use denia_core::message::ChatMessage;
 use denia_core::session::{
-    GoalOp, GoalState, PermissionMode, SESSION_FORMAT_VERSION, SessionEnvelope, SessionEvent,
-    SessionHeader, SessionHeaderKind, TurnEndReason, apply_goal_op,
+    ApprovalOutcome, AskOutcome, AskResolution, GoalOp, GoalState, PermissionMode,
+    SESSION_FORMAT_VERSION, SessionEnvelope, SessionEvent, SessionHeader, SessionHeaderKind,
+    TurnEndReason, apply_goal_op,
 };
 use denia_core::stream::ContentBlock;
 use denia_token_meter::{ContextBreakdown, ContextMeter, ContextPressure, TurnTokenUsage};
 use thiserror::Error;
+
+pub use history::{HistoryProjection, LEGACY_HISTORY_PROJECTION_VERSION, legacy_subagent_drop_set};
+pub use history::{SUBAGENT_SEED_VERSION, SubagentSeed, build_subagent_seed};
+
+/// 历史投影文件名（会话目录内，与会话日志同级）。
+pub const HISTORY_PROJECTION_FILE: &str = "history-projection.json";
 
 /// 摘要重读上限:防止异常的超长行拖垮列表。
 const SUMMARY_SCAN_LIMIT: usize = 64 * 1024;
@@ -172,6 +178,11 @@ struct SessionInner {
     /// 其中属于 transient(chunk)的部分;`turn-end` 清扫时按此扣减。
     transient_bytes: u64,
     first_prompt_excerpt: Option<String>,
+    /// 旧子代理的模型历史投影（计划 9.4）；非旧 child 恒为 None。
+    ///
+    /// 只作用于**模型面**（`derive_messages`/派生面/注入基线），审计 UI 与
+    /// `with_events` 仍是完整日志。
+    history_projection: Option<history::HistoryProjection>,
 }
 
 /// One live session: header, in-memory log, and its append handle. The log is
@@ -325,6 +336,39 @@ impl Session {
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
         f(&inner.events)
+    }
+
+    /// 模型面事件视图：应用历史投影（若有）后的事件序列。
+    ///
+    /// UI/审计继续用 [`Session::with_events`]（完整日志）；任何"模型见过什么"
+    /// 的判断（派生的对话历史、自动注入的基线）都必须走这里，否则投影会被
+    /// 旁路掉——旧 child 的全局规则又会重新进模型。
+    pub fn with_model_events<R>(&self, f: impl FnOnce(&[SessionEnvelope]) -> R) -> R {
+        let inner = self
+            .inner
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        match &inner.history_projection {
+            None => f(&inner.events),
+            Some(projection) => {
+                let filtered: Vec<SessionEnvelope> = inner
+                    .events
+                    .iter()
+                    .filter(|envelope| !projection.drops(envelope.seq))
+                    .cloned()
+                    .collect();
+                f(&filtered)
+            }
+        }
+    }
+
+    /// 当前生效的历史投影（没有则为 None）。
+    pub fn history_projection(&self) -> Option<history::HistoryProjection> {
+        self.inner
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .history_projection
+            .clone()
     }
 
     /// 会话日志文件的字节数(O(1) metadata)。
@@ -664,150 +708,6 @@ fn excerpt_text(text: &str, max_chars: usize) -> String {
         format!("{head}…")
     } else {
         head
-    }
-}
-
-#[cfg(test)]
-mod seed_tests {
-    use super::*;
-    use denia_core::message::ChatRole;
-    use denia_core::session::{SessionEvent, TurnEndReason};
-    use denia_core::stream::ContentBlock;
-
-    fn envelope(seq: u64, event: SessionEvent) -> SessionEnvelope {
-        SessionEnvelope {
-            seq,
-            time: 1_000 + seq,
-            event,
-        }
-    }
-
-    fn user(seq: u64, text: &str) -> SessionEnvelope {
-        envelope(
-            seq,
-            SessionEvent::UserMessage {
-                text: text.to_string(),
-                injected: false,
-                channel: None,
-                images: Vec::new(),
-            },
-        )
-    }
-
-    fn closed_turn(seq: u64, turn: u32) -> SessionEnvelope {
-        envelope(
-            seq,
-            SessionEvent::TurnEnd {
-                turn,
-                reason: TurnEndReason::Completed,
-            },
-        )
-    }
-
-    #[test]
-    fn projection_drops_parent_injections_and_keeps_conversation() {
-        let source = vec![
-            envelope(
-                1,
-                SessionEvent::SystemPrompt {
-                    turn: 1,
-                    step: 1,
-                    text: "SYSTEM-SENTINEL".into(),
-                },
-            ),
-            envelope(
-                2,
-                SessionEvent::UserMessage {
-                    text: "GLOBAL-RULE-SENTINEL".into(),
-                    injected: true,
-                    channel: Some("workspace-instructions".into()),
-                    images: Vec::new(),
-                },
-            ),
-            user(3, "用户的真实请求"),
-            envelope(
-                4,
-                SessionEvent::AssistantMessage {
-                    turn: 1,
-                    step: 1,
-                    blocks: vec![ContentBlock::Text {
-                        text: "助手的回答".into(),
-                    }],
-                    usage: Some(denia_core::stream::TokenUsage::default()),
-                    interrupted: false,
-                    source_event_seqs: vec![5],
-                    first_token_time: None,
-                },
-            ),
-            envelope(
-                6,
-                SessionEvent::CompactionSummary {
-                    turn: 1,
-                    step: 2,
-                    summary: "OLD-SUMMARY-SENTINEL".into(),
-                    replaces_from: 1,
-                    replaces_to: 4,
-                    keep_from: 3,
-                    pre_tokens: 100,
-                    post_tokens: 10,
-                },
-            ),
-            envelope(
-                7,
-                SessionEvent::AgentInbox {
-                    id: "inbox-1".into(),
-                    text: "INBOX-SENTINEL".into(),
-                    source: "agent:root".into(),
-                },
-            ),
-            envelope(8, SessionEvent::TurnStart { turn: 2 }),
-            user(9, "当前正在运行的轮次"),
-        ];
-
-        // 没有闭合轮次 → 明确拒绝,而不是悄悄 fork 一份空上下文。
-        assert!(build_subagent_seed(&source).is_err());
-
-        let mut with_closed = source.clone();
-        with_closed.push(closed_turn(10, 2));
-        let seed = build_subagent_seed(&with_closed).unwrap();
-        assert_eq!(seed.cut_seq, 10);
-        let text: Vec<String> = seed
-            .events
-            .iter()
-            .map(|envelope| serde_json::to_string(&envelope.event).unwrap())
-            .collect();
-        for sentinel in [
-            "SYSTEM-SENTINEL",
-            "GLOBAL-RULE-SENTINEL",
-            "OLD-SUMMARY-SENTINEL",
-            "INBOX-SENTINEL",
-        ] {
-            assert!(
-                !text.iter().any(|event| event.contains(sentinel)),
-                "{sentinel} 不得进入子代理种子"
-            );
-        }
-        assert!(text.iter().any(|event| event.contains("用户的真实请求")));
-        assert!(text.iter().any(|event| event.contains("助手的回答")));
-        // 用量不跨会话累计:父的 usage 不带进子会话。
-        assert!(text.iter().all(|event| !event.contains("usage\":")));
-        assert!(seed.dropped.iter().any(|item| item == "system-prompt"));
-        assert!(seed.dropped.iter().any(|item| item == "compaction-summary"));
-    }
-
-    #[test]
-    fn projection_requires_some_conversation() {
-        let source = vec![
-            envelope(1, SessionEvent::TurnStart { turn: 1 }),
-            closed_turn(2, 1),
-        ];
-        assert!(build_subagent_seed(&source).is_err());
-    }
-
-    #[test]
-    fn chat_role_is_used_by_projection_inputs() {
-        // 防回归:ContentBlock 的导入不被误删。
-        assert_eq!(ChatRole::User, ChatRole::User);
     }
 }
 

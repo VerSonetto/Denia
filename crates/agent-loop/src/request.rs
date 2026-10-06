@@ -452,10 +452,7 @@ async fn run_microcompact_gate(driver: &SessionDriver, state: &TurnState, step: 
         return;
     }
     // 组装关闭压缩功能时,微压缩作为压缩的前置清理一并跳过。
-    if !driver
-        .preset_features(state.session.agent_preset().as_deref())
-        .compaction
-    {
+    if !driver.features_for(&state.session).compaction {
         return;
     }
 
@@ -621,10 +618,7 @@ async fn run_compaction_gate(
 ) -> bool {
     // 组装关闭压缩功能时整个自动闸门跳过(手动 /compact 由 compact_manually
     // 按同一开关拒绝)。
-    if !driver
-        .preset_features(state.session.agent_preset().as_deref())
-        .compaction
-    {
+    if !driver.features_for(&state.session).compaction {
         return false;
     }
     let pressure = state.session.context_pressure();

@@ -68,6 +68,7 @@ impl Session {
                     resident_bytes: 0,
                     transient_bytes: 0,
                     first_prompt_excerpt: None,
+                    history_projection: None,
                 }),
             })
         }

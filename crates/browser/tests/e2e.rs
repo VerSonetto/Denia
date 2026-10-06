@@ -170,3 +170,80 @@ async fn drives_a_real_browser_end_to_end() {
 
     println!("==> 端到端全部通过");
 }
+
+/// 真实浏览器下的 **tab 归属**：每个 owner 只清理自己的 tab（计划 6.4/L04）。
+///
+/// 用 data URL 不依赖外网。
+#[tokio::test]
+#[ignore = "需要本机安装 Playwright 浏览器(约 200MB),手动运行"]
+async fn closes_only_the_owning_sessions_tabs() {
+    let manager = BrowserManager::new(temp_home("ownership"));
+
+    // child-a 与 child-b 各开一个 tab（归属执行）。
+    let first = manager
+        .execute_owned(
+            BrowserCommand::NewTab {
+                url: Some("data:text/html,<title>owned-a</title>a".to_string()),
+            },
+            Some("child-a"),
+        )
+        .await;
+    let first_tab = value_of(&first, "child-a newTab")["tabId"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    assert!(!first_tab.is_empty());
+    let second = manager
+        .execute_owned(
+            BrowserCommand::NewTab {
+                url: Some("data:text/html,<title>owned-b</title>b".to_string()),
+            },
+            Some("child-b"),
+        )
+        .await;
+    let second_tab = value_of(&second, "child-b newTab")["tabId"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    assert!(!second_tab.is_empty());
+    assert_ne!(first_tab, second_tab, "两次新建必须是两个不同的 tab");
+    assert_eq!(
+        manager.tab_owners_for_test().owned("child-a"),
+        vec![first_tab.clone()]
+    );
+    assert_eq!(
+        manager.tab_owners_for_test().owned("child-b"),
+        vec![second_tab.clone()]
+    );
+
+    // 只关 child-a：child-b 的 tab 必须还在。
+    assert_eq!(manager.close_owned("child-a").await, 1);
+    let outcome = manager.execute(BrowserCommand::List).await;
+    let tabs = value_of(&outcome, "list")["tabs"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    let ids: Vec<String> = tabs
+        .iter()
+        .filter_map(|tab| tab["tabId"].as_str().map(str::to_string))
+        .collect();
+    assert!(
+        !ids.contains(&first_tab),
+        "child-a 的 tab 必须已关闭：{ids:?}"
+    );
+    assert!(
+        ids.contains(&second_tab),
+        "child-b 的 tab 不得被顺手清掉：{ids:?}"
+    );
+    // 重复清理是幂等的；无关 owner 关不到任何东西。
+    assert_eq!(manager.close_owned("child-a").await, 0);
+    assert_eq!(manager.close_owned("parent").await, 0);
+    let outcome = manager.execute(BrowserCommand::List).await;
+    let tabs = value_of(&outcome, "list")["tabs"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    assert_eq!(tabs.len(), 1, "只剩 child-b 的 tab");
+
+    println!("==> tab 归属清理通过（只关自己名下的 tab）");
+}

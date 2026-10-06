@@ -401,7 +401,6 @@ mod tests {
 
     fn ctx_with(bridge: Option<Arc<dyn crate::AskBridge>>) -> ToolContext {
         ToolContext {
-            granted_tools: None,
             output_store: None,
             session_id: Some("s1".to_string()),
             selection: None,

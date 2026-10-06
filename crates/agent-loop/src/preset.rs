@@ -50,27 +50,35 @@ pub(crate) fn apply_tool_allowlist(assembly: &mut PromptAssembly, allowed: &[Str
     retain_tools(assembly, |name| allowed.iter().any(|a| a == name));
 }
 
-/// 摘掉 bash 的 `run_in_background` 参数:没有后台任务能力时,参数留在面
-/// 上等于给模型一个会落到 jobs 注册表的旋钮。
-pub(crate) fn strip_run_in_background(assembly: &mut PromptAssembly) {
-    if let Some(bash) = assembly
-        .tools
-        .iter_mut()
-        .find(|schema| schema.name == "bash")
-        && let Some(object) = bash.parameters.as_object_mut()
-    {
-        if let Some(properties) = object.get_mut("properties").and_then(|p| p.as_object_mut()) {
-            properties.remove("run_in_background");
-        }
-        if let Some(required) = object.get_mut("required").and_then(|r| r.as_array_mut()) {
-            required.retain(|value| value.as_str() != Some("run_in_background"));
-        }
-    }
-}
-
 /// 工具黑名单收窄:只读权限档摘除 bash 与写文件工具时用。
 pub(crate) fn apply_tool_blocklist(assembly: &mut PromptAssembly, blocked: &[&str]) {
     retain_tools(assembly, |name| !blocked.contains(&name));
+}
+
+/// 摘掉 bash 的 `run_in_background` 参数。
+///
+/// 后台命令的入口是 `job_start`，因此"有没有 jobs 授权"必须决定这个参数
+/// 存不存在：只禁 `job_start` 工具、留下参数，等于给模型一条绕过通道
+/// （bash 工具会把 `run_in_background: true` 转成 `job_start` 调用）。
+/// 关闭 jobs 的组装与**未授予 `job_start` 的子代理**共用这一个函数，
+/// 保证 schema 与执行器（`exec::reject_before_dispatch`）口径一致。
+pub(crate) fn strip_background_param(assembly: &mut PromptAssembly) {
+    let Some(bash) = assembly
+        .tools
+        .iter_mut()
+        .find(|schema| schema.name == "bash")
+    else {
+        return;
+    };
+    let Some(object) = bash.parameters.as_object_mut() else {
+        return;
+    };
+    if let Some(properties) = object.get_mut("properties").and_then(|p| p.as_object_mut()) {
+        properties.remove("run_in_background");
+    }
+    if let Some(required) = object.get_mut("required").and_then(|r| r.as_array_mut()) {
+        required.retain(|value| value.as_str() != Some("run_in_background"));
+    }
 }
 
 /// 把一份 preset 应用到本 step 的装配:persona 覆盖/独占,再 features 与
@@ -108,7 +116,7 @@ pub(crate) fn apply_preset(assembly: &mut PromptAssembly, preset: &AgentPreset) 
     // jobs 关闭:bash 的 run_in_background 参数一并摘除——参数仍在时模型
     // 后台跑一条命令会落到 jobs 注册表,与"没有后台任务功能"矛盾。
     if !preset.features.jobs {
-        strip_run_in_background(assembly);
+        strip_background_param(assembly);
     }
     // compaction 关闭:摘上下文管理纪律段;自动压缩 gate 与手动 /compact 由
     // request 层按同一开关跳过。
