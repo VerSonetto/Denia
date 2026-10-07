@@ -3,7 +3,7 @@ import { useComposerMentions } from '../features/conversation/useComposerMention
 import { useComposerSlash } from '../features/conversation/useComposerSlash';
 import { normalizeSelection, LAST_MODEL_KEY, LAST_MODEL_KEY_LEGACY, NODES_THROTTLE_MS, firstAvailableSelection, queuedPayload, pendingMessageKey, latestPermissionMode, consoleDefaultPermission, latestRequestSelection, latestPendingApproval, type OutgoingPayload } from '../features/conversation/sessionState';
 import { RuntimePanel } from '../components/RuntimePanel';
-import { useCallback, useEffect, useMemo, useRef, useState, Fragment, type ClipboardEvent, type KeyboardEvent, type WheelEvent } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, Fragment, type ClipboardEvent, type KeyboardEvent } from 'react';
 import * as api from '../api';
 
 import type { ApprovalDecisionPayload } from '../api';
@@ -30,6 +30,7 @@ import { ContextRing } from '../components/ContextRing';
 import { IconBranch, IconArrowDown, IconChevron, IconClose, IconDownload, IconFile, IconFolder, IconImage, IconPanelOpen, IconPlus, IconSend, IconSparkles, IconUndo, IconSpinner, IconStop, IconSlashCommand } from '../components/icons';
 import { resolveSessionReasoningEffort } from '../modelCatalog';
 import { useStickToBottom } from '../hooks/useStickToBottom';
+import { useContainedWheel } from '../hooks/useContainedWheel';
 
 import { collectSkillTokens, parseLeadingCommand } from './slash';
 import { serializeEditor } from './editor';
@@ -1613,19 +1614,7 @@ export default function SessionsPage({
     if (!sending) void send()
   }
 
-  const onPromptWheel = (event: WheelEvent<HTMLDivElement>) => {
-    const el = scrollRef.current
-    const field = promptRef.current
-    if (el === null || field === null) return
-    const atTop = field.scrollTop <= 0
-    const atEnd = field.scrollTop + field.clientHeight >= field.scrollHeight - 1
-    const up = event.deltaY < 0
-    const down = event.deltaY > 0
-    if ((up && atTop) || (down && atEnd)) {
-      el.scrollTop += event.deltaY
-      event.preventDefault()
-    }
-  }
+  const promptScrollRef = useContainedWheel<HTMLDivElement>()
 
   const workspaceRow = (
     <div className="composer-workspace hero-ws-row">
@@ -1762,7 +1751,7 @@ export default function SessionsPage({
           ))}
         </div>
       )}
-      <div className="prompt-scroll">
+      <div className="prompt-scroll" ref={promptScrollRef}>
         <div
           ref={promptRef}
           className="prompt-editor"
@@ -1808,7 +1797,6 @@ export default function SessionsPage({
             if (inert) onOpenPicker()
           }}
           onKeyDown={onPromptKeyDown}
-          onWheel={onPromptWheel}
         />
       </div>
       {mentionOpen && (

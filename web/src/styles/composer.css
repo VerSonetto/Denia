@@ -134,6 +134,7 @@
 .prompt-scroll {
   max-height: 336px;
   overflow-y: auto;
+  overscroll-behavior: contain;
 }
 
 /*

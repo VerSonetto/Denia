@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useMemo, useState } from 'react'
+import { useContainedWheel } from '../hooks/useContainedWheel'
 import { localeRevision, t } from '../i18n'
 import type { ApprovalDecisionPayload } from '../api'
 import type { ModelCatalog, ModelSelection } from '../types'
@@ -38,38 +39,7 @@ export function PlanReviewPanel({
   const [modelPicked, setModelPicked] = useState(false)
   const [feedback, setFeedback] = useState('')
   const [submitting, setSubmitting] = useState(false)
-  const rootRef = useRef<HTMLDivElement | null>(null)
-
-  // 滚动链拦截:面板出现后滚动只属于面板。从事件目标向上找面板内
-  // 能在该方向继续滚的容器,找到就交给原生滚动;全部到边界(或不在
-  // 可滚区)时 preventDefault + stopPropagation,防止串到后面的聊天
-  // 记录。React 的 onWheel 走 passive 监听,preventDefault 无效,必须
-  // 挂原生 { passive: false }。
-  useEffect(() => {
-    const root = rootRef.current
-    if (!root) return
-    const onWheel = (event: WheelEvent) => {
-      const vertical = Math.abs(event.deltaY) >= Math.abs(event.deltaX)
-      const delta = vertical ? event.deltaY : event.deltaX
-      if (delta === 0) return
-      let node = event.target as HTMLElement | null
-      while (node && node !== root) {
-        if (node instanceof HTMLElement) {
-          const start = vertical ? node.scrollTop : node.scrollLeft
-          const max = vertical
-            ? node.scrollHeight - node.clientHeight
-            : node.scrollWidth - node.clientWidth
-          // 该容器在这个方向还能滚:不拦截,交给浏览器原生滚动。
-          if (max > 1 && (delta > 0 ? start < max - 1 : start > 1)) return
-        }
-        node = node.parentElement
-      }
-      event.preventDefault()
-      event.stopPropagation()
-    }
-    root.addEventListener('wheel', onWheel, { passive: false })
-    return () => root.removeEventListener('wheel', onWheel)
-  }, [])
+  const rootRef = useContainedWheel<HTMLDivElement>()
 
   const labels = useMemo<MarkdownLabels>(
     () => ({
