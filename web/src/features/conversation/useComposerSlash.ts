@@ -43,6 +43,7 @@ export function useComposerSlash({ activeId, inert, prompt, promptRef, setPrompt
     const map = new Map<string, SlashChipKind>()
     map.set('plan', 'command')
     map.set('compact', 'command')
+    map.set('goal', 'command')
     for (const skill of skillEntries) map.set(skill.name, 'skill')
     return map
   }, [skillEntries])

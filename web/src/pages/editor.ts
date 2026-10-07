@@ -92,11 +92,7 @@ function locateOffset(editor: HTMLElement, offset: number): CaretPosition {
   return { container: editor, offset: nodes.length }
 }
 
-/** 当前光标的草稿偏移(选区不在编辑器内时返回 0)。 */
-export function caretOffsetIn(editor: HTMLElement): number {
-  const selection = window.getSelection()
-  if (!selection || selection.rangeCount === 0) return 0
-  const { startContainer, startOffset } = selection.getRangeAt(0)
+function offsetIn(editor: HTMLElement, startContainer: Node, startOffset: number): number {
   if (startContainer === editor) {
     let total = 0
     const nodes = Array.from(editor.childNodes)
@@ -135,6 +131,29 @@ export function caretOffsetIn(editor: HTMLElement): number {
     total += draftLength(node)
   }
   return total
+}
+
+/** 当前光标的草稿偏移(选区不在编辑器内时返回 0)。 */
+export function caretOffsetIn(editor: HTMLElement): number {
+  const selection = window.getSelection()
+  if (!selection || selection.rangeCount === 0) return 0
+  const range = selection.getRangeAt(0)
+  if (!editor.contains(range.startContainer)) return 0
+  return offsetIn(editor, range.startContainer, range.startOffset)
+}
+
+/** 菜单夺焦前保存整个选区;没有编辑器选区时在草稿末尾插入。 */
+export function selectionOffsetsIn(editor: HTMLElement): { start: number; end: number } {
+  const selection = window.getSelection()
+  const range = selection?.rangeCount ? selection.getRangeAt(0) : null
+  if (!range || !editor.contains(range.startContainer) || !editor.contains(range.endContainer)) {
+    const end = serializeEditor(editor).length
+    return { start: end, end }
+  }
+  return {
+    start: offsetIn(editor, range.startContainer, range.startOffset),
+    end: offsetIn(editor, range.endContainer, range.endOffset),
+  }
 }
 
 /** 把折叠光标放到草稿偏移处。 */

@@ -1,0 +1,87 @@
+/target
+/web/node_modules
+/web/dist
+*.log
+.env
+.DS_Store
+*.tsbuildinfo
+/.zcode
+/denia_develop.exe
+
+# tauri-build 编译期生成的 ACL capability schema(见 tauri-utils
+# acl::schema::generate_capability_schema),不是源码,随 capabilities/ 变化重生成。
+/crates/desktop/gen/
+
+# 一次性 esbuild 调试打包产物(由 web/scripts/make-bundle.mjs 生成)
+/web/scripts/app-bundle.mjs
+
+# agent 本地工作约定(不入库)
+/AGENTS.md
+
+# AI 测试落盘的临时脚本
+/chunk*.js
+/turnstile.js
+
+/tmp_chunks/
+
+/mail_page.html
+/register_page.js
+
+# 本地开发实例构建脚本(仅本地使用)
+/scripts/dev.ps1
+
+# WorkBuddy 工具数据目录(记忆与概念稿,不入库)
+/.workbuddy/
+
+# 本地 denia 运行环境的启动脚本(仅本机)
+/.denia/
+
+# 本地图标预览页，不纳入版本库
+/web/public/tool-icons.html
+/web/public/sidebar-icons.html
+
+# 逆向分析产物(第三方程序解包:app.asar 524MB + 解包源码 498MB),与本项目无关
+/chatgpt-re/
+
+# 逆向分析报告与证据(推理强度滑块等),本地留存不入库
+/analysis/
+
+# 一次性应用扫描脚本(定位本机安装位置用)
+/_scan*.ps1
+
+# 设计、计划与交接笔记(重构执行计划、接班文档、对比报告),本地工作记录不入库
+/docs/
+.gitignore
+.trae
+
+# ===== ↑ 以上同步自 .gitignore（「从 .gitignore 同步」只重写以上部分）=====
+.git/
+.hg/
+.svn/
+node_modules/
+bower_components/
+jspm_packages/
+__pycache__/
+site-packages/
+venv/
+coverage/
+htmlcov/
+lcov-report/
+cmakefiles/
+cmake-build-*/
+bazel-*/
+pods/
+deriveddata/
+storybook-static/
+playwright-report/
+test-results/
+allure-results/
+allure-report/
+cdk.out/
+*.egg-info/
+*.dist-info/
+eggs/
+pip-wheel-metadata/
+wheels/
+# ----- ↑ 以上为 ZCode 默认排除规则（自定义规则请写在本行下方，不会被同步/恢复改动）-----
+# 自定义规则写在下方（本行提示可删除）

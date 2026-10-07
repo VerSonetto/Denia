@@ -12,6 +12,7 @@
     "typecheck": "tsc -b --pretty false"
   },
   "dependencies": {
+    "@phosphor-icons/react": "^2.1.10",
     "@radix-ui/react-slider": "^1.4.7",
     "@shikijs/langs": "^4.4.3",
     "@shikijs/themes": "4.4.3",

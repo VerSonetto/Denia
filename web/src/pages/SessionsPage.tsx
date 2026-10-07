@@ -21,6 +21,8 @@ import { OpenInApp } from '../components/OpenInApp';
 import { ErrorBoundary } from '../components/ErrorBoundary';
 import { StatsBar } from '../components/StatsBar';
 import { ComposerModelMenu } from '../components/ComposerModelMenu';
+import { ComposerContextMenu } from '../components/ComposerContextMenu';
+import { buildSessionContextQuote, validateContextQuotes } from '../features/conversation/composerContext';
 import { ComposerEffortControl } from '../components/ComposerEffortControl';
 import { PermissionSelector, loadPermission, hasStoredPermission } from '../components/PermissionSelector';
 import { PlanReviewPanel } from '../components/PlanReviewPanel';
@@ -33,8 +35,9 @@ import { useStickToBottom } from '../hooks/useStickToBottom';
 import { useContainedWheel } from '../hooks/useContainedWheel';
 
 import { collectSkillTokens, parseLeadingCommand } from './slash';
-import { serializeEditor } from './editor';
-import { REFERENCE_MIME } from '../fileTree';
+import { selectRange, selectionOffsetsIn, serializeEditor, setCaretOffset } from './editor';
+import { formatFileMention } from './mention';
+import { insertReferenceAt, REFERENCE_MIME } from '../fileTree';
 import { formatTokens } from '../stats';
 import { TodoPanel } from '../components/TodoPanel';
 import { GoalBar } from '../components/GoalBar';
@@ -181,6 +184,7 @@ export default function SessionsPage({
   // contentEditable 输入器(原 textarea):DOM 是草稿的事实源,prompt 状态
   // 只作镜像(input 事件同步),外部写路径统一走 applyDraft 重建 DOM。
   const promptRef = useRef<HTMLDivElement | null>(null)
+  const composerPanelRef = useRef<HTMLDivElement | null>(null)
   const scrollRef = useRef<HTMLDivElement | null>(null)
   // 对话内容列:增长(工具卡展开/图片加载/markdown 回流)不一定伴随 nodes 变化,
   // ResizeObserver 观察它才能兜住所有内容增高路径(同 dsh columnRef)。
@@ -215,7 +219,8 @@ export default function SessionsPage({
     setOptimizedPrompt(null)
     originalPromptRef.current = ''
   }, [])
-  const mentionCwd = activeSession?.cwd_alive === false ? null : (activeSession?.cwd ?? null)
+  const contextWorkspacePath = activeId ? activeSession?.cwd ?? null : activeWs?.path ?? null
+  const mentionCwd = activeSession?.cwd_alive === false ? null : contextWorkspacePath
   const { mentionOpen, mentionItems, mentionLoading, mentionQuery, mentionActive, setMentionActive,
     mentionMenuRef, mentionDir, closeMention, refreshMentions, pickMention } = useComposerMentions({
       mentionCwd, promptRef, onDraftChange, syncPromptHeight,
@@ -451,6 +456,61 @@ export default function SessionsPage({
   const pendingFullAccessRef = useRef<PermissionMode | null>(null)
   const [approvalReq, setApprovalReq] = useState<ApprovalRequest | null>(null)
   const fileInputRef = useRef<HTMLInputElement | null>(null)
+  const contextSelectionRef = useRef({ start: 0, end: 0 })
+  const contextQuotesRef = useRef(trajQuotes)
+  contextQuotesRef.current = trajQuotes
+
+  const openContextMenu = () => {
+    const editor = promptRef.current
+    if (editor) contextSelectionRef.current = selectionOffsetsIn(editor)
+    closeMention()
+    closeSlash()
+  }
+
+  const insertContextFile = (candidate: api.MentionCandidate) => {
+    const editor = promptRef.current
+    const reference = formatFileMention(candidate, false)
+    if (!editor || !reference) return
+    const draft = serializeEditor(editor)
+    const start = Math.min(contextSelectionRef.current.start, draft.length)
+    const end = Math.min(contextSelectionRef.current.end, draft.length)
+    const { text, caret } = insertReferenceAt(draft.slice(0, start) + draft.slice(end), start, reference)
+    const inserted = text.slice(start, caret)
+    editor.focus({ preventScroll: true })
+    selectRange(editor, start, end)
+    document.execCommand('insertText', false, inserted)
+    onDraftChange(serializeEditor(editor))
+    setCaretOffset(editor, caret)
+    syncPromptHeight()
+    closeMention()
+    closeSlash()
+  }
+
+  const insertContextCommand = (name: string) => {
+    const editor = promptRef.current
+    if (!editor) return
+    const draft = serializeEditor(editor)
+    const existing = parseLeadingCommand(draft)
+    const body = existing?.kind === 'goal' || existing?.kind === 'plan' ? existing.rest ?? '' : draft
+    applyDraft(`/${name} ${body}`)
+    editor.focus({ preventScroll: true })
+    setCaretOffset(editor, name.length + 2 + body.length)
+    closeMention()
+    closeSlash()
+  }
+
+  const addContextSession = async (session: SessionSummary, signal: AbortSignal) => {
+    const page = await api.getSessionPage(session.id, { limit: 300 }, signal)
+    if (signal.aborted) return
+    const quote = buildSessionContextQuote(session, page.events, page.hasMoreBefore)
+    const next = [...contextQuotesRef.current.filter(item => item.id !== quote.id), quote]
+    validateContextQuotes(next)
+    contextQuotesRef.current = next
+    setTrajQuotes(next)
+    promptRef.current?.focus({ preventScroll: true })
+    closeMention()
+    closeSlash()
+  }
 
   // 设置里的默认档位只在"当前没有已加载会话 + 用户没显式选过"时生效
   // (会话级档位由 attach 的 onSnapshot/onEnvelope 覆盖,优先级更高)。
@@ -1381,6 +1441,7 @@ export default function SessionsPage({
         body,
         skillEntries.map((skill) => skill.name),
       )
+      validateContextQuotes(outgoingQuotes)
       // 附件上传(不限格式):先持久化,再随消息注入路径。
       const uploadedPaths: string[] = []
       for (const attachment of outgoingAttachments) {
@@ -1687,6 +1748,7 @@ export default function SessionsPage({
   const composerCard = (
     <div
       className={`prompt-panel${inert ? ' pick-target' : ''}${optimizing ? ' optimizing' : ''}`}
+      ref={composerPanelRef}
       onClick={inert ? onOpenPicker : undefined}
     >
       <ApprovalDialog request={approvalReq} onDecide={handleApproval} />
@@ -1734,8 +1796,8 @@ export default function SessionsPage({
           ))}
           {attachments.map((attachment, index) => (
             <span className="att-chip" key={`att-${index}`}>
-              <IconImage size={12} />
-              <span className="att-name">{attachment.name}</span>
+              {attachment.mime.startsWith('image/') ? <IconImage size={12} /> : <IconFile size={12} />}
+              <span className="att-name" title={attachment.name}>{attachment.name}</span>
               <button
                 type="button"
                 className="att-remove"
@@ -1919,7 +1981,7 @@ export default function SessionsPage({
         </>
       )}
       <div className="prompt-bar">
-        {/* 左组:添加文件(+)与权限档位 —— 贴着书写起笔的左下角。 */}
+        {/* 左组:添加上下文与权限档位。 */}
         <div className="composer-left">
           <input
             ref={fileInputRef}
@@ -1928,16 +1990,23 @@ export default function SessionsPage({
             hidden
             onChange={onPickFiles}
           />
-          <button
-            type="button"
-            className="icon-btn composer-add-btn"
-            title={t('uploadFile')}
-            aria-label={t('uploadFile')}
-            disabled={inert || optimizing}
-            onClick={() => fileInputRef.current?.click()}
-          >
-            <IconPlus size={16} />
-          </button>
+          <ComposerContextMenu
+            panelAnchorRef={composerPanelRef}
+            disabled={inert || optimizing || sending}
+            workspacePath={contextWorkspacePath}
+            filesAvailable={activeSession?.cwd_alive !== false}
+            activeId={activeId}
+            sessions={sessions}
+            commands={!showAttachRow ? [
+              { name: 'goal', label: t('contextGoal'), description: t('cmdGoalDesc') },
+              { name: 'plan', label: t('contextPlan'), description: t('cmdPlanDesc') },
+            ] : []}
+            onOpen={openContextMenu}
+            onUpload={() => fileInputRef.current?.click()}
+            onFile={insertContextFile}
+            onSession={addContextSession}
+            onCommand={insertContextCommand}
+          />
           <PermissionSelector
             value={permission}
             onChange={requestPermissionChange}

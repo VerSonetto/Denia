@@ -36,10 +36,13 @@ const MEASURE_STYLE = {
 export interface PanePopoverProps {
   /** 触发按钮;用于取锚点矩形,并作为"外部点击"判定的内部节点。 */
   anchorRef: React.RefObject<HTMLElement | null>
+  positionAnchorRef?: React.RefObject<HTMLElement | null>
+  matchAnchorWidth?: boolean
   open: boolean
   onClose(): void
   /** 相对锚点水平对齐:`start` 贴左缘,`end` 贴右缘(默认 `end`)。 */
   align?: 'start' | 'end'
+  side?: 'top' | 'bottom'
   className?: string
   role?: string
   ariaLabel?: string
@@ -48,9 +51,12 @@ export interface PanePopoverProps {
 
 export function PanePopover({
   anchorRef,
+  positionAnchorRef,
+  matchAnchorWidth = false,
   open,
   onClose,
   align = 'end',
+  side = 'bottom',
   className,
   role = 'menu',
   ariaLabel,
@@ -61,7 +67,7 @@ export function PanePopover({
 
   /** 量浮层尺寸 + 锚点位置,算出最终落点并钳进视口。 */
   const place = useCallback(() => {
-    const anchor = anchorRef.current
+    const anchor = (positionAnchorRef ?? anchorRef).current
     const panel = panelRef.current
     // 拿不到锚点说明调用方漏了 `ref={anchorRef}` —— 这是编程错误,不是运行时状况。
     // **不猜位置**:先前这里兜底放到视口左上角,结果菜单"逃逸"到界面最左侧,
@@ -74,9 +80,16 @@ export function PanePopover({
     }
     if (!panel) return
     const a = anchor.getBoundingClientRect()
-    const p = panel.getBoundingClientRect()
     const vw = window.innerWidth
     const vh = window.innerHeight
+    if (matchAnchorWidth) {
+      panel.style.width = `${Math.min(a.width, vw - VIEWPORT_MARGIN * 2)}px`
+      const available = side === 'top'
+        ? a.top - ANCHOR_GAP - VIEWPORT_MARGIN
+        : vh - a.bottom - ANCHOR_GAP - VIEWPORT_MARGIN
+      panel.style.setProperty('--popover-available-height', `${Math.max(0, available)}px`)
+    }
+    const p = panel.getBoundingClientRect()
 
     // 水平:贴锚点左缘或右缘,再钳进视口。
     const rawLeft = align === 'end' ? a.right - p.width : a.left
@@ -85,19 +98,23 @@ export function PanePopover({
       Math.min(rawLeft, vw - p.width - VIEWPORT_MARGIN),
     )
 
-    // 垂直:优先朝下(菜单在标签栏下方展开,符合直觉);
-    // 下方放不下才翻到锚点上方,同样钳进视口。
     const below = a.bottom + ANCHOR_GAP
     const above = a.top - ANCHOR_GAP - p.height
-    const top =
-      below + p.height <= vh - VIEWPORT_MARGIN
+    const fitsBelow = below + p.height <= vh - VIEWPORT_MARGIN
+    const fitsAbove = above >= VIEWPORT_MARGIN
+    const preferred = side === 'top' ? above : below
+    const top = side === 'top' && fitsAbove
+      ? above
+      : side === 'bottom' && fitsBelow
         ? below
-        : above >= VIEWPORT_MARGIN
+        : fitsAbove
           ? above
-          : Math.max(VIEWPORT_MARGIN, Math.min(below, vh - p.height - VIEWPORT_MARGIN))
+          : fitsBelow
+            ? below
+            : Math.max(VIEWPORT_MARGIN, Math.min(preferred, vh - p.height - VIEWPORT_MARGIN))
 
     setPos({ left, top })
-  }, [anchorRef, align])
+  }, [anchorRef, positionAnchorRef, matchAnchorWidth, align, side])
 
   // 先量后摆:打开时先以隐藏态布局,拿到尺寸再定位。
   useLayoutEffect(() => {
@@ -107,6 +124,15 @@ export function PanePopover({
     }
     place()
   }, [open, place])
+
+  useEffect(() => {
+    if (!open || !panelRef.current || typeof ResizeObserver === 'undefined') return
+    const observer = new ResizeObserver(place)
+    observer.observe(panelRef.current)
+    const anchor = (positionAnchorRef ?? anchorRef).current
+    if (anchor) observer.observe(anchor)
+    return () => observer.disconnect()
+  }, [open, place, positionAnchorRef, anchorRef])
 
   // 打开期间:外点 / Escape 关闭。浮层已 portal,不算"外部"。
   useEffect(() => {
