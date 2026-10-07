@@ -282,5 +282,27 @@ check('切出 stdout', withErr.stdout, 'stdout line')
 check('切出 stderr', withErr.stderr, 'error: boom')
 check('无 stderr 分隔时不误切', mod.bashOutputParts('a\n--- stderr\nb').stderr, undefined)
 
+/* ---- bash:运行中的实时增量与终态共用一套口径 ---- */
+
+check(
+  '实时增量同样清洗',
+  mod.liveBashOutput({ stdout: '\x1b[32m 10%\r\x1b[32m100%\x1b[0m\r\n\x1b[31mfail\x1b[0m\r\n', stderr: '' }),
+  { stdout: '100%\nfail', stderr: undefined },
+)
+check('实时空 stderr 归并', mod.liveBashOutput({ stdout: 'ok', stderr: '' }).stderr, undefined)
+check('实时 stderr 单列', mod.liveBashOutput({ stdout: 'out', stderr: 'boom\n' }), {
+  stdout: 'out',
+  stderr: 'boom',
+})
+
+// 关键一致性:同一条输出,运行中(实时增量)与结束后(结果切段)必须给出
+// 完全相同的展示结果 —— 否则命令一结束画面会"跳"一下。
+const churn = '\x1b[33mwarn\x1b[0m\n完成\r\n'
+check(
+  '实时与终态逐字一致',
+  mod.liveBashOutput({ stdout: churn, stderr: '' }),
+  mod.bashOutputParts(mod.cleanToolOutput(`退出码: 0\n${churn}`)),
+)
+
 console.log(failed === 0 ? '\nALL PASS' : `\n${failed} FAILED`)
 process.exit(failed === 0 ? 0 : 1)

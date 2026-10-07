@@ -6,34 +6,181 @@
 
 use std::process::Stdio;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
+use denia_core::session::SessionEvent;
 use denia_core::tool::ToolSchema;
 use serde::Deserialize;
 
+use crate::SessionEventSink;
 use crate::shell_session::ShellHub;
 use crate::support::{parse_tool_args, tool_error};
 use crate::{Tool, ToolContext, ToolOutput, shell};
+
+/// 实时输出的节流间隔。
+///
+/// 节奏取"人眼够用、日志不炸"的折中:输出密集时每 [`STREAM_INTERVAL`] 最多
+/// 推一条,首块立即推(短命令也要能立刻看到东西)。停顿时由定时分支补推,
+/// 见 [`consume_output`]。
+const STREAM_INTERVAL: Duration = Duration::from_millis(120);
+
+/// 单次调用的实时输出总量上限。
+///
+/// 命令结束后 `ToolResult` 的首尾预览与产物已经覆盖完整内容,实时通道再往上
+/// 堆只有日志成本;到顶即停推,界面随即由最终结果接替。
+const STREAM_BUDGET_BYTES: usize = 128 * 1024;
+
+/// 把命令输出按增量推给会话日志的节流器。
+///
+/// 三条纪律:
+/// 1. **增量**:每次只发新增正文,前端按序拼接(不是整段重发);
+/// 2. **UTF-8 安全**:尾部不完整的多字节字符留到下一块 —— 切出半个字符会让
+///    替换字符永久留在前端已拼接的历史里;
+/// 3. **有界**:单条不超过一个读块,单次调用不超过 [`STREAM_BUDGET_BYTES`]。
+///
+/// 没有会话身份(`emit_event` 为 None)或没有工具调用 id 时退化为空实现:
+/// 单测与裸跑路径不必为此分叉,也拿不到可挂载增量的事件。
+struct Streamer {
+    sink: Option<SessionEventSink>,
+    call_id: String,
+    stream: &'static str,
+    /// 尚未凑成合法 UTF-8 的尾部字节。
+    pending: Vec<u8>,
+    last_emit: Option<Instant>,
+    emitted: usize,
+}
+
+impl Streamer {
+    fn new(sink: Option<SessionEventSink>, call_id: Option<&str>, stream: &'static str) -> Self {
+        Self {
+            sink,
+            call_id: call_id.unwrap_or_default().to_string(),
+            stream,
+            pending: Vec::new(),
+            last_emit: None,
+            emitted: 0,
+        }
+    }
+
+    fn enabled(&self) -> bool {
+        self.sink.is_some() && !self.call_id.is_empty()
+    }
+
+    /// 收下一块输出;到点就推。
+    fn push(&mut self, bytes: &[u8]) {
+        if !self.enabled() {
+            return;
+        }
+        self.pending.extend_from_slice(bytes);
+        self.flush_if_due();
+    }
+
+    /// 到点(或首块)才推。调用点有两处:每次读返回、每个节流周期。
+    fn flush_if_due(&mut self) {
+        if self.pending.is_empty() {
+            return;
+        }
+        if let Some(at) = self.last_emit
+            && at.elapsed() < STREAM_INTERVAL
+        {
+            return;
+        }
+        let boundary = utf8_boundary(&self.pending);
+        if boundary == 0 {
+            return;
+        }
+        let bytes: Vec<u8> = self.pending.drain(..boundary).collect();
+        let text = String::from_utf8_lossy(&bytes).into_owned();
+        self.emit(&text);
+    }
+
+    /// 流结束:补推尾部残留(含被截断的半个字符,由 lossy 收尾)。
+    fn finish(&mut self) {
+        if self.pending.is_empty() {
+            return;
+        }
+        let bytes = std::mem::take(&mut self.pending);
+        let text = String::from_utf8_lossy(&bytes).into_owned();
+        self.emit(&text);
+    }
+
+    fn emit(&mut self, text: &str) {
+        let Some(sink) = self.sink.clone() else {
+            return;
+        };
+        if text.is_empty() || self.emitted >= STREAM_BUDGET_BYTES {
+            return;
+        }
+        let room = STREAM_BUDGET_BYTES - self.emitted;
+        let text = if text.len() > room {
+            &text[..floor_char_boundary(text, room)]
+        } else {
+            text
+        };
+        if text.is_empty() {
+            return;
+        }
+        self.emitted += text.len();
+        self.last_emit = Some(Instant::now());
+        sink(SessionEvent::ToolOutputChunk {
+            call_id: self.call_id.clone(),
+            stream: self.stream.to_string(),
+            text: text.to_string(),
+        });
+    }
+}
+
+/// `pending` 里最后一个完整字符的结尾(可安全切分的长度)。
+///
+/// 尾部被截断的多字节字符留到下一块;而**真坏字节**要连同它一起放行 ——
+/// 否则它会永远卡在缓冲最前面,后面的输出再也发不出去。
+fn utf8_boundary(pending: &[u8]) -> usize {
+    match std::str::from_utf8(pending) {
+        Ok(_) => pending.len(),
+        Err(error) if error.error_len().is_none() => error.valid_up_to(),
+        Err(error) => error.valid_up_to() + error.error_len().unwrap_or(1),
+    }
+}
+
+/// `str::floor_char_boundary` 的稳定版替身(后者仍是 unstable)。
+fn floor_char_boundary(text: &str, index: usize) -> usize {
+    let mut cut = index.min(text.len());
+    while cut > 0 && !text.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    cut
+}
 
 async fn consume_output(
     mut reader: impl tokio::io::AsyncRead + Unpin,
     preview: Arc<tokio::sync::Mutex<crate::output::Preview>>,
     capture: Option<crate::output::Capture>,
-    stream: &str,
+    stream: &'static str,
+    mut streamer: Streamer,
 ) -> std::io::Result<()> {
     use tokio::io::AsyncReadExt;
     let mut buffer = [0u8; 8192];
     loop {
-        let count = reader.read(&mut buffer).await?;
-        if count == 0 {
-            return Ok(());
-        }
-        preview.lock().await.push(&buffer[..count]);
-        if let Some(capture) = &capture {
-            capture.append(stream, &buffer[..count]).await;
+        tokio::select! {
+            read = reader.read(&mut buffer) => {
+                let count = read?;
+                if count == 0 {
+                    break;
+                }
+                preview.lock().await.push(&buffer[..count]);
+                if let Some(capture) = &capture {
+                    capture.append(stream, &buffer[..count]).await;
+                }
+                streamer.push(&buffer[..count]);
+            }
+            // 输出停顿时也要把已积累的增量推出去:否则"打印一行然后长时间
+            // 静默"的命令会把那一行压到命令结束才显示,实时性归零。
+            _ = tokio::time::sleep(STREAM_INTERVAL) => streamer.flush_if_due(),
         }
     }
+    streamer.finish();
+    Ok(())
 }
 
 const DEFAULT_TIMEOUT_MS: u64 = 120_000;
@@ -103,6 +250,11 @@ impl BashTool {
     }
 
     /// 常驻 shell 路径:同一会话复用同一个进程,状态跨调用保留。
+    ///
+    /// 这里没有实时输出增量:命令与结果都关在 `PersistentShell::run` 里,
+    /// 拿不到读数回调(且它把 stdout/stderr 合并成一条流)。当前部署没有挂
+    /// [`ShellHub`],走不到这条路径;真要启用时得先把增量回调补上,否则
+    /// 常驻形态的 bash 会静默失去实时输出。
     async fn execute_persistent(
         &self,
         hub: &ShellHub,
@@ -262,12 +414,14 @@ impl Tool for BashTool {
             stdout_preview.clone(),
             capture.clone(),
             "stdout",
+            Streamer::new(ctx.emit_event.clone(), ctx.call_id.as_deref(), "stdout"),
         ));
         let mut stderr_task = tokio::spawn(consume_output(
             child.stderr.take().unwrap(),
             stderr_preview.clone(),
             capture.clone(),
             "stderr",
+            Streamer::new(ctx.emit_event.clone(), ctx.call_id.as_deref(), "stderr"),
         ));
         let mut error = None;
         let code = tokio::select! {
@@ -328,6 +482,32 @@ mod tests {
     use denia_core::session::PermissionMode;
     use tokio_util::sync::CancellationToken;
 
+    fn sink(events: &Arc<std::sync::Mutex<Vec<SessionEvent>>>) -> SessionEventSink {
+        let events = events.clone();
+        Arc::new(move |event| events.lock().unwrap().push(event))
+    }
+
+    /// 某次调用某条流上收到的增量,按到达顺序。
+    fn deltas_of(
+        events: &Arc<std::sync::Mutex<Vec<SessionEvent>>>,
+        call_id: &str,
+        stream: &str,
+    ) -> Vec<String> {
+        events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|event| match event {
+                SessionEvent::ToolOutputChunk {
+                    call_id: id,
+                    stream: name,
+                    text,
+                } if id == call_id && name == stream => Some(text.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
     fn ctx(dir: &std::path::Path) -> ToolContext {
         ToolContext {
             output_store: None,
@@ -345,6 +525,117 @@ mod tests {
             goal_reader: None,
             read_state: None,
         }
+    }
+
+    /// 首块立即推(短命令也要能看到实时性),窗口内的后续块先攒着,结束必收尾。
+    ///
+    /// 白盒地钉住 `last_emit` 而不是真的等 120ms:节流窗口是时钟行为,靠
+    /// sleep 去测只会换来一个在慢机器上随机失败的用例。
+    #[test]
+    fn streamer_is_immediate_then_throttled() {
+        let events: Arc<std::sync::Mutex<Vec<SessionEvent>>> = Arc::default();
+        let mut streamer = Streamer::new(Some(sink(&events)), Some("call-1"), "stdout");
+        streamer.push(b"first");
+        assert_eq!(
+            deltas_of(&events, "call-1", "stdout"),
+            vec!["first".to_string()]
+        );
+
+        streamer.last_emit = Some(Instant::now());
+        streamer.push(b"second");
+        assert_eq!(
+            deltas_of(&events, "call-1", "stdout").len(),
+            1,
+            "节流窗口内不该再推"
+        );
+
+        streamer.finish();
+        assert_eq!(
+            deltas_of(&events, "call-1", "stdout"),
+            vec!["first".to_string(), "second".to_string()],
+            "结束必须把攒下的补出去"
+        );
+    }
+
+    /// 增量必须能原样拼回输出:逐字节喂(把每个多字节字符都切在最坏的位置),
+    /// 拼回来仍要一字不差、且不出现替换字符 —— 半个字符一旦拼进前端的历史
+    /// 就永久留在那里,重连也不会修好。
+    #[test]
+    fn streamer_deltas_reconstruct_text_without_replacement_chars() {
+        let events: Arc<std::sync::Mutex<Vec<SessionEvent>>> = Arc::default();
+        let mut streamer = Streamer::new(Some(sink(&events)), Some("call-1"), "stdout");
+        let text = "测试🦀中文 stdout\n".repeat(40);
+        for byte in text.as_bytes() {
+            streamer.push(std::slice::from_ref(byte));
+        }
+        streamer.finish();
+        let deltas = deltas_of(&events, "call-1", "stdout");
+        assert!(!deltas.is_empty(), "整段输出不该一个增量都没有");
+        assert_eq!(deltas.concat(), text, "增量拼不回原文");
+        assert!(
+            !deltas.iter().any(|delta| delta.contains('\u{FFFD}')),
+            "多字节字符被切开,产生了替换字符"
+        );
+    }
+
+    /// 实时通道有总量上限:喂满即停,超出部分不再推(命令结束后由结果与
+    /// 产物覆盖完整内容,继续往日志里灌只有成本)。
+    #[test]
+    fn streamer_stops_at_budget() {
+        let events: Arc<std::sync::Mutex<Vec<SessionEvent>>> = Arc::default();
+        let mut streamer = Streamer::new(Some(sink(&events)), Some("call-1"), "stdout");
+        let block = "x".repeat(8192);
+        for _ in 0..(STREAM_BUDGET_BYTES / 8192 + 20) {
+            streamer.push(block.as_bytes());
+        }
+        streamer.finish();
+        let total: usize = deltas_of(&events, "call-1", "stdout")
+            .iter()
+            .map(String::len)
+            .sum();
+        assert_eq!(total, STREAM_BUDGET_BYTES, "推满即止,不多不少");
+    }
+
+    /// 没有调用 id(单测、裸跑)时不推任何东西:增量没有可挂载的工具行。
+    #[test]
+    fn streamer_is_inert_without_a_call_id() {
+        let events: Arc<std::sync::Mutex<Vec<SessionEvent>>> = Arc::default();
+        let mut streamer = Streamer::new(Some(sink(&events)), None, "stdout");
+        streamer.push(b"hello");
+        streamer.finish();
+        assert!(events.lock().unwrap().is_empty());
+    }
+
+    /// 端到端:一次真实命令会把输出按增量推出去,且推的是**命令的输出** ——
+    /// 工具自己的框架行(退出码)不在其中。
+    #[tokio::test]
+    async fn streams_a_real_command_without_framing_lines() {
+        let dir = std::env::temp_dir();
+        let events: Arc<std::sync::Mutex<Vec<SessionEvent>>> = Arc::default();
+        let mut context = ctx(&dir);
+        context.emit_event = Some(sink(&events));
+        context.call_id = Some("call-1".to_string());
+        let command = if cfg!(windows) {
+            "Write-Output 'line1'; Write-Output 'line2'; Write-Output 'line3'"
+        } else {
+            "echo line1; echo line2; echo line3"
+        };
+        let arguments = serde_json::json!({"command": command, "timeout_ms": 30000}).to_string();
+        let out = BashTool::new().execute(&arguments, &context).await;
+        assert!(!out.is_error, "{}", out.content);
+        let streamed = deltas_of(&events, "call-1", "stdout").concat();
+        for line in ["line1", "line2", "line3"] {
+            assert!(
+                out.content.contains(line),
+                "结果里缺 {line}:{}",
+                out.content
+            );
+            assert!(streamed.contains(line), "实时增量里缺 {line}:{streamed}");
+        }
+        assert!(
+            !streamed.contains("退出码"),
+            "框架行不该进实时增量:{streamed}"
+        );
     }
 
     #[tokio::test]

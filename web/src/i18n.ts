@@ -436,8 +436,11 @@ const zh = {
   statsCacheMiss: '未命中',
 
   modelProvidersLabel: '供应商',
+  modelPickerLabel: '选择模型',
   modelSearchPlaceholder: '搜索模型…',
   modelSearchEmpty: '没有匹配的模型',
+  modelFilterAll: '全部',
+  modelRecentLabel: '最近使用',
   reasoningLabel: '推理强度',
   effortControlHint: '调节推理强度',
   effortControlOffHint: '思考已关闭',
@@ -1628,8 +1631,11 @@ const en: typeof zh = {
   statsCacheMiss: 'Uncached',
 
   modelProvidersLabel: 'Providers',
+  modelPickerLabel: 'Choose a model',
   modelSearchPlaceholder: 'Search models…',
   modelSearchEmpty: 'No matching models',
+  modelFilterAll: 'All',
+  modelRecentLabel: 'Recent',
   reasoningLabel: 'Reasoning effort',
   effortControlHint: 'Adjust reasoning effort',
   effortControlOffHint: 'Thinking is off',

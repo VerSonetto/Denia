@@ -45,11 +45,11 @@ export function IconStop(props: IconProps) {
   return (
     <Svg {...props}>
       <rect
-        x="5"
-        y="5"
-        width="6"
-        height="6"
-        rx="1.25"
+        x="3.5"
+        y="3.5"
+        width="9"
+        height="9"
+        rx="1.75"
         fill="currentColor"
       />
     </Svg>

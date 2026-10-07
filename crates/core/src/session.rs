@@ -896,6 +896,25 @@ pub enum SessionEvent {
         #[cfg_attr(feature = "bindings", ts(optional))]
         replaces: Option<u64>,
     },
+    /// 工具执行期间的实时输出增量(目前只有 `bash` 发射)。
+    ///
+    /// 与 `ToolResult` 的分工:本事件只回答"此刻屏幕上该显示什么",**不是**
+    /// 命令结果的事实来源——命令结束后 `ToolResult` 仍然是唯一进入模型历史
+    /// 的那份。因此它既不是 message 也不是状态,只是纯观感:
+    /// - 不进入派生历史(`derive_surface` 忽略)与 token-meter;
+    /// - 是 transient(见 `is_transient_event`):落盘保留可回放,但不占
+    ///   offset,轮次闭合后从内存回收。
+    ///
+    /// `text` 是**增量**(自同流上一个 chunk 之后的新输出),前端按序拼接;
+    /// 发射方保证不会把多字节字符切成两半。
+    ToolOutputChunk {
+        /// 工具调用 id;前端据此把增量挂到对应工具行上。
+        call_id: String,
+        /// 输出流名(`stdout` / `stderr`),与工具结果里的分段口径一致。
+        stream: String,
+        /// 本次新增的输出正文。
+        text: String,
+    },
     /// 超长工具参数打桩(模型侧投影):把 `call_id` 对应的工具调用参数在
     /// 派生历史里替换为 `placeholder`。日志与 UI 保留全文,只有模型面变短。
     /// write_file/edit 的大参数执行成功后即成死重——文件已在磁盘,按纪律

@@ -8,7 +8,12 @@ import { attach, type SessionPageMeta } from '../sessionStreams'
 import type { AskAnswer, SessionEnvelope, TodoItem, UserMessageImage } from '../types'
 import type { TrajectoryQuote } from '../trajectory'
 import { Transcript } from './transcript'
-import { appendSessionEvents, liveWindowStart, SESSION_PAGE_LIMIT } from '../sessionMemory'
+import {
+  appendSessionEvents,
+  isTransientEvent,
+  liveWindowStart,
+  SESSION_PAGE_LIMIT,
+} from '../sessionMemory'
 
 const OLDER_PAGE_LIMIT = SESSION_PAGE_LIMIT
 
@@ -196,7 +201,9 @@ export function SessionView({
       if (batch.length === 0) return
       // 就地累加,不复制整份历史(见 accRef 注释)。
       appendSessionEvents(accRef.current, batch)
-      const durableCount = batch.filter((envelope) => envelope.type !== 'assistant-chunk').length
+      // 只数持久事件:高频流式帧(助手增量、工具实时输出)不占分页位次,
+      // 把它们算进来会让翻页总数在命令运行期间自己往上飘。
+      const durableCount = batch.filter((envelope) => !isTransientEvent(envelope)).length
       const scroller = paneRef.current?.closest('.conversation-scroll')
       const atBottom = scroller !== null && scroller !== undefined &&
         scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 64
@@ -219,10 +226,10 @@ export function SessionView({
         pageMetaRef.current = pageInfo
         setPageMeta(pageInfo)
       }
-      // 结算/持久事件更新快照,释放已完成的 chunk;纯输出帧不复制历史。
+      // 结算/持久事件更新快照,释放已完成的 chunk;纯流式帧不复制历史。
       const needsEvents =
         viewRef.current === 'trajectory' || windowStart > 0 ||
-        batch.some((env) => env.type !== 'assistant-chunk')
+        batch.some((env) => !isTransientEvent(env))
       if (needsEvents) publishEvents()
       if (windowStart > 0) setNodes(foldEvents(accRef.current))
       else setNodes((previous) => applyEnvelopes(previous, batch))

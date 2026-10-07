@@ -9,7 +9,8 @@ const output = join(webRoot, 'node_modules', '.shots', 'session-memory.mjs')
 mkdirSync(dirname(output), { recursive: true })
 await build({ entryPoints: [join(webRoot, 'src', 'sessionMemory.ts')], outfile: output,
   bundle: true, format: 'esm', platform: 'node', logLevel: 'silent' })
-const { appendSessionEvents, liveWindowStart, LIVE_EVENT_LIMIT } = await import(pathToFileURL(output).href)
+const { appendSessionEvents, isTransientEvent, liveWindowStart, LIVE_EVENT_LIMIT } =
+  await import(pathToFileURL(output).href)
 let seq = 0
 const event = (type, fields = {}) => ({ type, seq: ++seq, time: seq, ...fields })
 const chunk = (turn = 1, step = 1) => event('assistant-chunk', {
@@ -48,3 +49,26 @@ for (let turn = 1; turn <= 2000; turn++) {
 assert.equal(trimmed + windowEvents.length, 8000)
 assert.equal(liveWindowStart(Array.from({ length: 1000 }, () => message())), 0)
 console.log(`ok   2,000 turns: ${windowEvents.length}/8,000 events retained; ${trimmed} remain reloadable from disk`)
+
+/* bash 的实时输出增量:有效窗口是 tool-call → tool-result,结果一到即回收
+   (正文以结果为准),尚未出结果的调用必须留着供实时渲染。 */
+const call = (callId) => event('tool-call', { turn: 1, step: 1, call_id: callId, name: 'bash', arguments: '{}' })
+const toolOutput = (callId, text) => event('tool-output-chunk', { call_id: callId, stream: 'stdout', text })
+const toolResult = (callId) => event('tool-result', { turn: 1, step: 1, call_id: callId, content: 'done', is_error: false })
+const streamed = []
+appendSessionEvents(streamed, [call('c1'), toolOutput('c1', 'a'), call('c2'), toolOutput('c2', 'b')])
+assert.deepEqual(streamed.map((entry) => entry.type), [
+  'tool-call', 'tool-output-chunk', 'tool-call', 'tool-output-chunk',
+])
+appendSessionEvents(streamed, [toolResult('c1')])
+assert.deepEqual(streamed.map((entry) => entry.type), [
+  'tool-call', 'tool-call', 'tool-output-chunk', 'tool-result',
+])
+console.log('ok   answered call output released, in-flight call output retained')
+
+/* 高频帧名单必须与后端 is_transient_event 同口径:前端漏登记会把增量帧
+   当成持久事件计数(翻页总数在命令运行期间自己往上飘)。 */
+assert.equal(isTransientEvent(chunk()), true)
+assert.equal(isTransientEvent(toolOutput('c1', 'x')), true)
+assert.equal(isTransientEvent(toolResult('c1')), false)
+console.log('ok   transient frame list matches the backend')

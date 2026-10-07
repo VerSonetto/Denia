@@ -269,7 +269,7 @@ impl SessionStore {
         while let Some(envelope) =
             next_log_event(&mut reader, &mut header, &mut line, &mut line_no)?
         {
-            if matches!(envelope.event, SessionEvent::AssistantChunk { .. }) {
+            if is_transient_event(&envelope.event) {
                 continue;
             }
             if let SessionEvent::UserMessage {
@@ -309,7 +309,7 @@ impl SessionStore {
         while let Some(envelope) =
             next_log_event(&mut reader, &mut header2, &mut line, &mut line_no)?
         {
-            if matches!(envelope.event, SessionEvent::AssistantChunk { .. }) {
+            if is_transient_event(&envelope.event) {
                 continue;
             }
             if !eligible(envelope.seq) {

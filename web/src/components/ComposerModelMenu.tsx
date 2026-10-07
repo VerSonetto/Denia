@@ -1,40 +1,99 @@
 import {
+  Fragment,
   useEffect,
   useLayoutEffect,
+  useMemo,
   useRef,
   useState,
   type KeyboardEvent as ReactKeyboardEvent,
-  type MouseEvent as ReactMouseEvent,
 } from 'react'
 import { formatContextWindow, resolveSessionReasoningEffort } from '../modelCatalog'
 import { t } from '../i18n'
-import { useIsMobile } from '../hooks/useIsMobile'
 import type {
   CatalogModel,
   ModelCatalog,
   ModelProviderGroup,
   ModelSelection,
 } from '../types'
-import { IconArrowLeft, IconCheck, IconChevron, IconChevronDown, IconSearch, IconThink } from './icons'
+import { IconCheck, IconChevronDown, IconClose, IconSearch, IconThink } from './icons'
 
-/** 二级菜单宽度 + 间距,与 styles.css 的 .model-menu-sub 保持一致(翻转探测用)。 */
-const SUB_MENU_WIDTH = 304
-const SUB_MENU_GAP = 6
-/** 悬浮展开二级的延迟:滑过供应商时不误触。 */
-const HOVER_OPEN_DELAY = 180
-/** 鼠标离开后的二级宽限:吸收一二级之间穿过缝隙的短暂离开。 */
-const SUB_CLOSE_DELAY = 120
+/**
+ * 最近使用:本机记最近选过的几个模型。「模型极多」的目录里,常用项永远在
+ * 首屏 —— 这也是选择器唯一能让"每天只用两个模型"的人免于搜索/滚动的办法。
+ */
+const RECENT_KEY = 'denia.model.recent.v1'
+const RECENT_MAX = 5
 
-/** 搜索命中项:模型连同所属供应商,平铺展示时用。 */
-interface SearchHit {
+interface ModelRef {
+  provider: string
+  model: string
+}
+
+function loadRecents(): ModelRef[] {
+  try {
+    const raw = window.localStorage.getItem(RECENT_KEY)
+    if (!raw) return []
+    const parsed: unknown = JSON.parse(raw)
+    if (!Array.isArray(parsed)) return []
+    return parsed
+      .filter(
+        (entry): entry is ModelRef =>
+          typeof entry === 'object' &&
+          entry !== null &&
+          typeof (entry as ModelRef).provider === 'string' &&
+          typeof (entry as ModelRef).model === 'string',
+      )
+      .slice(0, RECENT_MAX)
+  } catch {
+    /* storage unavailable:最近使用只是便利项,丢了不影响选择 */
+    return []
+  }
+}
+
+function rememberRecent(entry: ModelRef): ModelRef[] {
+  const next = [
+    entry,
+    ...loadRecents().filter((r) => r.provider !== entry.provider || r.model !== entry.model),
+  ].slice(0, RECENT_MAX)
+  try {
+    window.localStorage.setItem(RECENT_KEY, JSON.stringify(next))
+  } catch {
+    /* storage unavailable */
+  }
+  return next
+}
+
+/** 列表行(渲染与键盘索引共用同一份编号,方向键才能跨区块连续移动)。 */
+interface Row {
   group: ModelProviderGroup
   model: CatalogModel
+  index: number
+}
+
+/** 区块:标题可选(单供应商、单搜索块时不写标题,省掉一层噪声)。 */
+interface Section {
+  key: string
+  title: string | null
+  rows: Row[]
 }
 
 /**
- * Composer 模型选择:两级级联菜单 + 模型搜索。
- * 一级 = 供应商列表(沿用目录分组顺序),二级 = 该供应商的模型;
- * 搜索词非空时一级列表切换为命中的模型平铺列表,点击直接选中。
+ * Composer 模型选择:单面板 + 搜索优先。
+ *
+ * # 为什么从「两级级联」改成「单面板」
+ *
+ * 旧实现是一级供应商列 + 悬浮展开的二级模型列。两个极端都不好:
+ *   - 模型极少(1 个供应商 2 个模型):也要先扫一级、再展开二级,两次定位;
+ *   - 模型极多:得先知道模型属于哪个供应商,**搜索还只在一级列里**,
+ *     键盘要在"一级/二级/搜索"三种模式间切换(←/→ 进出)。
+ *
+ * 现在只有一屏:常驻搜索框 + 供应商筛选胶囊 + 一个连续列表。
+ *   - 极多 → 打字两三个字符即命中(跨全部供应商、名称/ID/描述),Enter 选中;
+ *   - 常用 → "最近使用"永远排在最前;
+ *   - 极少 → 供应商筛选不渲染、分组标题也不渲染,列表就是那两行;
+ *   - 键盘 → ↑↓ 在**渲染顺序**上连续移动(最近使用 → 各供应商),Enter 选中,
+ *     Esc 逐层退(清搜索 → 取消筛选 → 关闭),没有模式切换。
+ *
  * 思考强度已拆为独立控件(ComposerEffortControl),此处只管模型本身。
  */
 export function ComposerModelMenu({
@@ -49,75 +108,126 @@ export function ComposerModelMenu({
   onChange: (next: ModelSelection) => void
 }) {
   const [open, setOpen] = useState(false)
-  // 二级展开的供应商 id;null 表示只显示一级。
-  const [focusedProvider, setFocusedProvider] = useState<string | null>(null)
-  // 右侧放不下二级时翻转到左侧。
-  const [flip, setFlip] = useState(false)
-  // 键盘焦点层:providers 在一级移动,models 在二级移动(→/Enter 进入,←/Esc 返回)。
-  const [kbMode, setKbMode] = useState<'providers' | 'models'>('providers')
-  const [kbProvider, setKbProvider] = useState(0)
-  const [kbModel, setKbModel] = useState(0)
-  // 搜索词:非空时一级列表变为命中的模型平铺列表。
   const [query, setQuery] = useState('')
-  // 窄屏:两列级联(一级 232px + 间距 + 二级 304px ≈ 542px)在 390px 屏上
-  // 必然溢出,改成底部抽屉 + 逐级钻取(供应商 → 模型,带返回)。
-  const isMobile = useIsMobile()
+  // 供应商筛选:null = 全部。与搜索叠加(在选中的供应商里搜)。
+  const [providerId, setProviderId] = useState<string | null>(null)
+  // 键盘光标:平铺列表(含"最近使用")里的绝对下标。
+  const [cursor, setCursor] = useState(0)
+  const [recents, setRecents] = useState<ModelRef[]>([])
 
   const rootRef = useRef<HTMLDivElement | null>(null)
   const chipRef = useRef<HTMLButtonElement | null>(null)
-  const menuRef = useRef<HTMLDivElement | null>(null)
   const searchRef = useRef<HTMLInputElement | null>(null)
-  // 悬浮展开延迟与二级关闭宽限,两个定时器互斥使用。
-  const openTimerRef = useRef<number | null>(null)
-  const closeTimerRef = useRef<number | null>(null)
+  const filtersRef = useRef<HTMLDivElement | null>(null)
 
-  const group = catalog.groups.find((g) => g.id === selection.provider)
+  const groups = catalog.groups
+  const group = groups.find((g) => g.id === selection.provider)
   const model = group?.models.find((m) => m.id === selection.model)
   // 网关模型名常带厂商标注后缀(如 "qwen3.8-flash (ali)");
   // 输入框统一显示「模型名 (提供商 id)」,括号内固定是路由 id。
   const chipLabel = `${(model?.name ?? selection.model).replace(/\s*\([^)]*\)\s*$/, '')} (${selection.provider})`
 
-  /* ---- 搜索派生:按模型名 / ID / 描述 / 供应商名匹配,保持分组顺序平铺 ---- */
-
   const q = query.trim().toLowerCase()
   const searching = q.length > 0
-  const searchHits: SearchHit[] = []
-  if (searching) {
-    for (const hitGroup of catalog.groups) {
-      const groupMatched = hitGroup.name.toLowerCase().includes(q)
-      for (const candidate of hitGroup.models) {
-        if (
-          groupMatched ||
-          candidate.name.toLowerCase().includes(q) ||
-          candidate.id.toLowerCase().includes(q) ||
-          (candidate.description ?? '').toLowerCase().includes(q)
-        ) {
-          searchHits.push({ group: hitGroup, model: candidate })
+  const filtering = providerId !== null
+  const visibleGroups = filtering ? groups.filter((g) => g.id === providerId) : groups
+
+  /* ---- 列表派生:区块(渲染)→ 行(键盘) ---- */
+
+  const sections = useMemo<Section[]>(() => {
+    const out: Section[] = []
+    let index = 0
+    const push = (
+      key: string,
+      title: string | null,
+      pairs: Array<[ModelProviderGroup, CatalogModel]>,
+    ) => {
+      if (pairs.length === 0) return
+      out.push({
+        key,
+        title,
+        rows: pairs.map(([pairGroup, pairModel]) => ({
+          group: pairGroup,
+          model: pairModel,
+          index: index++,
+        })),
+      })
+    }
+
+    if (searching) {
+      const hits: Array<[ModelProviderGroup, CatalogModel]> = []
+      for (const candidateGroup of visibleGroups) {
+        const groupMatched = candidateGroup.name.toLowerCase().includes(q)
+        for (const candidate of candidateGroup.models) {
+          if (
+            groupMatched ||
+            candidate.name.toLowerCase().includes(q) ||
+            candidate.id.toLowerCase().includes(q) ||
+            (candidate.description ?? '').toLowerCase().includes(q)
+          ) {
+            hits.push([candidateGroup, candidate])
+          }
         }
       }
+      // 搜索命中本就稀疏:平铺成一整块,不再按供应商切分。
+      push('results', null, hits)
+      return out
     }
-  }
 
-  const clearTimers = () => {
-    if (openTimerRef.current !== null) {
-      window.clearTimeout(openTimerRef.current)
-      openTimerRef.current = null
+    if (!filtering) {
+      const pairs: Array<[ModelProviderGroup, CatalogModel]> = []
+      for (const recent of recents) {
+        const recentGroup = groups.find((g) => g.id === recent.provider)
+        const recentModel = recentGroup?.models.find((m) => m.id === recent.model)
+        // 目录可能已换(供应商下线/模型改名):找不到就静默丢掉,不显示死项。
+        if (recentGroup && recentModel) pairs.push([recentGroup, recentModel])
+      }
+      push('recent', t('modelRecentLabel'), pairs)
     }
-    if (closeTimerRef.current !== null) {
-      window.clearTimeout(closeTimerRef.current)
-      closeTimerRef.current = null
+
+    for (const candidateGroup of visibleGroups) {
+      push(
+        candidateGroup.id,
+        // 只有一个供应商时分组标题是废话(极简目录的极端情况)。
+        visibleGroups.length > 1 ? candidateGroup.name : null,
+        candidateGroup.models.map((entry) => [candidateGroup, entry] as [ModelProviderGroup, CatalogModel]),
+      )
     }
-  }
+    return out
+  }, [filtering, groups, q, recents, searching, visibleGroups])
+
+  const rows = useMemo(() => sections.flatMap((section) => section.rows), [sections])
+
+  // 打开时把光标落在当前模型上:按 ↓/Enter 的直觉是"从这里继续"。
+  // 查询与筛选变化后回到列表头(用户刚收窄了范围,视线在第一条)。
+  useEffect(() => {
+    if (!open) return
+    const current = rows.findIndex(
+      (row) => row.group.id === selection.provider && row.model.id === selection.model,
+    )
+    setCursor(current >= 0 ? current : 0)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open])
+
+  useEffect(() => {
+    setCursor(0)
+  }, [query, providerId])
+
+  useEffect(() => {
+    setCursor((previous) => Math.min(previous, Math.max(0, rows.length - 1)))
+  }, [rows.length])
+
+  // 光标跟随滚动(关闭时 rows 为空,不必处理)。
+  useEffect(() => {
+    if (!open) return
+    rootRef.current?.querySelector('[data-kb="true"]')?.scrollIntoView({ block: 'nearest' })
+  }, [open, cursor])
 
   const closeMenu = () => {
-    clearTimers()
     setOpen(false)
-    setFocusedProvider(null)
-    setKbMode('providers')
     setQuery('')
+    setProviderId(null)
   }
-
-  useEffect(() => closeMenu, [])
 
   useEffect(() => {
     if (!open) return
@@ -129,162 +239,81 @@ export function ComposerModelMenu({
     return () => document.removeEventListener('mousedown', onDoc)
   }, [open])
 
-  // 搜索词变化时键盘高亮回到命中列表顶部。
-  useEffect(() => {
-    setKbModel(0)
-  }, [query])
-
-  // 打开时:翻转探测 + 一级列宽度写入 CSS 变量 + 聚焦搜索框(可直接打字)。
-  // 窄屏走底部抽屉(宽度由 CSS 给足),翻转探测与 --menu-w 都不适用。
+  // 打开即聚焦搜索框:选择器的第一动作永远是"打字"。
   useLayoutEffect(() => {
-    if (!open || isMobile) return
-    const menu = menuRef.current
-    if (!menu) return
-    const rect = menu.getBoundingClientRect()
-    // 右侧放得下就放右侧;放不下且左侧更宽才翻到左侧(两侧都窄时保持右侧,避免溢出)。
-    const rightSpace = window.innerWidth - rect.right
-    const leftSpace = rect.left
-    setFlip(rightSpace < SUB_MENU_GAP + SUB_MENU_WIDTH && leftSpace > rightSpace)
-    const anchor = menu.parentElement
-    // 一级列实测宽写入 CSS 变量:二级的 left 依一级右缘(--menu-w)定位,翻转侧用 100%(chip 左缘)。
-    anchor?.style.setProperty('--menu-w', `${Math.round(rect.width)}px`)
-    searchRef.current?.focus()
-  }, [open, isMobile])
-
-  // 键盘高亮条目跟随滚动(级联模型与搜索平铺共用 data-kb 标记)。
-  useEffect(() => {
     if (!open) return
-    if (!searching && kbMode !== 'models') return
-    rootRef.current?.querySelector('[data-kb="true"]')?.scrollIntoView({ block: 'nearest' })
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, kbMode, kbModel, focusedProvider, query])
+    setRecents(loadRecents())
+    searchRef.current?.focus()
+  }, [open])
 
-  /* ---- 鼠标悬浮:延迟展开 + 宽限关闭,防缝隙闪烁 ---- */
-
-  const hoverProvider = (groupId: string) => {
-    if (closeTimerRef.current !== null) {
-      window.clearTimeout(closeTimerRef.current)
-      closeTimerRef.current = null
+  // 供应商筛选栏:纵向滚轮转成横向滚动。
+  // 滚动条被刻意藏起(26px 的胶囊行挂不下一条槽),于是滚轮成了唯一的滚动
+  // 手段 —— 而纵向滚轮在横向溢出容器上默认什么也不做,会被面板背后的会话
+  // 吃掉,表现得像"这栏根本不能滚"。这里直接用原生非被动监听:
+  // React 的 onWheel 挂在根节点上是被动的,preventDefault 不生效。
+  useEffect(() => {
+    const row = filtersRef.current
+    if (!row || !open) return
+    const onWheel = (event: WheelEvent) => {
+      if (row.scrollWidth <= row.clientWidth) return
+      const delta = event.deltaY !== 0 ? event.deltaY : event.deltaX
+      if (delta === 0) return
+      event.preventDefault()
+      row.scrollLeft += delta
     }
-    if (focusedProvider === groupId) return
-    if (openTimerRef.current !== null) window.clearTimeout(openTimerRef.current)
-    openTimerRef.current = window.setTimeout(() => {
-      openTimerRef.current = null
-      setFocusedProvider(groupId)
-    }, HOVER_OPEN_DELAY)
-  }
-
-  const scheduleSubClose = () => {
-    if (openTimerRef.current !== null) {
-      window.clearTimeout(openTimerRef.current)
-      openTimerRef.current = null
-    }
-    if (closeTimerRef.current !== null) window.clearTimeout(closeTimerRef.current)
-    closeTimerRef.current = window.setTimeout(() => {
-      closeTimerRef.current = null
-      setFocusedProvider(null)
-    }, SUB_CLOSE_DELAY)
-  }
-
-  const cancelSubClose = () => {
-    if (closeTimerRef.current !== null) {
-      window.clearTimeout(closeTimerRef.current)
-      closeTimerRef.current = null
-    }
-  }
+    row.addEventListener('wheel', onWheel, { passive: false })
+    return () => row.removeEventListener('wheel', onWheel)
+  }, [open])
 
   /* ---- 选择 ---- */
 
-  const pickModel = (providerId: string, modelId: string) => {
-    const nextGroup = catalog.groups.find((g) => g.id === providerId)
+  const pickModel = (provider: string, modelId: string) => {
+    const nextGroup = groups.find((g) => g.id === provider)
     const nextModel = nextGroup?.models.find((m) => m.id === modelId)
     const nextEfforts = nextModel?.reasoning?.efforts ?? []
     // 换模型时:同模型保留当前档位,跨模型交给档位归一化(默认最高档)。
-    const sameModel = selection.provider === providerId && selection.model === modelId
+    const sameModel = selection.provider === provider && selection.model === modelId
     const preferred = sameModel ? selection.reasoningEffort : undefined
     const resolved = resolveSessionReasoningEffort(
       nextEfforts,
       preferred && nextEfforts.some((entry) => entry.id === preferred) ? preferred : undefined,
     )
+    setRecents(rememberRecent({ provider, model: modelId }))
     closeMenu()
     chipRef.current?.focus()
-    onChange({ provider: providerId, model: modelId, reasoningEffort: resolved })
+    onChange({ provider, model: modelId, reasoningEffort: resolved })
   }
 
-  /* ---- 键盘导航:焦点可能在 chip 或搜索框,由容器统一分发 ---- */
+  /* ---- 键盘:Escape 逐层退,↑↓ 全场连续,Enter 选中 ---- */
 
-  const onMenuKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
+  const onKeyDown = (event: ReactKeyboardEvent<HTMLDivElement>) => {
     if (!open) return
     // 输入法组词阶段的 Enter / Esc 交给 IME,不当作菜单快捷键。
     if (event.nativeEvent.isComposing) return
-    const groups = catalog.groups
     if (event.key === 'Escape') {
       event.preventDefault()
       if (searching) {
         setQuery('')
         return
       }
-      if (kbMode === 'models') {
-        setKbMode('providers')
-        setFocusedProvider(null)
+      if (filtering) {
+        setProviderId(null)
         return
       }
       closeMenu()
+      chipRef.current?.focus()
       return
     }
-    if (searching) {
-      // 搜索态:↑↓ 在命中模型间移动,Enter 直接选中。
-      if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
-        event.preventDefault()
-        const delta = event.key === 'ArrowDown' ? 1 : -1
-        setKbModel((prev) => Math.min(searchHits.length - 1, Math.max(0, prev + delta)))
-      } else if (event.key === 'Enter') {
-        event.preventDefault()
-        const hit = searchHits[kbModel]
-        if (hit) pickModel(hit.group.id, hit.model.id)
-      }
+    if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+      event.preventDefault()
+      const delta = event.key === 'ArrowDown' ? 1 : -1
+      setCursor((previous) => Math.min(rows.length - 1, Math.max(0, previous + delta)))
       return
     }
-    if (kbMode === 'providers') {
-      if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
-        event.preventDefault()
-        const delta = event.key === 'ArrowDown' ? 1 : -1
-        const next = Math.min(groups.length - 1, Math.max(0, kbProvider + delta))
-        setKbProvider(next)
-        // 二级已展开(如鼠标开的)时,高亮移动跟随切换二级内容。
-        if (focusedProvider) {
-          const target = groups[next]
-          clearTimers()
-          setFocusedProvider(target && target.models.length > 0 ? target.id : null)
-        }
-      } else if (event.key === 'ArrowRight' || event.key === 'Enter') {
-        event.preventDefault()
-        const target = groups[kbProvider]
-        if (!target || target.models.length === 0) return
-        clearTimers()
-        setFocusedProvider(target.id)
-        const current = target.models.findIndex(
-          (m) => m.id === selection.model && selection.provider === target.id,
-        )
-        setKbModel(Math.max(0, current))
-        setKbMode('models')
-      }
-    } else {
-      const currentGroup = groups[kbProvider]
-      const models = currentGroup?.models ?? []
-      if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
-        event.preventDefault()
-        const delta = event.key === 'ArrowDown' ? 1 : -1
-        setKbModel(Math.min(models.length - 1, Math.max(0, kbModel + delta)))
-      } else if (event.key === 'Enter') {
-        event.preventDefault()
-        const target = models[kbModel]
-        if (currentGroup && target) pickModel(currentGroup.id, target.id)
-      } else if (event.key === 'ArrowLeft') {
-        event.preventDefault()
-        setKbMode('providers')
-        setFocusedProvider(null)
-      }
+    if (event.key === 'Enter') {
+      event.preventDefault()
+      const row = rows[cursor]
+      if (row) pickModel(row.group.id, row.model.id)
     }
   }
 
@@ -293,38 +322,13 @@ export function ComposerModelMenu({
       closeMenu()
       return
     }
-    clearTimers()
-    setFlip(false)
-    setKbMode('providers')
-    const index = catalog.groups.findIndex((g) => g.id === selection.provider)
-    setKbProvider(index >= 0 ? index : 0)
+    setQuery('')
+    setProviderId(null)
     setOpen(true)
   }
 
-  // 点击供应商条目:立即展开二级(不关闭整个菜单)。
-  const clickProvider = (event: ReactMouseEvent<HTMLButtonElement>, groupId: string, hasModels: boolean) => {
-    event.preventDefault()
-    clearTimers()
-    if (hasModels) {
-      setFocusedProvider(groupId)
-      const current = catalog.groups
-        .find((g) => g.id === groupId)
-        ?.models.findIndex((m) => m.id === selection.model && selection.provider === groupId)
-      setKbProvider(Math.max(0, catalog.groups.findIndex((g) => g.id === groupId)))
-      setKbModel(Math.max(0, current ?? 0))
-    }
-  }
-
-  const subGroup = focusedProvider
-    ? catalog.groups.find((g) => g.id === focusedProvider)
-    : null
-
   return (
-    <div
-      className={`model-menu-anchor${open ? ' open' : ''}`}
-      ref={rootRef}
-      onKeyDown={onMenuKeyDown}
-    >
+    <div className={`model-menu-anchor${open ? ' open' : ''}`} ref={rootRef} onKeyDown={onKeyDown}>
       <button
         ref={chipRef}
         type="button"
@@ -341,12 +345,12 @@ export function ComposerModelMenu({
       {open && (
         <>
           <div className="menu-backdrop" onClick={closeMenu} />
-          {/* 一级:搜索框 + (供应商列表 | 搜索命中平铺)。
-              窄屏钻取进二级后收起一级,避免两列叠在一起。 */}
-          {(!isMobile || !focusedProvider) && (
-          <div className="model-menu" role="menu" aria-label={t('modelProvidersLabel')} ref={menuRef}>
+          <div className="model-menu" role="menu" aria-label={t('modelPickerLabel')}>
             <div className="model-menu-search">
               <IconSearch size={13} />
+              {/* 不给 type:一旦写成 type="text",就会命中 controls.css 里
+                  `input[type='text']` 的全局皮肤(底色 + 1px 边框 + 12px 圆角),
+                  搜索行立刻多出一个"框"。这里要的是完全无边框。 */}
               <input
                 ref={searchRef}
                 value={query}
@@ -355,181 +359,108 @@ export function ComposerModelMenu({
                 aria-label={t('modelSearchPlaceholder')}
                 spellCheck={false}
               />
-            </div>
-            {searching ? (
-              <div className="model-menu-scroll">
-                {searchHits.length === 0 ? (
-                  <div className="model-menu-empty">{t('modelSearchEmpty')}</div>
-                ) : (
-                  searchHits.map(({ group: hitGroup, model: hitModel }, index) => {
-                    const active =
-                      selection.provider === hitGroup.id && selection.model === hitModel.id
-                    const kbHere = index === kbModel
-                    return (
-                      <button
-                        key={`${hitGroup.id}-${hitModel.id}`}
-                        type="button"
-                        role="menuitem"
-                        data-kb={kbHere || undefined}
-                        className={`model-menu-item${active ? ' active' : ''}${kbHere ? ' kb' : ''}`}
-                        onClick={() => pickModel(hitGroup.id, hitModel.id)}
-                      >
-                        <span className="row1">
-                          <span className="name">{hitModel.name}</span>
-                          <span className="meta">
-                            {hitModel.thinkingSupported && (
-                              <span className="think" title={t('thinkingLabel')}>
-                                <IconThink size={12} />
-                              </span>
-                            )}
-                            {hitModel.contextWindow ? (
-                              <span className="ctx" title={t('contextWindowColumn')}>
-                                {formatContextWindow(hitModel.contextWindow)}
-                              </span>
-                            ) : null}
-                            {active && (
-                              <span className="check" title={t('currentModel')}>
-                                <IconCheck size={13} />
-                              </span>
-                            )}
-                          </span>
-                        </span>
-                        <span className="hint">{hitGroup.name}</span>
-                      </button>
-                    )
-                  })
-                )}
-              </div>
-            ) : (
-              <>
-                <div className="model-menu-heading">{t('modelProvidersLabel')}</div>
-                <div
-                  className="model-menu-scroll"
-                  onMouseLeave={isMobile ? undefined : scheduleSubClose}
-                >
-                  {catalog.groups.map((g, index) => {
-                    const hasCurrent = selection.provider === g.id
-                    const expanded = focusedProvider === g.id
-                    const kbHere = kbMode === 'providers' && index === kbProvider
-                    return (
-                      <button
-                        key={g.id}
-                        type="button"
-                        role="menuitem"
-                        aria-haspopup="menu"
-                        aria-expanded={expanded}
-                        className={`model-menu-provider${hasCurrent ? ' active' : ''}${
-                          expanded ? ' expanded' : ''
-                        }${kbHere ? ' kb' : ''}`}
-                        onMouseEnter={
-                          isMobile
-                            ? undefined
-                            : () => {
-                                setKbMode('providers')
-                                hoverProvider(g.id)
-                              }
-                        }
-                        onClick={(event) => clickProvider(event, g.id, g.models.length > 0)}
-                      >
-                        <span className="glyph" aria-hidden="true">
-                          {g.name.charAt(0).toUpperCase()}
-                        </span>
-                        <span className="name">{g.name}</span>
-                        {hasCurrent && (
-                          <span className="mark" title={t('currentModel')}>
-                            <IconCheck size={13} />
-                          </span>
-                        )}
-                        <span className="chev" aria-hidden="true">
-                          <IconChevron size={12} />
-                        </span>
-                      </button>
-                    )
-                  })}
-                </div>
-              </>
-            )}
-          </div>
-          )}
-          {/* 二级:该供应商的模型 + 思考强度(搜索态隐藏)。
-              窄屏下这一列就是当前唯一一屏,带返回回到供应商列表。 */}
-          {!searching && subGroup && subGroup.models.length > 0 && (
-            <div
-              className={`model-menu-sub${flip ? ' flip' : ''}`}
-              role="menu"
-              aria-label={subGroup.name}
-              onMouseEnter={
-                isMobile
-                  ? undefined
-                  : () => {
-                      cancelSubClose()
-                      setKbMode('providers')
-                    }
-              }
-              // 窄屏是钻取式的独立一屏,没有"鼠标移出"这回事 ——
-              // 挂了 onMouseLeave 会在触屏点按后误触发收起。
-              onMouseLeave={isMobile ? undefined : scheduleSubClose}
-            >
-              {isMobile ? (
+              {searching && (
                 <button
                   type="button"
-                  className="model-menu-back"
+                  className="model-menu-clear"
+                  title={t('searchSessionsClear')}
+                  aria-label={t('searchSessionsClear')}
                   onClick={() => {
-                    clearTimers()
-                    setFocusedProvider(null)
-                    setKbMode('providers')
+                    setQuery('')
+                    searchRef.current?.focus()
                   }}
                 >
-                  <IconArrowLeft size={14} />
-                  <span>{t('modelProvidersLabel')}</span>
+                  <IconClose size={11} />
                 </button>
-              ) : null}
-              <div className="model-menu-heading">{subGroup.name}</div>
-              <div className="model-menu-scroll">
-                {subGroup.models.map((m, index) => {
-                  const active =
-                    selection.provider === subGroup.id && selection.model === m.id
-                  const kbHere = kbMode === 'models' && index === kbModel
-                  return (
-                    <div
-                      key={m.id}
-                      className={`model-menu-model${active ? ' active' : ''}`}
-                    >
-                      <button
-                        type="button"
-                        role="menuitem"
-                        data-kb={kbHere || undefined}
-                        className={`model-menu-item${active ? ' active' : ''}${kbHere ? ' kb' : ''}`}
-                        onClick={() => pickModel(subGroup.id, m.id)}
-                      >
-                        <span className="row1">
-                          <span className="name">{m.name}</span>
-                          <span className="meta">
-                            {m.thinkingSupported && (
-                              <span className="think" title={t('thinkingLabel')}>
-                                <IconThink size={12} />
-                              </span>
-                            )}
-                            {m.contextWindow ? (
-                              <span className="ctx" title={t('contextWindowColumn')}>
-                                {formatContextWindow(m.contextWindow)}
-                              </span>
-                            ) : null}
-                            {active && (
-                              <span className="check" title={t('currentModel')}>
-                                <IconCheck size={13} />
-                              </span>
-                            )}
-                          </span>
-                        </span>
-                        {m.description && <span className="hint">{m.description}</span>}
-                      </button>
-                    </div>
-                  )
-                })}
-              </div>
+              )}
             </div>
-          )}
+            {/* 供应商筛选:只有多于一个供应商时才值得占一行(极简目录不渲染)。 */}
+            {groups.length > 1 && (
+              <div className="model-menu-filters" ref={filtersRef}>
+                <button
+                  type="button"
+                  className={`model-filter-chip${filtering ? '' : ' active'}`}
+                  onClick={() => setProviderId(null)}
+                >
+                  {t('modelFilterAll')}
+                </button>
+                {groups.map((filterGroup) => (
+                  <button
+                    key={filterGroup.id}
+                    type="button"
+                    className={`model-filter-chip${providerId === filterGroup.id ? ' active' : ''}`}
+                    onClick={() => setProviderId(filterGroup.id)}
+                  >
+                    {filterGroup.name}
+                  </button>
+                ))}
+              </div>
+            )}
+            <div className="model-menu-scroll">
+              {rows.length === 0 ? (
+                <div className="model-menu-empty">{t('modelSearchEmpty')}</div>
+              ) : (
+                sections.map((section) => (
+                  <Fragment key={section.key}>
+                    {section.title && <div className="model-menu-heading">{section.title}</div>}
+                    {section.rows.map((row) => {
+                      const active =
+                        selection.provider === row.group.id && selection.model === row.model.id
+                      const kb = cursor === row.index
+                      // 分组标题被省略时(单供应商、平铺搜索、最近使用)供应商
+                      // 信息只剩这里能说,补一行副标题。
+                      const showProvider =
+                        searching || section.key === 'recent' || visibleGroups.length === 1
+                      return (
+                        <button
+                          key={`${section.key}-${row.group.id}-${row.model.id}`}
+                          type="button"
+                          role="menuitemradio"
+                          aria-checked={active}
+                          data-kb={kb || undefined}
+                          className={`model-menu-item${active ? ' active' : ''}${kb ? ' kb' : ''}`}
+                          onMouseMove={() => setCursor(row.index)}
+                          onClick={() => pickModel(row.group.id, row.model.id)}
+                        >
+                          <span className="row1">
+                            <span className="name" title={row.model.name}>
+                              {row.model.name}
+                            </span>
+                            <span className="meta">
+                              {row.model.thinkingSupported && (
+                                <span className="think" title={t('thinkingLabel')}>
+                                  <IconThink size={12} />
+                                </span>
+                              )}
+                              {row.model.contextWindow ? (
+                                <span className="ctx" title={t('contextWindowColumn')}>
+                                  {formatContextWindow(row.model.contextWindow)}
+                                </span>
+                              ) : null}
+                              {active && (
+                                <span className="check" title={t('currentModel')}>
+                                  <IconCheck size={13} />
+                                </span>
+                              )}
+                            </span>
+                          </span>
+                          {showProvider ? (
+                            <span className="hint" title={row.group.name}>
+                              {row.group.name}
+                            </span>
+                          ) : row.model.description ? (
+                            <span className="hint" title={row.model.description}>
+                              {row.model.description}
+                            </span>
+                          ) : null}
+                        </button>
+                      )
+                    })}
+                  </Fragment>
+                ))
+              )}
+            </div>
+          </div>
         </>
       )}
     </div>

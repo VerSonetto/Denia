@@ -27,7 +27,7 @@ import { PlanReviewPanel } from '../components/PlanReviewPanel';
 import { ApprovalDialog, type ApprovalDecision, type ApprovalRequest } from '../components/ApprovalDialog';
 import { ConfirmDialog } from '../components/ConfirmDialog';
 import { ContextRing } from '../components/ContextRing';
-import { IconBranch, IconArrowDown, IconChevron, IconClose, IconDownload, IconFile, IconFolder, IconImage, IconPanelOpen, IconPlus, IconPaperclip, IconSend, IconSparkles, IconUndo, IconSpinner, IconStop, IconSlashCommand } from '../components/icons';
+import { IconBranch, IconArrowDown, IconChevron, IconClose, IconDownload, IconFile, IconFolder, IconImage, IconPanelOpen, IconPlus, IconSend, IconSparkles, IconUndo, IconSpinner, IconStop, IconSlashCommand } from '../components/icons';
 import { resolveSessionReasoningEffort } from '../modelCatalog';
 import { useStickToBottom } from '../hooks/useStickToBottom';
 
@@ -143,9 +143,20 @@ export default function SessionsPage({
       setTranscriptNodes(nodesRef.current)
     }, NODES_THROTTLE_MS)
   }, [])
+  // 卸载时收掉待发的节拍。**必须同步把 ref 置回 null**:节拍用 ref 是否非空
+  // 当"已有待发任务"的判据,清了定时器却留着 id,后续每一次 applyNodes 都会
+  // 以为还有任务在排队而直接 return —— 统计条这类只吃 transcriptNodes 的下游
+  // 就再也不会更新。
+  //
+  // 这条路径在 StrictMode 下必现:开发模式挂载会跑一遍"挂载→卸载→挂载",
+  // 首次挂载时 SessionView 的 effect 已经用空数组调过一次 applyNodes(排了
+  // 节拍),卸载那一步把定时器清掉,于是整个会话期间状态栏不再出现。
   useEffect(
     () => () => {
-      if (nodesThrottleRef.current !== null) window.clearTimeout(nodesThrottleRef.current)
+      if (nodesThrottleRef.current !== null) {
+        window.clearTimeout(nodesThrottleRef.current)
+        nodesThrottleRef.current = null
+      }
     },
     [],
   )
@@ -271,6 +282,18 @@ export default function SessionsPage({
     refreshGoal(activeId)
   }, [activeId, refreshGoal])
 
+  // 会话切换:清空上一会话的草稿与派生视图状态。
+  //
+  // 依赖只挂 activeId —— 这是一次"换会话"的复位,不是"回调换了个引用"的
+  // 复位。closeMention / resetFollow 走 ref 转发:它们挂在别的 hook 上,
+  // 身份会随着工作区、cwd、运行状态在挂载过程中变化,一旦进了依赖数组,
+  // 这个 effect 会在会话加载**之后**再跑一次,把刚收到的 transcriptNodes
+  // 清空 —— 表现就是输入框下方的状态栏(StatsBar)整场不再出现(它只吃
+  // nodes,而此刻已无新节点推送)。
+  const resetFollowRef = useRef(resetFollow)
+  resetFollowRef.current = resetFollow
+  const closeMentionRef = useRef(closeMention)
+  closeMentionRef.current = closeMention
   useEffect(() => {
     optimizeAbortRef.current?.abort()
     optimizeAbortRef.current = null
@@ -282,7 +305,7 @@ export default function SessionsPage({
     setSending(false)
     setPendingMessages([])
     sendingRef.current = false
-    closeMention()
+    closeMentionRef.current()
     nodesRef.current = []
     setTranscriptNodes([])
     setAxisAnchors([])
@@ -291,10 +314,10 @@ export default function SessionsPage({
     setQueuedMessages([])
     queueSeqRef.current = 0
     // 新会话从顶部开始且重新吸底:复位归属,不写 DOM(scrollTop 归零)。
-    resetFollow()
+    resetFollowRef.current()
     const el = scrollRef.current
     if (el !== null) el.scrollTop = 0
-  }, [activeId, closeMention, resetFollow])
+  }, [activeId])
 
   useEffect(() => {
     let cancelled = false
@@ -1908,12 +1931,33 @@ export default function SessionsPage({
         </>
       )}
       <div className="prompt-bar">
-        <div className="composer-modes">
+        {/* 左组:添加文件(+)与权限档位 —— 贴着书写起笔的左下角。 */}
+        <div className="composer-left">
+          <input
+            ref={fileInputRef}
+            type="file"
+            multiple
+            hidden
+            onChange={onPickFiles}
+          />
+          <button
+            type="button"
+            className="icon-btn composer-add-btn"
+            title={t('uploadFile')}
+            aria-label={t('uploadFile')}
+            disabled={inert || optimizing}
+            onClick={() => fileInputRef.current?.click()}
+          >
+            <IconPlus size={16} />
+          </button>
           <PermissionSelector
             value={permission}
             onChange={requestPermissionChange}
             disabled={inert || permissionBusy}
           />
+        </div>
+        {/* 右组:模型 → 思考强度 → 优化 → 上下文 → 发送,一条从左到右的链。 */}
+        <div className="composer-right">
           {selection && (
             <div className="composer-model-group">
               {catalog && selection && (
@@ -1935,25 +1979,6 @@ export default function SessionsPage({
               )}
             </div>
           )}
-        </div>
-        <div className="composer-right">
-          <input
-            ref={fileInputRef}
-            type="file"
-            multiple
-            hidden
-            onChange={onPickFiles}
-          />
-          <button
-            type="button"
-            className="icon-btn composer-upload-btn"
-            title={t('uploadFile')}
-            aria-label={t('uploadFile')}
-            disabled={inert || optimizing}
-            onClick={() => fileInputRef.current?.click()}
-          >
-            <IconPaperclip size={16} />
-          </button>
           <button
             type="button"
             className={`icon-btn composer-opt-btn${optimizedPrompt ? ' undo' : ''}${optimizing ? ' busy' : ''}`}

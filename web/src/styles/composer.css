@@ -118,8 +118,12 @@
   font-weight: 600;
 }
 
+/* 未选工作区:整张卡是"选一个工作区"的点击靶。虚线轮廓是唯一的例外 ——
+   卡片本身不画边框,这道虚线用 outline 画(不占盒模型,不影响 22px 圆角),
+   因为虚线没法用 box-shadow 表达。 */
 .prompt-panel.pick-target {
-  border-style: dashed;
+  outline: 1px dashed var(--border-l3);
+  outline-offset: -1px;
   cursor: pointer;
 }
 
@@ -381,13 +385,13 @@
   color: var(--label-primary);
 }
 
-/* 优化进行中:输入框银光呼吸,锁定编辑状态。 */
+/* 优化进行中:输入框银光呼吸,锁定编辑状态。卡片没有边框,银光直接叠在
+   常态阴影之上(末项仍是 --composer-shadow,底色与极淡轮廓不丢)。 */
 .prompt-panel.optimizing {
-  border-color: rgba(210, 220, 255, 0.28);
   box-shadow:
     0 0 0 1px rgba(210, 220, 255, 0.18),
     0 0 22px rgba(200, 215, 255, 0.22),
-    var(--shadow-lv2);
+    var(--composer-shadow);
   animation: optimize-glow 1.6s ease-in-out infinite;
 }
 
@@ -403,13 +407,13 @@
     box-shadow:
       0 0 0 1px rgba(210, 220, 255, 0.16),
       0 0 16px rgba(200, 215, 255, 0.16),
-      var(--shadow-lv2);
+      var(--composer-shadow);
   }
   50% {
     box-shadow:
       0 0 0 1px rgba(210, 220, 255, 0.3),
       0 0 34px rgba(200, 215, 255, 0.32),
-      var(--shadow-lv2);
+      var(--composer-shadow);
   }
 }
 
@@ -460,7 +464,7 @@
   /* 右侧不留内边距:chevron 之后直接衔接强度控件,两个 chip 读作一组 */
   padding: 0 2px 0 8px;
   border: none;
-  border-radius: var(--r-sm);
+  border-radius: 999px;
   background: transparent;
   color: var(--label-secondary);
   font-size: 13px;
@@ -518,7 +522,7 @@
   /* 左侧不留内边距,与模型 chip 的 chevron 紧邻 */
   padding: 0 6px 0 4px;
   border: none;
-  border-radius: var(--r-sm);
+  border-radius: 999px;
   background: transparent;
   color: var(--label-secondary);
   font-size: 13px;
@@ -598,49 +602,36 @@
   min-width: 0;
 }
 
-/* ---- 模型级联菜单:一级供应商列 / 二级模型列 ---- */
+/* ---- 模型选择器:单面板(搜索优先) ----
+ *
+ * 形态是一屏,不是级联:常驻搜索框 + 供应商筛选胶囊 + 一个连续列表。
+ * 三种规模的目录走同一条路径 ——
+ *   极多:打两三个字符即命中(跨全部供应商;匹配名称/ID/描述),Enter 选中;
+ *   常用:"最近使用"区块永远在最前,不必搜索也不必滚动;
+ *   极少:筛选行与分组标题都不渲染,列表就是那几行,一次点击即完成。
+ *
+ * 面板锚在 chip 的**右缘**(bottom + right),向左展开 —— 它挂在右侧工具区,
+ * 左对齐会顶出窗口。窄屏由 responsive.css 改写成贴底抽屉。 */
 
 .model-menu {
   position: absolute;
+  right: 0;
   bottom: calc(100% + 8px);
-  left: 0;
   z-index: 53;
-  min-width: 232px;
+  width: min(360px, calc(100vw - 24px));
+  max-height: min(460px, 62vh);
   display: flex;
   flex-direction: column;
   background: var(--bg-layer-2);
   border: 1px solid var(--border-l2);
-  border-radius: var(--r-md);
+  border-radius: 16px;
   box-shadow: var(--shadow-float);
   overflow: hidden;
   animation: model-menu-in 0.16s var(--ease);
 }
 
-/* 两列各自按内容伸展,共用同一上限:二级不随一级高度收缩,
-   供应商少/模型多时模型列依然能撑到上限,内部滚动。 */
-.model-menu,
-.model-menu-sub {
-  max-height: min(440px, 62vh);
-}
-
-.model-menu-scroll {
-  flex: 1;
-  min-height: 0;
-  overflow-y: auto;
-  padding: 6px;
-}
-
-.model-menu-heading {
-  flex: none;
-  padding: 9px 12px 5px;
-  font-size: 11px;
-  font-weight: 600;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-  color: var(--label-caption);
-}
-
-/* 一级列:搜索框(级联与搜索平铺共用头部) */
+/* 搜索行:完全无边框 —— 图标 + 文字 + 占位符自报家门,不再加底线或底色。
+   面板本身已经是一张卡,里面再出现第二个"框"会把搜索读成独立控件。 */
 .model-menu-search {
   display: flex;
   align-items: center;
@@ -650,14 +641,8 @@
   margin: 4px 10px 2px;
   padding: 0 2px;
   border: none;
-  border-bottom: 1px solid var(--border-l1);
   background: transparent;
   color: var(--label-tertiary);
-  transition: border-color 0.15s var(--ease);
-}
-
-.model-menu-search:focus-within {
-  border-color: var(--border-l3);
 }
 
 .model-menu-search input {
@@ -675,141 +660,116 @@
   color: var(--label-caption);
 }
 
-/* 搜索无结果空态 */
+/* 清空:只在有词时出现,空态不留一个死按钮。 */
+.model-menu-clear {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: none;
+  border-radius: 999px;
+  background: var(--active-fill);
+  color: var(--label-secondary);
+  cursor: pointer;
+}
+
+.model-menu-clear:hover {
+  color: var(--label-primary);
+}
+
+/* 供应商筛选:横向滚动(供应商很多时不换行、不把面板撑高)。
+   滚动条本身不画(26px 的胶囊行挂一条 7px 的槽会抢视线),滚动由滚轮承担,
+   见 ComposerModelMenu 里挂在元素上的非被动 wheel 监听。 */
+.model-menu-filters {
+  display: flex;
+  gap: 4px;
+  flex: none;
+  padding: 0 8px 6px;
+  overflow-x: auto;
+  overscroll-behavior-x: contain;
+  scrollbar-width: none;
+}
+
+.model-menu-filters::-webkit-scrollbar {
+  display: none;
+}
+
+.model-filter-chip {
+  flex: none;
+  height: 26px;
+  padding: 0 10px;
+  border: none;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--label-tertiary);
+  font-size: 12px;
+  line-height: 26px;
+  white-space: nowrap;
+  cursor: pointer;
+  transition:
+    background 0.12s var(--ease),
+    color 0.12s var(--ease);
+}
+
+.model-filter-chip:hover {
+  background: var(--hover-fill);
+  color: var(--label-secondary);
+}
+
+.model-filter-chip.active {
+  background: var(--accent-soft);
+  color: var(--label-primary);
+}
+
+.model-menu-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 0 6px 8px;
+}
+
+/* 分组标题吸顶:长列表滚到中段也还知道自己在哪个供应商下。 */
+.model-menu-heading {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  padding: 7px 8px 5px;
+  background: var(--bg-layer-2);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--label-caption);
+}
+
 .model-menu-empty {
-  padding: 18px 12px;
+  padding: 22px 12px;
   text-align: center;
   color: var(--label-caption);
   font-size: 12.5px;
 }
 
-/* 一级:供应商条目 */
-.model-menu-provider {
-  display: flex;
-  align-items: center;
-  gap: 9px;
-  width: 100%;
-  padding: 7px 9px;
-  border: none;
-  border-radius: var(--r-sm);
-  background: transparent;
-  color: var(--label-secondary);
-  font-size: 13px;
-  font-weight: 500;
-  line-height: 20px;
-  cursor: pointer;
-  text-align: left;
-  transition: background 0.12s var(--ease), color 0.12s var(--ease);
-}
-
-.model-menu-provider:hover,
-.model-menu-provider.kb {
-  background: var(--hover-fill);
-  color: var(--label-primary);
-}
-
-.model-menu-provider.active {
-  background: var(--active-fill);
-  color: var(--label-primary);
-}
-
-.model-menu-provider .glyph {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 22px;
-  height: 22px;
-  flex: none;
-  border-radius: 7px;
-  background: var(--accent-soft);
-  color: var(--label-secondary);
-  font-size: 11px;
-  font-weight: 650;
-}
-
-.model-menu-provider.active .glyph,
-.model-menu-provider.expanded .glyph {
-  color: var(--label-primary);
-}
-
-.model-menu-provider .name {
-  flex: 1;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.model-menu-provider .mark {
-  display: inline-flex;
-  flex: none;
-  color: var(--label-primary);
-}
-
-.model-menu-provider .chev {
-  display: inline-flex;
-  flex: none;
-  color: var(--label-caption);
-  transition: color 0.12s var(--ease);
-}
-
-.model-menu-provider.expanded .chev {
-  color: var(--label-primary);
-}
-
-/* 二级:模型列(高度随内容伸展、与一级底边对齐,右侧放不下时翻到左侧) */
-.model-menu-sub {
-  position: absolute;
-  bottom: calc(100% + 8px);
-  left: calc(var(--menu-w, 100%) + 6px);
-  z-index: 54;
-  width: 304px;
-  display: flex;
-  flex-direction: column;
-  background: var(--bg-layer-2);
-  border: 1px solid var(--border-l2);
-  border-radius: var(--r-md);
-  box-shadow: var(--shadow-float);
-  overflow: hidden;
-  animation: model-sub-in 0.16s var(--ease);
-}
-
-.model-menu-sub.flip {
-  left: auto;
-  right: calc(100% + 6px);
-  animation-name: model-sub-in-flip;
-}
-
-/* 模型条目:名称行 + 徽标 + 描述 */
-.model-menu-model {
-  display: flex;
-  flex-direction: column;
-  gap: 3px;
-  border-radius: var(--r-sm);
-}
-
-.model-menu-model + .model-menu-model {
-  margin-top: 2px;
-}
-
-.model-menu-model.active {
-  background: var(--active-fill);
-}
-
+/* 行:名称 + 右侧元信息(思考 / 上下文 / 当前),副标题按需出现。 */
 .model-menu-item {
   display: flex;
   flex-direction: column;
   align-items: stretch;
   gap: 2px;
   width: 100%;
-  padding: 6px 8px;
+  padding: 7px 8px;
   border: none;
-  border-radius: var(--r-sm);
+  border-radius: 10px;
   background: transparent;
   color: var(--label-secondary);
   font-size: 13px;
   text-align: left;
   cursor: pointer;
+  transition:
+    background 0.12s var(--ease),
+    color 0.12s var(--ease);
 }
 
 .model-menu-item:hover,
@@ -818,7 +778,8 @@
   color: var(--label-primary);
 }
 
-.model-menu-model.active .model-menu-item {
+.model-menu-item.active {
+  background: var(--active-fill);
   color: var(--label-primary);
 }
 
@@ -861,14 +822,14 @@
   color: var(--label-primary);
 }
 
+/* 副标题:单行(列表要密),全文交给 title —— hover 即可读全。 */
 .model-menu-item .hint {
   font-size: 11px;
   color: var(--label-tertiary);
   line-height: 1.4;
-  display: -webkit-box;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 2;
+  white-space: nowrap;
   overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 /* chip 展开时 chevron 转向上方(默认朝下 → 旋转 180°) */
@@ -880,28 +841,6 @@
   from {
     opacity: 0;
     transform: translateY(6px);
-  }
-  to {
-    opacity: 1;
-    transform: none;
-  }
-}
-
-@keyframes model-sub-in {
-  from {
-    opacity: 0;
-    transform: translateX(-4px);
-  }
-  to {
-    opacity: 1;
-    transform: none;
-  }
-}
-
-@keyframes model-sub-in-flip {
-  from {
-    opacity: 0;
-    transform: translateX(4px);
   }
   to {
     opacity: 1;

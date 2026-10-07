@@ -394,7 +394,8 @@
   display: flex;
   flex-direction: column;
   width: 100%;
-  padding: 0 var(--composer-side-clearance) 16px;
+  /* 底距 12px:status 栏也落在这一列里,留 16px 会把整块(含输入卡)整体抬高。 */
+  padding: 0 var(--composer-side-clearance) 12px;
 }
 
 .session-layout[data-phase='active'] .composer-seat {
@@ -434,6 +435,9 @@
   gap: 6px;
   flex-wrap: wrap;
   padding: 0 4px;
+  /* 贴住输入卡:叠在 composer-stack 的 8px 间隙上再收 4px,净距 4px ——
+     状态栏是输入区的注脚,离卡片该比离页脚近。 */
+  margin-top: -4px;
 }
 
 .stats-pill {

@@ -472,7 +472,19 @@ truncation?: TruncationInfo,
  * 替换,旧节点不再进入模型历史与 token-meter 表面(对齐 dsh
  * `tool/result` 的 `surfaceOp.replace`)。None = 普通追加。
  */
-replaces?: number, } | { "type": "args-cleared", turn: number, step: number, call_id: string, placeholder: string, } | { "type": "compaction-summary", turn: number, step: number, 
+replaces?: number, } | { "type": "tool-output-chunk", 
+/**
+ * 工具调用 id;前端据此把增量挂到对应工具行上。
+ */
+call_id: string, 
+/**
+ * 输出流名(`stdout` / `stderr`),与工具结果里的分段口径一致。
+ */
+stream: string, 
+/**
+ * 本次新增的输出正文。
+ */
+text: string, } | { "type": "args-cleared", turn: number, step: number, call_id: string, placeholder: string, } | { "type": "compaction-summary", turn: number, step: number, 
 /**
  * 压缩后插入的摘要文本(模型可见,user role)。
  */
@@ -562,7 +574,19 @@ truncation?: TruncationInfo,
  * 替换,旧节点不再进入模型历史与 token-meter 表面(对齐 dsh
  * `tool/result` 的 `surfaceOp.replace`)。None = 普通追加。
  */
-replaces?: number, } | { "type": "args-cleared", turn: number, step: number, call_id: string, placeholder: string, } | { "type": "compaction-summary", turn: number, step: number, 
+replaces?: number, } | { "type": "tool-output-chunk", 
+/**
+ * 工具调用 id;前端据此把增量挂到对应工具行上。
+ */
+call_id: string, 
+/**
+ * 输出流名(`stdout` / `stderr`),与工具结果里的分段口径一致。
+ */
+stream: string, 
+/**
+ * 本次新增的输出正文。
+ */
+text: string, } | { "type": "args-cleared", turn: number, step: number, call_id: string, placeholder: string, } | { "type": "compaction-summary", turn: number, step: number, 
 /**
  * 压缩后插入的摘要文本(模型可见,user role)。
  */

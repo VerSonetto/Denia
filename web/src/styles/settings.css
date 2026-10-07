@@ -14,7 +14,7 @@
   height: 28px;
   padding: 0;
   border: none;
-  border-radius: var(--r-sm);
+  border-radius: 999px;
   background: transparent;
   cursor: pointer;
   transition: background 0.15s var(--ease);
@@ -419,11 +419,6 @@
 /* 窄屏专用:面板返回按钮与分类项箭头。桌面端不出现(钻取是窄屏交互)。 */
 .setm-panel-back,
 .setm-nav-chev {
-  display: none;
-}
-
-/* 窄屏专用:模型二级菜单返回条。 */
-.model-menu-back {
   display: none;
 }
 

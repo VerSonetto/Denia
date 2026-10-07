@@ -64,6 +64,14 @@ export type TranscriptNode =
       /** tool-call 事件的 seq;孤儿结果行用 result 事件的 seq。 */
       seq?: number
       result?: { content: string; isError: boolean }
+      /**
+       * 执行期间的实时输出增量(仅运行中的 bash 有,按流累积)。
+       *
+       * 只服务"命令还在跑"的观感:`tool-result` 一到就丢弃 —— 成果正文是
+       * 首尾预览 + 完整产物,与增量流口径不同,留着只会多占一份可能上百
+       * KB 的字符串。
+       */
+      live?: { stdout: string; stderr: string }
       /** `ask` 工具的提问载荷:挂在对应工具行上渲染问答卡片。 */
       ask?: AskCardData
       /**
@@ -231,6 +239,37 @@ function isTokenDeltaChunk(chunk: StreamChunk): boolean {
 }
 
 /**
+ * 实时输出增量该并进哪条流:只认 `stderr` 这一条旁路,其余(含未来可能
+ * 新增的流名)一律并入 stdout —— 界面上只有这两处能显示,认不出的流名
+ * 丢掉会让输出凭空消失,归并至少保证"看得见"。
+ */
+function liveKey(stream: string): 'stdout' | 'stderr' {
+  return stream === 'stderr' ? 'stderr' : 'stdout'
+}
+
+/** 增量累积(copy-on-write 版,增量 fold 路径用)。 */
+function withLive(
+  node: Extract<TranscriptNode, { kind: 'tool' }>,
+  stream: string,
+  text: string,
+): Extract<TranscriptNode, { kind: 'tool' }> {
+  const live = node.live ?? { stdout: '', stderr: '' }
+  const key = liveKey(stream)
+  return { ...node, live: { ...live, [key]: live[key] + text } }
+}
+
+/** 增量累积(原地版,冷路径用:那里的节点本来就是新造的)。 */
+function appendLive(
+  node: Extract<TranscriptNode, { kind: 'tool' }>,
+  stream: string,
+  text: string,
+): void {
+  const live = (node.live ??= { stdout: '', stderr: '' })
+  const key = liveKey(stream)
+  live[key] += text
+}
+
+/**
  * The deterministic fold: identical output for cold history and live
  * streaming. Chunk deltas accumulate into an in-progress assistant node;
  * the settled `assistant-message` replaces it with authoritative blocks.
@@ -265,6 +304,16 @@ export function foldEvents(events: SessionEnvelope[]): TranscriptNode[] {
         closeOpen()
         nodes.push({ kind: 'context-injection', text: event.text, seq: event.seq })
         break
+      case 'tool-output-chunk': {
+        // 实时输出增量:挂到对应工具行上(命令还在跑才有;结果一到作废,
+        // 见 tool 节点的 live 注释)。找不到行的(日志被截断)就丢掉 ——
+        // 它只是观感,不值得为它造一个游离节点。
+        const node = tools.get(event.call_id)
+        // 已出结果的调用不再回填:读侧被中止时增量可能迟到于 tool-result,
+        // 回填会把那份可能上百 KB 的字符串永远挂在节点上。
+        if (node && !node.result) appendLive(node, event.stream, event.text)
+        break
+      }
       case 'command-run':
         closeOpen()
         nodes.push({ kind: 'command-echo', name: event.name, text: event.text, seq: event.seq })
@@ -418,6 +467,7 @@ export function foldEvents(events: SessionEnvelope[]): TranscriptNode[] {
         const result = { content: event.content, isError: event.is_error }
         if (node) {
           node.result = result
+          delete node.live
         } else {
           nodes.push({
             kind: 'tool',
@@ -775,6 +825,19 @@ function applyEnvelopeStep(
           seq: event.seq,
         },
       ]
+    case 'tool-output-chunk': {
+      for (let i = nodes.length - 1; i >= 0; i--) {
+        const node = nodes[i]
+        if (node.kind === 'tool' && node.callId === event.call_id) {
+          // 已出结果的调用不再回填(读侧被中止时增量可能迟到于结果)。
+          if (node.result) return nodes
+          const copy = nodes.slice()
+          copy[i] = withLive(node, event.stream, event.text)
+          return copy
+        }
+      }
+      return nodes
+    }
     case 'tool-result': {
       // 带 replaces 的 tool-result 是模型侧的原位替换(微压缩清理),
       // 对话流里继续显示原始调用/结果,不落占位行。
@@ -786,6 +849,8 @@ function applyEnvelopeStep(
           copy[i] = {
             ...node,
             result: { content: event.content, isError: event.is_error },
+            // 实时增量到此作废(冷路径同规则)。
+            live: undefined,
           }
           return copy
         }

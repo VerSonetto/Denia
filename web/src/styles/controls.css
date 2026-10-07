@@ -1245,7 +1245,7 @@ button.btn.form-action {
   height: 28px;
   padding: 0 5px 0 8px;
   border: none;
-  border-radius: var(--r-sm);
+  border-radius: 999px;
   background: transparent;
   color: var(--label-secondary);
   font-size: 13px;
@@ -1562,15 +1562,20 @@ button.btn.form-action {
   color: var(--error);
 }
 
-/* ---- 输入框右区:上传 + 圆环 ---- */
+/* ---- 输入框控件架:左端(添加文件 + 权限)/ 右端(发送链) ----
+   两组的排布(顺序、间距、窄屏换行)由 responsive.css 定,这里只给原子外观。 */
 
 .composer-right {
   display: flex;
   align-items: center;
-  gap: 8px;
 }
 
-.composer-upload-btn.icon-btn {
+.composer-left {
+  display: flex;
+  align-items: center;
+}
+
+.composer-add-btn.icon-btn {
   width: 28px;
   height: 28px;
   align-items: center;
@@ -1578,7 +1583,7 @@ button.btn.form-action {
   color: var(--label-secondary);
 }
 
-.composer-upload-btn.icon-btn:hover {
+.composer-add-btn.icon-btn:hover {
   color: var(--label-primary);
 }
 
@@ -1590,7 +1595,7 @@ button.btn.form-action {
   height: 28px;
   padding: 4px;
   border: none;
-  border-radius: var(--r-sm);
+  border-radius: 999px;
   background: transparent;
   color: var(--label-secondary);
   cursor: pointer;

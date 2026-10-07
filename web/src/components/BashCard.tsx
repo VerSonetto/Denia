@@ -12,15 +12,21 @@ import type { BashOutput } from '../toolDisplay'
  *
  * 退出码非 0 时竖线整条转红;stderr 段落单列并着红 —— 这两处红是**信息**
  * (命令自己失败在哪),不是装饰,所以只在这里出现。
+ *
+ * 运行中与结束后共用这一个组件:命令还在跑时 `output` 是实时增量,结束后
+ * 换成结果里的首尾预览,画面不换容器也不跳版式。
  */
 export const BashCard = memo(function BashCard({
   command,
   output,
   exitCode,
+  running,
 }: {
   command: string
   output: BashOutput
   exitCode?: number
+  /** 命令仍在执行:此时"没有输出"只是还没轮到它说话,不提示。 */
+  running?: boolean
 }) {
   const failed = exitCode !== undefined && exitCode !== 0
   const empty = output.stdout.length === 0 && !output.stderr
@@ -42,7 +48,7 @@ export const BashCard = memo(function BashCard({
           <pre>{output.stderr}</pre>
         </div>
       )}
-      {empty && <div className="bash-line bash-empty">{t('bashNoOutput')}</div>}
+      {empty && !running && <div className="bash-line bash-empty">{t('bashNoOutput')}</div>}
     </div>
   )
 })

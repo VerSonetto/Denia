@@ -266,10 +266,29 @@ export function bashOutputParts(content: string): BashOutput {
   const body = content.replace(/^退出码:\s*-?\d+\n?/, '')
   const marker = '\n--- stderr ---\n'
   const index = body.indexOf(marker)
-  if (index < 0) return { stdout: trimTail(body) }
-  const stdout = trimTail(body.slice(0, index))
-  const stderr = trimTail(body.slice(index + marker.length))
-  return { stdout, stderr: stderr.length > 0 ? stderr : undefined }
+  if (index < 0) return bashOutputFrom(body, '')
+  return bashOutputFrom(body.slice(0, index), body.slice(index + marker.length))
+}
+
+/**
+ * 两段输出的收尾:去掉尾部空白,空的 stderr 归并成 `undefined`。
+ *
+ * 与 [`bashOutputParts`] 拆开是为了让**运行中**的实时增量能复用同一套收尾
+ * (见 [`liveBashOutput`]):实时与终态的口径必须一致,否则命令一结束画面
+ * 会"跳"一下。
+ */
+export function bashOutputFrom(stdout: string, stderr: string): BashOutput {
+  const out = trimTail(stdout)
+  const err = trimTail(stderr)
+  return { stdout: out, stderr: err.length > 0 ? err : undefined }
+}
+
+/**
+ * 运行中的 bash:实时增量走与终态**完全相同**的清洗管线(剥 ANSI 彩色与
+ * 光标序列、归一 CRLF 与进度条式的回车覆盖),再交给同一个 `BashCard`。
+ */
+export function liveBashOutput(live: { stdout: string; stderr: string }): BashOutput {
+  return bashOutputFrom(cleanToolOutput(live.stdout), cleanToolOutput(live.stderr))
 }
 
 function trimTail(text: string): string {

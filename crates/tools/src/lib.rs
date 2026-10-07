@@ -60,7 +60,9 @@ pub use shell_session::{Captured, PersistentShell, ShellHub};
 pub use todo::TodoWriteTool;
 pub use web_fetch::WebFetchTool;
 
-/// Session-event sink handed to tools that emit log-only state (todo_write).
+/// Session-event sink handed to tools that emit log-only state: the todo
+/// snapshot (`todo_write`), goal operations (`update_goal`) and `bash`'s live
+/// output increments (`tool-output-chunk`, 只服务实时观感、不进模型历史).
 /// The agent loop wires it to the session append + broadcast; tools never
 /// touch the session handle directly.
 pub type SessionEventSink = Arc<dyn Fn(SessionEvent) + Send + Sync>;

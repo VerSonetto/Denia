@@ -51,6 +51,11 @@
   --shadow-lv2: 0 1px 0 rgba(255, 255, 255, 0.04), 0 8px 32px rgba(0, 0, 0, 0.55);
   --shadow-float: 0 0 0 1px rgba(255, 255, 255, 0.06), 0 16px 48px rgba(0, 0, 0, 0.6);
 
+  /* 输入卡片:刻意不画边框,轮廓只由底色 + 这层极淡阴影成形。深色底上
+     一道内嵌高光就够(外投影在近黑底色上看不见,只会糊成一圈脏边)。 */
+  --composer-shadow: inset 0 0 1px #ffffff33;
+  --composer-shadow-focus: inset 0 0 1px #ffffff4d;
+
   --ease: cubic-bezier(0.4, 0, 0.2, 1);
   --font-ui:
     -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB',
@@ -117,6 +122,11 @@
     --shadow-lv2: 0 1px 0 rgba(0, 0, 0, 0.04), 0 8px 24px rgba(0, 0, 0, 0.06);
     --shadow-float: 0 0 0 1px rgba(0, 0, 0, 0.06), 0 16px 40px rgba(0, 0, 0, 0.1);
 
+    /* 白底卡片:三层递进 —— 一道 1px 描边定轮廓,一层近影交代厚度,
+       一层大扩散的极淡投影托住整张卡。 */
+    --composer-shadow: 0 0 0 1px #0000000a, 0 2px 8px #0000000a, 0 4px 80px 8px #00000006;
+    --composer-shadow-focus: 0 0 0 1px #00000012, 0 2px 10px #0000000f, 0 4px 80px 8px #0000000a;
+
     color-scheme: light;
   }
 }
@@ -168,6 +178,11 @@
 
   --shadow-lv2: 0 1px 0 rgba(0, 0, 0, 0.04), 0 8px 24px rgba(0, 0, 0, 0.06);
   --shadow-float: 0 0 0 1px rgba(0, 0, 0, 0.06), 0 16px 40px rgba(0, 0, 0, 0.1);
+
+  /* 白底卡片:三层递进 —— 一道 1px 描边定轮廓,一层近影交代厚度,
+     一层大扩散的极淡投影托住整张卡。 */
+  --composer-shadow: 0 0 0 1px #0000000a, 0 2px 8px #0000000a, 0 4px 80px 8px #00000006;
+  --composer-shadow-focus: 0 0 0 1px #00000012, 0 2px 10px #0000000f, 0 4px 80px 8px #0000000a;
 
   color-scheme: light;
 }

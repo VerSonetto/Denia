@@ -429,6 +429,7 @@ mod seed_tests {
             SessionEvent::AskRequested { .. } => "ask-requested",
             SessionEvent::AskResolved { .. } => "ask-resolved",
             SessionEvent::AssistantChunk { .. } => "chunk",
+            SessionEvent::ToolOutputChunk { .. } => "tool-output-chunk",
             SessionEvent::RetryAttempt { .. } => "retry",
             SessionEvent::TodoWrite { .. } => "todo",
             SessionEvent::ArgsCleared { .. } => "args-cleared",

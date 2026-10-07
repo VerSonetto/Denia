@@ -128,29 +128,19 @@
 
 @media (max-width: 820px) {
   /* 输入卡片底部的控件行:窄屏下排不下就**换行分组**,而不是横向溢出。
-     `.prompt-bar` 本身已有 flex-wrap,但子元素仍按桌面宽度撑开,所以这里
-     逐个收窄。 */
-  .prompt-bar {
-    gap: 6px;
-    padding: 2px 6px 6px;
-  }
-
-  .composer-modes {
-    gap: 4px;
+     模型/思考/权限三个 chip 各自是绝对定位弹层的锚点,所以这两组容器
+     **绝不能**用 overflow: hidden 兜底:一裁切,弹出的菜单会被一起剪掉
+     (实测模型/思考/权限菜单在手机上完全不可见,只剩一个空框)。 */
+  .composer-left,
+  .composer-right {
     min-width: 0;
-    /* 允许收缩到 0 并参与换行:桌面用的 `flex: 1 1 auto` 会让这一组
-       独占整行宽度(实测 336px),把 `.composer-right` 顶到屏幕外。 */
-    flex: 1 1 0;
-    /* 放不下就换行,**绝不能**用 overflow: hidden 兜底:这三个 chip
-       各自是绝对定位弹层的锚点,容器一裁切,弹出的菜单会被一起剪掉
-       (实测模型/思考/权限菜单在手机上完全不可见,只剩一个空框)。 */
-    flex-wrap: wrap;
     overflow: visible;
   }
 
   /* 三个 chip 都是 flex 项,默认 min-width: auto 会被内容撑开并拒绝
      收缩 —— 长模型名因此仍能把右侧按钮顶出屏幕。 */
-  .composer-modes > * {
+  .composer-left > *,
+  .composer-right > * {
     min-width: 0;
   }
 
@@ -191,16 +181,11 @@
     white-space: nowrap;
   }
 
-  .composer-right {
-    gap: 6px;
-    flex: 0 0 auto;
-  }
-
   /* 触控目标放大到 ≥40px:桌面 28px 的按钮在手指下太难点中。
      用 min-height 而不是 height,避免压坏内部图标的基线对齐。 */
   .composer-right .icon-btn,
-  .composer-modes .icon-btn,
-  .composer-upload-btn.icon-btn {
+  .composer-left .icon-btn,
+  .composer-add-btn.icon-btn {
     min-width: 40px;
     min-height: 40px;
   }
@@ -248,8 +233,8 @@
  * 内部滚动,并带上拖动把手与标题,符合手机用户对"选择器"的心智。
  *
  * 用 position: fixed 是安全的:输入区的各层祖先(.composer-seat/.composer-stack/
- * .prompt-bar/.composer-modes)都没有 transform/filter/will-change,不会成为
- * fixed 的包含块(已核对)。
+ * .prompt-bar/.composer-left/.composer-right)都没有 transform/filter/will-change,
+ * 不会成为 fixed 的包含块(已核对)。
  */
 @media (max-width: 820px) {
   /* 抽屉打开时遮罩要盖住整屏(桌面用的是无样式透明层)。
@@ -273,8 +258,7 @@
   /* 抽屉本体:贴底、占满宽度、圆角在上、内部滚动。 */
   .permission-menu,
   .effort-popover,
-  .model-menu,
-  .model-menu-sub {
+  .model-menu {
     position: fixed;
     left: 0;
     right: 0;
@@ -298,8 +282,7 @@
   /* 抽屉顶部的拖动把手:纯视觉提示,不实现拖拽手势(点击遮罩/选项即关)。 */
   .permission-menu::before,
   .effort-popover::before,
-  .model-menu::before,
-  .model-menu-sub::before {
+  .model-menu::before {
     content: '';
     flex: none;
     width: 36px;
@@ -309,41 +292,9 @@
     background: var(--border-l2);
   }
 
-  /* 窄屏钻取:二级独占一屏,不再相对一级定位。 */
-  .model-menu-sub,
-  .model-menu-sub.flip {
-    left: 0;
-    right: 0;
-    animation: composer-sheet-in 0.2s var(--ease);
-  }
-
-  /* 返回条:回到供应商列表。 */
-  .model-menu-back {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    flex: none;
-    width: 100%;
-    padding: 10px 14px 8px;
-    border: none;
-    border-bottom: 1px solid var(--border-l1);
-    background: transparent;
-    color: var(--label-secondary);
-    font-size: 13px;
-    font-weight: 550;
-    text-align: left;
-    cursor: pointer;
-    -webkit-tap-highlight-color: transparent;
-  }
-
-  .model-menu-back:active {
-    background: var(--active-fill);
-  }
-
   /* 选项行在手指下要够大:桌面 8px 内边距的条目太密。 */
   .permission-item,
-  .model-menu-item,
-  .model-menu-provider {
+  .model-menu-item {
     min-height: 44px;
     padding-top: 10px;
     padding-bottom: 10px;
@@ -409,21 +360,48 @@
   }
 }
 
-/* Composer: one continuous surface, with spacing defining the controls. */
+/* ---------- Composer ----------
+ *
+ * 一张连续的卡片,分两层:上层是**书写区**(编辑器 + 附件),下层是**控件架**
+ * (左端是写之前的前置开关:添加文件与权限;右端是发送前的一条链:模型 →
+ * 思考强度 → 优化 → 上下文 → 发送)。层次靠两件事建立,而不是靠线条:
+ *   1. 控件架与书写区之间只隔一段留白,不画分割线;
+ *   2. 控件架里的 chip 一律"静默"(无底色、次要色),只有悬停/展开才显形,
+ *      唯一一块实心的是发送键 —— 视线因此天然落在"写完了点这里"。
+ *
+ * 卡片**不画边框**:轮廓完全由底色 + 一层极淡阴影(--composer-shadow,
+ * 浅/深两套见 foundation.css)成形,圆角 22px。`border: 0 !important` 是
+ * 刻意写死的 —— 任何按状态补边框的规则(焦点、优化中、选工作区)都别再
+ * 加回来,状态差异一律走阴影。
+ *
+ * 这块是 composer 外观的**唯一真相**:composer.css / controls.css 里同名选择器
+ * 只提供原子样式(chip 自身、菜单),卡片、控件架、按钮尺寸以这里为准。
+ *
+ * 约束(别动,否则手机端底部弹层与向上弹出的菜单会坏):
+ *   - 卡片及其祖先不加 transform / filter / will-change;
+ *   - 卡片与控件架不加 overflow: hidden(菜单锚在 chip 上向上弹出)。 */
 .prompt-panel {
   position: relative;
   display: flex;
   flex-direction: column;
   width: 100%;
-  border: 1px solid var(--border-l2);
-  background: var(--input-major);
   overflow: visible;
-  --composer-radius: 18px;
-  --composer-inset: 8px;
-  gap: 4px;
-  padding-top: 10px;
+  --composer-radius: 22px;
+  --composer-inset: 10px;
+  gap: 0;
+  padding-top: 8px;
+  border: 0 !important;
   border-radius: var(--composer-radius);
-  box-shadow: none;
+  background: var(--input-major);
+  box-shadow: var(--composer-shadow);
+  transition: box-shadow 0.18s var(--ease);
+}
+/* 焦点态:链路上的阴影抬一档(浅色是那圈 1px 描边略深,深色是内嵌高光
+   略亮)。不画外圈光晕 —— 编辑器进页面就自动聚焦,常驻的光圈会和卡片
+   轮廓叠成一圈"双轮廓"。也不用 outline:圆角卡片上会在角上断开,且
+   编辑器自己 outline: none。 */
+.prompt-panel:focus-within:not(.pick-target):not(.optimizing) {
+  box-shadow: var(--composer-shadow-focus);
 }
 .prompt-panel .prompt-editor {
   border: none;
@@ -437,14 +415,18 @@
   word-break: normal;
   overflow-wrap: break-word;
   cursor: text;
-  min-height: 40px;
-  padding: 4px 16px 8px;
+  min-height: 52px;
+  padding: 8px 18px 6px;
   font-size: 15px;
   line-height: 26px;
+  letter-spacing: 0.005em;
 }
 .prompt-panel .prompt-editor:empty::before {
   content: attr(data-placeholder);
-  pointer-events: none; color: var(--label-tertiary); }
+  pointer-events: none;
+  color: var(--label-tertiary);
+}
+/* 控件架:左端前置开关,右端发送链。窄屏下两段各占一行(见底部断点)。 */
 .prompt-bar {
   display: flex;
   flex-wrap: wrap;
@@ -452,16 +434,28 @@
   justify-content: space-between;
   position: relative;
   z-index: 2;
-  gap: 8px 12px;
-  padding: 4px var(--composer-inset) var(--composer-inset);
-  border-top: none;
+  gap: 6px 12px;
+  padding: 2px var(--composer-inset) var(--composer-inset);
   border-radius: 0 0 var(--composer-radius) var(--composer-radius);
   background: transparent;
 }
-.composer-modes {
+/* 左端:添加文件(+)与权限。两者都是"写之前"的前置开关,合成一组贴左。 */
+.composer-left {
   display: flex;
   align-items: center;
-  min-width: 0; gap: 10px; flex-wrap: wrap; flex: 1 1 280px; }
+  flex: 0 1 auto;
+  min-width: 0;
+  gap: 2px;
+}
+/* 右端:模型 → 思考强度 → 优化 → 上下文 → 发送。整组贴右,顺序即链路。 */
+.composer-right {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: auto;
+  flex: none;
+  min-width: 0;
+}
 .composer-model-group {
   display: flex;
   align-items: center;
@@ -472,30 +466,77 @@
 .composer-model-group .model-menu-anchor { min-width: 0; }
 .composer-model-group .model-chip { max-width: min(260px, 35vw); }
 .composer-model-group .effort-control { flex: none; }
-.prompt-bar button:focus-visible { outline: 2px solid var(--label-tertiary); outline-offset: 3px; }
-.prompt-bar .permission-chip { border-radius: 9px; min-height: 32px; }
-.composer-right { gap: 6px; margin-left: auto; flex: none; }
-.composer-upload-btn.icon-btn, .composer-opt-btn { width: 32px; height: 32px; border-radius: 9px; }
+.prompt-bar button:focus-visible {
+  outline: 2px solid var(--label-tertiary);
+  outline-offset: 2px;
+}
+/* 控件架统一"胶囊":圆角全开。22px 的卡片配上直角感的小圆角会显得两种语言
+   打架;整排胶囊 + 一枚实心圆发送键,是这套卡片的语法。 */
+.prompt-bar .permission-chip { border-radius: 999px; min-height: 32px; }
+.prompt-bar .model-chip,
+.prompt-bar .effort-chip,
+.prompt-bar .effort-chip-static { min-height: 32px; border-radius: 999px; }
+/* 添加文件:常驻一块浅灰底 —— 它是"写之前"的第一个动作,不该像 chip 那样
+   隐身(hover 才显形)。悬停再抬一档。 */
+.composer-add-btn.icon-btn {
+  width: 32px;
+  height: 32px;
+  border-radius: 999px;
+  background: var(--hover-fill);
+  color: var(--label-secondary);
+}
+.composer-add-btn.icon-btn:hover:not(:disabled) {
+  background: var(--active-fill);
+  color: var(--label-primary);
+}
+.composer-add-btn.icon-btn:disabled {
+  background: transparent;
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.composer-opt-btn { width: 32px; height: 32px; border-radius: 10px; }
+.prompt-bar .cm-trigger { width: 32px; height: 32px; border-radius: 10px; }
 .prompt-bar .btn-send {
-  width: 34px;
-  height: 34px;
+  width: 36px;
+  height: 36px;
+  /* 正圆:发送键是这一排里唯一的实心块,圆比圆角方更不像"又一块 chip"。 */
   border-radius: 50%;
   transform: none;
+  transition:
+    transform 0.15s var(--ease),
+    background 0.15s var(--ease),
+    opacity 0.15s var(--ease);
 }
-.prompt-bar .btn-send:disabled { opacity: 1; background: var(--active-fill); color: var(--label-caption); }
-.composer-attachments { padding: 0 16px 4px; }
+.prompt-bar .btn-send:not(:disabled):active { transform: scale(0.94); }
+.prompt-bar .btn-send:disabled {
+  opacity: 1;
+  background: var(--active-fill);
+  color: var(--label-caption);
+}
+.prompt-bar .btn-send.stop { transform: none; }
+.composer-attachments { padding: 2px 16px 6px; }
+
 @media (max-width: 820px) {
-  .prompt-bar { gap: 6px; padding: 4px var(--composer-inset) var(--composer-inset); }
-  .composer-modes { flex: 1 1 100%; gap: 6px; }
-  .composer-model-group { flex: 1 1 auto; }
+  .prompt-panel { padding-top: 6px; }
+  .prompt-panel .prompt-editor { padding: 8px 16px 4px; min-height: 56px; font-size: 16px; }
+  /* 手机:前置开关(+ / 权限)留在第一行,发送链整条换到第二行靠右 ——
+     五个控件横着放不进 390px,与其让模型名吃掉发送键,不如让链路独占一行。 */
+  .prompt-bar { gap: 6px 4px; padding: 2px var(--composer-inset) var(--composer-inset); }
+  .composer-left { flex: 1 1 auto; gap: 2px; }
+  .composer-right { flex: 1 1 100%; justify-content: flex-end; gap: 6px; }
+  /* 模型组吃掉行内余量(名字长了就省略号),后面四个控件保持自然宽度。 */
+  .composer-model-group { flex: 1 1 0; min-width: 0; }
   .composer-model-group .model-menu-anchor { flex: 1 1 auto; }
   .composer-model-group .model-chip { max-width: 100%; }
-  .prompt-panel .prompt-editor { padding-inline: 16px; min-height: 40px; font-size: 16px; }
-  .prompt-bar .btn-send { width: 40px; height: 40px; }
-  .prompt-bar .permission-chip, .composer-model-group .model-chip,
-  .composer-model-group .effort-chip { min-height: 40px; }
+  .prompt-bar .btn-send { width: 44px; height: 44px; border-radius: 50%; }
+  .prompt-bar .permission-chip,
+  .prompt-bar .model-chip,
+  .prompt-bar .effort-chip,
+  .prompt-bar .effort-chip-static { min-height: 40px; }
+  .prompt-bar .cm-trigger { width: 40px; height: 40px; }
   .composer-image-remove { opacity: 1; }
 }
 @media (prefers-reduced-motion: reduce) {
-  .prompt-panel { transition: none; }
+  .prompt-panel,
+  .prompt-bar .btn-send { transition: none; }
 }

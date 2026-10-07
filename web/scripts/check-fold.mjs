@@ -161,5 +161,60 @@ check('全命中为 100%', stats.cacheHitPercent(0, 500), '100.00')
 check('无缓存为 0%', stats.cacheHitPercent(500, 0), '0.00')
 check('无计费输入返回 null', stats.cacheHitPercent(0, 0), null)
 
+/* 11) bash 实时输出增量:挂到对应工具行上,按流拼接,结果到达即作废。
+      冷启动(foldEvents)与增量(applyEnvelopes)两条路径必须给出同一个
+      live —— 刷新页面看到的历史与实时观看不能是两个样子。 */
+const toolCall = {
+  seq: 1, time: 1000, type: 'tool-call', turn: 1, step: 1,
+  call_id: 'c1', name: 'bash', arguments: JSON.stringify({ command: 'npm run build' }),
+}
+const chunk = (seq, stream, text) => ({
+  seq, time: 1000 + seq, type: 'tool-output-chunk', call_id: 'c1', stream, text,
+})
+const result = {
+  seq: 9, time: 2000, type: 'tool-result', turn: 1, step: 1,
+  call_id: 'c1', content: '退出码: 0\n完成', is_error: false,
+}
+
+const liveEvents = [
+  toolCall,
+  chunk(2, 'stdout', 'build '),
+  chunk(3, 'stdout', 'ok\n'),
+  chunk(4, 'stderr', 'warn\n'),
+]
+const coldNodes = mod.foldEvents(liveEvents)
+const coldLive = coldNodes.find((n) => n.kind === 'tool')
+check('冷启动:增量按流分桶', coldLive.live, { stdout: 'build ok\n', stderr: 'warn\n' })
+check('冷启动:增量不落成独立节点', coldNodes.length, 1)
+
+const incrLive = mod
+  .applyEnvelopes(mod.foldEvents([toolCall]), liveEvents.slice(1))
+  .find((n) => n.kind === 'tool')
+check('增量:与冷启动逐字一致', incrLive.live, coldLive.live)
+
+// 结果一到就作废:正文口径换成结果里的首尾预览,那份可能上百 KB 的增量
+// 字符串不再留着。
+const settled = mod.applyEnvelope(mod.foldEvents(liveEvents), result).find((n) => n.kind === 'tool')
+check('结果到达后清掉实时增量', settled.live, undefined)
+check('结果本身保留', settled.result.content, '退出码: 0\n完成')
+
+// 找不到工具行的增量(日志被截断)直接丢掉,不为观感造游离节点。
+check('孤儿增量不造节点', mod.foldEvents([chunk(1, 'stdout', 'x')]).length, 0)
+
+// 迟到于结果的增量(读侧被中止时的竞态)不回填:回填会把那份可能上百 KB
+// 的字符串永远挂在节点上,而展示本来就走结果。
+const late = mod.foldEvents([toolCall, result, chunk(10, 'stdout', 'late')]).find((n) => n.kind === 'tool')
+check('迟到增量不回填', late.live, undefined)
+check('迟到增量不影响结果', late.result.content, '退出码: 0\n完成')
+
+const lateIncr = mod
+  .applyEnvelopes(mod.foldEvents([toolCall, result]), [chunk(10, 'stdout', 'late')])
+  .find((n) => n.kind === 'tool')
+check('增量路径:迟到增量同样不回填', lateIncr.live, undefined)
+
+// 认不出的流名归入 stdout:界面上只有两处能显示,丢掉就是输出凭空消失。
+const oddStream = mod.foldEvents([toolCall, chunk(2, 'console', 'x')]).find((n) => n.kind === 'tool')
+check('未知流名归入 stdout', oddStream.live.stdout, 'x')
+
 console.log(failed === 0 ? '\nALL PASS' : `\n${failed} FAILED`)
 process.exit(failed === 0 ? 0 : 1)

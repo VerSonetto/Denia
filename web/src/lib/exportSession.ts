@@ -136,6 +136,8 @@ function headLine(envelope: SessionEnvelope): string {
       return `tool-call · ${envelope.name} · call_id=${envelope.call_id}`
     case 'tool-result':
       return `tool-result · call_id=${envelope.call_id}${envelope.is_error ? ' · FAILED' : ''}`
+    case 'tool-output-chunk':
+      return `tool-output-chunk · ${envelope.stream} · call_id=${envelope.call_id} · ${envelope.text.length} 字符`
     case 'todo-write':
       return `todo-write · ${envelope.todos.length} 项`
     case 'permission-mode':
@@ -209,6 +211,18 @@ function eventBody(envelope: SessionEnvelope): string {
       lines.push('```')
       lines.push('')
       lines.push('</details>')
+      return lines.join('\n')
+    case 'tool-output-chunk':
+      // 实时增量:只服务"命令还在跑"的观感,正文以随后的 tool-result 为准 ——
+      // 导出里保留原文即可,不必再解释。它与 assistant-chunk 同属高频帧,
+      // 会话日志里可能积很多条。
+      lines.push(
+        `- ${envelope.stream}(+${envelope.text.length} 字符,实时增量;正文以 tool-result 为准):`,
+      )
+      lines.push('')
+      lines.push('```')
+      lines.push(fenceSafe(envelope.text))
+      lines.push('```')
       return lines.join('\n')
     case 'assistant-chunk':
       lines.push(`- chunk: ${describeChunk(envelope.chunk)}`)

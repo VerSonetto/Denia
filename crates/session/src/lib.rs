@@ -460,15 +460,22 @@ fn anchor_preview(text: &str) -> String {
     format!("{cut}…")
 }
 
-/// 临时流事件(chunk):高频、体量大、只服务实时流式回放。
+/// 临时流事件:高频、体量大、只服务实时流式回放。
 ///
-/// 内存事件表**不驻留已闭合轮次的 chunk** —— 派生面(token-meter 与
+/// 内存事件表**不驻留已闭合轮次的临时事件** —— 派生面(token-meter 与
 /// `derive_surface`)只折叠 user/assistant/tool-result,闭环轮次的历史
 /// 重建只依赖结算的 `assistant-message`(与分页端点的展示粒度同口径),
-/// chunk 只在当前未结算步骤里驻留,消息结算或 `turn-end` 时清扫。日志文件
-/// 仍完整记录每一条(append-only 不变)。
+/// 临时事件只在当前未结算的步骤里驻留,消息结算或 `turn-end` 时清扫。日志
+/// 文件仍完整记录每一条(append-only 不变)。
+///
+/// 判定只有这一处:凡是"只服务实时观感、不进模型历史"的高频事件都登记在
+/// 这里,分页(`store::read_page`)与加载(`recovery`)都按它过滤 —— 新增
+/// 这类事件时不必再去各处补 `matches!`。
 fn is_transient_event(event: &SessionEvent) -> bool {
-    matches!(event, SessionEvent::AssistantChunk { .. })
+    matches!(
+        event,
+        SessionEvent::AssistantChunk { .. } | SessionEvent::ToolOutputChunk { .. }
+    )
 }
 
 fn usage_envelope(envelope: &SessionEnvelope) -> Option<SessionEnvelope> {
@@ -2168,6 +2175,72 @@ mod tests {
             })
             .unwrap();
         assert_eq!(envelope.seq, 5);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// 工具的实时输出增量是 transient:只服务"命令还在跑"的观感 ——
+    /// 不进派生历史、不占分页位次、轮次闭合即从内存回收,而日志里必须
+    /// 一条不少(append-only 是日志作为唯一真相的前提)。
+    #[test]
+    fn tool_output_chunks_stay_out_of_history_and_paging_but_stay_in_the_log() {
+        let root = temp_root();
+        let store = SessionStore::open(&root).unwrap();
+        let cwd = root.join("work");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let session = store.create(&cwd, true).unwrap();
+        let id = session.id().to_string();
+
+        session.append(SessionEvent::TurnStart { turn: 1 }).unwrap();
+        session
+            .append(SessionEvent::UserMessage {
+                text: "跑一下".into(),
+                injected: false,
+                images: Vec::new(),
+                channel: None,
+            })
+            .unwrap();
+        for text in ["line1\n", "line2\n"] {
+            session
+                .append(SessionEvent::ToolOutputChunk {
+                    call_id: "call-1".into(),
+                    stream: "stdout".into(),
+                    text: text.into(),
+                })
+                .unwrap();
+        }
+        session
+            .append(SessionEvent::TurnEnd {
+                turn: 1,
+                reason: TurnEndReason::Completed,
+            })
+            .unwrap();
+
+        assert_eq!(session.derive_messages().len(), 1, "只有用户消息进模型历史");
+        assert!(
+            !session
+                .events()
+                .iter()
+                .any(|envelope| matches!(envelope.event, SessionEvent::ToolOutputChunk { .. })),
+            "闭环轮次的临时事件不该继续驻留内存"
+        );
+
+        drop(session);
+        let page = store.read_page(&id, None, 50).unwrap();
+        assert!(
+            !page
+                .events
+                .iter()
+                .any(|envelope| matches!(envelope.event, SessionEvent::ToolOutputChunk { .. })),
+            "分页的展示粒度不该被实时增量撑开"
+        );
+        assert_eq!(page.total, 3, "展示事件只有 turn-start/user/turn-end");
+
+        let raw = std::fs::read_to_string(store.root().join(&id).join("session.jsonl")).unwrap();
+        assert_eq!(
+            raw.matches("tool-output-chunk").count(),
+            2,
+            "日志里必须完整保留每一条(append-only)"
+        );
         std::fs::remove_dir_all(&root).unwrap();
     }
 }

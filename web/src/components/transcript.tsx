@@ -24,7 +24,9 @@ import {
   cleanToolOutput,
   cleanBashCommand,
   bashOutputParts,
+  liveBashOutput,
   parseArgsObject,
+  type BashOutput,
   type EditDiffs,
 } from '../toolDisplay'
 import { DiffCard, DiffStat } from './DiffCard'
@@ -737,6 +739,9 @@ function skillLoadBody(name: string, content: string, isError: boolean): string 
   }
 }
 
+/** 共享的空输出:每次渲染新建对象会让 `BashCard` 的 memo 形同虚设。 */
+const EMPTY_BASH_OUTPUT: BashOutput = { stdout: '' }
+
 function ToolRow({
   node,
   onAskAnswer,
@@ -792,10 +797,12 @@ function ToolRow({
     () => (node.name === 'bash' ? bashCommand(node.args) : null),
     [node.name, node.args],
   )
-  const bashOut = useMemo(
-    () => (node.name === 'bash' && outBody !== null ? bashOutputParts(outBody) : null),
-    [node.name, outBody],
-  )
+  const bashOut = useMemo<BashOutput | null>(() => {
+    if (node.name !== 'bash') return null
+    // 结束后以结果的首尾预览为准;还在跑时用实时增量(见 fold 的 live)。
+    if (outBody !== null) return bashOutputParts(outBody)
+    return node.live ? liveBashOutput(node.live) : null
+  }, [node.name, outBody, node.live])
   // 成功时卡片(diff / 清单 / bash 引用)已经把"改了什么"说全了,不再重复
   // out 那句结果文案;失败时保留 out(错误原因要看得见)。
   const showOut =
@@ -917,8 +924,9 @@ function ToolRow({
             // bash:命令 + 输出走"引用"形态(无底色卡片,靠竖线分组)。
             <BashCard
               command={commandBody}
-              output={bashOut ?? { stdout: '' }}
+              output={bashOut ?? EMPTY_BASH_OUTPUT}
               exitCode={exitCode}
+              running={running}
             />
           ) : (
             !todos &&
