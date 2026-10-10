@@ -1,17 +1,38 @@
 import { memo, useEffect, useMemo, useRef, useState } from 'react'
 import { t } from '../i18n'
 import type { TranscriptNode } from '../fold'
+import type { SessionTotals } from '../types'
 import { cacheHitPercent, deriveStats, formatCompactDuration, formatTokens } from '../stats'
 
 /**
  * 输入框下方的会话状态栏 —— Denia 自有设计:分段胶囊条。
  * 每个统计维度一个迷你胶囊(图标+数值),横向排列;
- * 运行中状态由消息流末尾的「工作中」指示行承担,这里只放已结算统计。
  * 上下文占用只住在输入框的占用圆环(ContextRing),一处事实一处家。
  * 无数据的胶囊整组消失;全部无数据时不渲染。
+ *
+ * 累计口径(轮次/步数/工具数/耗时/token)吃服务端对**整份日志**的投影
+ * (`totals`),不再按当前加载窗口折叠 —— 分页只给尾部窗口,按窗口折叠会在
+ * 刷新、翻页、长会话实时裁剪后缩水。耗时再叠加进行中轮次的实时值(它没有
+ * turn-end,两侧都不计),所以运行中数字也在走。首 token 延迟与吞吐是均值,
+ * 仍按窗口。运行中状态本身由消息流末尾的「工作中」指示行承担。
  */
-export const StatsBar = memo(function StatsBar({ nodes }: { nodes: TranscriptNode[] }) {
-  const stats = useMemo(() => deriveStats(nodes), [nodes])
+export const StatsBar = memo(function StatsBar({
+  nodes,
+  totals,
+  openTurnStartedAt = null,
+}: {
+  nodes: TranscriptNode[]
+  /** 全会话累计统计(服务端投影 + 实时增量);缺省时退化为按窗口折叠。 */
+  totals?: SessionTotals
+  /** 进行中轮次起点(epoch ms);有值时耗时胶囊按秒跳动。 */
+  openTurnStartedAt?: number | null
+}) {
+  const windowStats = useMemo(() => deriveStats(nodes), [nodes])
+  const now = useLiveClock(openTurnStartedAt !== null)
+  const liveMs = openTurnStartedAt === null ? 0 : Math.max(0, now - openTurnStartedAt)
+  const stats = totals === undefined
+    ? { ...windowStats, turnMs: windowStats.turnMs + liveMs }
+    : { ...windowStats, ...totals, turnMs: totals.turnMs + liveMs }
 
   const hasActivity = stats.steps > 0 || stats.toolCalls > 0
   const hasTokens = stats.inputTokens > 0 || stats.outputTokens > 0
@@ -61,6 +82,21 @@ export const StatsBar = memo(function StatsBar({ nodes }: { nodes: TranscriptNod
     </div>
   )
 })
+
+/**
+ * 秒级时钟:只有存在进行中轮次时才装定时器,空闲会话零定时器零重渲染。
+ * 锚点用服务端事件时刻(与「工作中」指示行同源),不随重挂载丢失。
+ */
+function useLiveClock(active: boolean): number {
+  const [now, setNow] = useState(() => Date.now())
+  useEffect(() => {
+    if (!active) return
+    setNow(Date.now())
+    const interval = window.setInterval(() => setNow(Date.now()), 1000)
+    return () => window.clearInterval(interval)
+  }, [active])
+  return now
+}
 
 /** 通用胶囊。 */
 function Pill({ label, title, mono }: { label: string; title: string; mono?: boolean }) {

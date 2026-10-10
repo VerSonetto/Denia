@@ -535,6 +535,57 @@ fn next_log_event(
     }
 }
 
+/// 全会话累计统计:整份日志折叠出的展示总量,与分页窗口无关。
+///
+/// 口径与前端 `deriveStats`(`web/src/stats.ts`)逐项对齐 —— 轮次/耗时看
+/// `turn-start`→`turn-end` 配对,步数与 token 看结算的 `assistant-message`,
+/// 工具次数看 `tool-call`。带上它是因为分页只给窗口:前端若自己从窗口折叠,
+/// 刷新、翻页、长会话的实时裁剪都会让状态栏的累计数字缩水。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionTotals {
+    /// 已闭合轮次的墙钟时长之和(毫秒)。
+    pub turn_ms: u64,
+    pub turns: u64,
+    pub steps: u64,
+    pub tool_calls: u64,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cache_read_tokens: u64,
+    pub reasoning_tokens: u64,
+}
+
+impl SessionTotals {
+    /// 折叠一条日志事件。`open_turn` 是跨事件保持的配对状态(未闭合轮次的
+    /// turn 号与起点时刻),由调用方持有。
+    pub fn fold(&mut self, envelope: &SessionEnvelope, open_turn: &mut Option<(u32, u64)>) {
+        match &envelope.event {
+            SessionEvent::TurnStart { turn } => *open_turn = Some((*turn, envelope.time)),
+            SessionEvent::TurnEnd { turn, .. } => {
+                // 配不上起点(截断遗留)只丢这一轮的时长,不编造。
+                if let Some((started, at)) = *open_turn
+                    && started == *turn
+                {
+                    self.turns += 1;
+                    self.turn_ms += envelope.time.saturating_sub(at);
+                }
+                *open_turn = None;
+            }
+            SessionEvent::AssistantMessage { usage, .. } => {
+                self.steps += 1;
+                if let Some(usage) = usage {
+                    self.input_tokens += usage.input_tokens;
+                    self.output_tokens += usage.output_tokens;
+                    self.cache_read_tokens += usage.cache_read_tokens.unwrap_or(0);
+                    self.reasoning_tokens += usage.reasoning_tokens.unwrap_or(0);
+                }
+            }
+            SessionEvent::ToolCall { .. } => self.tool_calls += 1,
+            _ => {}
+        }
+    }
+}
+
 /// 一次分页读取的会话事件窗口:只保留 `limit` 条,后端不驻留全量历史。
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct SessionPage {
@@ -544,6 +595,8 @@ pub struct SessionPage {
     pub has_more_before: bool,
     /// 全会话非注入 user-message 锚点(与 `before` 无关,恒为全量)。
     pub anchors: Vec<SessionAnchor>,
+    /// 全会话累计统计(与 `before`/`limit` 无关,恒为全量)。
+    pub totals: SessionTotals,
 }
 
 /// 索引条目:启动/失效时从文件摘要得到,list 只读它。
@@ -1925,6 +1978,194 @@ mod tests {
             })
             .unwrap();
         assert_eq!(session.events_after(1002).len(), 1);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// Bug 回归:结算消息与工具调用必须在等待工具执行前就落盘。
+    ///
+    /// 客户端断线重快照读的是磁盘分页(`store::read_page`,过滤 transient)。
+    /// 这两个事件若还留在 BufWriter 里,工具执行期间的一次重连就会把刚结算的
+    /// 正文和工具行从视图里抹掉,直到 ToolResult(原本的 flush 点)才追回来 ——
+    /// 用户看到的就是"AI 输出完一调工具,前面那段就没了"。
+    #[test]
+    fn settle_and_tool_call_reach_disk_before_tool_result() {
+        let root = temp_root();
+        let store = SessionStore::open(&root).unwrap();
+        let cwd = root.join("work");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let session = store.create(&cwd, true).unwrap();
+        let id = session.id().to_string();
+        session.append(SessionEvent::TurnStart { turn: 1 }).unwrap();
+        for _ in 0..64 {
+            session
+                .append(SessionEvent::AssistantChunk {
+                    turn: 1,
+                    step: 1,
+                    chunk: denia_core::stream::StreamChunk::TextDelta {
+                        index: 0,
+                        text: "fragment".into(),
+                    },
+                })
+                .unwrap();
+        }
+        session
+            .append(SessionEvent::AssistantMessage {
+                turn: 1,
+                step: 1,
+                blocks: vec![ContentBlock::Text {
+                    text: "settled".into(),
+                }],
+                usage: None,
+                interrupted: false,
+                source_event_seqs: Vec::new(),
+                first_token_time: None,
+            })
+            .unwrap();
+        session
+            .append(SessionEvent::ToolCall {
+                turn: 1,
+                step: 1,
+                call_id: "call-1".into(),
+                name: "bash".into(),
+                arguments: r#"{"command":"sleep 60"}"#.into(),
+            })
+            .unwrap();
+        // 工具还在跑(尚无 ToolResult);此处不显式 flush,模拟重连后的分页读取。
+        let page = store.read_page(&id, None, 100).unwrap();
+        assert!(
+            page.events.iter().any(|envelope| matches!(
+                &envelope.event,
+                SessionEvent::AssistantMessage { blocks, .. }
+                    if blocks.iter().any(|block| matches!(block, ContentBlock::Text { text } if text == "settled"))
+            )),
+            "结算消息必须在工具执行前对磁盘读者可见"
+        );
+        assert!(
+            page.events
+                .iter()
+                .any(|envelope| matches!(&envelope.event, SessionEvent::ToolCall { call_id, .. } if call_id == "call-1")),
+            "工具调用行必须在工具执行前对磁盘读者可见"
+        );
+        drop(session);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// 累计统计:折叠整份日志,且不受分页 `before`/`limit` 影响。
+    ///
+    /// 前端状态栏直接吃它当基准 —— 只按窗口折叠的话,刷新/翻页/长会话裁剪
+    /// 都会让耗时、轮次、token 这些累计值缩水。
+    #[test]
+    fn read_page_totals_fold_whole_log_regardless_of_window() {
+        let root = temp_root();
+        let store = SessionStore::open(&root).unwrap();
+        let cwd = root.join("work");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let session = store.create(&cwd, true).unwrap();
+        let id = session.id().to_string();
+        let usage = |input: u64, output: u64, cache: Option<u64>, reasoning: Option<u64>| {
+            denia_core::stream::TokenUsage {
+                input_tokens: input,
+                output_tokens: output,
+                cache_read_tokens: cache,
+                reasoning_tokens: reasoning,
+            }
+        };
+        let message = |turn: u32, step: u32, usage| SessionEvent::AssistantMessage {
+            turn,
+            step,
+            blocks: vec![ContentBlock::Text {
+                text: "答复".into(),
+            }],
+            usage,
+            interrupted: false,
+            source_event_seqs: Vec::new(),
+            first_token_time: None,
+        };
+
+        // 轮次 1:1000 → 4000(3s),1 结算(10/5,缓存 2,推理 1),1 工具调用。
+        session
+            .append_with_time(SessionEvent::TurnStart { turn: 1 }, 1000)
+            .unwrap();
+        session
+            .append_with_time(
+                SessionEvent::UserMessage {
+                    text: "第一个问题".into(),
+                    injected: false,
+                    images: Vec::new(),
+                    channel: None,
+                },
+                1100,
+            )
+            .unwrap();
+        session
+            .append_with_time(
+                SessionEvent::AssistantChunk {
+                    turn: 1,
+                    step: 1,
+                    chunk: denia_core::stream::StreamChunk::TextDelta {
+                        index: 0,
+                        text: "chunk".into(),
+                    },
+                },
+                2000,
+            )
+            .unwrap();
+        session
+            .append_with_time(message(1, 1, Some(usage(10, 5, Some(2), Some(1)))), 3000)
+            .unwrap();
+        session
+            .append_with_time(
+                SessionEvent::ToolCall {
+                    turn: 1,
+                    step: 1,
+                    call_id: "call-1".into(),
+                    name: "bash".into(),
+                    arguments: "{}".into(),
+                },
+                3100,
+            )
+            .unwrap();
+        session
+            .append_with_time(
+                SessionEvent::TurnEnd {
+                    turn: 1,
+                    reason: TurnEndReason::Completed,
+                },
+                4000,
+            )
+            .unwrap();
+        // 轮次 2:5000 → 6500(1.5s),1 结算(20/7,无缓存/推理)。
+        session
+            .append_with_time(SessionEvent::TurnStart { turn: 2 }, 5000)
+            .unwrap();
+        session
+            .append_with_time(message(2, 1, Some(usage(20, 7, None, None))), 6000)
+            .unwrap();
+        session
+            .append_with_time(
+                SessionEvent::TurnEnd {
+                    turn: 2,
+                    reason: TurnEndReason::Completed,
+                },
+                6500,
+            )
+            .unwrap();
+        drop(session);
+
+        let page = store.read_page(&id, None, 100).unwrap();
+        assert_eq!(page.totals.turn_ms, 4500);
+        assert_eq!(page.totals.turns, 2);
+        assert_eq!(page.totals.steps, 2);
+        assert_eq!(page.totals.tool_calls, 1);
+        assert_eq!(page.totals.input_tokens, 30);
+        assert_eq!(page.totals.output_tokens, 12);
+        assert_eq!(page.totals.cache_read_tokens, 2);
+        assert_eq!(page.totals.reasoning_tokens, 1);
+
+        // 分页窗口只影响 events,统计恒为全会话。
+        let windowed = store.read_page(&id, Some(7), 1).unwrap();
+        assert!(windowed.events.len() < page.events.len());
+        assert_eq!(windowed.totals, page.totals);
         std::fs::remove_dir_all(&root).unwrap();
     }
 

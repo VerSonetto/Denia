@@ -1,9 +1,10 @@
 import * as api from './api'
 import type { SessionAnchor } from './api'
-import type { SessionEnvelope, SessionHeader } from './types'
+import type { SessionEnvelope, SessionHeader, SessionTotals } from './types'
 import { isPushDead, setPushDead } from './pushChannel'
 import { POLL_HOLD_SEC, pollSessionFollow } from './pushTransport'
 import { SESSION_PAGE_LIMIT } from './sessionMemory'
+import { totalsFromPage } from './stats'
 
 /**
  * 会话事件流引擎(每会话一个状态机)。
@@ -46,6 +47,11 @@ export interface SessionPageMeta {
   hasMoreBefore: boolean
   /** 全会话非注入 user-message 锚点(轮次轴刻度)。 */
   anchors: SessionAnchor[]
+  /**
+   * 全会话累计统计(服务端对整份日志的投影):分页窗口里没有早期轮次,
+   * 状态栏的累计值必须以它为基准,再叠加后续实时帧。
+   */
+  totals: SessionTotals
 }
 
 export interface SessionStreamListener {
@@ -159,6 +165,7 @@ function reconnect(id: string, state: StreamState) {
         total: data.total,
         hasMoreBefore: data.hasMoreBefore,
         anchors: data.anchors ?? [],
+        totals: totalsFromPage(data.totals),
       }
       for (const listener of state.listeners) {
         listener.onSnapshot(data.header, data.events, meta)
@@ -230,15 +237,33 @@ function openFollow(id: string, state: StreamState, gen: number) {
       if (state.dead || gen !== state.generation) return
       scheduleRetry(id, state)
     },
+    // 心跳也是帧:它到达就说明链路活着,刷新看门狗依据(否则工具静默执行
+    // 几十秒会被误判成断线,重连又把进行中的那一段推倒重来)。
+    () => {
+      state.lastFrameAt = now()
+    },
   )
   state.controller = controller
-  // watchdog:32 秒无帧(SSE 心跳 15 秒一次,说明通道死了)→ 主动断、重连。
-  // 关键是同时把降级决定权交给 pushChannel:只重连不换传输,就还是每 32 秒
-  // 白跑一趟 —— 那正是"AI 早回完了、手机上几十秒才跳出来"的成因。
+  // watchdog:32 秒连心跳都没有(SSE 心跳 15 秒一次,说明通道死了)→ 主动断、
+  // 重连,并把降级决定权交给 pushChannel:只重连不换传输,就还是每 32 秒白跑
+  // 一趟 —— 那正是"AI 早回完了、手机上几十秒才跳出来"的成因。
+  armWatchdog(id, state, gen)
+}
+
+/**
+ * 装看门狗:每 32 秒查一次"最近 30 秒有没有收到过帧(含心跳)"。
+ * 帧新鲜就续装下一轮,而不是像一次性定时器那样在连接 32 秒后永久失去
+ * 活性监视;只有真正静默才断流重连。
+ */
+function armWatchdog(id: string, state: StreamState, gen: number) {
+  if (state.dead || gen !== state.generation) return
   state.watchdogTimer = window.setTimeout(() => {
     state.watchdogTimer = null
     if (state.dead || gen !== state.generation) return
-    if (now() - state.lastFrameAt <= 30_000) return
+    if (now() - state.lastFrameAt <= 30_000) {
+      armWatchdog(id, state, gen)
+      return
+    }
     setPushDead(true)
     abortAndNull(state)
     scheduleRetry(id, state)

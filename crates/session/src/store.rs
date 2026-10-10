@@ -241,6 +241,8 @@ impl SessionStore {
     ///   成对的 turn-start/turn-end;边界落在首条锚点之前时直接用边界。
     /// - `anchors` 恒为全会话非注入 user-message(不受 `before` 限制),供
     ///   前端轮次轴渲染全部刻度。
+    /// - `totals` 恒为全会话累计统计(同样不受 `before`/`limit` 限制):窗口
+    ///   里没有早期轮次,前端若只从窗口折叠,刷新/翻页后状态栏数字就会缩水。
     /// - 两遍顺序扫描:窗口起点依赖文件末尾才能确定的边界,单遍需无界缓存;
     ///   两遍只引入一次顺序 IO,内存 O(锚点数 + 窗口)。
     pub fn read_page(
@@ -256,8 +258,8 @@ impl SessionStore {
         let limit = limit.clamp(1, 1000);
         let eligible = |seq: u64| before.is_none_or(|cut| seq < cut);
 
-        // 第一遍:统计展示事件总数、收集全会话锚点,并记录每个 eligible 锚点
-        // 的展示位次(供起点回退二分)。
+        // 第一遍:统计展示事件总数、收集全会话锚点与累计统计,并记录每个
+        // eligible 锚点的展示位次(供起点回退二分)。
         let mut reader = BufReader::new(File::open(&file)?);
         let mut header: Option<SessionHeader> = None;
         let mut line = String::new();
@@ -266,9 +268,14 @@ impl SessionStore {
         let mut anchors: Vec<SessionAnchor> = Vec::new();
         // (展示位次, seq):展示位次按 eligible 展示事件序号计。
         let mut anchor_at: Vec<(u64, u64)> = Vec::new();
+        // 累计统计:吃整份日志(不受 `before`/`limit` 与 transient 过滤影响),
+        // 前端刷新/翻页后状态栏的累计数字才不会缩水。
+        let mut totals = SessionTotals::default();
+        let mut open_turn: Option<(u32, u64)> = None;
         while let Some(envelope) =
             next_log_event(&mut reader, &mut header, &mut line, &mut line_no)?
         {
+            totals.fold(&envelope, &mut open_turn);
             if is_transient_event(&envelope.event) {
                 continue;
             }
@@ -326,6 +333,7 @@ impl SessionStore {
             total,
             has_more_before: start_index > 0,
             anchors,
+            totals,
         })
     }
 

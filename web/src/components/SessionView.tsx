@@ -5,6 +5,7 @@ import { applyEnvelopes, foldEvents } from '../fold'
 import type { TranscriptNode } from '../fold'
 import { t } from '../i18n'
 import { attach, type SessionPageMeta } from '../sessionStreams'
+import { emptyTotals } from '../stats'
 import type { AskAnswer, SessionEnvelope, TodoItem, UserMessageImage } from '../types'
 import type { TrajectoryQuote } from '../trajectory'
 import { Transcript } from './transcript'
@@ -128,7 +129,7 @@ export function SessionView({
   const [cwd, setCwd] = useState<string | null>(null)
   // 原始事件流:轨迹视图的 fold 源(与 transcript 共用一次订阅)。
   const [events, setEvents] = useState<SessionEnvelope[]>([])
-  const [pageMeta, setPageMeta] = useState<SessionPageMeta>({ total: 0, hasMoreBefore: false, anchors: [] })
+  const [pageMeta, setPageMeta] = useState<SessionPageMeta>({ total: 0, hasMoreBefore: false, anchors: [], totals: emptyTotals() })
   const [loadingOlder, setLoadingOlder] = useState(false)
   const olderRequestRef = useRef<AbortController | null>(null)
   const [loading, setLoading] = useState(true)
@@ -264,7 +265,7 @@ export function SessionView({
         olderRequestRef.current = null
         setLoadingOlder(false)
         queueRef.current = []
-        const pageInfo = meta ?? { total: snapshot.length, hasMoreBefore: false, anchors: [] }
+        const pageInfo = meta ?? { total: snapshot.length, hasMoreBefore: false, anchors: [], totals: emptyTotals() }
         accRef.current = snapshot.slice()
         eventsRef.current = snapshot
         setEvents(snapshot)
@@ -347,6 +348,8 @@ export function SessionView({
         hasMoreBefore: page.hasMoreBefore,
         anchors: [...new Map([...(page.anchors ?? []), ...pageMetaRef.current.anchors]
           .map((anchor) => [anchor.seq, anchor])).values()].sort((left, right) => left.seq - right.seq),
+        // 累计统计是全会话口径,向上翻页拿的还是同一份,不因翻页变化。
+        totals: pageMetaRef.current.totals,
       }
       pageMetaRef.current = pageInfo
       setPageMeta(pageInfo)

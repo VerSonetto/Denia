@@ -2161,6 +2161,134 @@ async fn plan_mode_denies_writes_and_keeps_tool_face_stable() {
     assert!(names.iter().any(|n| n == "edit"), "{names:?}");
 }
 
+/// 工具执行期间的磁盘探针:在 `execute` 里读**磁盘分页**(客户端断线重快照
+/// 走的就是 `SessionStore::read_page`),记录那一刻能看到的展示事件。
+struct PageProbeTool {
+    store: Arc<denia_session::SessionStore>,
+    id: String,
+    pages: Arc<Mutex<Vec<Vec<&'static str>>>>,
+}
+
+#[async_trait]
+impl denia_tools::Tool for PageProbeTool {
+    fn schema(&self) -> &ToolSchema {
+        Box::leak(Box::new(ToolSchema {
+            name: "page_probe".to_string(),
+            description: "snapshots the on-disk session page while it runs".to_string(),
+            parameters: serde_json::json!({ "type": "object" }),
+        }))
+    }
+
+    async fn execute(
+        &self,
+        _arguments: &str,
+        _ctx: &denia_tools::ToolContext,
+    ) -> denia_tools::ToolOutput {
+        let page = self.store.read_page(&self.id, None, 200).unwrap();
+        let seen = page
+            .events
+            .iter()
+            .map(|envelope| match &envelope.event {
+                SessionEvent::AssistantMessage { .. } => "assistant-message",
+                SessionEvent::ToolCall { .. } => "tool-call",
+                _ => "other",
+            })
+            .collect();
+        self.pages.lock().unwrap().push(seen);
+        denia_tools::ToolOutput {
+            artifact: None,
+            content: "probe:ok".to_string(),
+            is_error: false,
+        }
+    }
+}
+
+/// Bug 回归:模型输出完并转工具调用后,工具执行期间的磁盘分页必须已经包含
+/// 结算消息与工具行。
+///
+/// 客户端对 seq 断档的自愈是"整份重拉磁盘分页再 fold";这两个事件若等到
+/// ToolResult/turn-end(旧的 flush 点)才落盘,工具跑多久,刚输出的正文与
+/// 工具行就从视图里消失多久 —— 用户看到"AI 一调工具,前面那段就没了"。
+#[tokio::test]
+async fn disk_page_has_settle_and_tool_call_while_the_tool_runs() {
+    let root = std::env::temp_dir().join(format!("denia-loop-page-probe-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&root).unwrap();
+    let store = Arc::new(denia_session::SessionStore::open(&root).unwrap());
+    let session = Arc::new(store.create(&root, true).unwrap());
+    let id = session.id().to_string();
+    let pages = Arc::new(Mutex::new(Vec::new()));
+    let probe_pages = pages.clone();
+    let probe_store = store.clone();
+    let (driver, _registry) = driver_with_tools(
+        vec![
+            // 同一个 step:先输出正文,再发起工具调用(正是被吞掉的那一段)。
+            MockScript::Chunks(vec![
+                StreamChunk::BlockStart {
+                    index: 0,
+                    block_type: BlockType::Text,
+                },
+                StreamChunk::TextDelta {
+                    index: 0,
+                    text: "正文".to_string(),
+                },
+                StreamChunk::BlockEnd {
+                    index: 0,
+                    block: ContentBlock::Text {
+                        text: "正文".to_string(),
+                    },
+                },
+                StreamChunk::BlockStart {
+                    index: 1,
+                    block_type: BlockType::ToolCall,
+                },
+                StreamChunk::ToolCallDelta {
+                    index: 1,
+                    id: "call_probe".to_string(),
+                    name: Some("page_probe".to_string()),
+                    arguments_delta: "{}".to_string(),
+                },
+                StreamChunk::BlockEnd {
+                    index: 1,
+                    block: ContentBlock::ToolCall {
+                        id: "call_probe".to_string(),
+                        name: "page_probe".to_string(),
+                        arguments: "{}".to_string(),
+                        incomplete: false,
+                    },
+                },
+                StreamChunk::Finish {
+                    reason: FinishReason::ToolCalls,
+                },
+            ]),
+            MockScript::Chunks(text_script("done")),
+        ],
+        move |tools| {
+            tools.register(Arc::new(PageProbeTool {
+                store: probe_store,
+                id,
+                pages: probe_pages,
+            }));
+        },
+    );
+    run_simple_turn(&driver, &session, "跑一下探针").await;
+
+    let pages = pages.lock().unwrap();
+    assert_eq!(pages.len(), 1, "探针工具应执行一次");
+    assert!(
+        pages[0].contains(&"assistant-message"),
+        "工具执行期间磁盘分页就该有结算消息:{:?}",
+        pages[0]
+    );
+    assert!(
+        pages[0].contains(&"tool-call"),
+        "工具执行期间磁盘分页就该有工具行:{:?}",
+        pages[0]
+    );
+    drop(pages);
+    drop(session);
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 #[tokio::test]
 async fn exit_plan_outside_plan_mode_is_denied_without_approval() {
     // 非计划档调用 exit_plan:权限引擎直接拒绝(不弹审批卡),模型拿

@@ -116,8 +116,18 @@ export async function consoleDefaultPermission(): Promise<PermissionMode> {
   }
 }
 
-/** 从事件流反向找最近一次请求头,恢复该会话最后实际使用的模型。 */
+/**
+ * 从事件流反向找最近一次请求头,恢复该会话最后实际使用的模型与思考强度。
+ *
+ * 必须**跳过 `request-context` 继续往前找**:后端每个 step 的写入顺序是
+ * `request-header` → `request-context`(见 agent-loop 的 log_request_headers),
+ * 反向扫描第一条永远是只带路由元数据的 context;谁先扫到谁返回的话,模型名
+ * 两边都有(看着没坏),思考强度却永远恢复不出来,再经 normalizeSelection
+ * 回落到最高档 —— 表现就是切一次会话强度就跳一次 max。
+ * 老日志可能整份都没有 header,那时才用最近的 context 兜底(无强度可恢复)。
+ */
 export function latestRequestSelection(events: SessionEnvelope[]): ModelSelection | null {
+  let fallback: ModelSelection | null = null
   for (let index = events.length - 1; index >= 0; index -= 1) {
     const event = events[index]
     if (event.type === 'request-header') {
@@ -125,13 +135,12 @@ export function latestRequestSelection(events: SessionEnvelope[]): ModelSelectio
       if (!provider || !model) return null
       return { provider, model, reasoningEffort }
     }
-    if (event.type === 'request-context') {
-      // 老日志可能只有 request-context(路由元数据),无思考强度可恢复。
+    if (event.type === 'request-context' && fallback === null) {
       if (!event.provider || !event.model) return null
-      return { provider: event.provider, model: event.model }
+      fallback = { provider: event.provider, model: event.model }
     }
   }
-  return null
+  return fallback
 }
 
 /** 从事件流恢复仍未结算的审批请求(approval-asked 未被对应 decided 关闭)。 */

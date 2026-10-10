@@ -12,7 +12,7 @@ import { addSessionLocal, ensureSession, getActiveWorkspace, markStarted, notify
 import { t } from '../i18n';
 import { attach, ensureFollowing, invalidateSession } from '../sessionStreams';
 import { sessionDisplayTitle, subagentSnapshotText } from '../sessionDisplay';
-import type { TranscriptNode } from '../fold';
+import { openTurnStartedAt, type TranscriptNode } from '../fold';
 import type { TrajectoryQuote } from '../trajectory';
 import { SessionView } from '../components/SessionView';
 import { AgentPresetSelector } from '../components/AgentPresetSelector';
@@ -38,13 +38,13 @@ import { collectSkillTokens, parseLeadingCommand } from './slash';
 import { selectRange, selectionOffsetsIn, serializeEditor, setCaretOffset } from './editor';
 import { formatFileMention } from './mention';
 import { insertReferenceAt, REFERENCE_MIME } from '../fileTree';
-import { formatTokens } from '../stats';
+import { applyTotalsEvent, emptyTotals, formatTokens, resetTotals, totalsFromPage, type TotalsAccumulator } from '../stats';
 import { TodoPanel } from '../components/TodoPanel';
 import { GoalBar } from '../components/GoalBar';
 import { QueuedMessagePanel } from '../components/QueuedMessagePanel';
 import { ConversationAxis } from '../components/ConversationAxis';
 import { downloadFile, serializeSession, type ExportFormat } from '../lib/exportSession';
-import type { AskAnswer, CatalogModel, ModelCatalog, ModelSelection, PermissionMode, SessionSummary, TodoItem, QueuedMessage, UserMessageImage, WorkspaceRecord } from '../types';
+import type { AskAnswer, CatalogModel, ModelCatalog, ModelSelection, PermissionMode, SessionSummary, SessionTotals, TodoItem, QueuedMessage, UserMessageImage, WorkspaceRecord } from '../types';
 import { normalizePermissionMode } from '../types';
 import { isGenericImageName } from '../userImages';
 import { setModelSelection as setSharedModelSelection } from '../modelSelectionStore';
@@ -129,6 +129,11 @@ export default function SessionsPage({
   // (StatsBar 这类只吃统计的下游不需要 60Hz),其余时刻由 nodesRef 承载
   // 最新值给异步逻辑(回退找节点等)读。
   const [transcriptNodes, setTranscriptNodes] = useState<TranscriptNode[]>([])
+  // 状态栏累计统计:服务端对整份会话日志的投影当基准(随分页 meta 到达),
+  // 之后只叠加实时帧 —— 分页窗口里没有早期轮次,自己按窗口折叠会在刷新、
+  // 翻页、长会话实时裁剪时缩水。
+  const [sessionTotals, setSessionTotals] = useState<SessionTotals>(() => emptyTotals())
+  const totalsRef = useRef<TotalsAccumulator>({ totals: emptyTotals(), openTurns: new Map() })
   const nodesRef = useRef<TranscriptNode[]>([])
   const nodesThrottleRef = useRef<number | null>(null)
   const applyNodes = useCallback((nodes: TranscriptNode[], flush = false) => {
@@ -164,6 +169,8 @@ export default function SessionsPage({
     },
     [],
   )
+  /** 进行中轮次的起点:耗时胶囊据此实时跳动(闭合后自动归零)。 */
+  const openTurnAt = useMemo(() => openTurnStartedAt(transcriptNodes) ?? null, [transcriptNodes])
   // 全会话用户消息锚点(轮次轴刻度,来自分页响应,不受窗口限制)。
   const [axisAnchors, setAxisAnchors] = useState<api.SessionAnchor[]>([])
   // 轮次轴跳转请求:点击未加载刻度时递增 nonce 触发视图翻页定位。
@@ -314,6 +321,10 @@ export default function SessionsPage({
     closeMentionRef.current()
     nodesRef.current = []
     setTranscriptNodes([])
+    // 累计统计先清零,等新会话的分页 meta 重新给基准;否则会短暂显示上一
+    // 会话的耗时/token。
+    totalsRef.current = { totals: emptyTotals(), openTurns: new Map() }
+    setSessionTotals(emptyTotals())
     setAxisAnchors([])
     setAxisJump(null)
     setTodos([])
@@ -694,7 +705,11 @@ export default function SessionsPage({
     }
     restoredSelectionRef.current = null
     const unsubscribe = attach(activeId, {
-      onSnapshot: (_header, events) => {
+      onSnapshot: (_header, events, meta) => {
+        // 累计统计以服务端全会话投影为基准(分页窗口里没有早期轮次),
+        // 未闭合轮次表用页面事件重建;之后的重连重快照同样以新基准校正。
+        totalsRef.current = resetTotals(totalsFromPage(meta?.totals), events)
+        setSessionTotals({ ...totalsRef.current.totals })
         const mode = latestPermissionMode(events)
         if (mode) setPermission(mode)
         setApprovalReq(latestPendingApproval(events))
@@ -716,6 +731,10 @@ export default function SessionsPage({
         }
       },
       onEnvelope: (event) => {
+        // 累计统计的实时增量:结算/工具调用/轮次闭合才动累计值,流式帧不动。
+        if (applyTotalsEvent(totalsRef.current, event)) {
+          setSessionTotals({ ...totalsRef.current.totals })
+        }
         if (event.type === 'permission-mode') {
           setPermission(normalizePermissionMode(event.mode))
         } else if (event.type === 'approval-asked') {
@@ -2289,7 +2308,9 @@ export default function SessionsPage({
                   onExit={handlePlanExit}
                 />
               ) : activeSession?.subagent ? <div className="runtime-child-composer"><span>{t('runtimeChildReadonly')}</span><small className="runtime-child-snapshot" data-testid="child-snapshot" title={descriptorText}>{descriptorText}</small><button type="button" className="runtime-child-back-button" onClick={() => activeSession.parent_session && setActiveId(activeSession.parent_session, null)}>{t('runtimeBackParent')}</button></div> : composerCard}
-              {phase === 'active' && <StatsBar nodes={transcriptNodes} />}
+              {phase === 'active' && (
+                <StatsBar nodes={transcriptNodes} totals={sessionTotals} openTurnStartedAt={openTurnAt} />
+              )}
             </div>
           </div>
         )}

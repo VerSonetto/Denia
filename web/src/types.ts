@@ -224,6 +224,24 @@ export interface SessionSummary {
   agent_preset?: string
 }
 
+/**
+ * 全会话累计统计(服务端对整份日志的投影,见 Rust `denia_session::SessionTotals`)。
+ *
+ * 分页只给窗口,窗口里没有早期轮次 —— 状态栏的轮次/耗时/token 用它当基准,
+ * 再叠加实时帧,刷新/翻页/长会话裁剪才不会让累计数字缩水。
+ */
+export interface SessionTotals {
+  /** 已闭合轮次的墙钟时长之和(毫秒);进行中的轮次由界面加实时值。 */
+  turnMs: number
+  turns: number
+  steps: number
+  toolCalls: number
+  inputTokens: number
+  outputTokens: number
+  cacheReadTokens: number
+  reasoningTokens: number
+}
+
 /** agent preset 名册里的一行(随附或用户自定义)。 */
 export interface AgentPresetRow {
   id: string

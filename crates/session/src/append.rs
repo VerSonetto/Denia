@@ -47,8 +47,21 @@ impl Session {
         // 落盘策略:步骤边界/工具结果/todo 快照/权限切换立即 flush(耐久性
         // 边界——权限档位是安全语义,必须立即可被磁盘读者看到),流式 chunk
         // 只进 buffer,超 16KB 自动落盘(高频帧零系统调用)。
+        //
+        // 判据补充(界面一致性):凡是"已经完整呈现在界面上"或"会让本轮阻塞
+        // 等待(等工具跑完/等用户回答)"的事件,都必须在等待开始前落到磁盘 ——
+        // 断线重快照读的是磁盘分页(`store::read_page`),这类事件若还留在
+        // buffer 里,一次重连就会把刚结算的正文、工具行、待答卡片从视图里
+        // 抹掉,直到下一个 flush 点(ToolResult/TurnEnd)才追回来。结算消息与
+        // 工具调用同理:工具执行期间磁盘尾停在模型请求前,重建出来就没有它们。
         match &envelope.event {
-            SessionEvent::TurnEnd { .. }
+            SessionEvent::AssistantMessage { .. }
+            | SessionEvent::ToolCall { .. }
+            | SessionEvent::ApprovalAsked { .. }
+            | SessionEvent::ApprovalDecided { .. }
+            | SessionEvent::AskRequested { .. }
+            | SessionEvent::AskResolved { .. }
+            | SessionEvent::TurnEnd { .. }
             | SessionEvent::StepEnd { .. }
             | SessionEvent::ToolResult { .. }
             | SessionEvent::TodoWrite { .. }

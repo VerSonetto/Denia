@@ -12,6 +12,7 @@ import type {
   SessionEnvelope,
   SessionHeader,
   SessionSummary,
+  SessionTotals,
   SettingsDescribe,
   StreamChunk,
   SubagentCatalogView,
@@ -867,6 +868,8 @@ export interface SessionPageResponse {
   hasMoreBefore: boolean
   /** 全会话非注入 user-message 锚点(轮次轴刻度,不受分页窗口限制)。 */
   anchors: SessionAnchor[]
+  /** 全会话累计统计(轮次/耗时/token);旧后端不返回时按零值兜底。 */
+  totals?: Partial<SessionTotals>
 }
 
 /** 分页读取会话事件窗口:不经过全量快照,长会话首屏只拉尾部有限窗口。 */
@@ -1161,12 +1164,17 @@ export function cancelSession(id: string): Promise<unknown> {
 /**
  * Follows one session's live event stream after `after`; returns the abort
  * handle. The stream ends on server-side lag or close — callers re-snapshot.
+ *
+ * `onFrame` 对**每一个** SSE 帧触发(含心跳),供会话引擎的看门狗判定链路
+ * 活性:心跳也是服务端发来的帧,它到达就说明链路没死;只有连心跳都收不到
+ * 才算断(否则工具静默跑几十秒会被误判成断线)。
  */
 export function followSession(
   id: string,
   after: number,
   onEnvelope: (envelope: SessionEnvelope) => void,
   onEnd: () => void,
+  onFrame?: () => void,
 ): AbortController {
   const controller = new AbortController()
   const run = async () => {
@@ -1185,6 +1193,7 @@ export function followSession(
           // 这是 SSE 帧:它是"SSE 通"的唯一凭据,降级判定只认这个(长轮询通
           // 不算,否则会在两条传输之间来回挨卡)。
           noteSseFrame()
+          onFrame?.()
           // 心跳帧不是会话事件:它没有 seq,交给引擎会被判成断档而触发重快照,
           // 于是每 15 秒白拉一次全量尾部。
           if ((payload as { type?: string } | null)?.type === 'hb') return

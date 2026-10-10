@@ -314,6 +314,9 @@ async fn get_session_events(
         "total": page.total,
         "hasMoreBefore": page.has_more_before,
         "anchors": page.anchors,
+        // 全会话累计统计(不受分页窗口影响):状态栏的轮次/耗时/token
+        // 由它兜底,前端只在此基础上叠加实时帧。
+        "totals": page.totals,
     })))
 }
 

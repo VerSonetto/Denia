@@ -1,5 +1,5 @@
 import type { TranscriptNode } from './fold'
-import type { TokenUsage } from './types'
+import type { SessionEnvelope, SessionTotals, TokenUsage } from './types'
 
 /**
  * 会话级统计:从 transcript 节点折叠出的展示总量。
@@ -109,6 +109,89 @@ export function deriveStats(nodes: TranscriptNode[]): SessionStats {
   const tokensPerSecond = decodeMs > 0 ? decodeTokens / (decodeMs / 1000) : null
 
   return { turns: turns.size, steps, toolCalls, turnMs, inputTokens, outputTokens, cacheReadTokens, reasoningTokens, avgTtftMs, tokensPerSecond }
+}
+
+/**
+ * 全会话累计统计的客户端侧:服务端基准 + 实时增量。
+ *
+ * 上表 `deriveStats` 折的是**当前加载窗口**里的节点;窗口被首屏分页(尾部
+ * N 条)、重连重快照、长会话实时裁剪(>600 条丢旧轮次)截断后,累计值就会
+ * 缩水 —— 用户看到"耗时/轮次/token 忽大忽小"。所以累计字段改由服务端对
+ * 整份日志投影(`SessionTotals`,见 Rust `denia_session::SessionTotals`),
+ * 这里只维护"快照之后新到达的事件"那一小段增量;规则与 `deriveStats`
+ * 及服务端投影逐项一致,三处口径必须同步改。
+ *
+ * 进行中的轮次不计入任何一侧(它没有 turn-end),由界面按当前时刻加实时值。
+ */
+export function emptyTotals(): SessionTotals {
+  return {
+    turnMs: 0,
+    turns: 0,
+    steps: 0,
+    toolCalls: 0,
+    inputTokens: 0,
+    outputTokens: 0,
+    cacheReadTokens: 0,
+    reasoningTokens: 0,
+  }
+}
+
+/** 分页响应里的累计统计:旧后端/缺字段按零值补齐,不编造。 */
+export function totalsFromPage(totals: Partial<SessionTotals> | undefined): SessionTotals {
+  return { ...emptyTotals(), ...totals }
+}
+
+/**
+ * 增量累加器。`openTurns` 是未闭合轮次的起点表:每次快照用页面事件重建
+ * (窗口里已闭合的轮次在服务端基准里,不进表);配不上起点的 turn-end
+ * 直接跳过 —— 下一次快照的基准会把它补上,不会长期丢失。
+ */
+export interface TotalsAccumulator {
+  totals: SessionTotals
+  openTurns: Map<number, number>
+}
+
+/** 用快照基准重置累加器(首次挂载与每次重连重快照都会走)。 */
+export function resetTotals(base: SessionTotals, events: SessionEnvelope[]): TotalsAccumulator {
+  const openTurns = new Map<number, number>()
+  for (const envelope of events) {
+    if (envelope.type === 'turn-start') openTurns.set(envelope.turn, envelope.time)
+    else if (envelope.type === 'turn-end') openTurns.delete(envelope.turn)
+  }
+  return { totals: { ...base }, openTurns }
+}
+
+/**
+ * 折叠一条实时事件;返回是否改动了累计值(调用方据此决定要不要惊动 React)。
+ */
+export function applyTotalsEvent(state: TotalsAccumulator, envelope: SessionEnvelope): boolean {
+  switch (envelope.type) {
+    case 'turn-start':
+      state.openTurns.set(envelope.turn, envelope.time)
+      return false
+    case 'turn-end': {
+      const started = state.openTurns.get(envelope.turn)
+      state.openTurns.delete(envelope.turn)
+      if (started === undefined) return false
+      state.totals.turns += 1
+      state.totals.turnMs += Math.max(0, envelope.time - started)
+      return true
+    }
+    case 'assistant-message':
+      state.totals.steps += 1
+      if (envelope.usage) {
+        state.totals.inputTokens += envelope.usage.inputTokens
+        state.totals.outputTokens += envelope.usage.outputTokens
+        state.totals.cacheReadTokens += envelope.usage.cacheReadTokens ?? 0
+        state.totals.reasoningTokens += envelope.usage.reasoningTokens ?? 0
+      }
+      return true
+    case 'tool-call':
+      state.totals.toolCalls += 1
+      return true
+    default:
+      return false
+  }
 }
 
 /** 紧凑时长:45.2s 不足一分钟,2m42s 之后。 */
