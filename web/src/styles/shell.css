@@ -47,7 +47,12 @@
     align-items: center;
     justify-content: center;
     width: 46px;
-    height: 38px;
+    /* 跟随标题栏的**内容盒**,不写死像素:`.desktop-titlebar` 是
+       `height: 38px` + 1px 下边框,而全局 `box-sizing: border-box` 意味着带子的
+       可见高度只有 37px。按钮写 `height: 38px` 就比带子多出那 1px,且因为有确定
+       高度而不参与 `align-items: stretch`,从顶部起画 —— 三颗图形整体下沉 0.5px。
+       彼此仍然齐,所以比图标错位更隐蔽。 */
+    height: 100%;
     padding: 0;
     border: 0;
     background: transparent;

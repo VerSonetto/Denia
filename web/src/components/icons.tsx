@@ -257,10 +257,19 @@ export function IconClose(props: IconProps) {
   )
 }
 
+/**
+ * 最小化:一根压在 viewBox 中线上的横线。
+ *
+ * 曾经画在 `M3 11.5h10`（偏下 3.5 格，照抄了 Windows 旧版标题栏里那根靠下的短横）。
+ * 但按钮盒是 flex 居中的 —— 它居中的是**画布**，不是图形：横线于是落在按钮中线
+ * 下方约 3.3px，三颗并排时看起来就是「最小化和右边两颗不齐」。
+ * 现在 y=8 与全屏方框、关闭叉同一个中心；宽度 9.2 取自方框的描边外沿，
+ * 让三颗图形的横向光学重量一致。
+ */
 export function IconWindowMinimize(props: IconProps) {
   return (
     <Svg {...props}>
-      <path d="M3 11.5h10" stroke="currentColor" strokeWidth="1.25" strokeLinecap="round" />
+      <path d="M3.4 8h9.2" stroke="currentColor" strokeWidth="1.25" strokeLinecap="round" />
     </Svg>
   )
 }
