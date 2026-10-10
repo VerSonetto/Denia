@@ -1,0 +1,96 @@
+/* 自动保存状态条:一颗小圆点 + 文案;失败时右侧带「重试」。只用语义 token。 */
+
+.root {
+  display: flex;
+  min-width: 0;
+}
+
+.right {
+  justify-content: flex-end;
+}
+
+.pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--label-tertiary);
+}
+
+.dot {
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.saving {
+  color: var(--label-secondary);
+}
+
+.saving .dot {
+  animation: pulse 1s var(--ease) infinite;
+}
+
+@keyframes pulse {
+  0%,
+  100% {
+    opacity: 0.35;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .saving .dot {
+    animation: none;
+  }
+}
+
+.saved {
+  color: var(--label-secondary);
+}
+
+.error {
+  color: var(--danger);
+}
+
+.errorText {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.retry {
+  flex: none;
+  border: none;
+  border-radius: 7px;
+  background: transparent;
+  color: inherit;
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  padding: 2px 4px;
+  cursor: pointer;
+}
+
+.retry:hover {
+  color: var(--label-primary);
+}
+
+.retry:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+.hint {
+  font-size: 11.5px;
+  color: var(--label-caption);
+}

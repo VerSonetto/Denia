@@ -77,6 +77,7 @@ export function ModelRowsEditor({
   defaultContextWindow,
   discoverParams,
   disabled,
+  onCommit,
 }: {
   models: CatalogModelEntry[]
   onChange: (models: CatalogModelEntry[]) => void
@@ -84,6 +85,8 @@ export function ModelRowsEditor({
   /** 提供方探测参数;baseURL 为空时探测按钮自会报错。 */
   discoverParams: () => DiscoverParams
   disabled?: boolean
+  /** 自动保存的显式提交点:输入框失焦即落盘,不等防抖。 */
+  onCommit?: () => void
 }) {
   const update = (index: number, patch: Partial<CatalogModelEntry>) => {
     onChange(models.map((entry, i) => (i === index ? { ...entry, ...patch } : entry)))
@@ -137,12 +140,14 @@ export function ModelRowsEditor({
                 value={entry.id}
                 disabled={disabled}
                 onChange={(id) => update(index, { id })}
+                onCommit={onCommit}
               />
               <TextInput
                 placeholder={entry.id || t('modelNamePlaceholder')}
                 value={entry.name ?? ''}
                 disabled={disabled}
                 onChange={(name) => update(index, { name: name || undefined })}
+                onCommit={onCommit}
               />
               <NumberInput
                 value={entry.contextWindow}
@@ -154,6 +159,7 @@ export function ModelRowsEditor({
                     : t('contextWindowPlaceholder')
                 }
                 onChange={(contextWindow) => update(index, { contextWindow })}
+                onCommit={onCommit}
               />
               <button
                 type="button"

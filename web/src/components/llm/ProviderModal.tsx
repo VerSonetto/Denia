@@ -1,11 +1,14 @@
 /**
- * 提供方编辑弹窗(居中模态):
- * - 新增走两步:网关 → 密钥(+模型);步骤间做就地校验(fail loud)。
- * - 编辑平铺三段,路由 ID 锁死。
- * Esc 关弹窗(拦截冒泡,不连设置弹窗一起关);Cmd/Ctrl+Enter 提交。
+ * 提供方编辑弹窗(居中模态):全自动保存,**没有保存按钮**。
+ * - 表单快照随时按 payload 比对,变化后停笔约 0.8s 自动落盘;没变化不重复写。
+ * - 新增的路由 ID 以失焦为「开工」信号:在此之前不落盘,避免半途碎片建出孤儿网关;
+ *   建出来之后 ID 锁死(改名 = 新网关,不做原地重命名)。
+ * - 密钥值是显式提交点(失焦才写凭据存储),不参与 debounce。
+ * - 校验就地即时跑;不合法的字段保持上一次的已存值,不把坏 URL 推给在跑的路由。
+ * Esc / 遮罩双击 / 「完成」都先 flush 在途改动再关窗。
  */
 
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import * as api from '../../api'
 import { t } from '../../i18n'
 import {
@@ -15,22 +18,27 @@ import {
   type CatalogModelEntry,
 } from '../../modelCatalog'
 import { Badge, Button, ChipRadio, Field, NumberInput, TextInput } from './atoms/form'
+import { AutosaveStatus } from './AutosaveStatus'
 import { ModelRowsEditor } from './ModelRowsEditor'
+import type { ProviderAutosave } from './useProviderAutosave'
 import type { Notify } from '../../App'
 import type { CredentialInfo, OpenAiProfile, WireProtocol } from '../../types'
 import styles from './ProviderModal.module.css'
 
-const OPENAI_NS = 'llm-openai'
-
+/** 密钥引用名:由路由 ID 派生,必须是合法环境变量名(数字开头补 `_`)。 */
 function deriveKeyRef(routeId: string): string {
   const base = routeId.toUpperCase().replace(/[^A-Z0-9]+/g, '_')
-  // 引用名必须是合法环境变量名(字母/下划线开头);routeId 以数字开头时补 `_` 兜底,否则后端校验 400。
   const head = base.length > 0 && base[0] >= '0' && base[0] <= '9' ? '_' : ''
   return head + base + '_API_KEY'
 }
 
 /** HTTP 请求头名称的 token 语法(与后端 reqwest 校验一致)。 */
 const HEADER_NAME_PATTERN = /^[!#%&'*+\-.^_`|~0-9A-Za-z$]+$/
+
+const BASE_URL_PATTERN = /^https?:\/\//i
+
+/** 停笔多久落盘:够跨过一次中文补选的停顿,又不至于让人怀疑"存了没"。 */
+const AUTOSAVE_DEBOUNCE_MS = 800
 
 interface FormErrors {
   routeId?: string
@@ -41,27 +49,63 @@ interface FormErrors {
   headers?: string
 }
 
+interface HeaderRow {
+  name: string
+  value: string
+}
+
+/** 一次落盘的完整内容:key = providers 的键,value = 该键的 profile。 */
+interface Payload {
+  id: string
+  profile: Record<string, unknown>
+  modelsRaw: string
+}
+
+function headerErrorOf(rows: HeaderRow[]): string | undefined {
+  for (const row of rows) {
+    const name = row.name.trim()
+    if (!name) continue
+    if (!HEADER_NAME_PATTERN.test(name) || !row.value.trim()) {
+      return t('llm.field.headersInvalid')
+    }
+  }
+  return undefined
+}
+
+function modelsErrorOf(entries: CatalogModelEntry[]): string | undefined {
+  const seen = new Set<string>()
+  for (const entry of entries) {
+    const modelId = entry.id.trim()
+    // 只拦非空与重复;不校验字符格式(网关模型 id 常含 `/`、`:` 等)。
+    if (!modelId) return t('modelsInvalid')
+    if (seen.has(modelId)) return t('llm.models.duplicate', { id: modelId })
+    seen.add(modelId)
+  }
+  return undefined
+}
+
 export function ProviderModal({
   route,
   initial,
-  revision,
-  providers,
   credentials,
   notify,
+  autosave,
+  onChanged,
   onClose,
-  onSaved,
 }: {
   /** 编辑的路由 id;null = 新增两步流程。 */
   route: string | null
   initial: OpenAiProfile | null
-  revision: number
-  providers: Record<string, unknown>
   credentials: Record<string, CredentialInfo>
   notify: Notify
+  autosave: ProviderAutosave
+  /** 凭据等旁路改动后重拉设置(刷新密钥徽标)。 */
+  onChanged: () => void
   onClose: () => void
-  onSaved: () => void
 }) {
-  const isNew = route === null
+  /** 已落盘的路由 id;null = 还没建出来(新增且尚未提交过)。 */
+  const [createdId, setCreatedId] = useState<string | null>(route)
+  const isFresh = createdId === null
   const [step, setStep] = useState<1 | 2>(1)
   const [routeId, setRouteId] = useState(route ?? '')
   const [displayName, setDisplayName] = useState(initial?.displayName ?? '')
@@ -75,196 +119,215 @@ export function ProviderModal({
     ),
   )
   const [keyValue, setKeyValue] = useState('')
-  const [headers, setHeaders] = useState<{ name: string; value: string }[]>(() =>
+  const [headers, setHeaders] = useState<HeaderRow[]>(() =>
     Object.entries(initial?.headers ?? {}).map(([name, value]) => ({ name, value })),
   )
   const [errors, setErrors] = useState<FormErrors>({})
-  const [busy, setBusy] = useState(false)
-  const keyValueRef = useRef<HTMLInputElement | null>(null)
-  const panelRef = useRef<HTMLDivElement | null>(null)
+  /** 新增时:路由 ID 失焦过 = 允许建网关。 */
+  const [routeIdTouched, setRouteIdTouched] = useState(route !== null)
+  const [closing, setClosing] = useState(false)
+  const keySectionRef = useRef<HTMLDivElement | null>(null)
+  const timerRef = useRef<number | null>(null)
+  /** 最近一次已落盘/已在途的 payload 指纹,用来跳过「没变化」的写入。 */
+  const writtenRef = useRef<string | null>(null)
+  const inFlightRef = useRef<Promise<boolean> | null>(null)
+  // autosave 对象每次渲染都是新的;解构出身份稳定的回调再进依赖数组。
+  const { write, has } = autosave
 
-  // 密钥引用不暴露给用户:编辑沿用已存引用(不丢已配密钥),新增按路由派生。
-  const effectiveKeyRef = initial?.apiKeyEnv ?? (routeId.trim() ? deriveKeyRef(routeId.trim()) : '')
+  // 编辑沿用已存引用(不丢已配密钥);新建在网关落地那一刻按 id 派生。
+  const effectiveKeyRef =
+    initial?.apiKeyEnv ?? (createdId ? deriveKeyRef(createdId) : '')
   const credentialForRef = credentials[effectiveKeyRef]
   const keyConfigured = keyValue.trim().length > 0 || credentialForRef?.configured === true
 
-  /* ---- 自定义请求头:行增删与就地校验 ---- */
+  /* ---- 表单 → payload(纯派生) ---- */
 
-  const updateHeader = (index: number, patch: Partial<{ name: string; value: string }>) => {
-    setHeaders((rows) => rows.map((row, i) => (i === index ? { ...row, ...patch } : row)))
-  }
-
-  const addHeader = () => {
-    setHeaders((rows) => [...rows, { name: '', value: '' }])
-  }
-
-  const removeHeader = (index: number) => {
-    setHeaders((rows) => rows.filter((_, i) => i !== index))
-  }
-
-  /** 只拦「名有内容但非法/值为空」的行;空名行保存时剔除(宽容)。 */
-  const headerError = (): string | undefined => {
-    for (const row of headers) {
-      const name = row.name.trim()
-      if (!name) continue
-      if (!HEADER_NAME_PATTERN.test(name) || !row.value.trim()) {
-        return t('llm.field.headersInvalid')
-      }
-    }
-    return undefined
-  }
-
-  /* ---- 校验(提交/步进时全量跑,就地报错) ---- */
-
-  const validateGateway = useCallback((): boolean => {
-    const nextErrors: FormErrors = {}
-    const id = routeId.trim()
-    // 只做非空与重复校验,不做字符格式限制(网关 id 常含点、下划线等)。
-    if (!id) {
-      nextErrors.routeId = t('routeIdRequired')
-    } else if (isNew && id in providers) {
-      nextErrors.routeId = t('llm.error.routeIdExists', { id })
-    }
+  const payload = useMemo<Payload | null>(() => {
+    const id = (createdId ?? routeId).trim()
     const url = baseURL.trim()
-    if (!url) {
-      nextErrors.baseURL = t('baseURLRequired')
-    } else if (!/^https?:\/\//i.test(url)) {
-      nextErrors.baseURL = t('llm.error.baseURLFormat')
+    if (!id) return null
+    if (!BASE_URL_PATTERN.test(url)) return null
+    const profile: Record<string, unknown> = {
+      baseURL: url,
+      displayName: displayName.trim() || undefined,
+      apiKeyEnv: effectiveKeyRef || undefined,
+      protocol,
+      models: models.map((entry) => entryToWire(entry)),
     }
-    const headersErr = headerError()
-    if (headersErr) nextErrors.headers = headersErr
-    setErrors((prev) => ({ ...prev, ...nextErrors, models: undefined }))
-    return Object.keys(nextErrors).length === 0
-  }, [routeId, baseURL, providers, isNew, headers])
-
-  const validateAll = useCallback((): boolean => {
-    const nextErrors: FormErrors = {}
-    const id = routeId.trim()
-    if (!id) {
-      nextErrors.routeId = t('routeIdRequired')
-    } else if (isNew && id in providers) {
-      nextErrors.routeId = t('llm.error.routeIdExists', { id })
-    }
-    const url = baseURL.trim()
-    if (!url) {
-      nextErrors.baseURL = t('baseURLRequired')
-    } else if (!/^https?:\/\//i.test(url)) {
-      nextErrors.baseURL = t('llm.error.baseURLFormat')
-    }
-    if (ctxWindow !== undefined && (!Number.isFinite(ctxWindow) || ctxWindow <= 0)) {
-      nextErrors.ctx = t('llm.error.numberPositive')
-    }
-    if (maxTokens !== undefined && (!Number.isFinite(maxTokens) || maxTokens <= 0)) {
-      nextErrors.maxTokens = t('llm.error.numberPositive')
-    }
-    const headersErr = headerError()
-    if (headersErr) nextErrors.headers = headersErr
-    const seen = new Set<string>()
-    for (const entry of models) {
-      const modelId = entry.id.trim()
-      // 只拦非空与重复;不校验字符格式(网关模型 id 常含 `/`、`:` 等)。
-      if (!modelId) {
-        nextErrors.models = t('modelsInvalid')
-        break
-      }
-      if (seen.has(modelId)) {
-        nextErrors.models = t('llm.models.duplicate', { id: modelId })
-        break
-      }
-      seen.add(modelId)
-    }
-    setErrors(nextErrors)
-    return Object.keys(nextErrors).length === 0
-  }, [routeId, baseURL, providers, isNew, ctxWindow, maxTokens, models, headers])
-
-  /* ---- 保存 ---- */
-
-  const save = useCallback(async () => {
-    if (!validateAll()) return
-    const id = routeId.trim()
-    setBusy(true)
-    try {
-      if (keyValue.trim()) {
-        await api.setCredential(effectiveKeyRef, keyValue.trim())
-      }
-      const profile: Record<string, unknown> = {
-        baseURL: baseURL.trim(),
-        displayName: displayName.trim() || undefined,
-        apiKeyEnv: effectiveKeyRef || undefined,
-        protocol,
-        models: models.map((entry) => entryToWire(entry)),
-      }
-      if (ctxWindow !== undefined && ctxWindow > 0) profile.defaultContextWindow = ctxWindow
-      if (maxTokens !== undefined && maxTokens > 0) profile.defaultMaxTokens = maxTokens
-      const headerEntries = headers
-        .map((row) => ({ name: row.name.trim(), value: row.value.trim() }))
-        .filter((row) => row.name !== '')
-      if (headerEntries.length > 0) {
-        profile.headers = Object.fromEntries(headerEntries.map((row) => [row.name, row.value]))
-      }
-      const next = { ...providers, [id]: profile }
-      await api.replaceNamespace(OPENAI_NS, { providers: next }, revision)
-      notify('ok', t('providerSaved'))
-      onSaved()
-      onClose()
-    } catch (err) {
-      notify('err', err instanceof Error ? err.message : String(err))
-    } finally {
-      setBusy(false)
-    }
+    if (ctxWindow && ctxWindow > 0) profile.defaultContextWindow = ctxWindow
+    if (maxTokens && maxTokens > 0) profile.defaultMaxTokens = maxTokens
+    const headerEntries = headers
+      .map((row) => [row.name.trim(), row.value] as const)
+      .filter(([name]) => name !== '')
+    if (headerEntries.length > 0) profile.headers = Object.fromEntries(headerEntries)
+    return { id, profile, modelsRaw: JSON.stringify(profile.models) }
   }, [
-    validateAll,
+    createdId,
     routeId,
-    keyValue,
-    effectiveKeyRef,
     baseURL,
     displayName,
+    effectiveKeyRef,
     protocol,
     models,
     ctxWindow,
     maxTokens,
     headers,
-    providers,
-    revision,
-    notify,
-    onSaved,
-    onClose,
   ])
 
-  /* ---- 步进 ---- */
+  const fingerprint = payload ? `${payload.id}\u0000${JSON.stringify(payload.profile)}` : null
 
-  const goNext = () => {
-    if (step === 1) {
-      if (!validateGateway()) return
-      setStep(2)
+  /** payload 之外还缺什么:决定是「静默不写」还是「写了但报错」。 */
+  const blocking = useMemo(() => {
+    const next: FormErrors = {}
+    const id = routeId.trim()
+    if (!id) next.routeId = t('routeIdRequired')
+    else if (isFresh && autosave.has(id)) next.routeId = t('llm.error.routeIdExists', { id })
+    const url = baseURL.trim()
+    if (!url) next.baseURL = t('baseURLRequired')
+    else if (!BASE_URL_PATTERN.test(url)) next.baseURL = t('llm.error.baseURLFormat')
+    const headersErr = headerErrorOf(headers)
+    if (headersErr) next.headers = headersErr
+    if (ctxWindow !== undefined && (!Number.isFinite(ctxWindow) || ctxWindow <= 0)) {
+      next.ctx = t('llm.error.numberPositive')
     }
-  }
+    if (maxTokens !== undefined && (!Number.isFinite(maxTokens) || maxTokens <= 0)) {
+      next.maxTokens = t('llm.error.numberPositive')
+    }
+    const modelsErr = modelsErrorOf(models)
+    if (modelsErr) next.models = modelsErr
+    return next
+  }, [routeId, baseURL, headers, ctxWindow, maxTokens, models, isFresh, has])
 
-  const goBack = () => {
-    setErrors({})
-    setStep(1)
-  }
+  const hasBlocking = Object.keys(blocking).length > 0
 
-  /* ---- 键盘:Esc 关弹窗(preventDefault 阻断设置弹窗同关);Cmd/Ctrl+Enter 推进/提交 ---- */
+  useEffect(() => {
+    setErrors((prev) => {
+      const next: FormErrors = { ...prev }
+      let changed = false
+      for (const key of ['routeId', 'baseURL', 'headers', 'ctx', 'maxTokens', 'models'] as const) {
+        if (next[key] !== blocking[key]) {
+          next[key] = blocking[key]
+          changed = true
+        }
+      }
+      return changed ? next : prev
+    })
+  }, [blocking])
+
+  /* ---- 自动落盘 ---- */
+
+  const push = useCallback(
+    async (target: Payload): Promise<boolean> => {
+      const ok = await write(target.id, target.profile)
+      if (ok) setCreatedId((prev) => (prev === null ? target.id : prev))
+      return ok
+    },
+    [write],
+  )
+
+  /**
+   * 唯一的写入触发点:payload 指纹变了就 debounce 写一次。
+   * 新增在路由 ID 失焦前不写(不建半成品网关)。
+   */
+  useEffect(() => {
+    if (!payload || !fingerprint) return
+    if (hasBlocking) return
+    if (isFresh && !routeIdTouched) return
+    if (fingerprint === writtenRef.current) return
+    if (timerRef.current !== null) window.clearTimeout(timerRef.current)
+    const target = payload
+    timerRef.current = window.setTimeout(() => {
+      timerRef.current = null
+      writtenRef.current = fingerprint
+      inFlightRef.current = push(target).then((ok) => {
+        if (!ok) writtenRef.current = null
+        return ok
+      })
+    }, AUTOSAVE_DEBOUNCE_MS)
+    return () => {
+      if (timerRef.current !== null) {
+        window.clearTimeout(timerRef.current)
+        timerRef.current = null
+      }
+    }
+  }, [payload, fingerprint, hasBlocking, isFresh, routeIdTouched, push])
+
+  /** 立刻落盘(跳过 debounce),用于失焦与关窗。 */
+  const flushNow = useCallback(async (): Promise<boolean> => {
+    if (timerRef.current !== null) {
+      window.clearTimeout(timerRef.current)
+      timerRef.current = null
+    }
+    const pending = inFlightRef.current
+    if (pending) {
+      const ok = await pending
+      inFlightRef.current = null
+      const still = inFlightRef.current
+      if (still) await still
+      return ok
+    }
+    if (!payload || !fingerprint || hasBlocking) return true
+    if (fingerprint === writtenRef.current) return true
+    writtenRef.current = fingerprint
+    const done = push(payload)
+    inFlightRef.current = done
+    const ok = await done
+    inFlightRef.current = null
+    if (!ok) writtenRef.current = null
+    return ok
+  }, [payload, fingerprint, hasBlocking, push])
+
+  useEffect(() => {
+    return () => {
+      if (timerRef.current !== null) window.clearTimeout(timerRef.current)
+    }
+  }, [])
+
+  /* ---- 密钥:失焦即写凭据存储(不参与 debounce) ---- */
+
+  const commitKey = useCallback(async () => {
+    const value = keyValue.trim()
+    if (!value || !effectiveKeyRef) return
+    try {
+      await api.setCredential(effectiveKeyRef, value)
+      setKeyValue('')
+      notify('ok', t('keySaved'))
+      onChanged()
+    } catch (err) {
+      notify('err', err instanceof Error ? err.message : String(err))
+    }
+  }, [keyValue, effectiveKeyRef, notify, onChanged])
+
+  /* ---- 关窗:先 flush,失败不关 ---- */
+
+  const requestClose = useCallback(async () => {
+    if (closing) return
+    setClosing(true)
+    const dirty = payload !== null && fingerprint !== null && fingerprint !== writtenRef.current
+    const ok = await flushNow()
+    if (!ok) {
+      setClosing(false)
+      return
+    }
+    if (dirty && hasBlocking) {
+      notify('err', t('llm.autosave.dropped'))
+    }
+    onClose()
+  }, [closing, payload, fingerprint, hasBlocking, flushNow, notify, onClose])
+
+  /* ---- 键盘:Esc 关窗(preventDefault 阻断设置弹窗同关) ---- */
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === 'Escape') {
         event.preventDefault()
         event.stopPropagation()
-        onClose()
-        return
-      }
-      if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') {
-        event.preventDefault()
-        if (isNew && step !== 2) goNext()
-        else void save()
+        void requestClose()
       }
     }
     window.addEventListener('keydown', onKeyDown, true)
     return () => window.removeEventListener('keydown', onKeyDown, true)
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [onClose, isNew, step, save])
+  }, [requestClose])
 
   const discoverParams = useCallback(
     () => ({
@@ -273,9 +336,7 @@ export function ProviderModal({
       apiKeyEnv: keyValue.trim() ? undefined : effectiveKeyRef || undefined,
       protocol,
       headers: Object.fromEntries(
-        headers
-          .map((row) => [row.name.trim(), row.value.trim()])
-          .filter(([name]) => name !== ''),
+        headers.map((row) => [row.name.trim(), row.value]).filter(([name]) => name !== ''),
       ),
     }),
     [baseURL, keyValue, effectiveKeyRef, protocol, headers],
@@ -286,46 +347,43 @@ export function ProviderModal({
     { id: 2, label: t('llm.step.key') },
   ]
 
+  const goStep = (next: 1 | 2) => {
+    void flushNow()
+    setStep(next)
+  }
+
   return (
     <div className={styles.overlay}>
-      {/* 遮罩单击不关窗(与设置弹窗一致:弹层里点空白太容易误触),
-          双击才退出。 */}
+      {/* 遮罩单击不关窗(与设置弹窗一致:弹层里点空白太容易误触),双击才退出。 */}
+      <div className={styles.backdrop} onDoubleClick={() => void requestClose()} aria-hidden="true" />
       <div
-        className={styles.backdrop}
-        onDoubleClick={onClose}
-        aria-hidden="true"
-      />
-      <div
-        ref={panelRef}
         className={styles.panel}
         role="dialog"
         aria-modal="true"
-        aria-label={isNew ? t('llm.modal.new') : t('llm.modal.edit')}
+        aria-label={isFresh ? t('llm.modal.new') : t('llm.modal.edit')}
       >
         <header className={styles.head}>
-          <h3>{isNew ? t('llm.modal.new') : t('llm.modal.edit')}</h3>
-          <button type="button" className={styles.close} onClick={onClose} aria-label={t('close')}>
+          <h3>{isFresh ? t('llm.modal.new') : t('llm.modal.edit')}</h3>
+          <button
+            type="button"
+            className={styles.close}
+            onClick={() => void requestClose()}
+            aria-label={t('close')}
+          >
             ✕
           </button>
         </header>
 
-        {isNew && (
+        {isFresh && (
           <nav className={styles.steps} aria-label={t('llm.modal.new')}>
             {stepItems.map((item) => (
               <button
                 key={item.id}
                 type="button"
-                className={`${styles.stepItem}${
-                  step === item.id ? ` ${styles.stepActive}` : ''
-                }${step > item.id ? ` ${styles.stepDone}` : ''}`}
-                onClick={() => {
-                  if (item.id < step) {
-                    setErrors({})
-                    setStep(item.id)
-                  } else if (item.id === 2 && step === 1) {
-                    goNext()
-                  }
-                }}
+                className={`${styles.stepItem}${step === item.id ? ` ${styles.stepActive}` : ''}${
+                  step > item.id ? ` ${styles.stepDone}` : ''
+                }`}
+                onClick={() => goStep(item.id)}
               >
                 <span className={styles.stepIndex}>{step > item.id ? '✓' : item.id}</span>
                 {item.label}
@@ -335,22 +393,30 @@ export function ProviderModal({
         )}
 
         <div className={styles.body}>
-          {/* 步骤 1(新增):网关信息;编辑时常驻 */}
-          {(isNew ? step === 1 : true) && (
+          {/* 步骤 1(新增):网关信息;编辑/已建时常驻 */}
+          {(isFresh ? step === 1 : true) && (
             <section className={styles.section}>
-              {!isNew && <h4 className={styles.sectionTitle}>{t('llm.section.basic')}</h4>}
+              {!isFresh && <h4 className={styles.sectionTitle}>{t('llm.section.basic')}</h4>}
               <div className={styles.gridTwo}>
-                <Field label={t('routeIdLabel')} hint={t('llm.field.routeIdHint')} error={errors.routeId}>
+                <Field
+                  label={t('routeIdLabel')}
+                  hint={t(isFresh && !createdId ? 'llm.field.routeIdHint' : 'llm.field.routeIdLocked')}
+                  error={errors.routeId}
+                >
                   <TextInput
                     mono
                     placeholder={t('routeIdPlaceholder')}
                     value={routeId}
-                    disabled={!isNew}
+                    disabled={createdId !== null}
                     onChange={setRouteId}
+                    onCommit={() => {
+                      setRouteIdTouched(true)
+                      void flushNow()
+                    }}
                   />
                 </Field>
                 <Field label={t('displayNameLabel')} hint={t('llm.field.displayNameHint')}>
-                  <TextInput value={displayName} onChange={setDisplayName} />
+                  <TextInput value={displayName} onChange={setDisplayName} onCommit={() => void flushNow()} />
                 </Field>
               </div>
               <Field label={t('baseURLLabel')} hint={t('llm.field.baseURLHint')} error={errors.baseURL}>
@@ -359,6 +425,7 @@ export function ProviderModal({
                   placeholder="https://gateway.example.com/v1"
                   value={baseURL}
                   onChange={setBaseURL}
+                  onCommit={() => void flushNow()}
                 />
               </Field>
               <Field label={t('protocolLabel')} hint={t('protocolHint')}>
@@ -385,41 +452,74 @@ export function ProviderModal({
                         mono
                         placeholder={t('llm.field.headerNamePlaceholder')}
                         value={row.name}
-                        onChange={(name) => updateHeader(index, { name })}
+                        onChange={(name) =>
+                          setHeaders((rows) =>
+                            rows.map((entry, i) => (i === index ? { ...entry, name } : entry)),
+                          )
+                        }
+                        onCommit={() => void flushNow()}
                       />
                       <TextInput
                         mono
                         placeholder={t('llm.field.headerValuePlaceholder')}
                         value={row.value}
-                        onChange={(value) => updateHeader(index, { value })}
+                        onChange={(value) =>
+                          setHeaders((rows) =>
+                            rows.map((entry, i) => (i === index ? { ...entry, value } : entry)),
+                          )
+                        }
+                        onCommit={() => void flushNow()}
                       />
                       <button
                         type="button"
                         className={styles.headerRemove}
                         title={t('llm.field.headersRemove')}
                         aria-label={`${t('llm.field.headersRemove')} ${row.name || index + 1}`}
-                        onClick={() => removeHeader(index)}
+                        onClick={() => {
+                          setHeaders((rows) => rows.filter((_, i) => i !== index))
+                          void flushNow()
+                        }}
                       >
                         ✕
                       </button>
                     </div>
                   ))}
-                  <button type="button" className={styles.headerAdd} onClick={addHeader}>
+                  <button
+                    type="button"
+                    className={styles.headerAdd}
+                    onClick={() => setHeaders((rows) => [...rows, { name: '', value: '' }])}
+                  >
                     + {t('llm.field.headersAdd')}
                   </button>
                 </div>
               </Field>
               <div className={styles.gridTwo}>
                 <Field label={t('defaultContextWindowLabel')} error={errors.ctx}>
-                  <NumberInput mono value={ctxWindow} onChange={setCtxWindow} placeholder="262144" />
+                  <NumberInput
+                    mono
+                    value={ctxWindow}
+                    onChange={setCtxWindow}
+                    onCommit={() => void flushNow()}
+                    placeholder="262144"
+                  />
                 </Field>
-                <Field label={t('llm.field.maxTokensLabel')} hint={t('llm.field.maxTokensHint')} error={errors.maxTokens}>
-                  <NumberInput mono value={maxTokens} onChange={setMaxTokens} placeholder="8192" />
+                <Field
+                  label={t('llm.field.maxTokensLabel')}
+                  hint={t('llm.field.maxTokensHint')}
+                  error={errors.maxTokens}
+                >
+                  <NumberInput
+                    mono
+                    value={maxTokens}
+                    onChange={setMaxTokens}
+                    onCommit={() => void flushNow()}
+                    placeholder="8192"
+                  />
                 </Field>
               </div>
-              {isNew && step === 1 && (
+              {isFresh && step === 1 && (
                 <div className={styles.footRow}>
-                  <Button variant="primary" onClick={goNext}>
+                  <Button onClick={() => goStep(2)} disabled={hasBlocking}>
                     {t('llm.modal.next')}
                   </Button>
                 </div>
@@ -427,12 +527,12 @@ export function ProviderModal({
             </section>
           )}
 
-          {/* 步骤 2(新增):密钥 + 模型;编辑时常驻 */}
-          {(isNew ? step === 2 : true) && (
+          {/* 步骤 2(新增):密钥 + 模型;编辑/已建时常驻 */}
+          {(!isFresh || step === 2) && (
             <>
               <section className={styles.section}>
                 <h4 className={styles.sectionTitle}>{t('llm.section.key')}</h4>
-                <div ref={keyValueRef} className={styles.keyValueWrap}>
+                <div ref={keySectionRef} className={styles.keyValueWrap}>
                   <Field label={t('llm.field.keyValueLabel')} hint={t('llm.field.keyValueHint')}>
                     <TextInput
                       mono
@@ -441,6 +541,7 @@ export function ProviderModal({
                       placeholder={t('apiKeyPlaceholder')}
                       value={keyValue}
                       onChange={setKeyValue}
+                      onCommit={() => void commitKey()}
                     />
                   </Field>
                   <span className={styles.keyOptional}>{t('llm.field.keyPasteOptional')}</span>
@@ -450,7 +551,10 @@ export function ProviderModal({
                     <div className={styles.keyWarn}>
                       <Badge tone="err">{t('apiKeyMissing')}</Badge>
                       <span className={styles.keyWarnText}>{t('llm.credential.missingHint')}</span>
-                      <Button small onClick={() => keyValueRef.current?.scrollIntoView({ block: 'center' })}>
+                      <Button
+                        small
+                        onClick={() => keySectionRef.current?.scrollIntoView({ block: 'center' })}
+                      >
                         {t('llm.credential.setCta')}
                       </Button>
                     </div>
@@ -469,7 +573,7 @@ export function ProviderModal({
                   onChange={setModels}
                   defaultContextWindow={ctxWindow}
                   discoverParams={discoverParams}
-                  disabled={busy}
+                  onCommit={() => void flushNow()}
                 />
                 {errors.models && (
                   <p className={styles.modelsError} role="alert">
@@ -477,9 +581,9 @@ export function ProviderModal({
                   </p>
                 )}
               </section>
-              {isNew && step === 2 && (
+              {isFresh && step === 2 && (
                 <div className={styles.footRow}>
-                  <Button onClick={goBack}>{t('llm.modal.back')}</Button>
+                  <Button onClick={() => goStep(1)}>{t('llm.modal.back')}</Button>
                 </div>
               )}
             </>
@@ -487,18 +591,11 @@ export function ProviderModal({
         </div>
 
         <footer className={styles.foot}>
-          {errors.models && <span className={styles.footError}>{errors.models}</span>}
+          <AutosaveStatus autosave={autosave} align="left" />
           <div className={styles.footActions}>
-            {!isNew && (
-              <Button onClick={onClose} disabled={busy}>
-                {t('cancel')}
-              </Button>
-            )}
-            {(!isNew || step === 2) && (
-              <Button variant="primary" disabled={busy} onClick={() => void save()}>
-                {busy ? t('loading') : t('save')}
-              </Button>
-            )}
+            <Button disabled={closing} onClick={() => void requestClose()}>
+              {closing ? t('llm.autosave.saving') : t('llm.modal.done')}
+            </Button>
           </div>
         </footer>
       </div>

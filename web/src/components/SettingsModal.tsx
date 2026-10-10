@@ -4,7 +4,7 @@ import { RemoteAccessSettings } from './settings/RemoteAccessSettings'
 import { RuntimeSettings } from './settings/RuntimeSettings'
 import { MemorySettings } from './settings/MemorySettings'
 import { SetmActions, SetmBtn, SetmCard, SetmTiles } from './settings/setm'
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import * as api from '../api'
 import { t } from '../i18n'
 import { subscribeServerEvents } from '../serverEvents'
@@ -199,6 +199,8 @@ function paneDesc(tab: SettingsTab): string {
 export function SettingsModal({ notify, onClose }: { notify: Notify; onClose: () => void }) {
   const [tab, setTab] = useState<SettingsTab>('general')
   const [loading, setLoading] = useState(true)
+  /** 是否已完成过首拉:决定重拉时要不要重新亮骨架屏。 */
+  const loadedOnceRef = useRef(false)
   const [saving, setSaving] = useState(false)
   // 窄屏:标签栏与面板是两屏,先选分类再进面板(横向滚动条里塞 9 个
   // 148px 的标签,手机上既看不全也点不准)。
@@ -220,7 +222,10 @@ export function SettingsModal({ notify, onClose }: { notify: Notify; onClose: ()
   const toggleCard = (id: string) => setOpenCard((current) => (current === id ? null : id))
 
   const load = useCallback(async () => {
-    setLoading(true)
+    // 骨架屏只在首拉出现。设置变更后的自动重拉(SSE settings-updated)不能
+    // 把整个面板连子弹窗一起卸载 —— 模型面板改成自动保存后,保存就发生在
+    // 弹窗开着的中途,一旦卸载用户正在填的表单就没了。
+    if (!loadedOnceRef.current) setLoading(true)
     try {
       const [nextDescribe, nextPrompt, nextRules] = await Promise.all([
         api.getSettings(),
@@ -247,6 +252,7 @@ export function SettingsModal({ notify, onClose }: { notify: Notify; onClose: ()
     } catch (error) {
       notify('err', error instanceof Error ? error.message : String(error))
     } finally {
+      loadedOnceRef.current = true
       setLoading(false)
     }
   }, [notify])

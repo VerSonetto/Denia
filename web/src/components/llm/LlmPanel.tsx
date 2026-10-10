@@ -2,16 +2,18 @@
  * 设置弹窗「模型」Tab 的总面板:左侧子导航 + 右侧详情两栏;
  * 窗口 <1024px 折叠为单列(导航变横向分段)。
  * 数据(设置/凭据/目录)在此加载,供应商/目录/连通性三个子页共享。
+ * `llm-openai` 的唯一写入口(自动保存通道)也在这里,子页只发意图。
  */
 
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react'
 import * as api from '../../api'
 import { t } from '../../i18n'
-import { asRecord, namespaceOf } from './providerSettings'
+import { asRecord, namespaceOf, OPENAI_NS } from './providerSettings'
 import { ProvidersPanel } from './ProvidersPanel'
 import { ModelsPanel } from './ModelsPanel'
 import { ChatProbe } from './ChatProbe'
 import { ProviderModal } from './ProviderModal'
+import { sortRoutesByRecent, useProviderAutosave } from './useProviderAutosave'
 import { IconActivity, IconKey, IconStack } from '../icons'
 import type { ProviderRoute } from './types'
 import type { Notify } from '../../App'
@@ -22,8 +24,6 @@ import type {
   SettingsDescribe,
 } from '../../types'
 import styles from './LlmPanel.module.css'
-
-const OPENAI_NS = 'llm-openai'
 
 type SubPage = 'providers' | 'catalog' | 'probe'
 
@@ -37,14 +37,6 @@ export function LlmPanel({ notify }: { notify: Notify }) {
   const [probeSeed, setProbeSeed] = useState<string | undefined>(undefined)
 
   const settingsView = settings ? namespaceOf(settings, OPENAI_NS) : undefined
-
-  const routes = useMemo<ProviderRoute[]>(() => {
-    const providers = asRecord(settingsView?.value?.providers)
-    return Object.entries(providers).map(([route, raw]) => ({
-      route,
-      profile: asRecord(raw) as unknown as OpenAiProfile,
-    }))
-  }, [settingsView])
 
   const load = useCallback(async () => {
     try {
@@ -71,16 +63,39 @@ export function LlmPanel({ notify }: { notify: Notify }) {
     }
   }, [])
 
+  // 落盘后把整块刷新一遍:凭据徽标、模型目录计数都跟着变。
+  const reloadAll = useCallback(() => {
+    void load()
+    void loadCatalog()
+  }, [load, loadCatalog])
+
+  const autosave = useProviderAutosave({ notify, onChanged: reloadAll })
+  const { prime } = autosave
+
   useEffect(() => {
     void load()
     void loadCatalog()
   }, [load, loadCatalog])
 
-  // 设置被其他入口改动时(SSE 通知层已全局重拉设置),目录保持新鲜。
-  const reloadAll = useCallback(() => {
-    void load()
-    void loadCatalog()
-  }, [load, loadCatalog])
+  /**
+   * 每次拿到服务端快照,给自动保存通道打底(基线 + revision)。通道内部会避开
+   * 在途写入,所以这里无条件调用。
+   */
+  useEffect(() => {
+    if (!settings) return
+    const view = namespaceOf(settings, OPENAI_NS)
+    prime(asRecord(view?.value?.providers), view?.revision ?? 0)
+  }, [settings, prime])
+
+  const routes = useMemo<ProviderRoute[]>(() => {
+    const providers = asRecord(settingsView?.value?.providers)
+    const listed: ProviderRoute[] = Object.entries(providers).map(([route, raw]) => ({
+      route,
+      profile: asRecord(raw) as unknown as OpenAiProfile,
+    }))
+    // 刚新建/刚编辑过的网关置顶,方便「加完接着改」;其余保持原序。
+    return sortRoutesByRecent(listed, autosave.recent)
+  }, [settingsView, autosave.recent])
 
   const openProbe = useCallback((providerId?: string) => {
     setProbeSeed(providerId)
@@ -140,10 +155,9 @@ export function LlmPanel({ notify }: { notify: Notify }) {
         {sub === 'providers' && (
           <ProvidersPanel
             routes={routes}
-            settingsView={settingsView}
             credentials={credentials}
             notify={notify}
-            onChanged={reloadAll}
+            autosave={autosave}
             onOpenProbe={openProbe}
             onAdd={addProvider}
             onEdit={editProvider}
@@ -165,18 +179,18 @@ export function LlmPanel({ notify }: { notify: Notify }) {
 
       {modal && settings && (
         <ProviderModal
+          key={modal.route ?? '__new__'}
           route={modal.route}
           initial={
             modal.route
               ? (routes.find((entry) => entry.route === modal.route)?.profile ?? null)
               : null
           }
-          revision={settingsView?.revision ?? 0}
-          providers={asRecord(settingsView?.value?.providers)}
           credentials={credentials}
           notify={notify}
+          autosave={autosave}
+          onChanged={reloadAll}
           onClose={() => setModal(null)}
-          onSaved={reloadAll}
         />
       )}
     </div>

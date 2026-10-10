@@ -71,6 +71,7 @@ function useFieldAria(): {
 export function TextInput({
   value,
   onChange,
+  onCommit,
   disabled,
   placeholder,
   mono,
@@ -81,6 +82,11 @@ export function TextInput({
 }: {
   value: string
   onChange: (value: string) => void
+  /**
+   * 显式提交点:失焦或输入法上屏结束时触发。自动保存下的 debounce 只兜住
+   * 「停笔」,IME 的 compositionend 与失焦要立刻落一次,不等防抖。
+   */
+  onCommit?: () => void
   disabled?: boolean
   placeholder?: string
   mono?: boolean
@@ -101,6 +107,8 @@ export function TextInput({
       spellCheck={spellCheck}
       inputMode={inputMode}
       onChange={(event) => onChange(event.target.value)}
+      onBlur={onCommit}
+      onCompositionEnd={onCommit}
       {...aria}
     />
   )
@@ -110,12 +118,14 @@ export function TextInput({
 export function NumberInput({
   value,
   onChange,
+  onCommit,
   disabled,
   placeholder,
   mono,
 }: {
   value: number | undefined
   onChange: (value: number | undefined) => void
+  onCommit?: () => void
   disabled?: boolean
   placeholder?: string
   mono?: boolean
@@ -128,6 +138,7 @@ export function NumberInput({
         const digits = raw.trim().replace(/\D/g, '')
         onChange(digits ? Number(digits) : undefined)
       }}
+      onCommit={onCommit}
       disabled={disabled}
       placeholder={placeholder}
       mono={mono}

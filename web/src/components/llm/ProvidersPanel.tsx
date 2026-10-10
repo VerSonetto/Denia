@@ -1,17 +1,20 @@
 /**
- * 供应商子页:网关卡片列表 + 空态插画 + 删除确认。
+ * 供应商子页:顶部工具条(计数 + 添加) + 网关卡片列表 + 空态插画 + 删除确认。
  * 卡片是 memo 叶子;编辑弹窗由 LlmPanel 统一挂载,这里只发触发。
+ * 一切落盘(含删除)都走 autosave 通道,本页不直接写设置。
  */
 
 import { memo, useState } from 'react'
-import * as api from '../../api'
 import { t } from '../../i18n'
 import { protocolLabel } from '../../modelCatalog'
 import { Badge, Button } from './atoms/form'
+import { AutosaveStatus } from './AutosaveStatus'
 import { ConfirmDialog } from '../ConfirmDialog'
+import { IconPlus } from '../icons'
 import type { ProviderRoute } from './types'
+import type { ProviderAutosave } from './useProviderAutosave'
 import type { Notify } from '../../App'
-import type { CredentialInfo, NamespaceView } from '../../types'
+import type { CredentialInfo } from '../../types'
 import styles from './ProvidersPanel.module.css'
 
 const ProviderCard = memo(function ProviderCard({
@@ -86,21 +89,28 @@ function EmptyIllustration() {
   )
 }
 
+function AddButton({ onAdd }: { onAdd: () => void }) {
+  return (
+    <Button variant="primary" onClick={onAdd}>
+      <IconPlus size={13} />
+      {t('addProvider')}
+    </Button>
+  )
+}
+
 export function ProvidersPanel({
   routes,
-  settingsView,
   credentials,
   notify,
-  onChanged,
+  autosave,
   onOpenProbe,
   onAdd,
   onEdit,
 }: {
   routes: ProviderRoute[]
-  settingsView: NamespaceView | undefined
   credentials: Record<string, CredentialInfo>
   notify: Notify
-  onChanged: () => void
+  autosave: ProviderAutosave
   onOpenProbe: (providerId?: string) => void
   onAdd: () => void
   onEdit: (route: string) => void
@@ -108,55 +118,50 @@ export function ProvidersPanel({
   const [removing, setRemoving] = useState<ProviderRoute | null>(null)
 
   const confirmRemove = async () => {
-    if (!removing || !settingsView) return
-    const raw = (settingsView.value.providers as Record<string, unknown>) ?? {}
-    const next: Record<string, unknown> = {}
-    for (const [key, value] of Object.entries(raw)) {
-      if (key !== removing.route) next[key] = value
-    }
-    try {
-      await api.replaceNamespace('llm-openai', { providers: next }, settingsView.revision)
-      notify('ok', t('providerRemoved'))
-      onChanged()
-    } catch (err) {
-      notify('err', err instanceof Error ? err.message : String(err))
-    } finally {
-      setRemoving(null)
-    }
+    if (!removing) return
+    const target = removing
+    setRemoving(null)
+    const ok = await autosave.write(target.route, null)
+    if (ok) notify('ok', t('providerRemoved'))
   }
 
   return (
     <div className={styles.root}>
+      {/* 添加入口固定在顶部:列表再长也不用滚到底去找按钮。 */}
+      <div className={styles.toolbar}>
+        <div className={styles.toolbarCopy}>
+          <span className={styles.toolbarTitle}>{t('modelProvidersLabel')}</span>
+          <span className={styles.toolbarCount}>
+            {t('llm.provider.count', { n: routes.length })}
+          </span>
+        </div>
+        <div className={styles.toolbarActions}>
+          <AutosaveStatus autosave={autosave} />
+          {routes.length > 0 && <AddButton onAdd={onAdd} />}
+        </div>
+      </div>
+
       {routes.length === 0 ? (
         <div className={styles.empty}>
           <EmptyIllustration />
           <h4 className={styles.emptyTitle}>{t('llm.provider.emptyTitle')}</h4>
           <p className={styles.emptyHint}>{t('llm.provider.emptyHint')}</p>
-          <Button variant="primary" onClick={onAdd}>
-            {t('addProvider')}
-          </Button>
+          <AddButton onAdd={onAdd} />
         </div>
       ) : (
-        <>
-          <div className={styles.list}>
-            {routes.map(({ route, profile }) => (
-              <ProviderCard
-                key={route}
-                route={route}
-                profile={profile}
-                credential={profile.apiKeyEnv ? credentials[profile.apiKeyEnv] : undefined}
-                onEdit={() => onEdit(route)}
-                onRemove={() => setRemoving({ route, profile })}
-                onTest={() => onOpenProbe(route)}
-              />
-            ))}
-          </div>
-          <div>
-            <Button variant="ghost" onClick={onAdd}>
-              + {t('addProvider')}
-            </Button>
-          </div>
-        </>
+        <div className={styles.list}>
+          {routes.map(({ route, profile }) => (
+            <ProviderCard
+              key={route}
+              route={route}
+              profile={profile}
+              credential={profile.apiKeyEnv ? credentials[profile.apiKeyEnv] : undefined}
+              onEdit={() => onEdit(route)}
+              onRemove={() => setRemoving({ route, profile })}
+              onTest={() => onOpenProbe(route)}
+            />
+          ))}
+        </div>
       )}
 
       <ConfirmDialog
