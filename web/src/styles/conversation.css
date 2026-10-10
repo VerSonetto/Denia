@@ -9,6 +9,11 @@
   --chat-content-width: clamp(680px, 64%, var(--content-max));
   --composer-card-max-width: calc(var(--chat-content-width) + 32px);
   --composer-side-clearance: 16px;
+  /* 停靠区(队列 / 任务清单 / 目标条 / 输入卡 / 状态栏)共用的内容起始线。
+     之前面板内文字在 13px、输入卡控件在 10px,差 3px —— 肉眼说不出但一眼
+     觉得不整齐。面板自带 1px 边框,取 padding = inset - 1px 才能真正落在
+     同一条线上(var 的兜底值给脱离 .session-layout 渲染的场合)。 */
+  --dock-inset: 10px;
 }
 
 .session-layout[data-phase='active'] {
@@ -431,8 +436,12 @@
 .stats-bar {
   display: flex;
   align-items: center;
+  /* 居中:状态栏是输入区的注脚,居中读起来是「一句话的尾巴」,左对齐反而像
+     又一行控件。 */
   justify-content: center;
-  gap: 6px;
+  /* 8px:与 composer-stack 的层间距同格,胶囊之间用同一个数,整条注脚读起来
+     是一段而不是六颗各自为政的点。 */
+  gap: 8px;
   flex-wrap: wrap;
   padding: 0 4px;
   /* 贴住输入卡:叠在 composer-stack 的 8px 间隙上再收 4px,净距 4px ——
@@ -444,12 +453,17 @@
   display: inline-flex;
   align-items: center;
   gap: 5px;
-  padding: 2px 8px;
+  /* 3/10:11px 时代胶囊只有 20px 高,数字挤在两行半空里;抬到 12px 之后用
+     上下各 3px 把它撑回 22px,和 goal-budget-pill 同高,两种胶囊不再差一档。 */
+  padding: 3px 10px;
   border-radius: var(--r-pill);
   background: var(--accent-soft);
   color: var(--label-tertiary);
-  font-size: 11px;
+  /* 12px 是这套界面的注脚下限(caption 档),11px 在 1x 屏上已经糊到读不出
+     两位小数;这里装的是 token 数与命中率,值得占到 12px。 */
+  font-size: 12px;
   line-height: 16px;
+  letter-spacing: 0.01em;
   white-space: nowrap;
   cursor: default;
   transition: background 0.15s var(--ease), color 0.15s var(--ease);

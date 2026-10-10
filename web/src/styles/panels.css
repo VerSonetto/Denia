@@ -889,10 +889,14 @@
   flex: none;
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 10px;
   width: 100%;
-  height: 36px;
-  padding: 3px 4px 3px 12px;
+  /* min-height 而非固定 height:内容更高时顶开而不是被裁。42px 是 border-box,
+     即 10px 上下内边距 + 20px 内容(预算胶囊)+ 上下边框,收起时与 todo /
+     队列面板完全同高,三张同族卡片上下边缘接得齐。 */
+  min-height: 42px;
+  /* 左内边距比右边的 8px 大:1px 边框 + 9px,内容正好落在 --dock-inset 上。 */
+  padding: 10px 8px 10px calc(var(--dock-inset, 10px) - 1px);
   border: 1px solid var(--border-l1);
   border-radius: var(--r-md);
   background: var(--bg-layer-1);
@@ -915,6 +919,8 @@
   color: var(--label-tertiary);
   font-size: 12px;
   line-height: 16px;
+  /* 状态词是纯元信息,给一点字距把它与目标正文分开。 */
+  letter-spacing: 0.02em;
   white-space: nowrap;
 }
 
@@ -932,11 +938,12 @@
   flex: none;
   display: inline-flex;
   align-items: center;
-  padding: 1px 8px;
+  /* 2px 9px + 16px 行高 = 20px:与状态栏的统计胶囊同高,两种胶囊不再差一档。 */
+  padding: 2px 9px;
   border-radius: var(--r-pill);
   background: var(--accent-soft);
   color: var(--label-tertiary);
-  font-size: 11px;
+  font-size: 12px;
   line-height: 16px;
   font-variant-numeric: tabular-nums;
   white-space: nowrap;

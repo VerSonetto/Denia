@@ -416,7 +416,9 @@
   overflow-wrap: break-word;
   cursor: text;
   min-height: 52px;
-  padding: 8px 18px 6px;
+  /* 横向用 --composer-inset(而不是写死的 18px):它与下方控件架共用同一个
+     token,输入框内的文字与 + / 权限 / 模型 / 发送键自然落在同一条左轴上。 */
+  padding: 8px var(--composer-inset) 6px;
   font-size: 15px;
   line-height: 26px;
   letter-spacing: 0.005em;
@@ -514,11 +516,12 @@
   color: var(--label-caption);
 }
 .prompt-bar .btn-send.stop { transform: none; }
-.composer-attachments { padding: 2px 16px 6px; }
+/* 附件行跟着输入区内容对齐(原来 16px,比编辑区多缩进一圈)。 */
+.composer-attachments { padding: 2px var(--composer-inset) 6px; }
 
 @media (max-width: 820px) {
   .prompt-panel { padding-top: 6px; }
-  .prompt-panel .prompt-editor { padding: 8px 16px 4px; min-height: 56px; font-size: 16px; }
+  .prompt-panel .prompt-editor { padding: 8px var(--composer-inset) 4px; min-height: 56px; font-size: 16px; }
   /* 手机:前置开关(+ / 权限)留在第一行,发送链整条换到第二行靠右 ——
      五个控件横着放不进 390px,与其让模型名吃掉发送键,不如让链路独占一行。 */
   .prompt-bar { gap: 6px 4px; padding: 2px var(--composer-inset) var(--composer-inset); }
@@ -535,6 +538,22 @@
   .prompt-bar .effort-chip-static { min-height: 40px; }
   .prompt-bar .cm-trigger { width: 40px; height: 40px; }
   .composer-image-remove { opacity: 1; }
+}
+/* ---- 输入区停靠面板(手机):触摸目标与行距 ----
+   桌面上的胶囊只有 22px、队列动作键 24px,手指按不准;这里只改尺寸与间距,
+   不碰配色与圆角。 */
+@media (max-width: 820px) {
+  /* 375px 下状态栏本来就要折行,间距收回 6px 多换一列的宽度。 */
+  .stats-bar { gap: 6px; }
+  /* 抬到 32px:次级触摸目标够用,又不至于把折行后的状态栏吃掉半屏。 */
+  .stats-pill { min-height: 32px; padding: 6px 10px; }
+  /* 可点面板头与目标条同样给到手指尺寸(46px 含边框,三者仍对齐)。
+     左内边距不能写成padding: 12px 简写 —— 那会把左侧重置回 12px,面板内容
+     又比输入卡控件多缩进 3px。 */
+  .todo-header,
+  .queue-head { min-height: 44px; padding: 12px 12px 12px calc(var(--dock-inset, 10px) - 1px); }
+  .goal-bar { min-height: 46px; padding: 12px 8px 12px calc(var(--dock-inset, 10px) - 1px); }
+  .queue-action { width: 32px; height: 32px; }
 }
 @media (prefers-reduced-motion: reduce) {
   .prompt-panel,

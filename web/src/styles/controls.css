@@ -696,11 +696,22 @@ button.btn.form-action {
 .queue-head {
   display: flex;
   align-items: center;
-  gap: 10px;
+  /* 8px:与列表行同格,面板里的所有竖向间隙收敛到 8/6 两档。 */
+  gap: 8px;
   width: 100%;
-  padding: 8px 12px;
+  /* 10px + 18px 行高 = 38px 内容高,加上下边框 40px,与 todo 面板、目标条
+     三张卡片完全同高,叠在输入卡上方时边缘能连成一条线。min-height 是这道
+     下限的护栅:正文行高将来一改,头部不会被行高悄悄带高或带矮。 */
+  min-height: 40px;
+  /* 左内边距比头部内边距少 1px:面板有 1px 边框,减掉它内容才落在 --dock-inset
+     上,与输入卡里的控件、状态栏胶囊对齐。 */
+  padding: 10px 12px 10px calc(var(--dock-inset, 10px) - 1px);
   border: none;
   background: transparent;
+  /* 显式给字号行高:不写的话这里继承 button 的 UA 字体(13.33px/normal),
+     任何直接写进头部的文本都会掉出面板的字号阶梯。 */
+  font-size: 13px;
+  line-height: 18px;
   font-family: var(--font-ui);
 }
 
@@ -711,18 +722,22 @@ button.btn.form-action {
   color: var(--label-tertiary);
 }
 
+/* 面板字阶共三档:标题 13/18/600、正文 13/20/400、元信息 12/18/400。
+   标题靠字重与行高分开,不再靠另一个字号(13px 已经不能再降,降了就与元信息
+   挤在同一档)。 */
 .queue-title {
   flex: none;
   font-size: 13px;
-  line-height: 20px;
-  font-weight: 500;
+  line-height: 18px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
   color: var(--label-primary);
 }
 
 .queue-count {
   flex: none;
   font-size: 12px;
-  line-height: 20px;
+  line-height: 18px;
   color: var(--label-tertiary);
 }
 
@@ -731,7 +746,7 @@ button.btn.form-action {
   min-width: 0;
   overflow: hidden;
   font-size: 12px;
-  line-height: 20px;
+  line-height: 18px;
   color: var(--label-caption);
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -743,16 +758,17 @@ button.btn.form-action {
   flex-direction: column;
   gap: 6px;
   margin: 0;
-  padding: 2px 12px 10px;
+  /* 上 4px:原先的 2px 贴着头部分隔线,行与头之间几乎没有呼吸。 */
+  padding: 4px 12px 12px calc(var(--dock-inset, 10px) - 1px);
   list-style: none;
-  max-height: 180px;
+  max-height: 200px;
   overflow-y: auto;
 }
 
 .queue-item {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 8px;
   min-width: 0;
   font-size: 13px;
   line-height: 20px;
@@ -794,12 +810,13 @@ button.btn.form-action {
   flex: none;
   align-items: center;
   gap: 4px;
-  max-width: 140px;
-  padding: 1px 6px;
+  max-width: 160px;
+  padding: 1px 7px;
   border: 1px solid var(--border-l1);
   border-radius: 4px;
   background: var(--bg-layer-2);
-  font-size: 11px;
+  /* 12px:芯片里装的是文件名与引用标题,11px 下长名字只能靠悬停才能认出来。 */
+  font-size: 12px;
   line-height: 16px;
   color: var(--label-tertiary);
 }
@@ -814,8 +831,9 @@ button.btn.form-action {
 .queue-thumb {
   display: block;
   flex: none;
-  width: 26px;
-  height: 20px;
+  /* 28×22:比 12px 芯片(20px)高 2px,缩略图不再比旁边的芯片矮一截。 */
+  width: 28px;
+  height: 22px;
   overflow: hidden;
   border: 1px solid var(--border-l1);
   border-radius: 4px;
@@ -873,13 +891,20 @@ button.btn.form-action {
 .todo-header {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 8px;
   width: 100%;
-  padding: 8px 12px;
+  /* 10px + 18px 行高 = 38px 内容高,加上下边框 40px,与 todo 面板、目标条同高。 */
+  min-height: 40px;
+  /* 左内边距比头部内边距少 1px:面板有 1px 边框,减掉它内容才落在 --dock-inset
+     上,与输入卡里的控件、状态栏胶囊对齐。 */
+  padding: 10px 12px 10px calc(var(--dock-inset, 10px) - 1px);
   border: none;
   background: transparent;
   text-align: left;
   cursor: pointer;
+  /* 同.queue-head:不锁住字号行高,头部里的任何文本都会继承 button 的 UA 字体。 */
+  font-size: 13px;
+  line-height: 18px;
   font-family: var(--font-ui);
 }
 
@@ -896,16 +921,21 @@ button.btn.form-action {
 
 .todo-title {
   flex: none;
+  /* 右外边距把「面板名」与「面板内容」拆成两组:头部里 title 与正文原本共用
+     8px 间隙,读起来像同一句话(「任务清单 P0 基线勘察…」),加到 14px 才看得出
+     哪里是标签、哪里是内容。 */
+  margin-right: 6px;
   font-size: 13px;
-  line-height: 20px;
-  font-weight: 500;
+  line-height: 18px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
   color: var(--label-primary);
 }
 
 .todo-active-now {
   display: flex;
   align-items: center;
-  gap: 7px;
+  gap: 8px;
   flex: 1 1 auto;
   min-width: 0;
   font-size: 13px;
@@ -929,8 +959,9 @@ button.btn.form-action {
   flex: 1 1 auto;
   min-width: 0;
   overflow: hidden;
-  font-size: 13px;
-  line-height: 20px;
+  /* 12/18:进度计数是元信息,原先与任务标题同字号同档,一眼扫过去分不出主次。 */
+  font-size: 12px;
+  line-height: 18px;
   color: var(--label-tertiary);
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -946,18 +977,19 @@ button.btn.form-action {
 .todo-list {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 6px;
   margin: 0;
-  padding: 2px 12px 10px;
+  /* 上 4px:原先的 2px 贴着头部分隔线,行与头之间几乎没有呼吸。 */
+  padding: 4px 12px 12px calc(var(--dock-inset, 10px) - 1px);
   list-style: none;
-  max-height: 180px;
+  max-height: 200px;
   overflow-y: auto;
 }
 
 .todo-item {
   display: flex;
   align-items: center;
-  gap: 10px;
+  gap: 8px;
   min-width: 0;
   font-size: 13px;
   line-height: 20px;
@@ -1461,7 +1493,9 @@ button.btn.form-action {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
-  padding: 0 14px 10px;
+  /* 与 .prompt-editor / .prompt-bar 共用 --composer-inset,附件芯片与正文、
+     控件行落在同一条左轴上。 */
+  padding: 0 var(--composer-inset, 10px) 10px;
 }
 
 .composer-image-thumb {
