@@ -9,7 +9,7 @@ use std::collections::HashSet;
 use std::io::{BufRead, BufReader};
 use std::process::{Command, Stdio};
 
-use denia_mcp::{McpManager, McpServerConfig, McpServerStatus};
+use denia_mcp::{McpManager, McpServerConfig, McpServerStatus, PageCall};
 use serde_json::json;
 
 /// 起一个 HTTP fixture,返回它的 base URL(如 `http://127.0.0.1:54321`)。
@@ -121,19 +121,38 @@ async fn http_results_page_by_chars() {
     let manager = McpManager::new(HashSet::new());
     manager.reload(&[http_config("web", &base)]).await;
 
+    let arguments = json!({ "chars": 100 });
     let first = manager
-        .call_paged("mcp__web__big", 0, 30, &json!({ "chars": 100 }))
+        .call_paged(&PageCall {
+            qualified: "mcp__web__big",
+            arguments: &arguments,
+            offset: 0,
+            limit: 30,
+            result_id: None,
+            legacy_resume: false,
+            session: Some("s1"),
+        })
         .await
         .expect("call");
     assert_eq!(first.total_chars, 100);
     assert_eq!(first.shown_chars, 30);
     assert!(first.has_more);
+    let id = first.result_id.clone().expect("结果身份");
 
+    // 续读靠结果身份:带上令牌才走缓存,不带令牌就是新的一次真实调用。
     let next = manager
-        .call_paged("mcp__web__big", 30, 30, &json!({ "chars": 100 }))
+        .call_paged(&PageCall {
+            qualified: "mcp__web__big",
+            arguments: &arguments,
+            offset: 30,
+            limit: 30,
+            result_id: Some(&id),
+            legacy_resume: false,
+            session: Some("s1"),
+        })
         .await
         .expect("call");
-    assert!(next.from_cache, "翻页不重跑工具");
+    assert!(next.from_cache, "续读不重跑工具");
     assert_eq!(next.text, "A".repeat(30));
 }
 

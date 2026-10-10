@@ -151,6 +151,7 @@ pub fn register_shipped_prompt(
     })?;
     register_plan_prompt_section(prompt)?;
     register_goal_prompt_section(prompt)?;
+    register_task_prompt_section(prompt)?;
     // 行为与表达纪律:放在工具段之后,约束"怎么推进工作"、"怎么说话"、
     // "上下文变长时怎么办"、"代码写成什么样"、"结果怎么报告",
     // 与工具用法不重叠。
@@ -363,6 +364,32 @@ pub fn register_goal_prompt_section(prompt: &mut SystemPrompt) -> Result<(), Str
         order: SectionOrder::ToolGoal.value(),
         text: PromptText::Static(
             "会话存在目标时,一切工作以达成目标为先:每轮开始时先看最新的 [denia 目标] 状态注入(目标、状态、轮次与预算用量),评估当前进展再决定并执行下一步,不要原地等待指示。目标真正达成时立刻用 update_goal 的 complete 标记,不要把已完成的目标挂着续跑;被外部条件卡住(缺凭据、依赖方不可用、需要用户拍板)且无法绕开时,用 blocked 标记并写清阻塞条件,不要空转烧预算。用户插话是对目标的 steering:按新指示调整方向,必要时用 update_goal 的 edit 同步目标文本。get_goal 用于在动手前确认目标状态与预算用量。不要虚构目标状态,一切以 get_goal 返回为准。"
+                .to_string(),
+        ),
+        complete: false,
+        audience: SectionAudience::Model,
+    })?;
+    Ok(())
+}
+
+/// 任务账本工具(get_task/update_task/run_checks)的纪律段。
+///
+/// 与 `default_registry` 严格同步:三个工具在所有部署注册,本段同样总是注入
+/// (与 tool:goal 这些基础段同性质)。preset 的 `taskLedger` 开关关闭时,工具
+/// 与本段一起消失(段↔工具映射见 `denia_agent_loop::turn::section_tools`)。
+///
+/// 纪律与 description 分工不重叠:description 写参数机制,本段写"账本用来
+/// 干什么、什么时候写、完成判定怎么才算数、什么做不到"。
+pub fn register_task_prompt_section(prompt: &mut SystemPrompt) -> Result<(), String> {
+    prompt.section(PromptSection {
+        name: "tool:task".to_string(),
+        order: SectionOrder::ToolTask.value(),
+        text: PromptText::Static(
+            "任务账本记的是「这次任务要达成什么、有什么证据支撑完成」。多步任务开工前先用 update_task 的 open 声明目标与验收项(acceptance);用户要求或验收变了用 revise 换版(旧验证结论随之作废);过程中把事实、假设、失败尝试、未决问题用 amend 记下来;待完成工作用 set-remaining 整表替换;卡在外部条件上用 block,解除后 unblock;做完用 close 收口。\n\
+             验收项由你声明,完成也只看它:收口时当前 revision 的验收项必须全部被「通过的检查」覆盖才算验收通过,否则结局是「未验证完成」——不要用「我做完了」替代它。\n\
+             你**不能**自称验证通过:验证结论只能由 run_checks 真跑完命令后由宿主按退出码写出。要主张完成就跑检查(命令、期望退出码、工作目录、超时),用 covered 声明本次覆盖哪些验收项;检查失败就如实报告失败,不要绕过检查,也不要把没跑完的说成通过。\n\
+             事实必须能追溯:引用用户原话要在日志里核对得到,核不到会被降级为假设;拿不出处就用 assumption,不要把自己的推断写成 fact。\n\
+             run_checks 的输入快照只覆盖工作目录与文件内容指纹(没有环境变量快照):验证之后相关文件又被改过,旧结论就失效,需要重跑。动手前后用 get_task 确认状态、结局与当前 revision(它给出验收项、未决问题、证据的 id)。"
                 .to_string(),
         ),
         complete: false,
@@ -1001,8 +1028,9 @@ mod tests {
                 .any(|section| section.name == "tool:todo")
         );
         assert!(!render_context_snapshot(&assembly).is_empty());
-        // bash/read/write/todo/ls/glob/grep/edit/exit_plan/get_goal/update_goal/web_fetch。
-        assert_eq!(assembly.tools.len(), 13);
+        // bash/read/write/todo/ls/glob/grep/edit/exit_plan/get_goal/update_goal/web_fetch
+        // + 任务账本三件套 get_task/update_task/run_checks。
+        assert_eq!(assembly.tools.len(), 16);
         assert!(
             assembly
                 .tools
@@ -1355,6 +1383,7 @@ mod browser_prompt_tests {
             ask: None,
             call_id: None,
             goal_reader: None,
+            task_ledger: None,
             read_state: None,
         };
         let tool = crate::BrowserTool::new(hub);

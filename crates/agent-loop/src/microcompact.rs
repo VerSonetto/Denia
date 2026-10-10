@@ -116,8 +116,11 @@ struct Candidate {
 }
 
 /// 判断某个工具结果是否已经被清理过(幂等保护)。
+///
+/// 按前缀而非全等判断:带产物引用的占位符在 `CLEARED_PLACEHOLDER` 之后
+/// 还跟一段回读提示,全等会把它误判为未清理、反复重清。
 fn already_cleared(content: &str) -> bool {
-    content.trim() == CLEARED_PLACEHOLDER
+    content.trim_start().starts_with(CLEARED_PLACEHOLDER)
 }
 
 /// 粗略 token 估算:与 token-meter 的口径对齐(4 字符 ≈ 1 token)。
@@ -422,6 +425,19 @@ mod tests {
             }
             other => panic!("应当触发,实际 {other:?}"),
         }
+    }
+
+    #[test]
+    fn already_cleared_accepts_placeholder_with_output_reference() {
+        // 带产物引用的占位符仍然是"已清理":幂等保护必须按前缀判断,
+        // 否则带引用的条目会被当成未清理项反复重清。
+        let with_reference = format!(
+            "{CLEARED_PLACEHOLDER}[完整输出保留为产物 art-1,需要原文时用 read_tool_output 回读]"
+        );
+        assert!(already_cleared(with_reference.as_str()));
+        assert!(already_cleared(CLEARED_PLACEHOLDER));
+        assert!(!already_cleared("普通正文"));
+        assert!(!already_cleared(""));
     }
 
     #[test]

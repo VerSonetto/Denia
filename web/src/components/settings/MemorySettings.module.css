@@ -234,6 +234,54 @@
   color: var(--label-tertiary);
 }
 
+/* 文件行:名称左、删除键右;删除键平时只露一个极淡的 ×,hover 才显 danger。 */
+.fileRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-width: 0;
+}
+
+.fileText {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.fileDelete {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
+  color: var(--label-caption);
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+  opacity: 0.55;
+}
+
+.fileItem:hover .fileDelete,
+.fileDelete:focus-visible {
+  opacity: 1;
+}
+
+.fileDelete:hover {
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
+.fileDelete:focus-visible {
+  outline: none;
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
 .preview {
   min-height: 200px;
   max-height: 420px;
@@ -241,6 +289,49 @@
   padding: 10px 12px;
   border: 1px solid var(--border-l1);
   border-radius: 10px;
+}
+
+/* 预览头:文件名左、删除键右,与文件行同语言。 */
+.previewHead {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.previewName {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--label-secondary);
+}
+
+.previewDelete {
+  flex: none;
+  padding: 3px 10px;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  background: none;
+  color: var(--label-tertiary);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.previewDelete:hover {
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+
+.confirmName {
+  margin: 8px 0 0;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 12px;
+  color: var(--label-secondary);
+  overflow-wrap: anywhere;
 }
 
 .previewBody {

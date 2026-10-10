@@ -11,4 +11,5 @@ pub mod preset;
 pub mod session;
 pub mod stream;
 pub mod subagent;
+pub mod task;
 pub mod tool;

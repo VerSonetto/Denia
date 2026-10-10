@@ -118,11 +118,14 @@ pub fn parse_tool_args<T: serde::de::DeserializeOwned>(raw: &str) -> Result<T, S
 
 /// 统一工具错误输出:`[工具错误] {原因}\n建议:{hint}`。
 /// 建议必须可执行,模型据此修正下一次调用。
+///
+/// 不带 `report`:走到这里说明工具还没来得及产出任何执行事实。真正跑过
+/// 命令又失败的路径(如 bash 启动失败 / 超时)自行挂 `report`。
 pub fn tool_error(reason: impl std::fmt::Display, hint: impl std::fmt::Display) -> ToolOutput {
     ToolOutput {
-        artifact: None,
         content: format!("[工具错误] {reason}\n建议:{hint}"),
         is_error: true,
+        ..Default::default()
     }
 }
 

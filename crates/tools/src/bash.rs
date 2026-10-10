@@ -2,189 +2,20 @@
 //!
 //! 有 [`ShellHub`] 的部署走**常驻 shell**(同一会话的多次调用共享工作目录、
 //! 变量与环境),没有则退回一次性进程。形态差异的取舍见
-//! [`crate::shell_session`] 的模块文档。
+//! [`crate::shell_session`] 的模块文档。一次性进程的执行内核抽在
+//! [`crate::shell::run_command`],与 `run_checks` 共用一份实现。
 
-use std::process::Stdio;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use async_trait::async_trait;
-use denia_core::session::SessionEvent;
 use denia_core::tool::ToolSchema;
 use serde::Deserialize;
 
-use crate::SessionEventSink;
+use crate::shell::{self, CommandSpec, DEFAULT_TIMEOUT_MS, MAX_TIMEOUT_MS, StreamSpec};
 use crate::shell_session::ShellHub;
 use crate::support::{parse_tool_args, tool_error};
-use crate::{Tool, ToolContext, ToolOutput, shell};
-
-/// 实时输出的节流间隔。
-///
-/// 节奏取"人眼够用、日志不炸"的折中:输出密集时每 [`STREAM_INTERVAL`] 最多
-/// 推一条,首块立即推(短命令也要能立刻看到东西)。停顿时由定时分支补推,
-/// 见 [`consume_output`]。
-const STREAM_INTERVAL: Duration = Duration::from_millis(120);
-
-/// 单次调用的实时输出总量上限。
-///
-/// 命令结束后 `ToolResult` 的首尾预览与产物已经覆盖完整内容,实时通道再往上
-/// 堆只有日志成本;到顶即停推,界面随即由最终结果接替。
-const STREAM_BUDGET_BYTES: usize = 128 * 1024;
-
-/// 把命令输出按增量推给会话日志的节流器。
-///
-/// 三条纪律:
-/// 1. **增量**:每次只发新增正文,前端按序拼接(不是整段重发);
-/// 2. **UTF-8 安全**:尾部不完整的多字节字符留到下一块 —— 切出半个字符会让
-///    替换字符永久留在前端已拼接的历史里;
-/// 3. **有界**:单条不超过一个读块,单次调用不超过 [`STREAM_BUDGET_BYTES`]。
-///
-/// 没有会话身份(`emit_event` 为 None)或没有工具调用 id 时退化为空实现:
-/// 单测与裸跑路径不必为此分叉,也拿不到可挂载增量的事件。
-struct Streamer {
-    sink: Option<SessionEventSink>,
-    call_id: String,
-    stream: &'static str,
-    /// 尚未凑成合法 UTF-8 的尾部字节。
-    pending: Vec<u8>,
-    last_emit: Option<Instant>,
-    emitted: usize,
-}
-
-impl Streamer {
-    fn new(sink: Option<SessionEventSink>, call_id: Option<&str>, stream: &'static str) -> Self {
-        Self {
-            sink,
-            call_id: call_id.unwrap_or_default().to_string(),
-            stream,
-            pending: Vec::new(),
-            last_emit: None,
-            emitted: 0,
-        }
-    }
-
-    fn enabled(&self) -> bool {
-        self.sink.is_some() && !self.call_id.is_empty()
-    }
-
-    /// 收下一块输出;到点就推。
-    fn push(&mut self, bytes: &[u8]) {
-        if !self.enabled() {
-            return;
-        }
-        self.pending.extend_from_slice(bytes);
-        self.flush_if_due();
-    }
-
-    /// 到点(或首块)才推。调用点有两处:每次读返回、每个节流周期。
-    fn flush_if_due(&mut self) {
-        if self.pending.is_empty() {
-            return;
-        }
-        if let Some(at) = self.last_emit
-            && at.elapsed() < STREAM_INTERVAL
-        {
-            return;
-        }
-        let boundary = utf8_boundary(&self.pending);
-        if boundary == 0 {
-            return;
-        }
-        let bytes: Vec<u8> = self.pending.drain(..boundary).collect();
-        let text = String::from_utf8_lossy(&bytes).into_owned();
-        self.emit(&text);
-    }
-
-    /// 流结束:补推尾部残留(含被截断的半个字符,由 lossy 收尾)。
-    fn finish(&mut self) {
-        if self.pending.is_empty() {
-            return;
-        }
-        let bytes = std::mem::take(&mut self.pending);
-        let text = String::from_utf8_lossy(&bytes).into_owned();
-        self.emit(&text);
-    }
-
-    fn emit(&mut self, text: &str) {
-        let Some(sink) = self.sink.clone() else {
-            return;
-        };
-        if text.is_empty() || self.emitted >= STREAM_BUDGET_BYTES {
-            return;
-        }
-        let room = STREAM_BUDGET_BYTES - self.emitted;
-        let text = if text.len() > room {
-            &text[..floor_char_boundary(text, room)]
-        } else {
-            text
-        };
-        if text.is_empty() {
-            return;
-        }
-        self.emitted += text.len();
-        self.last_emit = Some(Instant::now());
-        sink(SessionEvent::ToolOutputChunk {
-            call_id: self.call_id.clone(),
-            stream: self.stream.to_string(),
-            text: text.to_string(),
-        });
-    }
-}
-
-/// `pending` 里最后一个完整字符的结尾(可安全切分的长度)。
-///
-/// 尾部被截断的多字节字符留到下一块;而**真坏字节**要连同它一起放行 ——
-/// 否则它会永远卡在缓冲最前面,后面的输出再也发不出去。
-fn utf8_boundary(pending: &[u8]) -> usize {
-    match std::str::from_utf8(pending) {
-        Ok(_) => pending.len(),
-        Err(error) if error.error_len().is_none() => error.valid_up_to(),
-        Err(error) => error.valid_up_to() + error.error_len().unwrap_or(1),
-    }
-}
-
-/// `str::floor_char_boundary` 的稳定版替身(后者仍是 unstable)。
-fn floor_char_boundary(text: &str, index: usize) -> usize {
-    let mut cut = index.min(text.len());
-    while cut > 0 && !text.is_char_boundary(cut) {
-        cut -= 1;
-    }
-    cut
-}
-
-async fn consume_output(
-    mut reader: impl tokio::io::AsyncRead + Unpin,
-    preview: Arc<tokio::sync::Mutex<crate::output::Preview>>,
-    capture: Option<crate::output::Capture>,
-    stream: &'static str,
-    mut streamer: Streamer,
-) -> std::io::Result<()> {
-    use tokio::io::AsyncReadExt;
-    let mut buffer = [0u8; 8192];
-    loop {
-        tokio::select! {
-            read = reader.read(&mut buffer) => {
-                let count = read?;
-                if count == 0 {
-                    break;
-                }
-                preview.lock().await.push(&buffer[..count]);
-                if let Some(capture) = &capture {
-                    capture.append(stream, &buffer[..count]).await;
-                }
-                streamer.push(&buffer[..count]);
-            }
-            // 输出停顿时也要把已积累的增量推出去:否则"打印一行然后长时间
-            // 静默"的命令会把那一行压到命令结束才显示,实时性归零。
-            _ = tokio::time::sleep(STREAM_INTERVAL) => streamer.flush_if_due(),
-        }
-    }
-    streamer.finish();
-    Ok(())
-}
-
-const DEFAULT_TIMEOUT_MS: u64 = 120_000;
-const MAX_TIMEOUT_MS: u64 = 600_000;
+use crate::{ExecutionReport, Tool, ToolContext, ToolOutput, end_reason};
 
 #[derive(Deserialize)]
 struct BashArgs {
@@ -276,13 +107,15 @@ impl BashTool {
                 return tool_error(
                     message,
                     "确认宿主 shell 可执行文件可用;工作目录是会话工作区",
-                );
+                )
+                .with_report(ExecutionReport::ended(end_reason::SPAWN_FAILED));
             }
             Err(join_error) => {
                 return tool_error(
                     format!("持久 shell 启动任务失败:{join_error}"),
                     "请重试一次",
-                );
+                )
+                .with_report(ExecutionReport::ended(end_reason::SPAWN_FAILED));
             }
         };
 
@@ -304,16 +137,20 @@ impl BashTool {
                     "命令被用户中断",
                     "该会话的持久 shell 已终止,下一条命令会重开一个干净 shell",
                 )
+                .with_report(ExecutionReport::ended(end_reason::CANCELLED))
             }
             result = runner => match result {
                 Ok(Ok(captured)) => ToolOutput::text(format!(
                     "退出码: {}\n{}",
                     captured.exit_code.unwrap_or(-1),
                     captured.text
-                )),
-                Ok(Err(message)) => ToolOutput::error(format!("[工具错误] {message}")),
+                ))
+                .with_report(ExecutionReport::completed(captured.exit_code)),
+                Ok(Err(message)) => ToolOutput::error(format!("[工具错误] {message}"))
+                    .with_report(ExecutionReport::ended(end_reason::SPAWN_FAILED)),
                 Err(join_error) => {
                     tool_error(format!("命令执行任务失败:{join_error}"), "请重试一次")
+                        .with_report(ExecutionReport::ended(end_reason::SPAWN_FAILED))
                 }
             },
         }
@@ -358,7 +195,6 @@ impl Tool for BashTool {
             .timeout_ms
             .unwrap_or(DEFAULT_TIMEOUT_MS)
             .min(MAX_TIMEOUT_MS);
-        let timeout = Duration::from_millis(requested_ms);
 
         // 挂了常驻 shell 注册表且当前调用归属某个会话 → 走持久路径。
         // 没有会话身份的调用(单测、无宿主的裸跑)退回一次性进程。
@@ -368,110 +204,39 @@ impl Tool for BashTool {
                 .await;
         }
 
-        let spawn_once = || {
-            let mut command = shell::shell_command(&args.command);
-            command
-                .current_dir(&ctx.cwd)
-                .stdin(Stdio::null())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .kill_on_drop(true);
-            command.spawn()
-        };
-        let mut child = match spawn_once() {
-            Ok(child) => child,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                // os error 2/3:shell 可执行文件路径失效(如 Store 版
-                // PowerShell 更新后按版本目录整体换路径)。清缓存重解析
-                // 并重试一次;仍失败才是真错误。
-                shell::invalidate_windows_shell_cache();
-                match spawn_once() {
-                    Ok(child) => child,
-                    Err(retry_error) => {
-                        return tool_error(
-                            format!("命令启动失败:{retry_error}"),
-                            "确认命令在该宿主 shell 上可用;工作目录是会话工作区",
-                        );
-                    }
-                }
-            }
-            Err(error) => {
-                return tool_error(
-                    format!("命令启动失败:{error}"),
-                    "确认命令在该宿主 shell 上可用;工作目录是会话工作区",
-                );
-            }
-        };
-
-        let capture = match &ctx.output_store {
-            Some(store) => Some(store.start(&["stdout", "stderr"]).await),
-            None => None,
-        };
-        let stdout_preview = Arc::new(tokio::sync::Mutex::new(crate::output::Preview::default()));
-        let stderr_preview = Arc::new(tokio::sync::Mutex::new(crate::output::Preview::default()));
-        let mut stdout_task = tokio::spawn(consume_output(
-            child.stdout.take().unwrap(),
-            stdout_preview.clone(),
-            capture.clone(),
-            "stdout",
-            Streamer::new(ctx.emit_event.clone(), ctx.call_id.as_deref(), "stdout"),
-        ));
-        let mut stderr_task = tokio::spawn(consume_output(
-            child.stderr.take().unwrap(),
-            stderr_preview.clone(),
-            capture.clone(),
-            "stderr",
-            Streamer::new(ctx.emit_event.clone(), ctx.call_id.as_deref(), "stderr"),
-        ));
-        let mut error = None;
-        let code = tokio::select! {
-            biased;
-            _ = ctx.cancel.cancelled() => { error = Some("命令被用户中断".to_string()); -1 }
-            _ = tokio::time::sleep(timeout) => { error = Some(format!("命令超时({requested_ms} ms 未结束)；可拆小命令或使用 run_in_background 后台运行")); -1 }
-            result = child.wait() => match result {
-                Ok(status) => status.code().unwrap_or(-1),
-                Err(failure) => { error = Some(format!("等待命令结束失败:{failure}")); -1 }
-            }
-        };
-        if error.is_some() {
-            let _ = child.kill().await;
+        // 一次性进程路径:执行内核与 `run_checks` 共用(见 [`shell::run_command`]),
+        // 差别只在超时文案与预览预算。
+        let run = shell::run_command(
+            CommandSpec {
+                command: &args.command,
+                cwd: &ctx.cwd,
+                timeout_ms: requested_ms,
+                output_store: ctx.output_store.as_ref(),
+                stream: Some(StreamSpec {
+                    sink: ctx.emit_event.clone(),
+                    call_id: ctx.call_id.clone(),
+                }),
+                preview_chars: (4_000, 8_000),
+                timeout_hint: "可拆小命令或使用 run_in_background 后台运行",
+            },
+            &ctx.cancel,
+        )
+        .await;
+        // 命令没能启动是工具层的事实(启动失败),与"跑完但非零"严格区分:
+        // 后者是命令自己的结果,如实上报而不是升级成工具失败。
+        if run.not_started {
+            let message = run
+                .error
+                .clone()
+                .unwrap_or_else(|| "命令启动失败".to_string());
+            return tool_error(message, "确认命令在该宿主 shell 上可用;工作目录是会话工作区")
+                .with_report(run.report());
         }
-        let drained = matches!(
-            tokio::time::timeout(Duration::from_secs(2), async {
-                let stdout = (&mut stdout_task).await;
-                let stderr = (&mut stderr_task).await;
-                (stdout, stderr)
-            })
-            .await,
-            Ok((Ok(Ok(())), Ok(Ok(()))))
-        );
-        if !drained {
-            stdout_task.abort();
-            stderr_task.abort();
-        }
-        let artifact = match capture {
-            Some(capture) => Some(capture.finish(drained).await),
-            None => None,
-        };
-        let mut content = format!(
-            "退出码: {code}\n{}",
-            stdout_preview.lock().await.render(4_000, 8_000)
-        );
-        let stderr = stderr_preview.lock().await.render(4_000, 8_000);
-        if !stderr.is_empty() {
-            content.push_str(&format!("\n--- stderr ---\n{stderr}"));
-        }
-        if let Some(message) = &error {
-            content.insert_str(0, &format!("[工具错误] {message}\n"));
-        }
-        if !drained {
-            content.push_str("\n[输出消费未完整结束，产物可能不完整]");
-        }
-        content.push_str(&crate::output::artifact_notice(artifact.as_ref()));
         ToolOutput {
-            content,
-            is_error: error.is_some(),
-            artifact,
+            content: run.render(),
+            is_error: run.error.is_some(),
+            artifact: run.artifact.clone(),
+            report: Some(run.report()),
         }
     }
 }
@@ -479,8 +244,10 @@ impl Tool for BashTool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use denia_core::session::PermissionMode;
+    use denia_core::session::{PermissionMode, SessionEvent};
     use tokio_util::sync::CancellationToken;
+
+    use crate::SessionEventSink;
 
     fn sink(events: &Arc<std::sync::Mutex<Vec<SessionEvent>>>) -> SessionEventSink {
         let events = events.clone();
@@ -523,87 +290,9 @@ mod tests {
             ask: None,
             call_id: None,
             goal_reader: None,
+            task_ledger: None,
             read_state: None,
         }
-    }
-
-    /// 首块立即推(短命令也要能看到实时性),窗口内的后续块先攒着,结束必收尾。
-    ///
-    /// 白盒地钉住 `last_emit` 而不是真的等 120ms:节流窗口是时钟行为,靠
-    /// sleep 去测只会换来一个在慢机器上随机失败的用例。
-    #[test]
-    fn streamer_is_immediate_then_throttled() {
-        let events: Arc<std::sync::Mutex<Vec<SessionEvent>>> = Arc::default();
-        let mut streamer = Streamer::new(Some(sink(&events)), Some("call-1"), "stdout");
-        streamer.push(b"first");
-        assert_eq!(
-            deltas_of(&events, "call-1", "stdout"),
-            vec!["first".to_string()]
-        );
-
-        streamer.last_emit = Some(Instant::now());
-        streamer.push(b"second");
-        assert_eq!(
-            deltas_of(&events, "call-1", "stdout").len(),
-            1,
-            "节流窗口内不该再推"
-        );
-
-        streamer.finish();
-        assert_eq!(
-            deltas_of(&events, "call-1", "stdout"),
-            vec!["first".to_string(), "second".to_string()],
-            "结束必须把攒下的补出去"
-        );
-    }
-
-    /// 增量必须能原样拼回输出:逐字节喂(把每个多字节字符都切在最坏的位置),
-    /// 拼回来仍要一字不差、且不出现替换字符 —— 半个字符一旦拼进前端的历史
-    /// 就永久留在那里,重连也不会修好。
-    #[test]
-    fn streamer_deltas_reconstruct_text_without_replacement_chars() {
-        let events: Arc<std::sync::Mutex<Vec<SessionEvent>>> = Arc::default();
-        let mut streamer = Streamer::new(Some(sink(&events)), Some("call-1"), "stdout");
-        let text = "测试🦀中文 stdout\n".repeat(40);
-        for byte in text.as_bytes() {
-            streamer.push(std::slice::from_ref(byte));
-        }
-        streamer.finish();
-        let deltas = deltas_of(&events, "call-1", "stdout");
-        assert!(!deltas.is_empty(), "整段输出不该一个增量都没有");
-        assert_eq!(deltas.concat(), text, "增量拼不回原文");
-        assert!(
-            !deltas.iter().any(|delta| delta.contains('\u{FFFD}')),
-            "多字节字符被切开,产生了替换字符"
-        );
-    }
-
-    /// 实时通道有总量上限:喂满即停,超出部分不再推(命令结束后由结果与
-    /// 产物覆盖完整内容,继续往日志里灌只有成本)。
-    #[test]
-    fn streamer_stops_at_budget() {
-        let events: Arc<std::sync::Mutex<Vec<SessionEvent>>> = Arc::default();
-        let mut streamer = Streamer::new(Some(sink(&events)), Some("call-1"), "stdout");
-        let block = "x".repeat(8192);
-        for _ in 0..(STREAM_BUDGET_BYTES / 8192 + 20) {
-            streamer.push(block.as_bytes());
-        }
-        streamer.finish();
-        let total: usize = deltas_of(&events, "call-1", "stdout")
-            .iter()
-            .map(String::len)
-            .sum();
-        assert_eq!(total, STREAM_BUDGET_BYTES, "推满即止,不多不少");
-    }
-
-    /// 没有调用 id(单测、裸跑)时不推任何东西:增量没有可挂载的工具行。
-    #[test]
-    fn streamer_is_inert_without_a_call_id() {
-        let events: Arc<std::sync::Mutex<Vec<SessionEvent>>> = Arc::default();
-        let mut streamer = Streamer::new(Some(sink(&events)), None, "stdout");
-        streamer.push(b"hello");
-        streamer.finish();
-        assert!(events.lock().unwrap().is_empty());
     }
 
     /// 端到端:一次真实命令会把输出按增量推出去,且推的是**命令的输出** ——
@@ -662,10 +351,38 @@ mod tests {
         assert!(!ok.is_error);
         assert!(ok.content.starts_with("退出码: 0"), "{}", ok.content);
         assert!(ok.content.contains("hi"));
+        // 结构化事实与文案同源:界面读 `report.exit_code`,不必再解析首行。
+        let report = ok.report.as_ref().expect("正常返回一定带执行报告");
+        assert_eq!(report.exit_code, Some(0));
+        assert_eq!(report.end_reason.as_deref(), Some(end_reason::COMPLETED));
 
         let bad = tool.execute(r#"{"command":"exit 3"}"#, &ctx(&dir)).await;
         assert!(!bad.is_error, "non-zero exit is data");
         assert!(bad.content.starts_with("退出码: 3"), "{}", bad.content);
+        // 非零退出码如实上报,但不把 is_error 翻成 true —— 这是命令的结果,
+        // 不是工具失败。
+        assert_eq!(
+            bad.report.as_ref().and_then(|report| report.exit_code),
+            Some(3)
+        );
+        assert!(!bad.is_error, "非零退出不得升级成工具失败");
+    }
+
+    #[tokio::test]
+    async fn timeout_reports_reason_without_exit_code() {
+        let dir = std::env::temp_dir();
+        let tool = BashTool::new();
+        let sleeping = if cfg!(windows) {
+            r#"{"command":"ping -n 10 127.0.0.1 >nul","timeout_ms":200}"#
+        } else {
+            r#"{"command":"sleep 10","timeout_ms":200}"#
+        };
+        let out = tool.execute(sleeping, &ctx(&dir)).await;
+        let report = out.report.as_ref().expect("超时也要留下结束原因");
+        assert_eq!(report.end_reason.as_deref(), Some(end_reason::TIMEOUT));
+        // 文案里的 `-1` 只是哨兵;结构化字段必须能区分"没拿到退出码"与
+        // "退出码是 -1"。
+        assert_eq!(report.exit_code, None);
     }
 
     #[tokio::test]
@@ -781,6 +498,7 @@ mod tests {
             ask: None,
             call_id: None,
             goal_reader: None,
+            task_ledger: None,
             read_state: None,
         };
         let command = if cfg!(windows) {
@@ -794,5 +512,73 @@ mod tests {
         let out = handle.await.unwrap();
         assert!(out.is_error);
         assert!(out.content.contains("中断"), "{}", out.content);
+    }
+
+    /// 取消前台命令时,shell 拉起的孙进程也必须一起消失。
+    ///
+    /// 回归用例:此前取消分支只 `child.kill()`,而 tokio 在 Windows 上走
+    /// TerminateProcess —— shell 死了,它拉起的 cargo/node 等后代继续跑,
+    /// 还握着输出管道(于是 drain 只能等满 2 秒再 abort)。
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn cancel_kills_grandchild_processes() {
+        let dir = std::env::temp_dir().join(format!("denia-bash-cancel-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let marker = dir.join("grandchild.pid");
+        let cancel = CancellationToken::new();
+        let mut context = ctx(&dir);
+        context.cancel = cancel.clone();
+        let arguments = serde_json::json!({
+            "command": crate::shell::test_tree::nested_sleeper_command(&marker),
+            "timeout_ms": 60_000,
+        })
+        .to_string();
+        let tool = BashTool::new();
+        let handle = tokio::spawn(async move { tool.execute(&arguments, &context).await });
+        // 等进程树真的拉起来(孙进程写出自己的 PID)再取消,免得测的是竞态。
+        let grandchild = crate::shell::test_tree::wait_for_pid(&marker).await;
+        cancel.cancel();
+        let out = handle.await.unwrap();
+        assert!(out.is_error, "{}", out.content);
+        assert!(out.content.contains("中断"), "{}", out.content);
+        assert!(
+            crate::shell::test_tree::wait_until_gone(grandchild).await,
+            "取消后孙进程 {grandchild} 还在跑:前台清理没有连根拔"
+        );
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    /// 超时同样要连根拔。
+    ///
+    /// 这里不看 PID 也能判定:泄漏的孙进程握着输出管道不放,read 任务永远到不了
+    /// EOF,工具只能等满 2 秒再 abort 并退回“输出消费未完整结束”。连根拔之后
+    /// 管道正常关闭,这句话不应该出现。
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn timeout_kills_grandchild_processes() {
+        let dir = std::env::temp_dir().join(format!("denia-bash-timeout-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let marker = dir.join("grandchild.pid");
+        let arguments = serde_json::json!({
+            "command": crate::shell::test_tree::nested_sleeper_command(&marker),
+            "timeout_ms": 2_000,
+        })
+        .to_string();
+        let out = BashTool::new().execute(&arguments, &ctx(&dir)).await;
+        assert!(out.is_error, "{}", out.content);
+        assert!(out.content.contains("超时"), "{}", out.content);
+        assert!(
+            !out.content.contains("输出消费未完整结束"),
+            "超时后还有后代握着输出管道:{}",
+            out.content
+        );
+        // 机器慢时内层 shell 可能还没起来(那就只剩管道这条信号),起来了就必须死。
+        if let Some(grandchild) = crate::shell::test_tree::read_pid(&marker) {
+            assert!(
+                crate::shell::test_tree::wait_until_gone(grandchild).await,
+                "超时后孙进程 {grandchild} 还在跑:前台清理没有连根拔"
+            );
+        }
+        let _ = tokio::fs::remove_dir_all(&dir).await;
     }
 }

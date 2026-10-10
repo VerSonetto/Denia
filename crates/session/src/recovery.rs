@@ -1,6 +1,58 @@
 //! Session recovery responsibilities.
 use super::*;
 
+/// 折叠任务账本必须看到的事件:任务事件本身,以及事实引用要核对的非注入
+/// 用户消息(见 `task_projection::reference_resolves`;其余事件折叠器不读)。
+fn task_fold_relevant(envelope: &SessionEnvelope) -> bool {
+    matches!(envelope.event, SessionEvent::Task { .. })
+        || matches!(
+            &envelope.event,
+            SessionEvent::UserMessage {
+                injected: false,
+                ..
+            }
+        )
+}
+
+/// 读取 `rewinds.jsonl` 里累计的报废 revision 集合。
+///
+/// 为什么是它:`session.jsonl` 被 rewind **物理截断**,被截掉的身份在日志里
+/// 已经查不到;`rewinds.jsonl` 与它同级、只追加、不被截断,是同目录里唯一
+/// 活得过截断与重启的载体。所以回退记录里带上"这次截掉了哪些身份",加载时
+/// 取并集 —— 选择写在这里是为了让下次改回退审计的人知道它有下游读者。
+///
+/// 边界:审计文件成了折叠作用域的一个输入,文件被删或被手改,报废集合就只剩
+/// 进程内积累的那部分(保护退化,不报错,也不挡住旧日志的读取)。所以解析
+/// 失败一律按空集处理 —— 审计文件不是真值来源,读不到只表示"没有已知报废
+/// 身份"。
+fn read_retired_revisions(file: &Path) -> Vec<RevisionId> {
+    let path = file.with_file_name("rewinds.jsonl");
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return Vec::new();
+    };
+    let mut out: Vec<RevisionId> = Vec::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let Ok(record) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        let Some(items) = record.get("retiredRevisions").and_then(|v| v.as_array()) else {
+            continue;
+        };
+        for item in items {
+            if let Some(id) = item.as_str()
+                && !out.iter().any(|known| known.as_str() == id)
+            {
+                out.push(RevisionId::new(id));
+            }
+        }
+    }
+    out
+}
+
 impl Session {
     /// Loads one session, repairing torn tails and orphaned turns.
     ///
@@ -130,6 +182,11 @@ impl Session {
         let mut title: Option<String> = None;
         let mut meter = ContextMeter::new();
         let mut pending_turn: Vec<SessionEnvelope> = Vec::new();
+        // 任务账本折叠所需的极小切片:任务事件 + 非注入用户消息(事实引用要
+        // 回日志里核对原话)。冷态不驻留事件,但折叠需要完整的任务脉络;
+        // 热态也只保留这两类,于是冷/热两条路径折出的账本逐字段相同 ——
+        // parity 由"两条路径用同一份切片"保证,而不是靠两处都记得改。
+        let mut task_events: Vec<SessionEnvelope> = Vec::new();
         let mut last_seq = 0u64;
         let mut first_prompt_excerpt = None;
         // 驻留事件的内存近似:逐行累计(chunk 只在打开的轮次里驻留,
@@ -184,6 +241,9 @@ impl Session {
                     if let SessionEvent::Goal { op } = &envelope.event {
                         goal = apply_goal_op(goal, op, envelope.time, meter.turn_usage().total());
                     }
+                    if task_fold_relevant(&envelope) {
+                        task_events.push(envelope.clone());
+                    }
                     if retain && !transient {
                         events.push(envelope);
                         resident_bytes += read as u64;
@@ -212,6 +272,13 @@ impl Session {
             // 冷态不驻留事件;turn 缓冲同样只服务热态的 meter 精确折叠。
             pending_turn.clear();
         }
+        // 任务账本折叠(冷热同一份输入,见上面的 `task_events`)。报废身份
+        // 来自 `rewinds.jsonl`:被截断掉的 revision 在日志里已经查不到。
+        let retired_revisions = read_retired_revisions(file);
+        let task = project_task_scoped(
+            &task_events,
+            &task_fold_scope(&header.id, &retired_revisions),
+        );
         let inner = SessionInner {
             events,
             writer: open_append_writer(file)?,
@@ -225,6 +292,8 @@ impl Session {
             permission_mode,
             agent_preset,
             goal,
+            task,
+            retired_revisions,
             title,
             derived_surface: None,
             derived_revision: 0,

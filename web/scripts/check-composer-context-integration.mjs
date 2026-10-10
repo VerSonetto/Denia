@@ -74,6 +74,7 @@ const stubs = new Map([
     export function subscribeEvents(...args) { b.record('subscribeEvents', args); return () => {}; }
     export async function listSkills(...args) { b.record('listSkills', args); return { skills: [] }; }
     export async function getGoal(...args) { b.record('getGoal', args); return { goal: null, tokensUsed: 0, maxRounds: 10 }; }
+    export async function getTask(...args) { b.record('getTask', args); return { task: null }; }
     export async function searchMentions(...args) {
       b.record('searchMentions', args);
       if (args[0] !== 'D:/mock-workspace' || !args[2] || args[2].aborted) throw new Error('Unexpected mention scope/signal');

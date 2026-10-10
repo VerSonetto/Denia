@@ -76,6 +76,10 @@ pub struct PresetFeatures {
     pub compaction: bool,
     /// goal 模式:工具、纪律段、状态注入与自动续跑。
     pub goal: bool,
+    /// 任务账本:工具(get_task/update_task/run_checks)与 `tool:task` 纪律段。
+    ///
+    /// 关掉它就只剩"干活"没有"记账":完成判定退回到模型自己的说法。
+    pub task_ledger: bool,
     /// 技能:skill 工具、纪律段与技能目录注入。
     pub skills: bool,
     /// 子代理工具(spawn/fork/send/interrupt/list/wait)。
@@ -97,6 +101,7 @@ impl Default for PresetFeatures {
             memory: true,
             compaction: true,
             goal: true,
+            task_ledger: true,
             skills: true,
             subagents: true,
             jobs: true,
@@ -106,6 +111,10 @@ impl Default for PresetFeatures {
         }
     }
 }
+
+/// 任务账本工具族(`features.taskLedger` 关闭时摘除;与 tools crate 的
+/// `default_registry` 注册保持同步)。
+pub const TASK_TOOLS: &[&str] = &["get_task", "update_task", "run_checks"];
 
 /// 后台任务工具族(`features.jobs` 关闭时摘除;与 tools crate 的
 /// capabilities 注册保持同步)。
@@ -129,6 +138,7 @@ impl PresetFeatures {
             memory: false,
             compaction: false,
             goal: false,
+            task_ledger: false,
             skills: false,
             subagents: false,
             jobs: false,
@@ -150,6 +160,9 @@ impl PresetFeatures {
         let mut out: Vec<&'static str> = Vec::new();
         if !self.goal {
             out.extend(["get_goal", "update_goal"]);
+        }
+        if !self.task_ledger {
+            out.extend(TASK_TOOLS.iter().copied());
         }
         if !self.skills {
             out.push("skill");
@@ -384,6 +397,19 @@ mod tests {
     }
 
     #[test]
+    fn task_ledger_switch_defaults_on_and_narrows_the_three_tools() {
+        // 缺省开启:旧 preset 文件不改动也能拿到账本工具。
+        let features: PresetFeatures = serde_yaml::from_str("{}").unwrap();
+        assert!(features.task_ledger);
+        assert!(features.excluded_tools().is_empty());
+        // 显式关闭:三个工具与工具纪律段一起被摘掉。
+        let features: PresetFeatures = serde_yaml::from_str("taskLedger: false\n").unwrap();
+        assert!(!features.task_ledger);
+        assert_eq!(features.excluded_tools(), TASK_TOOLS.to_vec());
+        assert!(PresetFeatures::all_off().excluded_tools().contains(&"run_checks"));
+    }
+
+    #[test]
     fn features_reject_unknown_keys() {
         let error = serde_yaml::from_str::<PresetFeatures>("agentMd: false\n").unwrap_err();
         assert!(error.to_string().contains("unknown field"), "{error}");
@@ -399,6 +425,9 @@ mod tests {
         for name in [
             "get_goal",
             "update_goal",
+            "get_task",
+            "update_task",
+            "run_checks",
             "skill",
             "spawn_agent",
             "fork_agent",

@@ -216,6 +216,7 @@ mod tests {
             ask: None,
             call_id: None,
             goal_reader: None,
+            task_ledger: None,
             read_state: None,
         }
     }
@@ -235,6 +236,7 @@ mod tests {
             ask: None,
             call_id: None,
             goal_reader: None,
+            task_ledger: None,
             read_state: None,
         }
     }

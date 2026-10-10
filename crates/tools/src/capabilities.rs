@@ -272,14 +272,14 @@ impl Tool for CapabilityTool {
         };
         match result {
             Ok(value) => ToolOutput {
-                artifact: None,
                 content: value.to_string(),
                 is_error: false,
+                ..Default::default()
             },
             Err(content) => ToolOutput {
-                artifact: None,
                 content,
                 is_error: true,
+                ..Default::default()
             },
         }
     }

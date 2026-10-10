@@ -42,6 +42,43 @@ pub(crate) enum RequestOutcome {
     RestartStep,
 }
 
+/// 流失败后的重试决策。
+///
+/// 与 [`denia_llm::retry::with_retry`] 同语义地把"能不能重试"与"等多久"
+/// 收在一个判定里:`RetryAfterTooLong` 明确表示**放弃重试**,调用方不得
+/// 兜成 0 毫秒——provider 要求等更久时立刻重发只会再撞同一堵墙。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RetryDecision {
+    /// 等待指定毫秒后重发。
+    Wait(u64),
+    /// 错误码不在可重试集。
+    NotRetryable,
+    /// 重试预算已耗尽。
+    BudgetExhausted,
+    /// provider 要求的等待超过本地退避上限 → 放弃重试。
+    RetryAfterTooLong,
+}
+
+/// 流中断/失败后的重试决策。
+fn stream_retry_decision(
+    policy: &denia_llm::RetryPolicy,
+    failure: &LlmFailure,
+    attempts_used: u32,
+) -> RetryDecision {
+    if !policy.is_retryable(&failure.code) {
+        return RetryDecision::NotRetryable;
+    }
+    if attempts_used >= policy.max_retries {
+        return RetryDecision::BudgetExhausted;
+    }
+    let attempt = attempts_used + 1;
+    let connection = policy.is_connection_error(&failure.code);
+    match policy.delay_ms_for(attempt, failure.provider_retry_after_ms, connection) {
+        Some(delay) => RetryDecision::Wait(delay),
+        None => RetryDecision::RetryAfterTooLong,
+    }
+}
+
 /// 派发一次模型请求并返回去向。`Err` 只保留给 append/存储类硬失败
 /// (轮次裸开,由 load 合成闭合);所有模型侧失败都转为 `TurnEnded`。
 pub(crate) async fn dispatch_request(
@@ -279,21 +316,20 @@ pub(crate) async fn dispatch_request(
                 }
             }
             let has_chunks = !source_event_seqs.is_empty();
-            let retryable = retry_policy.is_retryable(&failure.code)
-                && step_retries < retry_policy.max_retries
-                && !state.cancel.is_cancelled();
             // 可重试:finish 错误与流错误都重试(dsh:llm-retry 丢弃失败
             // 尝试的 chunk)。重放 LLM 请求无副作用:半成品 chunk 留在日志
             // 但不进派生历史,工具尚未执行;失败尝试的部分输出由新 attempt
             // 的 blocks 整体取代。曾限制"仅无输出时重试",实测被网关断流
             // 掐死的收尾步白白死亡——有输出重放是安全的,故取消该限制。
-            if retryable {
+            let cancelled = state.cancel.is_cancelled();
+            let decision = stream_retry_decision(&retry_policy, &failure, step_retries);
+            let retry_delay = match decision {
+                RetryDecision::Wait(delay) if !cancelled => Some(delay),
+                _ => None,
+            };
+            if let Some(delay) = retry_delay {
                 step_retries += 1;
                 state.step_retries = step_retries;
-                let connection = retry_policy.is_connection_error(&failure.code);
-                let delay = retry_policy
-                    .delay_ms_for(step_retries, failure.provider_retry_after_ms, connection)
-                    .unwrap_or(0);
                 append(
                     &state.session,
                     &state.emit,
@@ -332,6 +368,17 @@ pub(crate) async fn dispatch_request(
                     return close_aborted(state, step);
                 }
                 continue 'attempts;
+            }
+            if decision == RetryDecision::RetryAfterTooLong && !cancelled {
+                // 不能零延迟重发:provider 明确要求等更久,等待上限是本地
+                // 保护(与 llm::retry::with_retry 同语义)。
+                tracing::warn!(
+                    session_id = state.session.id(),
+                    attempt = step_retries + 1,
+                    code = %failure.code,
+                    retry_after_ms = ?failure.provider_retry_after_ms,
+                    "provider retry-after exceeds max delay; giving up retry"
+                );
             }
             // 不可重试/预算耗尽:失败尝试不产出终稿消息(dsh:流错误
             // rethrow 不终稿;已落盘的 chunk 保留在日志),分流终止。
@@ -438,6 +485,61 @@ fn log_request_headers(
     Ok(())
 }
 
+/// 被清理结果需要沿用到替换事件上的事实。
+///
+/// 微压缩只清内容,不改变结果本身:错误状态、失败身份、产物引用与截断
+/// 事实都必须跟着替换事件走,否则模型和 UI 都失去"这次到底成功没有、完整
+/// 输出在哪里"的依据。
+#[derive(Clone, Default)]
+struct ClearedCarry {
+    is_error: bool,
+    error_identity: Option<denia_core::session::ToolFailureIdentity>,
+    meta: Option<serde_json::Value>,
+    truncation: Option<denia_core::session::TruncationInfo>,
+}
+
+impl ClearedCarry {
+    fn from_event(event: &SessionEvent) -> Self {
+        match event {
+            SessionEvent::ToolResult {
+                is_error,
+                error_identity,
+                meta,
+                truncation,
+                ..
+            } => Self {
+                is_error: *is_error,
+                error_identity: error_identity.clone(),
+                meta: meta.clone(),
+                truncation: truncation.clone(),
+            },
+            _ => Self::default(),
+        }
+    }
+
+    /// 清理后的模型可见文本。
+    ///
+    /// 必须以 [`crate::microcompact::CLEARED_PLACEHOLDER`] 开头:幂等保护
+    /// (`already_cleared`)按前缀判断,否则带引用的占位符会被当成未清理项
+    /// 反复重清。有产物引用时额外给出回读入口 —— 内容被清掉不代表证据
+    /// 消失,只是从上下文挪到了产物里。
+    fn placeholder(&self) -> String {
+        let output_id = self
+            .meta
+            .as_ref()
+            .and_then(|meta| meta.get("outputArtifact"))
+            .and_then(|artifact| artifact.get("output_id"))
+            .and_then(|id| id.as_str());
+        match output_id {
+            Some(id) => format!(
+                "{}[完整输出保留为产物 {id},需要原文时用 read_tool_output 回读]",
+                crate::microcompact::CLEARED_PLACEHOLDER
+            ),
+            None => crate::microcompact::CLEARED_PLACEHOLDER.to_string(),
+        }
+    }
+}
+
 /// —— 工具结果微压缩闸门 ——
 ///
 /// 在 LLM 摘要之前的一层廉价清理:把已经用过的旧工具结果内容替换为
@@ -502,21 +604,33 @@ async fn run_microcompact_gate(driver: &SessionDriver, state: &TurnState, step: 
         })
         .collect();
 
+    // 原事件索引:替换事件只清内容,结果本身的其余事实必须沿用。
+    let wanted: std::collections::HashSet<u64> = cleared_seqs.iter().copied().collect();
+    let carry: std::collections::HashMap<u64, ClearedCarry> = state
+        .session
+        .events()
+        .iter()
+        .filter(|envelope| wanted.contains(&envelope.seq))
+        .map(|envelope| (envelope.seq, ClearedCarry::from_event(&envelope.event)))
+        .collect();
+
     let mut cleared_count = 0usize;
+    let mut cleared_calls: Vec<&str> = Vec::new();
     for seq in &cleared_seqs {
         let Some(call_id) = seq_to_call.get(seq) else {
             continue;
         };
+        let facts = carry.get(seq).cloned().unwrap_or_default();
         let event = SessionEvent::ToolResult {
             turn: state.turn,
             step,
             call_id: (*call_id).to_string(),
-            content: crate::microcompact::CLEARED_PLACEHOLDER.to_string(),
-            is_error: false,
+            content: facts.placeholder(),
+            is_error: facts.is_error,
             error: None,
-            error_identity: None,
-            meta: None,
-            truncation: None,
+            error_identity: facts.error_identity,
+            meta: facts.meta,
+            truncation: facts.truncation,
             replaces: Some(*seq),
         };
         if append(&state.session, &state.emit, event).is_err() {
@@ -524,9 +638,22 @@ async fn run_microcompact_gate(driver: &SessionDriver, state: &TurnState, step: 
             break;
         }
         cleared_count += 1;
+        cleared_calls.push(*call_id);
     }
 
     if cleared_count > 0 {
+        // 读状态失效(只在确实清掉东西之后做):
+        //
+        // 被清的内容既然已从模型上下文里消失,read_file 的去重提示
+        // ("自上次读取以来未变更,内容同上一条读取结果")就指向了一条
+        // 已不存在的记录——模型既看不到内容、又被拦着不重读。按**产生该
+        // 结果的工具调用 id** 精确失效:只有内容被清掉的文件失去去重收益,
+        // 其余文件(以及写后记录)照旧命中缓存。
+        let invalidated = match state.read_state.lock() {
+            Ok(mut read_state) => read_state.invalidate_calls(cleared_calls.iter().copied()),
+            // 锁中毒只影响去重优化,不阻断请求。
+            Err(_) => 0,
+        };
         tracing::info!(
             session_id = state.session.id(),
             turn = state.turn,
@@ -535,6 +662,7 @@ async fn run_microcompact_gate(driver: &SessionDriver, state: &TurnState, step: 
             cleared = cleared_count,
             kept = kept.len(),
             estimated_savings,
+            read_state_invalidated = invalidated,
             cleared_tool_calls = ?cleared,
             "microcompact applied"
         );
@@ -767,4 +895,122 @@ fn close_error(state: &TurnState, _step: u32, failure: LlmFailure, retries: u32)
         },
     );
     reason
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use denia_core::error::codes;
+    use denia_llm::RetryPolicy;
+
+    #[test]
+    fn long_retry_after_gives_up_instead_of_zero_delay_retry() {
+        // provider 给的 Retry-After 超过本地等待上限时,`delay_ms_for` 返回
+        // None。此处必须判为"放弃重试",而不是兑成 0 毫秒立刻重发。
+        let policy = RetryPolicy::default();
+        let failure = LlmFailure::new(codes::RATE_LIMIT, "slow down")
+            .with_retry_after_ms(policy.max_delay_ms + 1);
+        assert_eq!(
+            stream_retry_decision(&policy, &failure, 0),
+            RetryDecision::RetryAfterTooLong
+        );
+
+        // 连接类错误走更长的退避曲线,上限也更高:以它自己的上限判定。
+        let connection = LlmFailure::new(codes::TIMEOUT, "timeout")
+            .with_retry_after_ms(policy.connection_max_delay_ms + 1);
+        assert_eq!(
+            stream_retry_decision(&policy, &connection, 0),
+            RetryDecision::RetryAfterTooLong
+        );
+    }
+
+    #[test]
+    fn retry_within_limits_waits_and_other_cases_stop() {
+        let policy = RetryPolicy::default();
+        // 上限内:退避等待(非零),正常重试。
+        let hint = LlmFailure::new(codes::RATE_LIMIT, "slow down").with_retry_after_ms(1_500);
+        assert_eq!(
+            stream_retry_decision(&policy, &hint, 0),
+            RetryDecision::Wait(1_500)
+        );
+        // 不可重试的错误码。
+        let fatal = LlmFailure::new(codes::AUTH, "bad key");
+        assert_eq!(
+            stream_retry_decision(&policy, &fatal, 0),
+            RetryDecision::NotRetryable
+        );
+        // 预算耗尽。
+        let plain = LlmFailure::new(codes::SERVER, "5xx");
+        assert_eq!(
+            stream_retry_decision(&policy, &plain, policy.max_retries),
+            RetryDecision::BudgetExhausted
+        );
+    }
+
+    #[test]
+    fn cleared_carry_keeps_result_facts_and_output_reference() {
+        // 清理只该清内容:错误状态、失败身份、产物引用与截断事实必须沿用,
+        // 否则模型与 UI 都失去"这次到底成功没有、完整输出在哪里"的依据。
+        let event = SessionEvent::ToolResult {
+            turn: 1,
+            step: 2,
+            call_id: "call_1".into(),
+            content: "原文".into(),
+            is_error: true,
+            error: None,
+            error_identity: Some(denia_core::session::ToolFailureIdentity {
+                name: "read_file".into(),
+                code: "E_NOT_FOUND".into(),
+            }),
+            meta: Some(serde_json::json!({
+                "outputArtifact": { "output_id": "art-7", "complete": true }
+            })),
+            truncation: Some(denia_core::session::TruncationInfo {
+                total_chars: 400_000,
+                shown_chars: 16_000,
+            }),
+            replaces: None,
+        };
+        let carry = ClearedCarry::from_event(&event);
+        assert!(carry.is_error);
+        assert_eq!(
+            carry.error_identity.as_ref().map(|id| id.code.as_str()),
+            Some("E_NOT_FOUND")
+        );
+        assert_eq!(
+            carry.truncation.as_ref().map(|t| t.total_chars),
+            Some(400_000)
+        );
+        let text = carry.placeholder();
+        assert!(
+            text.starts_with(crate::microcompact::CLEARED_PLACEHOLDER),
+            "必须保持前缀,幂等判断依赖它: {text}"
+        );
+        assert!(text.contains("art-7"), "占位符要保留产物引用: {text}");
+        assert!(
+            text.contains("read_tool_output"),
+            "占位符要给出回读入口: {text}"
+        );
+    }
+
+    #[test]
+    fn cleared_carry_without_artifact_is_plain_placeholder() {
+        let event = SessionEvent::ToolResult {
+            turn: 1,
+            step: 2,
+            call_id: "call_1".into(),
+            content: "原文".into(),
+            is_error: false,
+            error: None,
+            error_identity: None,
+            meta: None,
+            truncation: None,
+            replaces: None,
+        };
+        let carry = ClearedCarry::from_event(&event);
+        assert_eq!(
+            carry.placeholder(),
+            crate::microcompact::CLEARED_PLACEHOLDER
+        );
+    }
 }

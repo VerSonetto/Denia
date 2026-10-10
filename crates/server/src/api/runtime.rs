@@ -72,6 +72,7 @@ async fn message(
         ask: None,
         call_id: None,
         goal_reader: None,
+        task_ledger: None,
         // 与 agent-loop 共享同一张读状态表:这个入口发起的工具调用
         // 也参与重复读取去重,不会在会话历史里留下"假新鲜"的标记。
         read_state: Some(state.driver.read_state_for(&id)),

@@ -68,6 +68,9 @@ pub enum SectionOrder {
     /// 会话目标工具(get_goal/update_goal)的纪律段;随 default_registry
     /// 注册,仅存在目标的会话在上下文注入里携带目标详情。
     ToolGoal,
+    /// 任务账本工具(get_task/update_task/run_checks)的纪律段;随
+    /// default_registry 注册,preset 关闭 taskLedger 时与工具一起消失。
+    ToolTask,
     /// 计划呈交工具(exit_plan)的纪律段;仅计划模式注入。
     ToolPlan,
     /// MCP 外部工具(`mcp__<server>__<tool>`)的纪律段;仅在至少有一个
@@ -118,6 +121,7 @@ impl SectionOrder {
             Self::ToolAsk => 2000,
             Self::ToolPreset => 2060,
             Self::ToolGoal => 1950,
+            Self::ToolTask => 1960,
             Self::ToolPlan => 2050,
             Self::ToolMcp => 2100,
             Self::ToolMemory => 2150,

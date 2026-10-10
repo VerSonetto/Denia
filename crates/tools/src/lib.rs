@@ -9,6 +9,7 @@ mod ask;
 mod bash;
 mod browser;
 pub mod capabilities;
+pub mod coordination;
 mod edit;
 mod files;
 pub mod glob;
@@ -25,6 +26,7 @@ pub mod runtime_command;
 pub mod shell;
 pub mod shell_session;
 pub mod support;
+mod task;
 mod todo;
 mod web_fetch;
 
@@ -34,6 +36,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use denia_core::session::{PermissionMode, SessionEvent};
 use denia_core::tool::ToolSchema;
+use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
 
 pub use ask::{AskTool, DEFAULT_TIMEOUT_MS as ASK_DEFAULT_TIMEOUT_MS};
@@ -53,10 +56,12 @@ pub use prompt::{
     register_communication_section, register_context_management_section,
     register_mcp_prompt_section, register_mcp_prompt_section_with_manager,
     register_memory_prompt_section, register_preset_prompt_section, register_risk_honesty_section,
-    register_shipped_prompt, register_working_style_section, render_mcp_section,
-    render_memory_section, shipped_with_persona, shipped_with_persona_and_browser_and_ask,
+    register_shipped_prompt, register_task_prompt_section, register_working_style_section,
+    render_mcp_section, render_memory_section, shipped_with_persona,
+    shipped_with_persona_and_browser_and_ask,
 };
 pub use shell_session::{Captured, PersistentShell, ShellHub};
+pub use task::{GetTaskTool, RunChecksTool, TaskLedgerHost, UpdateTaskTool};
 pub use todo::TodoWriteTool;
 pub use web_fetch::WebFetchTool;
 
@@ -137,6 +142,12 @@ pub struct ToolContext {
     /// 会话目标状态。返回 `(当前目标快照, 激活后的 token 用量)`。
     pub goal_reader:
         Option<Arc<dyn Fn() -> Option<(denia_core::session::GoalState, u64)> + Send + Sync>>,
+    /// 会话任务账本的宿主接口(`get_task` / `update_task` / `run_checks` 用)。
+    ///
+    /// `None` = 当前调用没有归属的代理会话(单测、宿主配置面):三个工具会
+    /// 以"读不到账本"显式拒绝,而不是静默把操作落到别处。折叠快照与 id
+    /// 分配都由宿主给([`TaskLedgerHost`]),工具层不读会话日志。
+    pub task_ledger: Option<Arc<dyn TaskLedgerHost>>,
     /// 会话共享的文件读取状态表。
     ///
     /// `read_file` 用它做重复读取去重;`write_file`/`edit` 用它做写前
@@ -147,10 +158,16 @@ pub struct ToolContext {
 }
 
 /// One model-facing tool outcome.
+///
+/// `content` / `is_error` 是**模型面**的事实;`artifact` 与 `report` 是给界面、
+/// 日志与诊断用的旁证,不进派生历史。
+#[derive(Default)]
 pub struct ToolOutput {
     pub content: String,
     pub is_error: bool,
     pub artifact: Option<output::OutputArtifact>,
+    /// 结构化执行信息;不执行命令的工具(读文件、ls、……)恒为 `None`。
+    pub report: Option<ExecutionReport>,
 }
 
 impl ToolOutput {
@@ -160,6 +177,7 @@ impl ToolOutput {
             content: content.into(),
             is_error: false,
             artifact: None,
+            report: None,
         }
     }
 
@@ -169,7 +187,83 @@ impl ToolOutput {
             content: content.into(),
             is_error: true,
             artifact: None,
+            report: None,
         }
+    }
+
+    /// 挂上结构化执行信息。
+    ///
+    /// 只描述**实际发生了什么**(退出码、结束原因),不改变 `is_error`:
+    /// 命令正常返回非零是命令自己的结果,不是工具失败。
+    pub fn with_report(mut self, report: ExecutionReport) -> Self {
+        self.report = Some(report);
+        self
+    }
+}
+
+/// 一次工具调用的结构化执行信息。
+///
+/// 与 [`ToolOutput::content`] 的分工:`content` 是给模型看的文本,这里是给
+/// 界面与诊断看的**事实**。退出码此前只存在于文案首行(见 `bash` 的
+/// "退出码: N"),界面要显示它就得反过来解析展示文本 —— 文案一改就断。
+/// 这里给它一个不必解析的载体。
+///
+/// 各字段都可缺省:只有真正跑过命令的工具才报得出退出码,而"不适用"与
+/// "取值为 0"必须能分开,所以退出码是 `Option` 而不是哨兵值(`-1` 之类的
+/// 哨兵只是文案里的展示约定,不是退出码)。
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExecutionReport {
+    /// 命令类工具的退出码;`None` = 不适用或未取得。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
+    /// 结束原因,取值见 [`end_reason`]。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end_reason: Option<String>,
+    /// 本次调用影响的文件(相对 `cwd`);推断不出就留空,不要猜。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub files: Vec<String>,
+    /// 输出是否完整保留;`None` = 没有产物可比对(如未启用输出存储)。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evidence_complete: Option<bool>,
+}
+
+/// [`ExecutionReport::end_reason`] 的取值。
+///
+/// 用字符串常量而不是 enum:这个值要原样落进 `meta`,前端、日志与测试按
+/// 同一套字面量比对,多一层 serde 映射只会多一处能对不上的地方。
+pub mod end_reason {
+    /// 命令跑完并拿到了退出码(非零也算 —— 那是命令的结果,不是工具失败)。
+    pub const COMPLETED: &str = "completed";
+    /// 超过 `timeout_ms` 被终止,没有退出码。
+    pub const TIMEOUT: &str = "timeout";
+    /// 用户中断,没有退出码。
+    pub const CANCELLED: &str = "cancelled";
+    /// 命令没能启动,或等待其结束失败。
+    pub const SPAWN_FAILED: &str = "spawn_failed";
+}
+
+impl ExecutionReport {
+    /// 正常结束(拿到或拿不到退出码,都算跑完了)。
+    pub fn completed(exit_code: Option<i32>) -> Self {
+        Self {
+            exit_code,
+            end_reason: Some(end_reason::COMPLETED.to_string()),
+            ..Default::default()
+        }
+    }
+
+    /// 未正常结束(超时 / 中断 / 启动或等待失败):没有退出码可报。
+    pub fn ended(reason: &str) -> Self {
+        Self {
+            end_reason: Some(reason.to_string()),
+            ..Default::default()
+        }
+    }
+
+    /// 补上产物的完整性事实。
+    pub fn with_evidence_complete(mut self, complete: bool) -> Self {
+        self.evidence_complete = Some(complete);
+        self
     }
 }
 
@@ -247,6 +341,9 @@ pub fn default_registry() -> ToolRegistry {
     registry.register(Arc::new(ExitPlanTool));
     registry.register(Arc::new(GetGoalTool));
     registry.register(Arc::new(UpdateGoalTool));
+    registry.register(Arc::new(GetTaskTool::default()));
+    registry.register(Arc::new(UpdateTaskTool::default()));
+    registry.register(Arc::new(RunChecksTool::default()));
     registry.register(Arc::new(WebFetchTool::new()));
     registry
 }

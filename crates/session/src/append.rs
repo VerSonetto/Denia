@@ -69,6 +69,7 @@ impl Session {
             | SessionEvent::AgentPreset { .. }
             | SessionEvent::SessionTitle { .. }
             | SessionEvent::Goal { .. }
+            | SessionEvent::Task { .. }
             | SessionEvent::CommandRun { .. } => {
                 inner.writer.flush()?;
             }
@@ -146,6 +147,14 @@ impl Session {
             // 清扫的正是本轮的 chunk,按记账扣减(饱和,防历史回退遗留的偏差)。
             inner.resident_bytes = inner.resident_bytes.saturating_sub(inner.transient_bytes);
             inner.transient_bytes = 0;
+        }
+        // 任务账本折叠:与 goal 同一条原则(操作即意图,状态由折叠得出),
+        // 但这里是**重放整条日志**而不是状态机单步 —— 折叠器核对事实引用时
+        // 要看日志里的用户原话,那一步只有整条日志才做得出来。放在事件入列
+        // 之后:折叠器必须看到这条事件本身。低频事件(每个约束/换版/收口
+        // 一条)承担一次重放,派生面热路径不受影响。
+        if matches!(&envelope.event, SessionEvent::Task { .. }) {
+            inner.refold_task(&self.header.id);
         }
         // 日志变了:派生面缓存失效,版本号自增(回退截断也走这里)。
         inner.derived_surface = None;

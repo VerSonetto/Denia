@@ -255,12 +255,93 @@ export interface BashOutput {
 }
 
 /**
+ * 工具结果的结构化执行信息(`tool-result` 事件的 `meta` 载荷)。
+ *
+ * 形状对齐后端 `denia_tools::ExecutionReport`:核心不解释 `meta`,前端按需
+ * 读。全部字段可选 —— 旧日志与已落盘的旧事件根本没有这些键,那时只能回退
+ * 到展示文本(见 [`bashExecution`])。
+ */
+export interface ToolResultMeta {
+  /** 命令类工具的退出码;缺省 = 不适用或未取得。 */
+  exit_code?: number
+  /** 结束原因:`completed` / `timeout` / `cancelled` / `spawn_failed`。 */
+  end_reason?: string
+  /** 本次调用影响的文件(相对 cwd);推断不出时缺省。 */
+  files?: string[]
+  /** 输出是否完整保留;缺省 = 没有产物可比对。 */
+  evidence_complete?: boolean
+  /** 完整输出的产物引用(工具结果过输出预算时由落盘层补上)。 */
+  outputArtifact?: unknown
+}
+
+/** 一次命令调用的执行事实:界面只用到这两项。 */
+export interface BashExecution {
+  /** 退出码;`undefined` = 不适用或未取得。 */
+  code?: number
+  /** 结束原因;旧数据缺省。 */
+  reason?: string
+}
+
+/**
+ * 把事件里 `unknown` 的 `meta` 收成前端认识的形状;不是对象视为没有。
+ *
+ * 不做逐字段校验:它由后端序列化而来,读侧(如 [`bashExecution`])自己按
+ * `typeof` 判断,形状意外时自然落回缺省,不值得为此筑一道重复的校验层。
+ */
+export function toolResultMeta(raw: unknown): ToolResultMeta | undefined {
+  return typeof raw === 'object' && raw !== null ? (raw as ToolResultMeta) : undefined
+}
+
+/**
+ * 取一次命令调用的执行事实(纯函数,导出以便单测)。
+ *
+ * **优先读结构化字段**:`content` 是给模型看的文案,形状随时会变(加一行
+ * 前置错误、换一种措辞),界面从它里面抠数字就是把展示格式当接口用。
+ *
+ * 字段缺失时回退到解析首行的"退出码: N"——这条回退只服务于**旧日志与已
+ * 落盘的旧事件**(那时没有 `meta`),去掉它会让历史会话的 bash 卡片丢掉退出
+ * 码徽标。新数据一律不依赖它。
+ */
+export function bashExecution(result?: {
+  content: string
+  meta?: ToolResultMeta
+}): BashExecution {
+  const meta = result?.meta
+  if (meta) {
+    // 逐字段收:JSON 里可能是 `null` 或别的形状,直接透传会让界面把 `null`
+    // 当成"有退出码"印出一行 `exit `。
+    const code = typeof meta.exit_code === 'number' ? meta.exit_code : undefined
+    const reason = typeof meta.end_reason === 'string' ? meta.end_reason : undefined
+    // 两个字段至少有一个存在才跳过回退:那才代表工具确实就这两项表过态。
+    // `meta` 只带别的键(例如只有 `outputArtifact` 的旧数据)或干脆是空对象
+    // 时不算表态 —— 退出码此时仍然只在文案首行,回退是**正确**行为,不是
+    // 把展示格式当接口用。
+    if (code !== undefined || reason !== undefined) return { code, reason }
+  }
+  return { code: exitCodeFromText(result?.content) }
+}
+
+/**
+ * 结果首行的"退出码: N";解析不出返回 `undefined`。
+ *
+ * 只给旧数据用(见 [`bashExecution`]),不参与新数据的展示路径。
+ */
+function exitCodeFromText(content?: string): number | undefined {
+  if (!content) return undefined
+  const match = content.match(/^退出码:\s*(-?\d+)/)
+  if (!match) return undefined
+  const code = Number(match[1])
+  return Number.isFinite(code) ? code : undefined
+}
+
+/**
  * 把 bash 工具结果切成 stdout / stderr 两段(纯函数,导出以便单测)。
  *
  * 后端把 stderr 拼在 `--- stderr ---` 分隔段之后(见 `bash.rs`),这里按它
  * 切开交给 UI 分别着色。首行的"退出码: N"已经由头部徽标呈现,正文里不再
- * 重复一遍。这是与 `editStartLine`、`skillLoadBody` 同类的展示投影:
- * 只影响对话流长什么样,不动模型可见的历史。
+ * 重复一遍 —— 徽标那边的取值优先读结构化字段(见 [`bashExecution`]),
+ * 这里剥的是**文本本身**,与那份字段无关。这是与 `editStartLine`、
+ * `skillLoadBody` 同类的展示投影:只影响对话流长什么样,不动模型可见的历史。
  */
 export function bashOutputParts(content: string): BashOutput {
   const body = content.replace(/^退出码:\s*-?\d+\n?/, '')

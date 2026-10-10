@@ -6,7 +6,7 @@ use crate::{
 use async_trait::async_trait;
 use denia_core::{
     config::ModelSelection,
-    session::{GoalOp, SessionEnvelope, SessionEvent, SubagentDescriptor},
+    session::{GoalOp, SessionEnvelope, SessionEvent, SubagentDescriptor, TurnEndReason},
 };
 use denia_tools::{ToolContext, capabilities::AgentRuntime};
 use serde::{Deserialize, Serialize};
@@ -737,6 +737,32 @@ impl Runtime {
         }
     }
 
+    /// 最近一次 goal 状态变更之后落下的最后一条 turn 结局。
+    ///
+    /// 水位 = 日志里最后一条 `SessionEvent::Goal` 的 `seq`(每条 goal 操作
+    /// 都落事件:set/edit/pause/resume/round…)。只有水位之后的 `TurnEnd`
+    /// 才算"上一轮的结果":水位之前的结局已经被该操作消化掉了。
+    ///
+    /// 没有水位会读错结局——resume 之后还没有新 `TurnEnd` 时,日志里最后一条
+    /// `TurnEnd` 仍是暂停前那条 `Aborted`,于是刚恢复就又落一次 Pause,恢复
+    /// 永远无效(判据不变,必然复现)。冷日志(无 goal 事件)水位取 0,与
+    /// 旧行为一致。
+    fn outcome_since_goal_change(events: &[SessionEnvelope]) -> Option<TurnEndReason> {
+        let watermark = events
+            .iter()
+            .rev()
+            .find_map(|e| matches!(e.event, SessionEvent::Goal { .. }).then_some(e.seq))
+            .unwrap_or(0);
+        events
+            .iter()
+            .rev()
+            .take_while(|e| e.seq > watermark)
+            .find_map(|e| match &e.event {
+                SessionEvent::TurnEnd { reason, .. } => Some(reason.clone()),
+                _ => None,
+            })
+    }
+
     /// goal 续跑入口:turn 结束(idle)或状态恢复后调用。目标 active 且
     /// 预算/轮次/失败护栏都放行时,自动发起新的 goal 轮(对照 codex
     /// `continue_active_goal_for_idle_thread`);与 inbox 唤醒通过 running
@@ -771,16 +797,9 @@ impl Runtime {
         }
         let config = self.goals_config();
 
-        // 上一轮结局分类(设置 goal 后还没有任何 turn 视为正常,直接开跑)。
-        let last_reason = live
-            .session
-            .events()
-            .iter()
-            .rev()
-            .find_map(|e| match &e.event {
-                SessionEvent::TurnEnd { reason, .. } => Some(reason.clone()),
-                _ => None,
-            });
+        // 上一轮结局分类(最近一次 goal 状态变更之后没有 turn 视为正常,
+        // 直接开跑——resume 后即属此列)。
+        let last_reason = live.session.with_events(Self::outcome_since_goal_change);
         match &last_reason {
             // 用户手动停止:目标自动暂停,等用户恢复——避免"停不下来"。
             Some(denia_core::session::TurnEndReason::Aborted { .. }) => {
@@ -919,22 +938,14 @@ impl Runtime {
 
     pub fn on_idle(&self, id: &str) {
         self.inner.admission.release(id);
+        // 与继续分类同一水位:goal 操作之前的 TurnEnd 已被那次操作消化。
+        // 否则 resume 之后(自动续跑不经过 human_turn,清不掉 paused)这里
+        // 会拿暂停前那条旧 Aborted 一直判定"用户刚停过",把已恢复的会话
+        // 卡在 paused 上:新轮次的唤醒全被挡住。
         let aborted = self.inner.live.get(id).is_some_and(|l| {
             l.session
-                .events()
-                .iter()
-                .rev()
-                .find_map(|e| {
-                    if let SessionEvent::TurnEnd { reason, .. } = &e.event {
-                        Some(matches!(
-                            reason,
-                            denia_core::session::TurnEndReason::Aborted { .. }
-                        ))
-                    } else {
-                        None
-                    }
-                })
-                .unwrap_or(false)
+                .with_events(Self::outcome_since_goal_change)
+                .is_some_and(|reason| matches!(reason, TurnEndReason::Aborted { .. }))
         });
         if aborted {
             self.inner.paused.lock().unwrap().insert(id.into());
@@ -2518,6 +2529,7 @@ mod tests {
             ask: None,
             call_id: None,
             goal_reader: None,
+            task_ledger: None,
             read_state: None,
         };
         (state, ctx)
@@ -4143,6 +4155,216 @@ mod tests {
             .error_for_status()
             .expect_err("预算超上限必须失败");
         server.abort();
+    }
+    /// 暂停后恢复不得被同一条旧 `TurnEnd{Aborted}` 打回 paused。
+    ///
+    /// 缺陷形状:判定"上一轮结局"取整份日志里最后一条 `TurnEnd`,没有水位
+    /// 也没有已处理标记;日志 append-only,暂停前那条 `Aborted` 一直留在那里,
+    /// 于是 resume 之后 `continue_goal` 读到的还是它,又落一次 Pause——判据
+    /// 不变,恢复必然立刻失效。
+    ///
+    /// 反向语义同时覆盖:水位之后的**新** Aborted 必须仍然暂停目标(连续
+    /// 两次手动停止都要生效)。
+    #[tokio::test]
+    async fn goal_resume_is_not_reverted_by_stale_abort() {
+        let (state, _) = setup().await;
+        let state = Arc::new(state);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let router = crate::api::router().with_state(state.clone());
+        let server = tokio::spawn(async move {
+            axum::serve(listener, router).await.unwrap();
+        });
+        let client = reqwest::Client::new();
+
+        // 轮询到条件成立;超时即失败,并把当前目标状态带进报错。
+        async fn wait_until(
+            state: &crate::state::AppState,
+            id: &str,
+            label: &str,
+            check: impl Fn(&crate::state::LiveSession) -> bool,
+        ) {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+            loop {
+                let live = state.live.get(id).unwrap();
+                if check(&live) {
+                    return;
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "等待超时:{label};当前目标 = {:?}",
+                    live.session.goal()
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        }
+
+        let created: Value = client
+            .post(format!("{base}/api/sessions"))
+            .json(&json!({"cwd": state.home}))
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let id = created["session"]["id"].as_str().unwrap().to_string();
+        let goal_url = format!("{base}/api/sessions/{id}/goal");
+
+        // 目标轮用 hold 模型(流永不产出):轮次挂住,便于手动停止出一个
+        // 真实的 `TurnEnd{Aborted}`。
+        client
+            .post(&goal_url)
+            .json(&json!({
+                "action": "set",
+                "objective": "验证暂停恢复不被旧结局打回",
+                "provider": "runtime-test",
+                "model": "hold"
+            }))
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap();
+        wait_until(&state, &id, "目标设置后自动开跑第一轮", |live| {
+            live.running.load(Ordering::SeqCst)
+                && live.session.goal().is_some_and(|g| g.rounds_started == 1)
+        })
+        .await;
+
+        // 第一次手动停止:水位之后的 Aborted → 目标自动暂停(原有语义)。
+        client
+            .post(format!("{base}/api/sessions/{id}/cancel"))
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap();
+        wait_until(&state, &id, "手动停止后目标自动暂停", |live| {
+            live.session
+                .goal()
+                .is_some_and(|g| matches!(g.status, denia_core::session::GoalStatus::Paused))
+        })
+        .await;
+
+        // 恢复:旧 Aborted 不得再把目标打回 paused——恢复必须真的开新轮。
+        let view: Value = client
+            .post(&goal_url)
+            .json(&json!({"action":"resume"}))
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(view["goal"]["status"], "active");
+        wait_until(&state, &id, "恢复后开新轮", |live| {
+            live.session.goal().is_some_and(|g| g.rounds_started == 2)
+        })
+        .await;
+        let view: Value = client
+            .get(&goal_url)
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(
+            view["goal"]["status"], "active",
+            "恢复之后不得再被同一条旧 Aborted 暂停:{}",
+            view["goal"]
+        );
+
+        // 第二次手动停止:水位之后的新 Aborted 仍必须暂停目标。
+        client
+            .post(format!("{base}/api/sessions/{id}/cancel"))
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap();
+        wait_until(&state, &id, "第二次手动停止仍暂停目标", |live| {
+            live.session
+                .goal()
+                .is_some_and(|g| matches!(g.status, denia_core::session::GoalStatus::Paused))
+        })
+        .await;
+        let live = state.live.get(&id).unwrap();
+        assert_eq!(
+            live.session.goal().map(|g| g.rounds_started),
+            Some(2),
+            "暂停态不得再推进轮次"
+        );
+        assert_eq!(
+            live.session
+                .events()
+                .iter()
+                .filter(|e| matches!(
+                    &e.event,
+                    SessionEvent::TurnEnd {
+                        reason: TurnEndReason::Aborted { .. },
+                        ..
+                    }
+                ))
+                .count(),
+            2,
+            "两次手动停止各留一条 Aborted"
+        );
+        server.abort();
+    }
+    /// `on_idle` 的 paused 判定必须与续跑分类共用同一水位:resume 走的是
+    /// 自动续跑路径(不经过 `human_turn`,清不掉 paused),若仍按"整份日志
+    /// 最后一条 TurnEnd"判定,暂停前那条 Aborted 会把已恢复的会话一直标成
+    /// "用户刚停过",新轮次的唤醒全被挡住。
+    #[tokio::test]
+    async fn on_idle_pause_flag_ignores_turn_ends_before_last_goal_op() {
+        let (state, ctx) = setup().await;
+        let owner = ctx.session_id.as_deref().unwrap();
+        let live = state.live.get(owner).unwrap();
+        let status = || live.session.goal().map(|goal| goal.status);
+
+        // 目标 active → 一轮被用户手动停止 → 目标暂停(Aborted 留在水位之前)。
+        live.session
+            .apply_goal(GoalOp::Set {
+                objective: "验证 paused 水位".into(),
+                token_budget: None,
+            })
+            .unwrap();
+        live.session
+            .append(SessionEvent::TurnEnd {
+                turn: 1,
+                reason: TurnEndReason::Aborted { cause: None },
+            })
+            .unwrap();
+        live.session.apply_goal(GoalOp::Pause).unwrap();
+        assert_eq!(status(), Some(denia_core::session::GoalStatus::Paused));
+
+        // resume 落成新水位:它之前那条 Aborted 不得再设置 paused 标记。
+        live.session.apply_goal(GoalOp::Resume).unwrap();
+        assert_eq!(status(), Some(denia_core::session::GoalStatus::Active));
+        state.runtime.on_idle(owner);
+        assert!(
+            !state.runtime.inner.paused.lock().unwrap().contains(owner),
+            "水位之前的旧 Aborted 不得再设置 paused 标记"
+        );
+
+        // 水位之后的新 Aborted 仍然生效:连续两次手动停止都要能暂停。
+        live.session
+            .append(SessionEvent::TurnEnd {
+                turn: 2,
+                reason: TurnEndReason::Aborted { cause: None },
+            })
+            .unwrap();
+        state.runtime.on_idle(owner);
+        assert!(
+            state.runtime.inner.paused.lock().unwrap().contains(owner),
+            "水位之后的新 Aborted 必须仍然设置 paused 标记"
+        );
     }
     #[tokio::test]
     async fn cancelled_start_leaves_no_child_and_config_rejects_invalid() {

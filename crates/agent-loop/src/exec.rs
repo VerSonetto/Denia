@@ -15,8 +15,9 @@ use std::sync::Arc;
 
 use denia_core::message::ToolCallRef;
 use denia_core::session::{ApprovalOutcome, PermissionMode, PlanReviewDecision, SessionEvent};
-use denia_tools::ToolOutput;
+use denia_tools::output::OutputArtifact;
 use denia_tools::permission::{ActionClass, Decision};
+use denia_tools::{ExecutionReport, ToolOutput};
 use futures::StreamExt;
 
 use crate::{SessionDriver, TurnState, append};
@@ -160,10 +161,7 @@ async fn commit_result(
                 output.artifact.as_ref(),
             ));
     }
-    let meta = output
-        .artifact
-        .as_ref()
-        .map(|artifact| serde_json::json!({ "outputArtifact": artifact }));
+    let meta = merge_meta(output.report.as_ref(), output.artifact.as_ref());
     let (content, truncation) = denia_tools::support::apply_output_budget(&output.content);
     append(
         &state.session,
@@ -208,6 +206,43 @@ async fn commit_result(
 
 /// 打桩阈值:参数达到这个字符数才打桩(对应约 2k+ token 的死重)。
 const ARGS_STUB_THRESHOLD_CHARS: usize = 8192;
+
+/// 工具结果 `meta` 的组装:以工具上报的结构化执行信息为底,产物引用按需补插。
+///
+/// 这里必须是**合并**而不是整体重建:工具(如 bash)报的 `exit_code` /
+/// `end_reason` 与落盘层补的 `outputArtifact` 是同一件事的两面,任何一方都
+/// 不该把另一方挤掉。落盘层只补自己那一个键(`or_insert`),工具已上报的同名
+/// 键一律保留 —— 推平重建会让工具报告在不知不觉中消失,并且要等到界面上
+/// 少一个徽标才被发现。
+fn merge_meta(
+    report: Option<&ExecutionReport>,
+    artifact: Option<&OutputArtifact>,
+) -> Option<serde_json::Value> {
+    let base = match report.map(serde_json::to_value) {
+        Some(Ok(serde_json::Value::Object(fields))) => fields,
+        // 报告形状是本地常量,序列化失败只可能是逻辑错误:此时宁可不带报告,
+        // 也不能让一次工具结果因为 meta 组装而落不下去。
+        _ => serde_json::Map::new(),
+    };
+    merge_into(base, artifact)
+}
+
+/// 把产物引用补进一份已有的 meta 字段表:只补缺省(`or_insert`),不覆盖。
+///
+/// 拆成两步是为了让"不覆盖工具已上报的同名键"有一条可断言的接缝:走
+/// [`merge_meta`] 只能造出工具**今天**会报的那几个键,键名冲突暂时不会出现
+/// —— 但冲突一旦出现就是静默丢数据,所以要有一条能直接喂冲突字段的路径。
+fn merge_into(
+    mut base: serde_json::Map<String, serde_json::Value>,
+    artifact: Option<&OutputArtifact>,
+) -> Option<serde_json::Value> {
+    if let Some(artifact) = artifact
+        && let Ok(value) = serde_json::to_value(artifact)
+    {
+        base.entry("outputArtifact".to_string()).or_insert(value);
+    }
+    (!base.is_empty()).then_some(serde_json::Value::Object(base))
+}
 
 /// 构造打桩占位符:保留 `path`(模型定位文件用)与原体量说明。
 /// 参数解析失败时返回 None——宁可不打桩,不损坏历史里的参数结构。
@@ -354,9 +389,11 @@ fn decide_for(
     let mode = state.permission_mode();
     // 只读档 bash 完全不开放(schema 已收窄,这里兜底幻觉调用/绕过面):
     // 读命令也不放行,与工具面口径一致。
-    if mode.is_read_only() && matches!(call.name.as_str(), "bash" | "job_start") {
+    if mode.is_read_only()
+        && matches!(call.name.as_str(), "bash" | "job_start" | "run_checks")
+    {
         return Decision::Deny(
-            "当前为只读模式,bash 命令不可用;请改用 ls/glob/grep/read_file 做阅读与检索,或请用户切换权限模式。".into(),
+            "当前为只读模式,跑命令不可用(包括 run_checks 的检查命令);请改用 ls/glob/grep/read_file 做阅读与检索,或请用户切换权限模式。".into(),
         );
     }
     // 子代理的只读上限：强制路径，不依赖角色文本，也禁止 MemoryWrite 特例
@@ -365,7 +402,7 @@ fn decide_for(
         && child.permission_ceiling == denia_core::subagent::PermissionCeiling::ReadOnly
         && matches!(
             call.name.as_str(),
-            "write_file" | "edit" | "bash" | "job_start" | "todo_write"
+            "write_file" | "edit" | "bash" | "job_start" | "todo_write" | "update_task" | "run_checks"
         )
     {
         return Decision::Deny(
@@ -451,6 +488,15 @@ fn classify_call(
                 ActionClass::Read
             }
         }
+        // 检查命令会真的跑起来,写副作用只能由命令自己决定:参数形状与
+        // bash 不同(命令在 `checks[].command` 里),不能借用上面那套命令
+        // 启发式(取不到命令会落到读类放行)。直接按"有写副作用的命令"
+        // 归类:自动编辑档弹审批,只读/计划档拒绝。
+        "run_checks" => ActionClass::BashWrite,
+        // 账本写是**会话内**写(不改工作区文件):按写类收窄,只读与计划档
+        // 拒绝;自动编辑档放行(与 todo_write 同性质,但它确实改状态,
+        // 所以进了写分支而不是读分支)。
+        "update_task" => ActionClass::WriteInside,
         _ => ActionClass::Read,
     }
 }
@@ -527,6 +573,7 @@ fn dispatch_tool_call(
         let sink_session = session.clone();
         let sink_emit = emit.clone();
         let goal_session = session.clone();
+        let ledger_session = session.clone();
         let context = denia_tools::ToolContext {
             output_store,
             session_id: Some(session.id().to_string()),
@@ -549,6 +596,14 @@ fn dispatch_tool_call(
                 let used = goal_session.goal_tokens_used().unwrap_or(0);
                 Some((goal, used))
             })),
+            // 任务账本的读写入口:折叠在会话日志锁内跑(零拷贝),工具层不
+            // 读日志、也不缓存第二份状态;id 由宿主分配(不可复用)。
+            task_ledger: Some(Arc::new(SessionTaskLedger {
+                session: ledger_session,
+                // 作用域(会话身份 + rewind 报废集合)只有会话自己知道;
+                // 从会话取,避免这里再维护一份会漂移的副本。
+                scope: session.task_fold_scope(),
+            })),
             read_state: Some(read_state),
         };
         let execute = tool.execute(&call.arguments, &context);
@@ -562,6 +617,73 @@ fn dispatch_tool_call(
             output = &mut execute => output,
         }
     })
+}
+
+/// 会话任务账本宿主:把折叠快照与 id 分配交给工具面
+///(`get_task` / `update_task` / `run_checks`)。
+///
+/// 折叠是纯函数且只读,所以直接在会话日志锁内跑(零拷贝);工具层拿到的
+/// 是快照,不是会话句柄 —— 账本的真值始终只有 `task_projection` 一处。
+struct SessionTaskLedger {
+    session: Arc<denia_session::Session>,
+    /// 折叠作用域:本会话身份(决定哪些验证结论算数)+ 已报废 revision。
+    scope: denia_session::TaskFoldScope,
+}
+
+impl denia_tools::TaskLedgerHost for SessionTaskLedger {
+    fn state(&self) -> Option<denia_core::task::TaskState> {
+        let scope = &self.scope;
+        self.session
+            .with_events(|events| denia_session::project_task_scoped(events, scope))
+    }
+
+    fn new_task_id(&self) -> denia_core::task::TaskId {
+        denia_session::fresh_task_id()
+    }
+
+    fn new_revision_id(&self) -> denia_core::task::RevisionId {
+        denia_session::fresh_revision_id()
+    }
+
+    fn new_note_id(&self) -> denia_core::task::NoteId {
+        denia_session::fresh_note_id()
+    }
+
+    fn new_requirement_id(&self) -> denia_core::task::RequirementId {
+        denia_session::fresh_requirement_id()
+    }
+
+    /// 引用用户原话:在日志里找**非注入**用户消息里的这段摘录,给出稳定
+    /// 坐标(seq 记录时刻、time_ms 跨 fork 重编号仍稳定的身份)。
+    ///
+    /// 核不到就返回 `None`:要求会被拒绝、事实会被折成假设 —— 引用能不能
+    /// 核对只能由看到日志的一侧判,模型自己填的坐标不作数。
+    fn user_reference(&self, quote: &str) -> Option<denia_core::task::SourceRef> {
+        let quote = quote.trim();
+        if quote.is_empty() {
+            return None;
+        }
+        let session = self.session.id().to_string();
+        self.session.with_events(|events| {
+            events
+                .iter()
+                .rev()
+                .find(|envelope| match &envelope.event {
+                    SessionEvent::UserMessage {
+                        text,
+                        injected: false,
+                        ..
+                    } => text.contains(quote),
+                    _ => false,
+                })
+                .map(|envelope| denia_core::task::SourceRef {
+                    session: Some(session.clone()),
+                    seq: envelope.seq,
+                    time_ms: envelope.time,
+                    quote: Some(quote.to_string()),
+                })
+        })
+    }
 }
 
 /// 执行一次策略 Ask 的调用(串行):落审批事件 → 等用户决策 → 落决策
@@ -790,5 +912,84 @@ mod memory_anchor_tests {
             &call("read_file", r#"{"path":"MEMORY.md"}"#),
             root
         ));
+    }
+}
+
+#[cfg(test)]
+mod merge_meta_tests {
+    use super::*;
+
+    fn artifact(complete: bool) -> OutputArtifact {
+        OutputArtifact {
+            output_id: "art-1".into(),
+            streams: std::collections::BTreeMap::new(),
+            complete,
+            storage_error: None,
+        }
+    }
+
+    /// 两者共存:工具报的字段一个不少,产物引用也补上了。
+    #[test]
+    fn report_and_artifact_survive_together() {
+        let report = ExecutionReport {
+            exit_code: Some(3),
+            end_reason: Some("completed".into()),
+            files: vec!["src/main.rs".into()],
+            evidence_complete: Some(true),
+        };
+        let meta =
+            merge_meta(Some(&report), Some(&artifact(true))).expect("两边都有内容就该产出 meta");
+        assert_eq!(meta["exit_code"], serde_json::json!(3));
+        assert_eq!(meta["end_reason"], serde_json::json!("completed"));
+        assert_eq!(meta["files"], serde_json::json!(["src/main.rs"]));
+        assert_eq!(meta["evidence_complete"], serde_json::json!(true));
+        assert_eq!(
+            meta["outputArtifact"]["output_id"],
+            serde_json::json!("art-1")
+        );
+    }
+
+    /// 落盘层只补缺省:工具已经上报了 `outputArtifact` 时,产物引用不得改写它。
+    #[test]
+    fn artifact_never_overwrites_a_reported_key() {
+        let report = ExecutionReport::completed(Some(0));
+        // 工具报的字段全部保留。
+        let meta = merge_meta(Some(&report), Some(&artifact(true))).unwrap();
+        assert_eq!(meta["end_reason"], serde_json::json!("completed"));
+        assert_eq!(meta["outputArtifact"]["complete"], serde_json::json!(true));
+
+        // 同名键冲突:基底里已有的那一份说了算。
+        let mut base = serde_json::Map::new();
+        base.insert(
+            "outputArtifact".to_string(),
+            serde_json::json!({ "output_id": "tool-owned" }),
+        );
+        let merged = merge_into(base, Some(&artifact(true))).unwrap();
+        assert_eq!(
+            merged["outputArtifact"]["output_id"],
+            serde_json::json!("tool-owned"),
+            "产物引用不得静默覆盖工具已上报的同名键"
+        );
+    }
+
+    /// 只有产物时退回原来的形状;两边都没有时 `None`(不落空对象)。
+    #[test]
+    fn artifact_alone_keeps_the_legacy_shape() {
+        let meta = merge_meta(None, Some(&artifact(false))).unwrap();
+        assert_eq!(meta["outputArtifact"]["complete"], serde_json::json!(false));
+        assert_eq!(meta.as_object().map(serde_json::Map::len), Some(1));
+        assert!(merge_meta(None, None).is_none());
+    }
+
+    /// 报告不带产物:模型只看见了预览、没有产物可存时的常见形状。
+    #[test]
+    fn report_alone_carries_no_artifact_key() {
+        let report = ExecutionReport::ended(denia_tools::end_reason::TIMEOUT);
+        let meta = merge_meta(Some(&report), None).unwrap();
+        assert_eq!(meta["end_reason"], serde_json::json!("timeout"));
+        assert!(meta.get("outputArtifact").is_none());
+        // 缺省字段不落空键:界面靠"键不存在"与"键为 none"区分旧日志。
+        assert!(meta.get("exit_code").is_none());
+        assert!(meta.get("files").is_none());
     }
 }

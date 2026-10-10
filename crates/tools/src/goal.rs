@@ -253,6 +253,7 @@ mod tests {
             permission_mode: PermissionMode::AutoEdit,
             ask: None,
             call_id: None,
+            task_ledger: None,
             goal_reader: Some(Arc::new(move || goal.clone())),
             read_state: None,
         }
@@ -393,6 +394,7 @@ mod tests {
             ask: None,
             call_id: None,
             goal_reader: None,
+            task_ledger: None,
             read_state: None,
         };
         assert!(GetGoalTool.execute("{}", &ctx).await.is_error);

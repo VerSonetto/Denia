@@ -20,18 +20,27 @@ export const BashCard = memo(function BashCard({
   command,
   output,
   exitCode,
+  failed,
   running,
 }: {
   command: string
   output: BashOutput
   exitCode?: number
+  /**
+   * 命令不成功(非零退出,或超时/中断/没起来)。
+   *
+   * 不能只从 `exitCode` 推:超时与中断下**根本没有退出码**(退出码字段为
+   * 缺省),靠退出码判断会让这两类失败静默地拿不回那条红竖线。取不到这个
+   * 标志位时仍旧按退出码判,兼容只传退出码的调用点。
+   */
+  failed?: boolean
   /** 命令仍在执行:此时"没有输出"只是还没轮到它说话,不提示。 */
   running?: boolean
 }) {
-  const failed = exitCode !== undefined && exitCode !== 0
+  const isFailed = failed ?? (exitCode !== undefined && exitCode !== 0)
   const empty = output.stdout.length === 0 && !output.stderr
   return (
-    <div className={`bash-quote${failed ? ' failed' : ''}`}>
+    <div className={`bash-quote${isFailed ? ' failed' : ''}`}>
       <div className="bash-line bash-cmd">
         <span className="bash-prompt" aria-hidden>
           $

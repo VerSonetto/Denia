@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import * as api from '../../api'
 import { t } from '../../i18n'
+import { ConfirmDialog } from '../ConfirmDialog'
 import { IconCheck } from '../icons'
 import styles from './MemorySettings.module.css'
 
@@ -52,6 +53,10 @@ export function MemorySettings() {
   const [previewError, setPreviewError] = useState<PreviewError | null>(null)
   const [changedDuringRead, setChangedDuringRead] = useState(false)
   const [workspaceOpen, setWorkspaceOpen] = useState(false)
+  // 删除:待确认目标 + 执行中 + 失败提示。
+  const [deleteTarget, setDeleteTarget] = useState<api.MemoryFileInfo | null>(null)
+  const [deleteBusy, setDeleteBusy] = useState(false)
+  const [deleteError, setDeleteError] = useState('')
   // 请求序号:慢请求返回时丢弃过期结果。
   const requestSeq = useRef(0)
 
@@ -169,7 +174,38 @@ export function MemorySettings() {
     setPreview(null)
     setPreviewError(null)
     setChangedDuringRead(false)
+    setDeleteTarget(null)
+    setDeleteError('')
   }, [])
+
+  /** 删除确认后执行:成功重载清单并复位预览,404 按"已被删"处理同样刷新。 */
+  const confirmDelete = useCallback(async () => {
+    if (!deleteTarget || deleteBusy) return
+    setDeleteBusy(true)
+    setDeleteError('')
+    try {
+      await api.deleteMemoryFile(selectedId, deleteTarget.name)
+    } catch (e) {
+      const err = e as Error & { code?: string; status?: number }
+      const gone = err.status === 404 || (err.code ?? '').includes('not-found')
+      if (!gone) {
+        setDeleteError(`${t('memoryDeleteFailed')}:${err.message}`)
+        setDeleteBusy(false)
+        return
+      }
+    }
+    setDeleteTarget(null)
+    setDeleteBusy(false)
+    // 删的是当前预览 → 预览复位;无论如何重载清单(并发删除也以服务端为准)。
+    if (selectedFile === deleteTarget.name) {
+      requestSeq.current += 1
+      setSelectedFile(null)
+      setPreview(null)
+      setPreviewError(null)
+      setChangedDuringRead(false)
+    }
+    await loadProjects()
+  }, [deleteTarget, deleteBusy, selectedId, selectedFile, loadProjects])
 
   return (
     <section className="setm-section">
@@ -283,9 +319,35 @@ export function MemorySettings() {
                       className={`${styles.fileItem}${selectedFile === file.name ? ' active' : ''}`}
                       onClick={() => void openFile(file)}
                     >
-                      <span className={styles.fileName}>{file.name}</span>
-                      <span className={styles.fileMeta}>
-                        {formatSize(file.size)} · {formatRelative(file.modifiedMs)}
+                      <span className={styles.fileRow}>
+                        <span className={styles.fileText}>
+                          <span className={styles.fileName}>{file.name}</span>
+                          <span className={styles.fileMeta}>
+                            {formatSize(file.size)} · {formatRelative(file.modifiedMs)}
+                          </span>
+                        </span>
+                        <span
+                          role="button"
+                          tabIndex={0}
+                          aria-label={`${t('memoryDelete')}:${file.name}`}
+                          title={t('memoryDelete')}
+                          className={styles.fileDelete}
+                          onClick={(event) => {
+                            event.stopPropagation()
+                            setDeleteError('')
+                            setDeleteTarget(file)
+                          }}
+                          onKeyDown={(event) => {
+                            if (event.key === 'Enter' || event.key === ' ') {
+                              event.preventDefault()
+                              event.stopPropagation()
+                              setDeleteError('')
+                              setDeleteTarget(file)
+                            }
+                          }}
+                        >
+                          ×
+                        </span>
                       </span>
                     </button>
                   </li>
@@ -307,6 +369,24 @@ export function MemorySettings() {
                 </p>
               ) : preview ? (
                 <>
+                  <div className={styles.previewHead}>
+                    <span className={styles.previewName} title={preview.name}>
+                      {preview.name}
+                    </span>
+                    <button
+                      type="button"
+                      className={styles.previewDelete}
+                      onClick={() => {
+                        const mine = visibleFiles.find((file) => file.name === preview.name)
+                        setDeleteError('')
+                        setDeleteTarget(
+                          mine ?? { name: preview.name, size: preview.size, modifiedMs: preview.modifiedMs },
+                        )
+                      }}
+                    >
+                      {t('memoryDelete')}
+                    </button>
+                  </div>
                   {changedDuringRead && (
                     <p className={styles.changedHint} role="status">
                       {t('memoryFileChanged')}
@@ -321,6 +401,24 @@ export function MemorySettings() {
           </div>
         )}
       </div>
+      {deleteError && (
+        <p className={styles.error} role="alert">
+          {deleteError}
+        </p>
+      )}
+      <ConfirmDialog
+        open={deleteTarget !== null}
+        title={t('memoryDeleteTitle')}
+        desc={t('memoryDeleteConfirm')}
+        confirmLabel={deleteBusy ? t('memoryPreviewLoading') : t('memoryDelete')}
+        danger
+        onConfirm={() => void confirmDelete()}
+        onCancel={() => {
+          if (!deleteBusy) setDeleteTarget(null)
+        }}
+      >
+        {deleteTarget && <p className={styles.confirmName}>{deleteTarget.name}</p>}
+      </ConfirmDialog>
     </section>
   )
 }

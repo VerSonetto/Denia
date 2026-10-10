@@ -13,7 +13,7 @@
  * 三件不做的事（执行计划 11.2）：
  * - 不提供"开启全局 AGENTS.md"或"委派深度"开关：子代理继承主提示基础、
  *   只自动加载项目规则，且禁止派遣子代理是运行时硬规则；
- * - 不在未选父会话时宣称"最终可用工具"（只能显示定义请求集合）；
+ * - 不在未选工作区时宣称"最终可用工具"（只能显示定义请求集合）；
  * - 不手改 generated 类型：wire 类型来自 Rust。
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
@@ -71,8 +71,10 @@ interface Draft {
 }
 
 export function SubagentSettings({ notify }: { notify: Notify }) {
-  const [sessions, setSessions] = useState<{ id: string; cwd?: string | null }[]>([])
-  const [sessionId, setSessionId] = useState('')
+  // 项目上下文:工作区列表(一工作区一条),替代早期的"每个会话一条"下拉。
+  // scope 载体是 cwd(服务端用它推导项目根),会话只是 cwd 的代理,不再枚举。
+  const [workspaces, setWorkspaces] = useState<{ id: string; title: string; path: string }[]>([])
+  const [workspaceId, setWorkspaceId] = useState('')
   const [catalog, setCatalog] = useState<SubagentCatalogView | null>(null)
   const [tools, setTools] = useState<SubagentToolsView | null>(null)
   const [draft, setDraft] = useState<Draft | null>(null)
@@ -94,23 +96,29 @@ export function SubagentSettings({ notify }: { notify: Notify }) {
     if (draft) editorRef.current?.scrollIntoView({ block: 'start', behavior: 'smooth' })
   }, [draft?.kind, draft?.target])
 
-  const scope = sessionId ? { sessionId } : {}
+  const cwd = workspaces.find((entry) => entry.id === workspaceId)?.path ?? ''
+  const scope = cwd ? { cwd } : {}
 
   const load = useCallback(async () => {
     setLoading(true)
     setError('')
     try {
-      const [profileView, toolView, settings, sessionList] = await Promise.all([
+      const [profileView, toolView, settings, workspaceList] = await Promise.all([
         api.listSubagentProfiles(scope),
         api.listSubagentTools(scope),
         api.getSettings(),
-        api.listSessions(),
+        api.listWorkspaces(),
       ])
       setCatalog(profileView)
       setTools(toolView)
-      setSessions(
-        sessionList.sessions.map((session) => ({ id: session.id, cwd: session.cwd ?? null })),
-      )
+      const rows = workspaceList.workspaces.map((entry) => ({
+        id: entry.id,
+        title: entry.title,
+        path: entry.path,
+      }))
+      setWorkspaces(rows)
+      // 工作区被删时回退到用户级,不挂死在一个非法 cwd 上。
+      setWorkspaceId((current) => (current && rows.some((row) => row.id === current) ? current : ''))
       const ns = settings.namespaces.find((entry) => entry.ns === POLICY_NS)
       if (ns) {
         setPolicy(typeof ns.value.maxConcurrentRuns === 'number' ? (ns.value.maxConcurrentRuns as number) : 8)
@@ -125,7 +133,7 @@ export function SubagentSettings({ notify }: { notify: Notify }) {
     } finally {
       setLoading(false)
     }
-  }, [sessionId])
+  }, [workspaceId])
 
   useEffect(() => {
     void load()
@@ -136,7 +144,7 @@ export function SubagentSettings({ notify }: { notify: Notify }) {
     setPreview(null)
     setDraft({
       kind: 'create',
-      writeScope: sessionId && catalog?.projectDir ? 'project' : 'user',
+      writeScope: cwd && catalog?.projectDir ? 'project' : 'user',
       revision: 0,
       profile,
       dirty: true,
@@ -293,16 +301,17 @@ export function SubagentSettings({ notify }: { notify: Notify }) {
     return map
   }, [filtered])
 
-  const sessionOptions = useMemo<SelectOption<string>[]>(
+  // 项目下拉选项:首项用户级,其余一工作区一条(label 取标题尾段,hint 取全路径)。
+  const workspaceOptions = useMemo<SelectOption<string>[]>(
     () => [
       { id: '', label: t('subagentsScopeUser'), hint: t('subagentsSessionHint') },
-      ...sessions.map((session) => ({
-        id: session.id,
-        label: (session.cwd ?? session.id).split(/[\\/]/).filter(Boolean).pop() ?? session.id,
-        hint: session.cwd ?? session.id,
+      ...workspaces.map((entry) => ({
+        id: entry.id,
+        label: (entry.title || entry.path).split(/[\\/]/).filter(Boolean).pop() ?? entry.path,
+        hint: entry.path,
       })),
     ],
-    [sessions],
+    [workspaces],
   )
 
   const update = (patch: Partial<SubagentProfile>) => {
@@ -329,7 +338,7 @@ export function SubagentSettings({ notify }: { notify: Notify }) {
         <div>
           <p className={styles.summary}>
             {t('subagentsEffective')} {effectiveCount} · {t('subagentsEnabled')} {enabledCount} ·{' '}
-            {sessionId ? t('subagentsScopeProject') : t('subagentsScopeUser')}
+            {cwd ? t('subagentsScopeProject') : t('subagentsScopeUser')}
           </p>
           <p className="setm-section-hint">
             {t('subagentsInheritNote')} {t('subagentsNoDispatchNote')}
@@ -346,10 +355,10 @@ export function SubagentSettings({ notify }: { notify: Notify }) {
         </Field>
         <DropdownField
           label={t('subagentsSessionLabel')}
-          value={sessionId}
-          options={sessionOptions}
+          value={workspaceId}
+          options={workspaceOptions}
           onChange={(next) => {
-            setSessionId(next)
+            setWorkspaceId(next)
             setDraft(null)
             setPreview(null)
           }}

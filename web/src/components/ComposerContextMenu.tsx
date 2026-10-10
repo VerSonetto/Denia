@@ -281,7 +281,7 @@ export function ComposerContextMenu(props: ComposerContextMenuProps) {
         openRef.current = true
         setOpen(true)
       }}
-    ><Plus size={18} weight="bold" /></button>
+    ><Plus size={15} weight="bold" /></button>
     <PanePopover anchorRef={anchorRef} positionAnchorRef={props.panelAnchorRef}
       matchAnchorWidth={Boolean(props.panelAnchorRef)} open={visible} onClose={dismiss} align="start" side="top"
       className="composer-context-popover" role="presentation">

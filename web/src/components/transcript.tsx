@@ -1,6 +1,6 @@
 import { memo, useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
-import { localeRevision, t } from '../i18n'
+import { localeRevision, t, type TranslationKey } from '../i18n'
 import {
   assistantHasContent,
   groupTranscript,
@@ -24,8 +24,10 @@ import {
   cleanToolOutput,
   cleanBashCommand,
   bashOutputParts,
+  bashExecution,
   liveBashOutput,
   parseArgsObject,
+  type BashExecution,
   type BashOutput,
   type EditDiffs,
 } from '../toolDisplay'
@@ -693,20 +695,42 @@ function toolDiff(name: string, args: string, result?: string): EditDiffs | null
 }
 
 /**
- * bash 的退出码标记:**只在非 0 时出现**。
+ * bash 的执行徽标:**只在需要说话时才出现**。
  *
  * 成功的命令不需要一枚对勾来证明自己 —— shell 的语义就是"没消息就是好
  * 消息",而且一个绿勾钉在命令行末尾既突兀又占地方。非 0 才需要说话,写
  * 法是 `exit 3`:等宽小字、错误前景色、无底色(底色会让人误以为是工具
  * 失败,而非零退出是命令自己的结果)。
+ *
+ * 超时 / 中断 / 没起来这三类情况**根本没有退出码**(文案首行的 `-1` 只是
+ * 给模型看的哨兵),这时报结束原因,不编一个数字出来。
  */
-function ExitBadge({ code }: { code: number }) {
-  if (code === 0) return null
+function ExitBadge({ code, reason }: BashExecution) {
+  if (code !== undefined && code !== 0) {
+    return (
+      <span className="exit-badge" title={t('bashExitNonZero', { code })}>
+        exit {code}
+      </span>
+    )
+  }
+  const label = reason ? BASH_END_REASON_LABELS[reason] : undefined
+  // 退出码拿到了(0)就没什么可说的;旧数据没有 reason,这里自然落空。
+  if (code !== undefined || !label) return null
   return (
-    <span className="exit-badge" title={t('bashExitNonZero', { code })}>
-      exit {code}
+    <span className="exit-badge" title={t('bashEndHint')}>
+      {t(label)}
     </span>
   )
+}
+
+/**
+ * 结束原因 → 徽标文案。取值与后端 `ExecutionReport.end_reason` 对齐;
+ * `completed` 不在这里 —— 正常结束本身不需要徽标。
+ */
+const BASH_END_REASON_LABELS: Record<string, TranslationKey> = {
+  timeout: 'bashEndTimeout',
+  cancelled: 'bashEndCancelled',
+  spawn_failed: 'bashEndSpawnFailed',
 }
 
 /** bash 参数里的命令正文(剥掉后端注入的输出编码前缀)。 */
@@ -716,15 +740,6 @@ function bashCommand(args: string): string | null {
   const command = typeof raw === 'string' ? raw : cleanBashCommand(args)
   const cleaned = cleanBashCommand(command)
   return cleaned.length > 0 ? cleaned : null
-}
-
-/** 结果首行的"退出码: N";解析不出返回 undefined。 */
-function bashExitCode(content?: string): number | undefined {
-  if (!content) return undefined
-  const match = content.match(/^退出码:\s*(-?\d+)/)
-  if (!match) return undefined
-  const code = Number(match[1])
-  return Number.isFinite(code) ? code : undefined
 }
 
 /** skill load 的 SKILL.md 正文随工具结果 JSON 返回;展开时按 markdown 渲染
@@ -741,6 +756,20 @@ function skillLoadBody(name: string, content: string, isError: boolean): string 
 
 /** 共享的空输出:每次渲染新建对象会让 `BashCard` 的 memo 形同虚设。 */
 const EMPTY_BASH_OUTPUT: BashOutput = { stdout: '' }
+
+/** 非 bash 行的执行事实:与 `EMPTY_BASH_OUTPUT` 同理,memo 靠共享对象生效。 */
+const EMPTY_BASH_EXECUTION: BashExecution = {}
+
+/**
+ * 命令是否"不成功":非零退出,或压根没正常结束(超时/中断/没起来)。
+ *
+ * 不能只看退出码:后三类情况下拿不到退出码,只看它会让这些失败在卡片上
+ * 变得和成功一模一样(连红竖线都没了)。
+ */
+function bashFailed(exit: BashExecution): boolean {
+  if (exit.code !== undefined) return exit.code !== 0
+  return exit.reason !== undefined && exit.reason !== 'completed'
+}
 
 function ToolRow({
   node,
@@ -807,11 +836,13 @@ function ToolRow({
   // out 那句结果文案;失败时保留 out(错误原因要看得见)。
   const showOut =
     node.result !== undefined && (node.result.isError || !(diff || todos || commandBody !== null))
-  // 退出码:bash 把"退出码: N"写在结果首行。非 0 是数据不是工具失败,
+  // 执行事实:优先读工具上报的 `meta`(退出码、结束原因),字段缺失时才
+  // 从结果首行的"退出码: N"回退解析(旧日志与旧事件没有 `meta`)。回退
+  // 规则写在 `bashExecution` 里,这里只管取。非 0 是数据不是工具失败,
   // 但要让人一眼看见 —— 挂在头部右侧。
-  const exitCode = useMemo(
-    () => (node.name === 'bash' ? bashExitCode(node.result?.content) : undefined),
-    [node.name, node.result?.content],
+  const exit = useMemo(
+    () => (node.name === 'bash' ? bashExecution(node.result) : EMPTY_BASH_EXECUTION),
+    [node.name, node.result],
   )
   const inputBody = useMemo(
     () => toolCallInput(node.name, node.args),
@@ -905,7 +936,7 @@ function ToolRow({
             removed={diff.diffs.reduce((sum, d) => sum + d.removed, 0)}
           />
         )}
-        {exitCode !== undefined && <ExitBadge code={exitCode} />}
+        <ExitBadge code={exit.code} reason={exit.reason} />
       </button>
       {open && (
         <div className="disc-body">
@@ -925,7 +956,8 @@ function ToolRow({
             <BashCard
               command={commandBody}
               output={bashOut ?? EMPTY_BASH_OUTPUT}
-              exitCode={exitCode}
+              exitCode={exit.code}
+              failed={bashFailed(exit)}
               running={running}
             />
           ) : (
@@ -976,7 +1008,13 @@ function TurnChrome({
   /** 死循环提示行点「继续」:自动发送继续消息。 */
   onLoopContinue?: () => void
 }) {
-  const { reason, usage } = node
+  // reason 来自 turn-end 事件的原始字段。类型上它必填,但**运行时未必**:旧
+  // 日志缺字段、以及后端 `TurnEnd { .. }` 通配落盘的路径都可能给出 undefined,
+  // 而这里原本一次读了六遍 `reason.kind` —— 缺一次就整块 transcript 抛
+  // Cannot read properties of undefined (reading 'kind')。缺失按 interrupted
+  // 收:它同样是"轮次没有正常跑完",至少界面要说得出话而不是崩。
+  const usage = node.usage
+  const reason = node.reason ?? { kind: 'interrupted' }
   const label =
     reason.kind === 'completed'
       ? t('reasonCompleted')

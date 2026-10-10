@@ -1,6 +1,29 @@
 //! Session history responsibilities.
 use super::*;
 
+/// 收集一次任务操作里引用到的 revision id。
+///
+/// 只按"这条事件提到了哪些身份"收,不判断它是不是被折叠采纳 —— 报废集合
+/// 宁多勿少:多收一个只会让"重用一个本就不该重用的 id"被拒,少收一个却会
+/// 让旧分支的验证结论复活。
+fn collect_revision_ids(op: &TaskOp, out: &mut Vec<RevisionId>) {
+    match op {
+        TaskOp::Open { revision, .. } | TaskOp::Revise { revision, .. } => {
+            push_unique_revision(out, revision)
+        }
+        TaskOp::RecordEvidence { evidence } => push_unique_revision(out, &evidence.revision),
+        TaskOp::RecordValidation { result } => push_unique_revision(out, result.revision()),
+        _ => {}
+    }
+}
+
+/// 追加一个尚未登记的身份(报废集合是有序并集,重复项不重复记)。
+fn push_unique_revision(out: &mut Vec<RevisionId>, id: &RevisionId) {
+    if !out.iter().any(|known| known == id) {
+        out.push(id.clone());
+    }
+}
+
 /// fork 投影版本：投影规则变化时自增，旧快照按版本解释。
 pub const SUBAGENT_SEED_VERSION: u32 = 1;
 
@@ -55,6 +78,10 @@ pub fn build_subagent_seed(events: &[SessionEnvelope]) -> SubagentSeed {
                 mark("agent-inbox", &mut dropped)
             }
             SessionEvent::Goal { .. } => mark("goal-state", &mut dropped),
+            // 任务账本是父会话的验证结论与约束脉络;子代理重新开自己的账本,
+            // 不继承父的未决问题、待完成与验收结论(继承过来的结论也会被
+            // `TaskState::verification` 按来源挡掉,这里直接不让它进种子)。
+            SessionEvent::Task { .. } => mark("task-ledger", &mut dropped),
             SessionEvent::PermissionMode { .. } => mark("permission-state", &mut dropped),
             SessionEvent::AgentPreset { .. } => mark("agent-preset", &mut dropped),
             SessionEvent::ApprovalPolicy { .. }
@@ -236,6 +263,16 @@ impl Session {
         };
 
         let removed_events = inner.events.len() - target_idx;
+        // rewind 是**物理截断**:被截掉的分支在日志里不复存在,折叠层再也拒绝
+        // 不了"旧 revision id 复活"。所以先把截断区间里出现过的身份收成报废
+        // 集合 —— 它随回退审计落盘(见函数末尾),并在下面的回放里作为折叠
+        // 作用域生效。
+        let mut retired: Vec<RevisionId> = Vec::new();
+        for envelope in &inner.events[target_idx..] {
+            if let SessionEvent::Task { op } = &envelope.event {
+                collect_revision_ids(op, &mut retired);
+            }
+        }
         // 先 flush,确保所有已写事件落盘;再按最后一个保留事件的字节偏移截断。
         inner.writer.flush()?;
         let truncate_offset = if target_idx == 0 {
@@ -279,6 +316,7 @@ impl Session {
         inner.last_system_prompt = None;
         inner.permission_mode = PermissionMode::AutoEdit;
         inner.goal = None;
+        inner.task = None;
         inner.meter = ContextMeter::new();
         inner.pending_turn.clear();
         inner.first_prompt_excerpt = None;
@@ -321,6 +359,13 @@ impl Session {
             }
         }
         inner.events = kept;
+        // 报废身份并入后重放任务账本:作用域里带上被截断区间的 id,旧分支的
+        // 验证结论因此不可能"复用同一个 revision id"带回新分支。集合只增不减
+        // —— 已经报废的身份不会因为后来没人提它而复活。
+        for id in &retired {
+            push_unique_revision(&mut inner.retired_revisions, id);
+        }
+        inner.refold_task(&self.header.id);
         inner.last_seq = inner
             .events
             .last()
@@ -328,12 +373,18 @@ impl Session {
             .unwrap_or(0);
 
         // 回退审计:独立于 session.jsonl 追加,物理截断不会抹掉这段记录。
+        // `retiredRevisions` 只记**本次截掉的**身份(历次取并集即完整报废
+        // 集合):加载时 `read_retired_revisions` 正是按并集读的。
         let rewind_file = self.file.with_file_name("rewinds.jsonl");
         let record = serde_json::json!({
             "time": now_millis(),
             "to_seq": to_seq,
             "to_message": to_message,
             "removed_events": removed_events,
+            "retiredRevisions": retired
+                .iter()
+                .map(|id| id.as_str())
+                .collect::<Vec<&str>>(),
         });
         {
             let mut fh = OpenOptions::new()
@@ -402,6 +453,23 @@ mod seed_tests {
         )
     }
 
+    /// 一次开账事件(任务账本的入口)。
+    fn task_open(seq: u64) -> SessionEnvelope {
+        envelope(
+            seq,
+            serde_json::json!({
+                "type": "task",
+                "op": {
+                    "kind": "open",
+                    "task_id": "task-sentinel",
+                    "revision": "rev-sentinel",
+                    "goal": "修好解析器",
+                    "requirements": []
+                }
+            }),
+        )
+    }
+
     fn kind_of(event: &SessionEvent) -> &'static str {
         match event {
             SessionEvent::TurnStart { .. } => "turn-start",
@@ -414,6 +482,7 @@ mod seed_tests {
             SessionEvent::ToolResult { .. } => "tool-result",
             SessionEvent::SystemPrompt { .. } => "system-prompt",
             SessionEvent::Goal { .. } => "goal",
+            SessionEvent::Task { .. } => "task",
             SessionEvent::PermissionMode { .. } => "permission",
             SessionEvent::AgentPreset { .. } => "agent-preset",
             SessionEvent::AgentInbox { .. } => "agent-inbox",
@@ -475,13 +544,15 @@ mod seed_tests {
                 9,
                 serde_json::json!({"type": "step-end", "turn": 1, "step": 1}),
             ),
-            turn_end(10),
+            // 父会话的任务账本：子代理自己开账，不继承父的账本与验收结论。
+            task_open(10),
+            turn_end(11),
             // 未闭合的当前轮次：不复制。
-            envelope(11, serde_json::json!({"type": "turn-start", "turn": 2})),
-            user(12, "正在进行的请求", false),
+            envelope(12, serde_json::json!({"type": "turn-start", "turn": 2})),
+            user(13, "正在进行的请求", false),
         ];
         let seed = build_subagent_seed(&events);
-        assert_eq!(seed.cut_seq, 10, "只截取到最后一个闭合轮次");
+        assert_eq!(seed.cut_seq, 11, "只截取到最后一个闭合轮次");
         let kinds: Vec<&'static str> = seed
             .events
             .iter()
@@ -498,6 +569,7 @@ mod seed_tests {
             "agent-inbox",
             "approval-asked",
             "ask-requested",
+            "task",
             "chunk",
         ] {
             assert!(
@@ -535,6 +607,11 @@ mod seed_tests {
                 .any(|item| item == "workspace-and-runtime-injections")
         );
         assert!(seed.dropped.iter().any(|item| item == "system-prompt"));
+        assert!(
+            seed.dropped.iter().any(|item| item == "task-ledger"),
+            "父会话的任务账本必须被标记为丢弃：{:?}",
+            seed.dropped
+        );
     }
 
     #[test]

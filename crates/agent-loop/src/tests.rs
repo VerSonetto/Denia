@@ -224,9 +224,9 @@ impl denia_tools::Tool for EchoTool {
         _ctx: &denia_tools::ToolContext,
     ) -> denia_tools::ToolOutput {
         denia_tools::ToolOutput {
-            artifact: None,
             content: format!("echo:{arguments}"),
             is_error: false,
+            ..Default::default()
         }
     }
 }
@@ -250,10 +250,38 @@ impl denia_tools::Tool for BulkyTool {
         _ctx: &denia_tools::ToolContext,
     ) -> denia_tools::ToolOutput {
         denia_tools::ToolOutput {
-            artifact: None,
             content: "x".repeat(denia_tools::support::OUTPUT_BUDGET_CHARS + 500),
             is_error: false,
+            ..Default::default()
         }
+    }
+}
+
+/// 超预算输出 + 结构化执行报告:验证 `merge_meta` 的两边在真实落盘路径上并存
+/// (工具报 `exit_code`/`end_reason`,落盘层补 `outputArtifact`)。
+struct ReportedBulkyTool;
+
+#[async_trait]
+impl denia_tools::Tool for ReportedBulkyTool {
+    fn schema(&self) -> &ToolSchema {
+        Box::leak(Box::new(ToolSchema {
+            name: "reported_bulky".to_string(),
+            description: "emits oversized output with an execution report".to_string(),
+            parameters: serde_json::json!({ "type": "object" }),
+        }))
+    }
+
+    async fn execute(
+        &self,
+        _arguments: &str,
+        _ctx: &denia_tools::ToolContext,
+    ) -> denia_tools::ToolOutput {
+        denia_tools::ToolOutput {
+            content: "y".repeat(denia_tools::support::OUTPUT_BUDGET_CHARS + 500),
+            is_error: false,
+            ..Default::default()
+        }
+        .with_report(denia_tools::ExecutionReport::completed(Some(0)))
     }
 }
 
@@ -1749,6 +1777,70 @@ async fn oversized_tool_result_is_truncated_with_notice() {
     );
 }
 
+/// 工具上报的执行事实与落盘层补的产物引用必须**同时**落在 `meta` 里。
+///
+/// `exec::merge_meta_tests` 只钉住两个纯函数各自的行为;这里走完整条
+/// `commit_result` 装配路径(真实 `tool-result` 事件落盘):超预算产物让落盘层
+/// 补 `outputArtifact` 之后,工具上报的 `exit_code`/`end_reason` 仍在 —— 界面
+/// 上"退出码徽标 + 完整输出入口"同时可见就靠这一点。
+#[tokio::test]
+async fn tool_result_meta_keeps_report_and_artifact_side_by_side() {
+    let (driver, _registry) = driver_with_tools(
+        vec![
+            MockScript::Chunks(tool_script_with("reported_bulky", "call_report")),
+            MockScript::Chunks(text_script("done")),
+        ],
+        |tools| {
+            tools.register(Arc::new(ReportedBulkyTool));
+        },
+    );
+    let session = temp_session();
+    let reason = driver
+        .run_turn(
+            &session,
+            &selection(),
+            "go",
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            true,
+            CancellationToken::new(),
+            noop_emit(),
+        )
+        .await;
+    assert_eq!(reason, TurnEndReason::Completed);
+
+    let meta = session
+        .events()
+        .iter()
+        .find_map(|e| match &e.event {
+            SessionEvent::ToolResult {
+                meta: Some(meta), ..
+            } => Some(meta.clone()),
+            _ => None,
+        })
+        .expect("tool result must carry meta");
+    assert_eq!(
+        meta["exit_code"],
+        serde_json::json!(0),
+        "工具上报的退出码被产物引用挤掉了:{meta}"
+    );
+    assert_eq!(
+        meta["end_reason"],
+        serde_json::json!("completed"),
+        "工具上报的结束原因被产物引用挤掉了:{meta}"
+    );
+    assert_eq!(
+        meta["outputArtifact"]["complete"],
+        serde_json::json!(true),
+        "落盘层补的产物引用缺失:{meta}"
+    );
+    assert!(
+        meta["outputArtifact"]["output_id"].is_string(),
+        "产物引用里必须有 output_id:{meta}"
+    );
+}
+
 fn tool_script_with(name: &str, id: &str) -> Vec<StreamChunk> {
     vec![
         StreamChunk::BlockStart {
@@ -2196,9 +2288,9 @@ impl denia_tools::Tool for PageProbeTool {
             .collect();
         self.pages.lock().unwrap().push(seen);
         denia_tools::ToolOutput {
-            artifact: None,
             content: "probe:ok".to_string(),
             is_error: false,
+            ..Default::default()
         }
     }
 }
@@ -2763,7 +2855,9 @@ async fn read_only_hides_bash_and_write_tools() {
     assert!(names.iter().any(|n| n == "read_file"), "{names:?}");
     let results = result_texts(&session);
     assert!(results[0].0, "hallucinated bash call must be denied");
-    assert!(results[0].1.contains("bash 命令不可用"), "{}", results[0].1);
+    // 只读档的拒绍文案现在覆盖整类命令工具(含 run_checks),不再单独点名 bash;断言稳定属性而不是逐字文案。
+    assert!(results[0].1.contains("只读模式"), "{}", results[0].1);
+    assert!(results[0].1.contains("不可用"), "{}", results[0].1);
 }
 
 #[test]
@@ -2843,9 +2937,9 @@ impl denia_tools::Tool for CountingMcpTool {
         self.executes
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         denia_tools::ToolOutput {
-            artifact: None,
             content: format!("echo:{arguments}"),
             is_error: false,
+            ..Default::default()
         }
     }
 }
@@ -3007,4 +3101,161 @@ async fn first_mcp_call_returns_definition_and_second_executes() {
         results[0]
     );
     assert_eq!(results[1], "echo:{\"text\":\"hi\"}");
+}
+
+/// 带用量锚点的工具调用脚本:用量决定上下文压力(微压缩的触发条件)。
+fn usage_tool_script(name: &str, id: &str, arguments: &str, input_tokens: u64) -> Vec<StreamChunk> {
+    vec![
+        StreamChunk::BlockStart {
+            index: 0,
+            block_type: BlockType::ToolCall,
+        },
+        StreamChunk::ToolCallDelta {
+            index: 0,
+            id: id.to_string(),
+            name: Some(name.to_string()),
+            arguments_delta: arguments.to_string(),
+        },
+        StreamChunk::BlockEnd {
+            index: 0,
+            block: ContentBlock::ToolCall {
+                id: id.to_string(),
+                name: name.to_string(),
+                arguments: arguments.to_string(),
+                incomplete: false,
+            },
+        },
+        StreamChunk::Usage {
+            usage: TokenUsage {
+                input_tokens,
+                output_tokens: 10,
+                cache_read_tokens: None,
+                reasoning_tokens: None,
+            },
+        },
+        StreamChunk::Finish {
+            reason: FinishReason::ToolCalls,
+        },
+    ]
+}
+
+/// 旧工具结果被微压缩清成占位符后,同页重读必须返回真实内容。
+///
+/// 否则模型拿到的是"自上次读取以来未变更"——而那条结果的内容已经被清掉,
+/// 模型既看不到内容、又被去重拦着不重读,只能靠猜。
+#[tokio::test]
+async fn microcompact_cleared_read_result_forces_a_real_reread() {
+    // 用量锚点抬到微压缩触发线以上(0.9 × (100k 窗口 − 20k 摘要预留 − 13k buffer)
+    // ≈ 60.3k),但低于摘要压缩占比(0.9 × 100k),不惊动 LLM 压缩。
+    const PRESSURE_TOKENS: u64 = 65_000;
+    let probe_args = r#"{"path":"probe.txt","offset":1,"limit":400}"#;
+    let other_args = r#"{"path":"other.txt","offset":1,"limit":400}"#;
+
+    let (driver, _registry) = driver_with_tools(
+        vec![
+            MockScript::Chunks(usage_tool_script(
+                "read_file",
+                "call_read_1",
+                probe_args,
+                PRESSURE_TOKENS,
+            )),
+            MockScript::Chunks(usage_tool_script(
+                "read_file",
+                "call_other",
+                other_args,
+                PRESSURE_TOKENS,
+            )),
+            MockScript::Chunks(usage_tool_script(
+                "read_file",
+                "call_read_2",
+                probe_args,
+                PRESSURE_TOKENS,
+            )),
+            MockScript::Chunks(usage_tool_script(
+                "read_file",
+                "call_read_3",
+                probe_args,
+                PRESSURE_TOKENS,
+            )),
+            MockScript::Chunks(text_script("done")),
+        ],
+        |tools| tools.register(Arc::new(denia_tools::ReadFileTool::default())),
+    );
+    // 保留最近 1 组 → 第 3 步的闸门清掉第 1 步那条读结果;min_savings=0
+    // 让小文件(几十字符)也达到"省得动"的门槛。
+    let driver = driver.with_microcompact(microcompact::MicrocompactSettings {
+        keep_recent_groups: 1,
+        min_savings: 0,
+        ..Default::default()
+    });
+
+    let session = temp_session();
+    let cwd = std::path::PathBuf::from(session.header().cwd.clone());
+    std::fs::write(cwd.join("probe.txt"), "MARKER-ONE\nsecond line").unwrap();
+    std::fs::write(cwd.join("other.txt"), "OTHER-FILE\nbody").unwrap();
+
+    let reason = driver
+        .run_turn(
+            &session,
+            &selection(),
+            "读一下 probe.txt",
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            true,
+            CancellationToken::new(),
+            noop_emit(),
+        )
+        .await;
+    assert_eq!(reason, TurnEndReason::Completed);
+
+    // 每条工具结果:(call_id, 内容, replaces)。
+    let results: Vec<(String, String, Option<u64>)> = session
+        .events()
+        .iter()
+        .filter_map(|envelope| match &envelope.event {
+            SessionEvent::ToolResult {
+                call_id,
+                content,
+                replaces,
+                ..
+            } => Some((call_id.clone(), content.clone(), *replaces)),
+            _ => None,
+        })
+        .collect();
+    let result_of = |id: &str| {
+        results
+            .iter()
+            .find(|(call, _, replaces)| call == id && replaces.is_none())
+            .map(|(_, content, _)| content.clone())
+    };
+
+    // 闸门确实清过东西(否则本测试是空转,断言没有意义)。
+    let cleared: Vec<&str> = results
+        .iter()
+        .filter(|(_, _, replaces)| replaces.is_some())
+        .map(|(call, _, _)| call.as_str())
+        .collect();
+    assert!(
+        cleared.contains(&"call_read_1"),
+        "第一条读结果必须被微压缩清掉:{cleared:?}"
+    );
+
+    // 被清掉结果的同页重读:必须拿到真实内容,而不是"未变更"。
+    let second = result_of("call_read_2").expect("第二次读取必须落一条结果");
+    assert!(
+        !second.contains("未变更"),
+        "被清理结果的同页重读不得命中去重:{second}"
+    );
+    assert!(
+        second.contains("MARKER-ONE"),
+        "被清理结果的同页重读必须返回真实内容:{second}"
+    );
+
+    // 反向:没被清理的那条读取照旧保留去重收益。
+    let third = result_of("call_read_3").expect("第三次读取必须落一条结果");
+    assert!(
+        third.contains("未变更"),
+        "未被清理的读取仍应命中去重:{third}"
+    );
 }

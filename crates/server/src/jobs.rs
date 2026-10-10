@@ -302,8 +302,8 @@ impl Jobs {
             let pid = child.id();
             let (status, exit) = tokio::select! {
                 result=child.wait()=>match result {Ok(s)=>(if s.success(){"completed"}else{"failed"},s.code()),Err(_)=>("failed",None)},
-                _=cancel.cancelled()=>{kill_tree(pid,&mut child).await;("killed",None)},
-                _=tokio::time::sleep(Duration::from_millis(timeout))=>{kill_tree(pid,&mut child).await;jobs.push(&id,"\n后台命令超时",cap);("failed",None)},
+                _=cancel.cancelled()=>{denia_tools::shell::kill_tree(pid,&mut child).await;("killed",None)},
+                _=tokio::time::sleep(Duration::from_millis(timeout))=>{denia_tools::shell::kill_tree(pid,&mut child).await;jobs.push(&id,"\n后台命令超时",cap);("failed",None)},
             };
             // 后代持有管道时不能无限等待；结果读取不会阻塞注册表锁。
             let out_abort = out.abort_handle();
@@ -410,20 +410,6 @@ async fn pump<R: AsyncRead + Unpin>(
     }
     true
 }
-async fn kill_tree(pid: Option<u32>, child: &mut tokio::process::Child) {
-    #[cfg(windows)]
-    if let Some(pid) = pid {
-        let mut cmd = tokio::process::Command::new("taskkill.exe");
-        cmd.args(["/PID", &pid.to_string(), "/T", "/F"])
-            .creation_flags(0x08000000);
-        let _ = cmd.output().await;
-    }
-    #[cfg(not(windows))]
-    let _ = pid;
-    let _ = child.kill().await;
-    let _ = child.wait().await;
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -444,6 +430,7 @@ mod tests {
             ask: None,
             call_id: None,
             goal_reader: None,
+            task_ledger: None,
             read_state: None,
         };
         let job = jobs
@@ -485,6 +472,7 @@ mod tests {
             ask: None,
             call_id: None,
             goal_reader: None,
+            task_ledger: None,
             read_state: None,
         };
         let job = jobs
@@ -535,5 +523,197 @@ mod tests {
             preview["output"]
         );
         tokio::fs::remove_dir_all(root).await.unwrap();
+    }
+
+    /// 后台用例的 `ToolContext`(与上面两条用例同形状,提取出来给进程树用例复用)。
+    #[cfg(windows)]
+    fn ctx(dir: &std::path::Path, session: &str) -> ToolContext {
+        ToolContext {
+            output_store: None,
+            session_id: Some(session.into()),
+            selection: None,
+            cwd: dir.to_path_buf(),
+            cancel: CancellationToken::new(),
+            confined: true,
+            vision_supported: false,
+            emit_event: None,
+            file_history: None,
+            permission_mode: denia_core::session::PermissionMode::AutoEdit,
+            ask: None,
+            call_id: None,
+            goal_reader: None,
+            task_ledger: None,
+            read_state: None,
+        }
+    }
+
+    /// 拉起「外层 shell → 内层 shell」进程树的那条命令:内层 shell 把自己的
+    /// PID 写进 `marker` 后长睡,外层同样长睡——形状与后台跑 `cargo build`
+    /// 一致(直接子进程是 shell,真正干活的是它的后代)。
+    ///
+    /// `denia_tools::shell::test_tree` 是 `pub(crate)` 且只在 tools 自己的测试
+    /// 构建里编译,跨 crate 拿不到,这里按同一形状写一份最小等价脚手架。
+    #[cfg(windows)]
+    fn nested_sleeper_command(marker: &std::path::Path) -> String {
+        let marker = marker.display();
+        format!(
+            "$exe = (Get-Process -Id $PID).Path; \
+             $inner = 'Set-Content -LiteralPath \"{marker}\" -Value $PID; Start-Sleep -Seconds 120'; \
+             & $exe -NoLogo -NoProfile -NonInteractive -Command $inner; \
+             Start-Sleep -Seconds 120"
+        )
+    }
+
+    /// 读孙进程报出的 PID(还没写出来就返回 None)。
+    #[cfg(windows)]
+    fn read_pid(marker: &std::path::Path) -> Option<u32> {
+        std::fs::read_to_string(marker).ok()?.trim().parse().ok()
+    }
+
+    /// 等孙进程报出自己的 PID,宽限 `budget` 后放弃。
+    #[cfg(windows)]
+    async fn wait_for_pid(marker: &std::path::Path, budget: Duration) -> Option<u32> {
+        let deadline = std::time::Instant::now() + budget;
+        loop {
+            if let Some(pid) = read_pid(marker) {
+                return Some(pid);
+            }
+            if std::time::Instant::now() >= deadline {
+                return None;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+
+    /// 进程是否还活着。查不出来时当「活着」:失败不能伪装成通过。
+    #[cfg(windows)]
+    async fn process_alive(pid: u32) -> bool {
+        let script = format!(
+            "if (Get-Process -Id {pid} -ErrorAction SilentlyContinue) {{ 'alive' }} else {{ 'gone' }}"
+        );
+        let output = tokio::process::Command::new(denia_tools::shell::shell_executable_path())
+            .args([
+                "-NoLogo",
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                &script,
+            ])
+            .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
+            .output()
+            .await;
+        match output {
+            Ok(output) => String::from_utf8_lossy(&output.stdout).contains("alive"),
+            Err(_) => true,
+        }
+    }
+
+    /// 等进程消失(给终止一个落地的宽限,而不是假定它瞬间生效)。
+    #[cfg(windows)]
+    async fn wait_until_gone(pid: u32) -> bool {
+        let deadline = std::time::Instant::now() + Duration::from_secs(15);
+        loop {
+            if !process_alive(pid).await {
+                return true;
+            }
+            if std::time::Instant::now() >= deadline {
+                return false;
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+    }
+
+    /// 回归:后台任务被**取消**时,它拉起的孙进程也必须一起消失。
+    ///
+    /// 此前只有前台 3 条 Windows 用例覆盖 `kill_tree`,「前后台复用同一实现」
+    /// 只是读代码得出的结论。这里走真实的后台取消链路:`Jobs::kill` →
+    /// `cancel.cancel()` → 任务 select 的 `cancel.cancelled()` 分支
+    /// (`denia_tools::shell::kill_tree`),再断言孙进程已被清理。
+    ///
+    /// 同步不靠 sleep 猜时序:孙进程先把自己的 PID 写进临时文件,轮询到 PID
+    /// 再取消;断言消失时同样轮询,并给 15 秒宽限。
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn cancel_kills_grandchild_processes() {
+        let dir = std::env::temp_dir().join(format!("denia-job-cancel-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let marker = dir.join("grandchild.pid");
+        let jobs = Jobs::new();
+        let job = jobs
+            .start(
+                &ctx(&dir, "cancel"),
+                &nested_sleeper_command(&marker),
+                "取消进程树",
+                60_000,
+                1,
+                8,
+                4096,
+            )
+            .unwrap();
+        // 等进程树真的拉起来(孙进程写出自己的 PID)再取消,免得测的是竞态。
+        let grandchild = wait_for_pid(&marker, Duration::from_secs(30))
+            .await
+            .expect("进程树没有拉起孙进程(缺 grandchild.pid)");
+        assert!(
+            process_alive(grandchild).await,
+            "孙进程 {grandchild} 应该在树里活着"
+        );
+        jobs.kill(&job.id, "cancel").unwrap();
+        jobs.wait(&job.id, "cancel", 15_000, &CancellationToken::new())
+            .await
+            .unwrap();
+        let settled = jobs.peek(&job.id, "cancel").unwrap();
+        assert_eq!(
+            settled["job"]["status"], "killed",
+            "取消后任务状态应为 killed:{}",
+            settled["job"]
+        );
+        assert!(
+            wait_until_gone(grandchild).await,
+            "取消后孙进程 {grandchild} 还在跑:后台清理没有连根拔"
+        );
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    /// 回归:后台任务**超时**时同样连根拔(select 里另一条 `kill_tree` 调用点)。
+    ///
+    /// 超时设 12 秒、等 PID 给 10 秒宽限:正常机器上内层 shell 起完约 1-2 秒,
+    /// 10 秒足够宽。若这里真的拿不到 PID,说明机器异常慢,直接报失败而不是
+    /// 悄悄放行。
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn timeout_kills_grandchild_processes() {
+        let dir = std::env::temp_dir().join(format!("denia-job-timeout-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let marker = dir.join("grandchild.pid");
+        let jobs = Jobs::new();
+        let job = jobs
+            .start(
+                &ctx(&dir, "timeout"),
+                &nested_sleeper_command(&marker),
+                "超时进程树",
+                12_000,
+                1,
+                8,
+                4096,
+            )
+            .unwrap();
+        let grandchild = wait_for_pid(&marker, Duration::from_secs(10))
+            .await
+            .expect("超时前没等到孙进程 PID:内层 shell 10 秒还没起来,机器过慢");
+        jobs.wait(&job.id, "timeout", 20_000, &CancellationToken::new())
+            .await
+            .unwrap();
+        let settled = jobs.peek(&job.id, "timeout").unwrap();
+        assert_eq!(
+            settled["job"]["status"], "failed",
+            "超时后任务状态应为 failed(超时分支):{}",
+            settled["job"]
+        );
+        assert!(
+            wait_until_gone(grandchild).await,
+            "超时后孙进程 {grandchild} 还在跑:后台清理没有连根拔"
+        );
+        let _ = tokio::fs::remove_dir_all(&dir).await;
     }
 }

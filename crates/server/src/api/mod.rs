@@ -19,6 +19,7 @@ mod sessions;
 mod settings;
 mod subagents;
 mod system_prompt;
+mod task;
 mod terminals;
 mod uploads;
 mod workspaces;
@@ -82,6 +83,7 @@ pub fn router() -> Router<Arc<AppState>> {
         .merge(llm::router())
         .merge(sessions::router())
         .merge(goal::router())
+        .merge(task::router())
         .merge(runtime::router())
         .merge(workspaces::router())
         .merge(uploads::router())

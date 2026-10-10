@@ -452,13 +452,16 @@ fn filter_mention_entries(entries: &[IndexedMention], needle: &str) -> Vec<Menti
         let Some((tier, pos, gaps)) = match_mention(entry, needle) else {
             continue;
         };
-        let rank = (if entry.kind == "directory" { 0u8 } else { 1u8 }, tier, pos, gaps);
+        let rank = (
+            if entry.kind == "directory" { 0u8 } else { 1u8 },
+            tier,
+            pos,
+            gaps,
+        );
         scored.push((entry, rank));
     }
     if scored.len() > MENTION_MAX_RESULTS {
-        scored.select_nth_unstable_by(MENTION_MAX_RESULTS, |a, b| {
-            compare_scored(a, b)
-        });
+        scored.select_nth_unstable_by(MENTION_MAX_RESULTS, |a, b| compare_scored(a, b));
         scored.truncate(MENTION_MAX_RESULTS);
     }
     scored.sort_by(compare_scored);

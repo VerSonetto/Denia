@@ -320,6 +320,11 @@ pub struct ContextMeter {
     pressure_tokens: Option<u64>,
     /// 取锚点时的表面总量;锚点后的表面增量 = surface - sampled。
     sampled_surface_tokens: Option<u64>,
+    /// 取锚点时的系统提示 / 工具声明估算。两者也会在会话中途变化(动态
+    /// 系统提示、工具集增删),必须与表面增量走同一有向口径,否则它们的
+    /// 变化会被错误地记到对话消息行上。
+    sampled_system_tokens: Option<u64>,
+    sampled_tools_tokens: Option<u64>,
     /// 最新 `request/context` 的路由容量(上下文窗口)。
     context_window: Option<u64>,
 }
@@ -397,6 +402,8 @@ impl ContextMeter {
             turn_usage: TurnTokenUsage::default(),
             pressure_tokens: None,
             sampled_surface_tokens: None,
+            sampled_system_tokens: None,
+            sampled_tools_tokens: None,
             context_window: None,
         }
     }
@@ -420,6 +427,8 @@ impl ContextMeter {
                 if let Some(sample) = usage {
                     self.pressure_tokens = Some(prompt_tokens(sample));
                     self.sampled_surface_tokens = Some(self.surface_tokens);
+                    self.sampled_system_tokens = Some(self.system_tokens);
+                    self.sampled_tools_tokens = Some(self.tools_tokens);
                 }
                 if let Some(message) = extract_assistant_message(blocks) {
                     self.fold_message_add(envelope.seq, estimate_message(&message));
@@ -526,7 +535,7 @@ impl ContextMeter {
         else {
             return raw;
         };
-        let target = pressure.saturating_add(self.surface_tokens.saturating_sub(sampled));
+        let target = pressure.saturating_add_signed(self.projected_drift(sampled));
         calibrate_breakdown(
             self.system_tokens,
             self.tools_tokens,
@@ -540,12 +549,27 @@ impl ContextMeter {
         self.turn_usage.clone()
     }
 
+    /// 锚点之后的有向漂移:表面消息 + 系统提示 + 工具声明。
+    ///
+    /// 必须带符号:微压缩与摘要会把节点从表面移除,清理腾出的空间如果不
+    /// 回落到投影上,已经腾出空间的会话仍会判定为超压,进而进入有信息
+    /// 损失的摘要压缩。下限 0 由 `saturating_add_signed` 保证。
+    fn projected_drift(&self, sampled: u64) -> i64 {
+        let mut drift = self.surface_tokens as i64 - sampled as i64;
+        if let Some(sampled_system) = self.sampled_system_tokens {
+            drift += self.system_tokens as i64 - sampled_system as i64;
+        }
+        if let Some(sampled_tools) = self.sampled_tools_tokens {
+            drift += self.tools_tokens as i64 - sampled_tools as i64;
+        }
+        drift
+    }
+
     /// 读当前压力投影(锚点 + 锚点后表面增量)。
     pub fn context_pressure(&self) -> ContextPressure {
         let projected = self.pressure_tokens.map(|pressure| {
             let sampled = self.sampled_surface_tokens.unwrap_or(0);
-            let drift = self.surface_tokens.saturating_sub(sampled);
-            pressure.saturating_add(drift)
+            pressure.saturating_add_signed(self.projected_drift(sampled))
         });
         ContextPressure {
             context_window: self.context_window,
@@ -824,6 +848,122 @@ mod tests {
         assert_eq!(
             b2.system_tokens + b2.tools_tokens + b2.message_tokens,
             p2.projected_tokens.unwrap()
+        );
+    }
+
+    #[test]
+    fn pressure_projection_falls_after_surface_shrinks() {
+        // 回归:微压缩/摘要把旧工具结果从表面移除后,腾出的空间必须反映到
+        // 压力投影上。此前漂移用 `saturating_sub` 计算,负增量被截成 0,
+        // 已经腾出空间的会话仍会被判定为超压、进而触发有信息损失的摘要。
+        let mut meter = ContextMeter::new();
+        meter.apply_one(&envelope(
+            1,
+            SessionEvent::UserMessage {
+                text: "开始".into(),
+                injected: false,
+                images: Vec::new(),
+                channel: None,
+            },
+        ));
+        meter.apply_one(&envelope(
+            2,
+            SessionEvent::AssistantMessage {
+                turn: 1,
+                step: 1,
+                blocks: vec![ContentBlock::Text { text: "ok".into() }],
+                usage: Some(TokenUsage {
+                    input_tokens: 100_000,
+                    output_tokens: 5,
+                    cache_read_tokens: Some(0),
+                    reasoning_tokens: None,
+                }),
+                interrupted: false,
+                source_event_seqs: Vec::new(),
+                first_token_time: None,
+            },
+        ));
+        // 约 10k tokens 的旧工具结果(role + ceil(content/4))。
+        meter.apply_one(&envelope(
+            3,
+            SessionEvent::ToolResult {
+                turn: 1,
+                step: 1,
+                call_id: "call_1".into(),
+                content: "x".repeat(40_000),
+                is_error: false,
+                error: None,
+                error_identity: None,
+                meta: None,
+                truncation: None,
+                replaces: None,
+            },
+        ));
+        let peak = meter.context_pressure().projected_tokens.unwrap();
+        assert!(peak > 110_000, "锚点后应计入大工具结果: {peak}");
+        // 微压缩:同 seq 原位替换为占位符(内容不再进模型)。
+        meter.apply_one(&envelope(
+            4,
+            SessionEvent::ToolResult {
+                turn: 1,
+                step: 2,
+                call_id: "call_1".into(),
+                content: "[旧工具结果内容已清理]".into(),
+                is_error: false,
+                error: None,
+                error_identity: None,
+                meta: None,
+                truncation: None,
+                replaces: Some(3),
+            },
+        ));
+        let after = meter.context_pressure().projected_tokens.unwrap();
+        assert!(
+            after < peak - 9_000,
+            "清理腾出的空间必须从投影里回落: peak={peak} after={after}"
+        );
+        // 校准后的三数与投影仍然严格相等。
+        let b = meter.breakdown();
+        assert_eq!(
+            b.system_tokens + b.tools_tokens + b.message_tokens,
+            after
+        );
+    }
+
+    #[test]
+    fn pressure_projection_tracks_system_and_tools_changes() {
+        // 回归:系统提示与工具声明在锚点之后的变化同样进入投影口径,
+        // 否则它们的变化会被错误地记到对话消息行上。
+        let mut meter = ContextMeter::new();
+        meter.set_system_tokens(1_000);
+        meter.set_tools_tokens(500);
+        meter.apply_one(&envelope(
+            1,
+            SessionEvent::AssistantMessage {
+                turn: 1,
+                step: 1,
+                blocks: vec![ContentBlock::Text { text: "ok".into() }],
+                usage: Some(TokenUsage {
+                    input_tokens: 2_000,
+                    output_tokens: 5,
+                    cache_read_tokens: Some(0),
+                    reasoning_tokens: None,
+                }),
+                interrupted: false,
+                source_event_seqs: Vec::new(),
+                first_token_time: None,
+            },
+        ));
+        let base = meter.context_pressure().projected_tokens.unwrap();
+        meter.set_system_tokens(3_000);
+        assert_eq!(
+            meter.context_pressure().projected_tokens.unwrap(),
+            base + 2_000
+        );
+        meter.set_tools_tokens(100);
+        assert_eq!(
+            meter.context_pressure().projected_tokens.unwrap(),
+            base + 2_000 - 400
         );
     }
 

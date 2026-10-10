@@ -8,8 +8,9 @@ import type {
   TurnEndReason,
   UserMessageImage,
 } from './types'
-import { editDiff, editStartLines, parseArgsObject, writeDiff } from './toolDisplay'
-import type { EditDiff, TodoSnapshotItem } from './toolDisplay'
+import type { BlockType } from './generated/core'
+import { editDiff, editStartLines, parseArgsObject, toolResultMeta, writeDiff } from './toolDisplay'
+import type { EditDiff, TodoSnapshotItem, ToolResultMeta } from './toolDisplay'
 
 /** `ask` 工具的问答载荷(挂在对应工具行上)。 */
 export interface AskCardData {
@@ -63,7 +64,15 @@ export type TranscriptNode =
       args: string
       /** tool-call 事件的 seq;孤儿结果行用 result 事件的 seq。 */
       seq?: number
-      result?: { content: string; isError: boolean }
+      result?: {
+        content: string
+        isError: boolean
+        /**
+         * 工具上报的结构化载荷(退出码、结束原因、产物引用……);旧日志与
+         * 已落盘的旧事件没有这个键,渲染侧据此回退到展示文本。
+         */
+        meta?: ToolResultMeta
+      }
       /**
        * 执行期间的实时输出增量(仅运行中的 bash 有,按流累积)。
        *
@@ -146,6 +155,18 @@ function mergeUsage(total: TokenUsage | null, usage?: TokenUsage): TokenUsage | 
   }
 }
 
+/**
+ * 后端内容块 → UI 块。
+ *
+ * **必须有兜底分支**:这里的输入是反序列化出来的外部数据,后端 `ContentBlock`
+ * 加一种新 `"type"`(或某个网关塞进畸形块)时,没有 default 的 switch 会
+ * **返回 undefined** —— 而调用方(`event.blocks.map(toUiBlock)`、`block-end`)
+ * 会把它当成合法 `UiBlock` 塞进数组。渲染期读 `block.kind` 于是抛
+ * `Cannot read properties of undefined (reading 'kind')`。
+ *
+ * 兜底按 `text` 处理:未知类型至少把能拿到的 `text`/`arguments` 显示出来,
+ * 而不是让整条消息乃至整块 transcript 降级。
+ */
 function toUiBlock(block: ContentBlock): UiBlock {
   switch (block.type) {
     case 'text':
@@ -160,7 +181,74 @@ function toUiBlock(block: ContentBlock): UiBlock {
         name: block.name,
         args: block.arguments,
       }
+    default: {
+      // TS 在这里把 block 收窄成 never(联合已穷尽),但**运行时未必**:数据
+      // 来自反序列化。走 unknown 拿到真实形状,别信类型。
+      const loose = block as unknown as Partial<{ type: string; text: string; arguments: string }> | null
+      const text = typeof loose?.text === 'string'
+        ? loose.text
+        : typeof loose?.arguments === 'string'
+          ? loose.arguments
+          : ''
+      return { kind: 'text', text }
+    }
   }
+}
+
+/**
+ * `block-start` 的块类型 → UI 块 kind。同 `toUiBlock`,不认识的类型按 `text`
+ * 收:开一个能显示的空块,好过把一个 `undefined` kind 挂进渲染路径。
+ */
+function blockKindOf(blockType: BlockType): UiBlock['kind'] {
+  return blockType === 'reasoning' || blockType === 'tool-call' ? blockType : 'text'
+}
+
+/**
+ * 把 chunk 声称的下标归一成**可以安全写入**的下标;返回 -1 表示这帧该丢。
+ *
+ * 为什么必须有:流式帧的 `index` 是提供方给的,不是我们数出来的。三条真实
+ * 路径都会让它超过已开块数——
+ * 1. 非规范网关:缺 index 的 tool-call 帧由后端"尽力归位"推算
+ *    (`crates/llm/src/wire.rs` 的 `resolve_wire_index`);
+ * 2. 网络错误重试:模型从头重新生成,重发低位 index 之后又续上高位;
+ * 3. 前端节点被重建:`assistant-chunk` 是 transient 事件,不进快照也不进
+ *    分页窗口(`store.rs::read_page` 按 `is_transient_event` 过滤),断流
+ *    重连后补发的增量落在一个 `blocks: []` 的新节点上,index 却仍是本次
+ *    attempt 内的高位值。
+ *
+ * 后果不是"显示不全"而是**整块 transcript 崩掉**:`next[index] = ...` 越界写
+ * 造出稀疏空洞,而空洞只是暂时不抛(`map`/`some` 会跳过没有的索引);下一次
+ * 任意一次 `[...blocks]` 展开会把空洞复制成**致密的 undefined**,于是渲染期
+ * `blocks.some((b) => b.kind …)` 抛
+ * `Cannot read properties of undefined (reading 'kind')`。同一份数据"实时跑
+ * 完不崩、刷新才崩"或反之,取决于中间有没有那一次展开 —— 这正是它表现为
+ * 偶发的原因。
+ *
+ * 归一规则:超过块数就折叠到末尾追加(语义上就是"又开了一个新块");下标
+ * 根本不是非负整数(畸形帧)则丢弃该帧 —— 宁可少一段正文,也不能把正文串
+ * 进别的块里冒充它。
+ */
+function slotFor(index: number, length: number): number {
+  if (typeof index !== 'number' || !Number.isInteger(index) || index < 0) return -1
+  return index > length ? length : index
+}
+
+/**
+ * 在归一后的下标上写入。越界折叠为追加,畸形下标原样返回(不产空洞)。
+ *
+ * 读也走同一个归一下标:否则"写到 5、读 3"会让增量串进错误的块里。
+ */
+function patchAt(
+  blocks: UiBlock[],
+  rawIndex: number,
+  patch: (previous: UiBlock | undefined) => UiBlock,
+): UiBlock[] {
+  const index = slotFor(rawIndex, blocks.length)
+  if (index < 0) return blocks
+  const next = [...blocks]
+  if (index === next.length) next.push(patch(undefined))
+  else next[index] = patch(next[index])
+  return next
 }
 
 /**
@@ -168,6 +256,9 @@ function toUiBlock(block: ContentBlock): UiBlock {
  * block kind when it arrives before its `block-start` (reasoning deltas are
  * never rendered as plain text); an existing loose `text` block is upgraded,
  * never downgraded. `block-end` replaces the block with the authority.
+ *
+ * 所有下标都先过 [`slotFor`]:提供方给的 index 不可信,越界写会造出渲染期
+ * 读得到的 undefined(见那里的说明)。
  */
 function applyChunk(blocks: UiBlock[], chunk: StreamChunk): UiBlock[] {
   switch (chunk.type) {
@@ -175,46 +266,47 @@ function applyChunk(blocks: UiBlock[], chunk: StreamChunk): UiBlock[] {
       // 正常流:delta 携带的 index 与已打开块数一致。异常流(网络错误重试,
       // 模型从头重新生成)会重发同 index 的 block-start,而后续 delta 仍按
       // 原 index 路由 —— 原样追加会造出一个永远收不到内容的空块(并且旧块
-      // 还会串进重试后的 delta)。把 index 规范化为"当前块数"并跳过对已
-      // 存在块的重复开启,两条路径(冷历史/实时流)才与 settle 后的权威块
-      // (重试尝试整体重建、无重复块)保持一致。
-      const existing = blocks[chunk.index]
-      if (
-        existing !== undefined &&
-        (chunk.index !== blocks.length || existing.kind === chunk.block_type)
-      ) {
-        return blocks
-      }
-      return [...blocks, { kind: chunk.block_type, text: '' }]
+      // 还会串进重试后的 delta)。所以该位置已有块就跳过这次重复开启;越界的
+      // index 经 `slotFor` 折叠到末尾,于是这里恒为追加,不再可能留下空洞。
+      const index = slotFor(chunk.index, blocks.length)
+      if (index < 0) return blocks
+      if (index < blocks.length) return blocks
+      return [...blocks, { kind: blockKindOf(chunk.block_type), text: '' }]
     }
     case 'text-delta':
     case 'reasoning-delta': {
       const kind = chunk.type === 'reasoning-delta' ? 'reasoning' as const : 'text' as const
-      const block = blocks[chunk.index] ?? { kind, text: '' }
-      const next = [...blocks]
-      next[chunk.index] = {
-        ...block,
-        kind: block.kind === 'text' ? kind : block.kind,
-        text: block.text + chunk.text,
-      }
-      return next
+      return patchAt(blocks, chunk.index, (block) => {
+        const previous = block ?? { kind, text: '' }
+        return {
+          ...previous,
+          kind: previous.kind === 'text' ? kind : previous.kind,
+          text: previous.text + chunk.text,
+        }
+      })
     }
     case 'tool-call-delta': {
-      const block = blocks[chunk.index] ?? { kind: 'tool-call' as const, text: '' }
-      const next = [...blocks]
-      next[chunk.index] = {
-        ...block,
-        args: (block.args ?? '') + chunk.arguments_delta,
-        id: chunk.id || block.id,
-        name: chunk.name ?? block.name,
-      }
-      return next
+      return patchAt(blocks, chunk.index, (block) => {
+        const previous = block ?? { kind: 'tool-call' as const, text: '' }
+        return {
+          ...previous,
+          args: (previous.args ?? '') + chunk.arguments_delta,
+          id: chunk.id || previous.id,
+          name: chunk.name ?? previous.name,
+        }
+      })
     }
     case 'block-end': {
+      const index = slotFor(chunk.index, blocks.length)
+      // index 越界 = 我们没开过这个块,没有可结算的对象。这里**丢帧而不是
+      // 追加**:block-end 的正文与已到达的 delta 同源,追加会把同一段文字
+      // 显示两遍;真正的权威是随后落盘的 assistant-message(它整体重建 blocks)。
+      if (index < 0 || index >= blocks.length) return blocks
       const settled = toUiBlock(chunk.block)
-      const next = [...blocks]
-      next[chunk.index] = { ...settled, text: settled.text || blocks[chunk.index]?.text || '' }
-      return next
+      return patchAt(blocks, chunk.index, (block) => ({
+        ...settled,
+        text: settled.text || block?.text || '',
+      }))
     }
     default:
       return blocks
@@ -464,7 +556,11 @@ export function foldEvents(events: SessionEnvelope[]): TranscriptNode[] {
         // 对话流里继续显示原始调用/结果,不落占位行。
         if (event.replaces != null) break
         const node = tools.get(event.call_id)
-        const result = { content: event.content, isError: event.is_error }
+        const result = {
+          content: event.content,
+          isError: event.is_error,
+          meta: toolResultMeta(event.meta),
+        }
         if (node) {
           node.result = result
           delete node.live
@@ -848,7 +944,11 @@ function applyEnvelopeStep(
           const copy = nodes.slice()
           copy[i] = {
             ...node,
-            result: { content: event.content, isError: event.is_error },
+            result: {
+              content: event.content,
+              isError: event.is_error,
+              meta: toolResultMeta(event.meta),
+            },
             // 实时增量到此作废(冷路径同规则)。
             live: undefined,
           }
@@ -863,7 +963,11 @@ function applyEnvelopeStep(
           name: '?',
           args: '',
           seq: event.seq,
-          result: { content: event.content, isError: event.is_error },
+          result: {
+            content: event.content,
+            isError: event.is_error,
+            meta: toolResultMeta(event.meta),
+          },
         },
       ]
     }

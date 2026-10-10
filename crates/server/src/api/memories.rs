@@ -1,6 +1,6 @@
-//! 项目记忆端点(设置页只读 viewer):列工作区记忆清单、读单个记忆文件。
+//! 项目记忆端点(设置页 viewer):列工作区记忆清单、读/删单个记忆文件。
 //!
-//! 只读,不做增删改——改记忆走模型或手改文件。安全口径:文件名按组件
+//! 增改记忆走模型或手改文件,删除走本页的显式确认。安全口径:文件名按组件
 //! 校验(拒绝 `..`/前缀/根)、拒绝符号链接、单文件 5MiB 上限。
 
 use std::sync::Arc;
@@ -17,7 +17,10 @@ use crate::state::AppState;
 pub fn router() -> Router<Arc<AppState>> {
     Router::new()
         .route("/api/memories/projects", get(list_projects))
-        .route("/api/memories/projects/{id}/{*file}", get(read_memory_file))
+        .route(
+            "/api/memories/projects/{id}/{*file}",
+            get(read_memory_file).delete(delete_memory_file),
+        )
 }
 
 /// 列出全部工作区的记忆清单(未启用过记忆的工作区 files 为空,不报错)。
@@ -124,6 +127,74 @@ async fn read_memory_file(
             .map(|d| d.as_millis() as u64)
             .unwrap_or(0),
     })))
+}
+
+/// 删除一个记忆文件(含 MEMORY.md 索引本身,删后清单 index 为 null)。
+/// 路径校验与读取同口径(resolve_manifest_file);删除后再确认一次是普通
+/// 文件才 remove,防止校验与删除之间的替换攻击面。
+async fn delete_memory_file(
+    State(state): State<Arc<AppState>>,
+    Path((id, file)): Path<(String, String)>,
+) -> Result<impl IntoResponse, ApiError> {
+    let workspace = state.workspaces.get(&id).ok_or_else(|| {
+        ApiError::new(
+            axum::http::StatusCode::NOT_FOUND,
+            "memory/workspace-not-found",
+            "workspace not found",
+        )
+    })?;
+    let root =
+        crate::project_memory::memory_root(&state.home, std::path::Path::new(&workspace.path));
+    let raw = file.trim().to_string();
+    let name = tokio::task::spawn_blocking(move || {
+        let path =
+            crate::project_memory::resolve_manifest_file(&root, &raw).map_err(|message| {
+                if message.contains("不存在") {
+                    ApiError::new(
+                        axum::http::StatusCode::NOT_FOUND,
+                        "memory/file-not-found",
+                        message,
+                    )
+                } else {
+                    ApiError::bad_request("memory/bad-path", message)
+                }
+            })?;
+        let metadata =
+            std::fs::symlink_metadata(&path).map_err(|error| delete_io_error(&raw, error))?;
+        if metadata.is_symlink() || !metadata.is_file() {
+            return Err(ApiError::bad_request(
+                "memory/bad-path",
+                format!("非法文件:{raw}"),
+            ));
+        }
+        std::fs::remove_file(&path).map_err(|error| delete_io_error(&raw, error))?;
+        Ok::<String, ApiError>(
+            path.strip_prefix(&root)
+                .unwrap_or(&path)
+                .to_string_lossy()
+                .replace('\\', "/"),
+        )
+    })
+    .await
+    .map_err(|e| ApiError::bad_request("memory/delete-failed", e.to_string()))??;
+    Ok(Json(json!({ "deleted": name })))
+}
+
+/// 删除期的 fs 错误:文件消失按 404(并发二次删是常态),其余 500。
+fn delete_io_error(raw: &str, error: std::io::Error) -> ApiError {
+    if error.kind() == std::io::ErrorKind::NotFound {
+        ApiError::new(
+            axum::http::StatusCode::NOT_FOUND,
+            "memory/file-not-found",
+            format!("文件不存在:{raw}"),
+        )
+    } else {
+        ApiError::new(
+            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+            "memory/delete-failed",
+            error.to_string(),
+        )
+    }
 }
 
 /// 读取期的 fs 错误:文件消失按 404(读取期变更提示的素材),其余 500。
@@ -247,6 +318,93 @@ mod tests {
         assert_eq!(status, axum::http::StatusCode::BAD_REQUEST);
         let status = client
             .get(format!("{base}/api/memories/projects/missing-id/a.md"))
+            .send()
+            .await
+            .unwrap()
+            .status();
+        assert_eq!(status, axum::http::StatusCode::NOT_FOUND);
+        server.abort();
+        std::fs::remove_dir_all(home).unwrap();
+    }
+
+    /// 删除记忆 API:正常删 200 且清单消失、二次删 404、非 md 400、
+    /// 缺失工作区 404、越界路径 400。
+    #[tokio::test]
+    async fn memory_api_deletes_files() {
+        let home = std::env::temp_dir().join(format!("denia-mem-del-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&home).unwrap();
+        let state = Arc::new(crate::state::build_state(&home, false, 3600).await.unwrap());
+        let ws_dir = home.join("ws");
+        std::fs::create_dir_all(&ws_dir).unwrap();
+        let record = state
+            .workspaces
+            .create(&ws_dir, None)
+            .map_err(|e| e.to_string())
+            .unwrap();
+        let root = crate::project_memory::memory_root(&home, &ws_dir);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("gone.md"), "待删除\n").unwrap();
+        std::fs::write(root.join("notes.txt"), "非 md\n").unwrap();
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let router = crate::api::router().with_state(state.clone());
+        let server = tokio::spawn(async move {
+            axum::serve(listener, router).await.unwrap();
+        });
+        let client = reqwest::Client::new();
+        let file_url = |name: &str| format!("{base}/api/memories/projects/{}/{name}", record.id);
+
+        // 正常删除:200 + 回 deleted 名,磁盘文件消失,清单同步消失。
+        let deleted: Value = client
+            .delete(file_url("gone.md"))
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(deleted["deleted"], "gone.md");
+        assert!(!root.join("gone.md").exists(), "磁盘文件必须被删掉");
+        let projects: Value = client
+            .get(format!("{base}/api/memories/projects"))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let mine = projects["projects"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|project| project["id"] == record.id.as_str())
+            .unwrap();
+        assert!(
+            mine["files"].as_array().unwrap().is_empty(),
+            "清单里不应再有已删文件:{mine:?}"
+        );
+
+        // 二次删 404;非 md 400;缺失工作区 404。越界路径拒绝由
+        // resolve_manifest_file 的单测覆盖(HTTP 层会先规范化 `..`)。
+        let status = client
+            .delete(file_url("gone.md"))
+            .send()
+            .await
+            .unwrap()
+            .status();
+        assert_eq!(status, axum::http::StatusCode::NOT_FOUND);
+        let status = client
+            .delete(file_url("notes.txt"))
+            .send()
+            .await
+            .unwrap()
+            .status();
+        assert_eq!(status, axum::http::StatusCode::BAD_REQUEST);
+        let status = client
+            .delete(format!("{base}/api/memories/projects/missing-id/a.md"))
             .send()
             .await
             .unwrap()

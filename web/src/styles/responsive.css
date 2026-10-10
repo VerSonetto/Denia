@@ -479,10 +479,10 @@
 .prompt-bar .effort-chip,
 .prompt-bar .effort-chip-static { min-height: 32px; border-radius: 999px; }
 /* 添加文件:常驻一块浅灰底 —— 它是"写之前"的第一个动作,不该像 chip 那样
-   隐身(hover 才显形)。悬停再抬一档。 */
+   隐身(hover 才显形)。悬停再抬一档。28px 与同排 opt 钮同高,不抢发送键。 */
 .composer-add-btn.icon-btn {
-  width: 32px;
-  height: 32px;
+  width: 28px;
+  height: 28px;
   border-radius: 999px;
   background: var(--hover-fill);
   color: var(--label-secondary);

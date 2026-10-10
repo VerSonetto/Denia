@@ -138,6 +138,45 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     output.push_str("export ");
     output.push_str(&denia_core::session::GoalOp::decl(&config));
     output.push_str("\n\n");
+    // 任务账本:`task` 事件负载(`SessionEvent::Task`)与只读任务视图共用的
+    // 词汇。`TaskOp` 不在别处出现时会被 `SessionEvent` 引用,而引用不会自带
+    // 定义 —— 少一条就是一份编译不过的绑定。名单顺序跟随 `task.rs`。
+    for decl in [
+        denia_core::task::TaskId::decl(&config),
+        denia_core::task::RevisionId::decl(&config),
+        denia_core::task::EvidenceId::decl(&config),
+        denia_core::task::RequirementId::decl(&config),
+        denia_core::task::NoteId::decl(&config),
+        denia_core::task::SourceRef::decl(&config),
+        denia_core::task::RequirementKind::decl(&config),
+        denia_core::task::RequirementClaim::decl(&config),
+        denia_core::task::Requirement::decl(&config),
+        denia_core::task::RevisionRecord::decl(&config),
+        denia_core::task::FactCitation::decl(&config),
+        denia_core::task::NoteClaim::decl(&config),
+        denia_core::task::Fact::decl(&config),
+        denia_core::task::Assumption::decl(&config),
+        denia_core::task::FailedAttempt::decl(&config),
+        denia_core::task::OpenQuestion::decl(&config),
+        denia_core::task::FileFingerprint::decl(&config),
+        denia_core::task::EvidenceSource::decl(&config),
+        denia_core::task::Evidence::decl(&config),
+        denia_core::task::CheckRun::decl(&config),
+        denia_core::task::ValidationVerdict::decl(&config),
+        denia_core::task::ValidationResult::decl(&config),
+        denia_core::task::TaskChange::decl(&config),
+        denia_core::task::LedgerOverflow::decl(&config),
+        denia_core::task::TaskStatus::decl(&config),
+        denia_core::task::TaskOutcome::decl(&config),
+        denia_core::task::StaleReason::decl(&config),
+        denia_core::task::VerificationState::decl(&config),
+        denia_core::task::TaskState::decl(&config),
+        denia_core::task::TaskOp::decl(&config),
+    ] {
+        output.push_str("export ");
+        output.push_str(&decl);
+        output.push_str("\n\n");
+    }
     output.push_str("export ");
     output.push_str(&denia_core::session::RequestHeaderReason::decl(&config));
     output.push_str("\n\n");

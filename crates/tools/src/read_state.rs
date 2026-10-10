@@ -21,6 +21,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::coordination::ContentFingerprint;
+
 /// 缓存键:`路径 + offset + limit`。
 ///
 /// 不同分页是**不同条目**——读第 1-100 行与读第 200-300 行是两次独立读取,
@@ -51,6 +53,11 @@ pub struct ReadEntry {
     pub mtime_ms: Option<u64>,
     /// 读取时的文件字节数。
     pub size_bytes: u64,
+    /// 读取时的**内容指纹**;文件过大或算不出时为 `None`。
+    ///
+    /// `(mtime, size)` 发现不了同尺寸改写(尤其是落在同一时间粒度里的
+    /// 改写),指纹能。任一侧缺指纹时,写前校验退化为 `(mtime, size)`。
+    pub fingerprint: Option<ContentFingerprint>,
     /// 是否为**被截断的部分视图**(工具强制截断,内容不完整)。
     ///
     /// 部分视图不得用于写操作,也不命中读缓存。
@@ -63,6 +70,13 @@ pub struct ReadEntry {
     pub read_at: SystemTime,
     /// 读取时的完整内容(仅完整读取时保留,供写前内容比对)。
     pub content: Option<String>,
+    /// 产生这条记录的**工具调用 id**。
+    ///
+    /// 去重的前提是"那次调用的结果仍在模型上下文里"。结果被微压缩清成
+    /// 占位符后,提示"内容同上一条读取结果"就指向了不存在的内容,必须按
+    /// 调用 id 精确失效([`ReadState::invalidate_calls`])。写后记录没有
+    /// 对应的读取调用,为 `None`(也就不会被清理连带失效)。
+    pub call_id: Option<String>,
 }
 
 impl ReadEntry {
@@ -74,30 +88,59 @@ impl ReadEntry {
     }
 }
 
-/// 文件当前的新鲜度指纹(来自 `stat`)。
+/// 文件当前的新鲜度指纹(来自 `stat` + 内容指纹)。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FileStamp {
     pub mtime_ms: Option<u64>,
     pub size_bytes: u64,
+    /// 文件当前内容的指纹;超过 [`MAX_FINGERPRINT_BYTES`] 时是 `None`。
+    pub fingerprint: Option<ContentFingerprint>,
 }
 
 impl FileStamp {
-    /// 从文件系统读取指纹;文件不存在或 stat 失败时返回 `None`。
+    /// 从文件系统读取指纹:`stat` + 内容指纹;文件不存在或 stat 失败时返回 `None`。
+    ///
+    /// 算内容指纹要把文件读一遍,所以只在**写前校验**这类低频路径上用;
+    /// 读缓存的去重判定走 [`FileStamp::stat_only`]。
     pub fn of(path: &Path) -> Option<Self> {
         let meta = std::fs::metadata(path).ok()?;
-        Some(Self {
-            mtime_ms: meta.modified().ok().and_then(system_time_to_ms),
-            size_bytes: meta.len(),
-        })
+        let mut stamp = Self::from_metadata(&meta);
+        stamp.fingerprint = fingerprint_of(path, stamp.size_bytes);
+        Some(stamp)
     }
 
-    /// 从 `std::fs::Metadata` 构造(避免二次 stat)。
+    /// 只取 `(mtime, size)`,不算内容指纹。
+    ///
+    /// 去重判定不需要指纹,而"每次读取都顺带把文件整读一遍"是不可接受的
+    /// 代价(命中缓存的那些调用本来可以完全不读文件)。
+    pub fn stat_only(path: &Path) -> Option<Self> {
+        std::fs::metadata(path)
+            .ok()
+            .map(|meta| Self::from_metadata(&meta))
+    }
+
+    /// 从 `std::fs::Metadata` 构造(避免二次 stat);不含内容指纹。
     pub fn from_metadata(meta: &std::fs::Metadata) -> Self {
         Self {
             mtime_ms: meta.modified().ok().and_then(system_time_to_ms),
             size_bytes: meta.len(),
+            fingerprint: None,
         }
     }
+}
+
+/// 内容指纹的读取上限。
+///
+/// 算指纹要把文件内容读一遍;设上限是为了让读路径与写前校验的额外 IO 有界。
+/// 超过上限的文件指纹为 `None`,写前校验退化为 `(mtime, size)`——大文件的
+/// 改写几乎总会动到 size 或 mtime,这个退化可以接受。
+const MAX_FINGERPRINT_BYTES: u64 = 8 * 1024 * 1024;
+
+fn fingerprint_of(path: &Path, size_bytes: u64) -> Option<ContentFingerprint> {
+    if size_bytes > MAX_FINGERPRINT_BYTES {
+        return None;
+    }
+    ContentFingerprint::of_path(path).ok().flatten()
 }
 
 fn system_time_to_ms(time: SystemTime) -> Option<u64> {
@@ -132,8 +175,11 @@ pub enum WriteCheck {
     PartialView,
     /// 读过且新鲜,可以写。
     Fresh,
-    /// 读过,但文件在读取之后被改动过。
+    /// 读过,但文件在读取之后被改动过(`mtime` 前进或 `size` 变化)。
     Stale,
+    /// 读过,`(mtime, size)` 都没变,但**内容指纹不符**:文件在同尺寸下
+    /// 被改写(或改动落在文件系统时间粒度之内)。
+    ContentChanged,
 }
 
 /// 文件读取状态表(按会话共享)。
@@ -160,6 +206,24 @@ impl ReadState {
     /// 清空(压缩后调用:压缩摘要已接管旧内容的记忆职责)。
     pub fn clear(&mut self) {
         self.entries.clear();
+    }
+
+    /// 失效"由这些工具调用产生"的读记录(微压缩把那批结果清成占位符后调用)。
+    ///
+    /// 精确失效而非整体清空:只有内容真的从上下文里消失的文件才失去去重
+    /// 收益,其余条目(以及写后记录)照旧命中缓存。调用 id 拿不到的条目
+    /// (`None`)不在这里失效。
+    ///
+    /// 返回被移除的条目数。
+    pub fn invalidate_calls<'a>(&mut self, call_ids: impl IntoIterator<Item = &'a str>) -> usize {
+        let ids: std::collections::HashSet<&str> = call_ids.into_iter().collect();
+        if ids.is_empty() {
+            return 0;
+        }
+        let before = self.entries.len();
+        self.entries
+            .retain(|_, entry| !entry.call_id.as_deref().is_some_and(|id| ids.contains(id)));
+        before - self.entries.len()
     }
 
     /// 已记录条目数。
@@ -190,6 +254,9 @@ impl ReadState {
     ///
     /// 查找**同一路径**下最近一次读取(不限定 offset/limit)——写操作关心的是
     /// "模型是否看过这个文件的足够内容",而不是某个特定分页。
+    ///
+    /// 两层判定:`(mtime, size)` 变了就是 [`WriteCheck::Stale`];`(mtime, size)`
+    /// 没变而内容指纹变了(同尺寸改写)是 [`WriteCheck::ContentChanged`]。
     pub fn check_writable(&self, path: &Path, stamp: &FileStamp) -> WriteCheck {
         let latest = self.latest_for_path(path);
         let Some(entry) = latest else {
@@ -207,9 +274,14 @@ impl ReadState {
             _ => entry.size_bytes != stamp.size_bytes,
         };
         if changed {
-            WriteCheck::Stale
-        } else {
-            WriteCheck::Fresh
+            return WriteCheck::Stale;
+        }
+        // `(mtime, size)` 都没变,再比内容指纹:同尺寸改写只有指纹能发现。
+        // 任一侧缺指纹(文件过大,或条目来自不算指纹的路径)就跳过这一层,
+        // 不能凭空判成冲突。
+        match (entry.fingerprint, stamp.fingerprint) {
+            (Some(cached), Some(current)) if cached != current => WriteCheck::ContentChanged,
+            _ => WriteCheck::Fresh,
         }
     }
 
@@ -225,6 +297,7 @@ impl ReadState {
     /// 写入成功后刷新条目:文件内容已变成我们写进去的样子。
     ///
     /// 这样模型接着 Edit 同一文件时不会因为"写前校验"而要求重读。
+    /// 指纹取自写后的 `stamp`(即刚写进去的那份内容)。
     pub fn record_after_write(&mut self, path: &Path, content: String, stamp: FileStamp) {
         // 清掉该路径的全部旧条目(写操作让所有分页视图都过期)。
         self.entries.retain(|key, _| key.path != path);
@@ -233,10 +306,13 @@ impl ReadState {
             ReadEntry {
                 mtime_ms: stamp.mtime_ms,
                 size_bytes: stamp.size_bytes,
+                fingerprint: stamp.fingerprint,
                 is_partial_view: false,
                 is_full_read: true,
                 read_at: SystemTime::now(),
                 content: Some(content),
+                // 写后记录不来自读取调用,没有可失效的调用 id。
+                call_id: None,
             },
         );
     }
@@ -258,6 +334,15 @@ mod tests {
         FileStamp {
             mtime_ms: mtime,
             size_bytes: size,
+            fingerprint: None,
+        }
+    }
+
+    /// 带内容指纹的 stat 快照:模拟写前校验时从盘上看到的当前状态。
+    fn stamp_of(mtime: Option<u64>, size: u64, body: &str) -> FileStamp {
+        FileStamp {
+            fingerprint: Some(ContentFingerprint::of_bytes(body.as_bytes())),
+            ..stamp(mtime, size)
         }
     }
 
@@ -265,10 +350,29 @@ mod tests {
         ReadEntry {
             mtime_ms: mtime,
             size_bytes: size,
+            fingerprint: None,
             is_partial_view: false,
             is_full_read: true,
             read_at: SystemTime::now(),
             content: Some("content".into()),
+            call_id: None,
+        }
+    }
+
+    /// 记录了正文 `body`(含内容指纹)的读条目。
+    fn entry_of_body(mtime: Option<u64>, size: u64, body: &str) -> ReadEntry {
+        ReadEntry {
+            fingerprint: Some(ContentFingerprint::of_bytes(body.as_bytes())),
+            content: Some(body.to_string()),
+            ..entry(mtime, size)
+        }
+    }
+
+    /// 带工具调用 id 的条目(模拟 read_file 记录的那一条)。
+    fn entry_of(call_id: &str) -> ReadEntry {
+        ReadEntry {
+            call_id: Some(call_id.to_string()),
+            ..entry(Some(100), 50)
         }
     }
 
@@ -361,6 +465,94 @@ mod tests {
     }
 
     #[test]
+    fn same_size_rewrite_is_caught_by_the_content_fingerprint() {
+        // 关键回归:mtime 与 size 都没变(同尺寸改写,或改动落在文件系统
+        // 时间粒度之内),只有内容指纹能发现。
+        let mut state = ReadState::new();
+        state.record(
+            ReadKey::new("a.rs", None, None),
+            entry_of_body(Some(100), 4, "abcd"),
+        );
+        assert_eq!(
+            state.check_writable(Path::new("a.rs"), &stamp_of(Some(100), 4, "abce")),
+            WriteCheck::ContentChanged
+        );
+        // 指纹一致 → 照旧可写。
+        assert_eq!(
+            state.check_writable(Path::new("a.rs"), &stamp_of(Some(100), 4, "abcd")),
+            WriteCheck::Fresh
+        );
+    }
+
+    #[test]
+    fn missing_fingerprint_falls_back_to_mtime_and_size() {
+        // 文件过大(没算指纹)时不能凭空判冲突:退化为 (mtime, size) 比较。
+        let mut state = ReadState::new();
+        state.record(ReadKey::new("a.rs", None, None), entry(Some(100), 4));
+        assert_eq!(
+            state.check_writable(Path::new("a.rs"), &stamp_of(Some(100), 4, "abce")),
+            WriteCheck::Fresh
+        );
+        assert_eq!(
+            state.check_writable(Path::new("a.rs"), &stamp(Some(100), 5)),
+            WriteCheck::Stale
+        );
+    }
+
+    #[test]
+    fn changed_stat_wins_over_the_same_size_explanation() {
+        // (mtime, size) 确实变了 → 报 Stale,不必再解释"同尺寸改写"。
+        let mut state = ReadState::new();
+        state.record(
+            ReadKey::new("a.rs", None, None),
+            entry_of_body(Some(100), 4, "abcd"),
+        );
+        assert_eq!(
+            state.check_writable(Path::new("a.rs"), &stamp_of(Some(200), 4, "abce")),
+            WriteCheck::Stale
+        );
+    }
+
+    #[test]
+    fn file_stamp_of_reads_the_fingerprint_and_stat_only_skips_it() {
+        let dir =
+            std::env::temp_dir().join(format!("denia-read-state-probe-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("probe.txt");
+        std::fs::write(&file, b"abcd").unwrap();
+
+        let stamp = FileStamp::of(&file).unwrap();
+        assert_eq!(stamp.size_bytes, 4);
+        assert_eq!(
+            stamp.fingerprint,
+            Some(ContentFingerprint::of_bytes(b"abcd"))
+        );
+        assert_eq!(FileStamp::stat_only(&file).unwrap().fingerprint, None);
+        // 文件不存在:两种取法都给 None。
+        assert!(FileStamp::of(&dir.join("missing.txt")).is_none());
+        assert!(FileStamp::stat_only(&dir.join("missing.txt")).is_none());
+
+        // 同尺寸改写 → 指纹变。
+        std::fs::write(&file, b"abce").unwrap();
+        assert_ne!(FileStamp::of(&file).unwrap().fingerprint, stamp.fingerprint);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn oversized_files_skip_the_fingerprint() {
+        // 超过上限的文件不算指纹(额外 IO 有界),写前校验退化为 (mtime, size)。
+        let dir = std::env::temp_dir().join(format!("denia-read-state-big-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("big.txt");
+        std::fs::write(&file, vec![b'x'; MAX_FINGERPRINT_BYTES as usize + 1]).unwrap();
+
+        let stamp = FileStamp::of(&file).unwrap();
+        assert_eq!(stamp.size_bytes, MAX_FINGERPRINT_BYTES + 1);
+        assert_eq!(stamp.fingerprint, None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn record_after_write_makes_file_writable() {
         let mut state = ReadState::new();
         state.record_after_write(Path::new("a.rs"), "new".into(), stamp(Some(500), 3));
@@ -405,5 +597,43 @@ mod tests {
         assert_eq!(recent.len(), 2, "部分视图必须被排除");
         assert_eq!(recent[0].0.path, PathBuf::from("new.rs"));
         assert_eq!(recent[1].0.path, PathBuf::from("old.rs"));
+    }
+
+    #[test]
+    fn invalidate_calls_removes_only_the_cleared_call_entries() {
+        // 微压缩只清掉了一部分工具结果:被清的那条对应的读记录必须失效
+        // (它的内容已不在上下文里),其余文件照旧保留去重收益。
+        let mut state = ReadState::new();
+        state.record(ReadKey::new("a.rs", None, None), entry_of("call_a"));
+        state.record(ReadKey::new("b.rs", None, None), entry_of("call_b"));
+        state.record(
+            ReadKey::new("a.rs", Some(200), Some(50)),
+            entry_of("call_a"),
+        );
+
+        assert_eq!(state.invalidate_calls(["call_a"]), 2);
+        assert!(state.get(&ReadKey::new("a.rs", None, None)).is_none());
+        assert!(
+            state
+                .get(&ReadKey::new("a.rs", Some(200), Some(50)))
+                .is_none()
+        );
+        assert!(state.get(&ReadKey::new("b.rs", None, None)).is_some());
+    }
+
+    #[test]
+    fn invalidate_calls_keeps_entries_without_call_id_and_ignores_empty_input() {
+        // 写后记录(无 call_id)不因清理失效;空集合不误伤任何条目。
+        let mut state = ReadState::new();
+        state.record_after_write(Path::new("w.rs"), "body".into(), stamp(Some(7), 4));
+        state.record(ReadKey::new("a.rs", None, None), entry_of("call_a"));
+
+        assert_eq!(state.invalidate_calls(Vec::<&str>::new()), 0);
+        assert_eq!(state.len(), 2);
+        assert_eq!(state.invalidate_calls(["call_a"]), 1);
+        assert_eq!(
+            state.check_writable(Path::new("w.rs"), &stamp(Some(7), 4)),
+            WriteCheck::Fresh
+        );
     }
 }

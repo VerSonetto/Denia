@@ -41,6 +41,7 @@ import { insertReferenceAt, REFERENCE_MIME } from '../fileTree';
 import { applyTotalsEvent, emptyTotals, formatTokens, resetTotals, totalsFromPage, type TotalsAccumulator } from '../stats';
 import { TodoPanel } from '../components/TodoPanel';
 import { GoalBar } from '../components/GoalBar';
+import { TaskStatusCard } from '../components/TaskStatusCard';
 import { QueuedMessagePanel } from '../components/QueuedMessagePanel';
 import { ConversationAxis } from '../components/ConversationAxis';
 import { downloadFile, serializeSession, type ExportFormat } from '../lib/exportSession';
@@ -178,6 +179,8 @@ export default function SessionsPage({
   const [todos, setTodos] = useState<TodoItem[]>([])
   // 当前会话的目标视图(goal 模式);服务端权威,goal/turn-end 事件触发重拉。
   const [goalView, setGoalView] = useState<api.GoalView | null>(null)
+  // 当前会话的任务账本投影(只读);同样是服务端权威,task/turn-end 事件触发重拉。
+  const [taskView, setTaskView] = useState<api.TaskSnapshot | null>(null)
   // 消息队列:AI 运行中输入的新消息,等本轮结束后自动发送。
   const [queuedMessages, setQueuedMessages] = useState<QueuedMessage[]>([])
   const queueSeqRef = useRef(0)
@@ -259,6 +262,19 @@ export default function SessionsPage({
     [],
   )
 
+  /* ---- 任务账本(只读投影):同上的服务端权威视图 + 事件触发重拉 ---- */
+
+  const refreshTask = useCallback(
+    (id: string) => {
+      api
+        .getTask(id)
+        // 没有任务事件的会话回 `task: null`,卡片据此不渲染。
+        .then((view) => setTaskView(view.task))
+        .catch(() => setTaskView(null))
+    },
+    [],
+  )
+
   /** 裸 /goal 的查看结果(多行 toast)。 */
   const goalSummaryText = (view: api.GoalView): string => {
     const goal = view.goal
@@ -294,6 +310,16 @@ export default function SessionsPage({
     }
     refreshGoal(activeId)
   }, [activeId, refreshGoal])
+
+  // 会话切换:拉取当前任务账本;SessionView 的 onTaskTouch(task 事件/轮次
+  // 闭合)也走这里 —— 状态与裁决只在服务端折叠,前端不自己推。
+  useEffect(() => {
+    if (!activeId) {
+      setTaskView(null)
+      return
+    }
+    refreshTask(activeId)
+  }, [activeId, refreshTask])
 
   // 会话切换:清空上一会话的草稿与派生视图状态。
   //
@@ -1109,6 +1135,10 @@ export default function SessionsPage({
   const handleGoalTouch = useCallback(() => {
     if (activeId) refreshGoal(activeId)
   }, [activeId, refreshGoal])
+
+  const handleTaskTouch = useCallback(() => {
+    if (activeId) refreshTask(activeId)
+  }, [activeId, refreshTask])
 
   const handleNotFound = useCallback(() => {
     // 会话已被删除(其他窗口/流 404):清空视图。
@@ -2255,6 +2285,7 @@ export default function SessionsPage({
                 compacting={compactingAt}
                 onTodosChange={setTodos}
                 onGoalTouch={handleGoalTouch}
+                onTaskTouch={handleTaskTouch}
                 onPendingSettled={settlePending}
                 onNotFound={handleNotFound}
                 onNodesChange={handleNodesChange}
@@ -2297,6 +2328,9 @@ export default function SessionsPage({
                   selection={selection ?? undefined}
                   onChanged={() => refreshGoal(activeId)}
                 />
+              )}
+              {phase === 'active' && activeId && !activeSession?.subagent && (
+                <TaskStatusCard task={taskView} />
               )}
               {planReview ? (
                 <PlanReviewPanel

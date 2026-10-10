@@ -159,6 +159,31 @@ impl Session {
         self.append(SessionEvent::Goal { op })
     }
 
+    /// 当前任务账本(任务事件折叠;`None` = 日志里没有任务事件)。
+    ///
+    /// 热/冷态都可用:冷加载在解析时就折好了这份聚合(见 `recovery::parse_file`),
+    /// 不需要先 `ensure_hot`。
+    pub fn task(&self) -> Option<TaskState> {
+        self.inner
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .task
+            .clone()
+    }
+
+    /// 任务折叠作用域:本会话身份 + rewind 报废的 revision。
+    ///
+    /// 会话内部的折叠走这里;任何在别处自己折任务账本的调用方(工具面的
+    /// 账本宿主)也必须用同一个作用域 —— 否则 rewind 之后旧分支的 revision
+    /// 身份会复活,父子会话的结论归属也失去判据。
+    pub fn task_fold_scope(&self) -> TaskFoldScope {
+        let inner = self
+            .inner
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        task_fold_scope(&self.header.id, &inner.retired_revisions)
+    }
+
     /// 切换会话权限模式:追加 permission-mode 事件(事件源折叠,O(1) 生效)。
     pub fn set_permission_mode(
         &self,

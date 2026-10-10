@@ -587,6 +587,10 @@ fn render_preset_file(preset: &AgentPreset) -> String {
             ("memory", features.memory),
             ("compaction", features.compaction),
             ("goal", features.goal),
+            // 任务账本开关:与 `PresetFeatures` 的字段表一一对应 —— 少一行
+            // 会让写回的 preset.yml 丢掉这个键,回读后默认开启(复制/创作的
+            // 组装会静默变形)。
+            ("taskLedger", features.task_ledger),
             ("skills", features.skills),
             ("subagents", features.subagents),
             ("jobs", features.jobs),

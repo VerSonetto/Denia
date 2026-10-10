@@ -10,6 +10,7 @@ use crate::config::LlmCallConfig;
 use crate::error::LlmFailure;
 use crate::message::ChatMessage;
 use crate::stream::{ContentBlock, StreamChunk, TokenUsage};
+use crate::task::TaskOp;
 use crate::tool::ToolSchema;
 
 /// On-disk and wire format version; pinned while unreleased.
@@ -957,6 +958,15 @@ pub enum SessionEvent {
     Goal {
         op: GoalOp,
     },
+    /// 任务账本的一次操作(与 `Goal` 同一设计:操作即意图,状态由纯折叠得出,
+    /// 见 `denia-session::task_projection`)。日志持久、可回放、不进入模型历史;
+    /// 结局(未验证完成 / 验收通过 / 验收失败 / 外部受阻)不是事件里的字段,
+    /// 而是折叠时按"当前 revision + 指纹仍有效的宿主证据"裁决出来的。
+    ///
+    /// 格式兼容:旧日志没有这个变体,读旧日志不受影响;新变体只写在新会话上。
+    Task {
+        op: TaskOp,
+    },
     /// 本地斜杠命令的回显(如 `/goal <目标>`):落日志获得真实 seq,前端
     /// 按序渲染为右对齐命令气泡——命令的"发送"必须有可见且排序正确的
     /// 结果。仅日志;不进入模型历史,也不携带任何目标状态语义。
@@ -1160,6 +1170,8 @@ fn derive_surface_inner(events: &[SessionEnvelope]) -> Vec<SurfaceMessage> {
     // 压缩折叠:被压缩的区间变成摘要消息,插在保留窗口之前。
     #[derive(Clone)]
     struct PendingSummary {
+        /// 摘要项在模型历史中的定位 seq(取 keep_from-1,排在保留窗口之前)。
+        seq: u64,
         keep_from: u64,
         text: String,
     }
@@ -1198,7 +1210,13 @@ fn derive_surface_inner(events: &[SessionEnvelope]) -> Vec<SurfaceMessage> {
             } => {
                 // 区间内的事件不再进入模型历史(日志保持 append-only)。
                 surface.retain(|item| item.seq < *replaces_from || item.seq > *replaces_to);
+                // 摘要与普通历史共用同一条定位规则:被本次压缩区间覆盖的旧摘要
+                // 一并淘汰。摘要是本轮循环结束后才插回 surface 的,单靠上面的
+                // `surface.retain` 清不掉它们 —— 漏掉这一步会让模型同时看到旧、
+                // 新两份互相矛盾的摘要。原始日志不受影响,仍为 append-only。
+                summaries.retain(|s| s.seq < *replaces_from || s.seq > *replaces_to);
                 summaries.push(PendingSummary {
+                    seq: keep_from.saturating_sub(1),
                     keep_from: *keep_from,
                     text: summary.clone(),
                 });
@@ -1288,7 +1306,7 @@ fn derive_surface_inner(events: &[SessionEnvelope]) -> Vec<SurfaceMessage> {
         surface.insert(
             pos,
             SurfaceItem {
-                seq: summary.keep_from.saturating_sub(1),
+                seq: summary.seq,
                 message: ChatMessage::user(summary.text),
                 is_error: false,
             },
@@ -2358,5 +2376,244 @@ mod tests {
         assert!(messages[0].content.contains("previous work summarized"));
         assert_eq!(messages[1].content, "now this");
         assert_eq!(messages[2].content, "fresh reply");
+    }
+
+    #[test]
+    fn derive_drops_summary_superseded_by_later_compaction() {
+        // 回归:第二次压缩覆盖了第一次摘要所在区间时,旧摘要必须随之淘汰。
+        // 摘要是本轮派生结束后才插回表面的,单靠 `surface.retain` 清不掉它们;
+        // 漏掉淘汰会让模型同时看到旧、新两份互相矛盾的摘要。
+        let events = vec![
+            envelope(
+                1,
+                SessionEvent::UserMessage {
+                    text: "first request".into(),
+                    injected: false,
+                    images: Vec::new(),
+                    channel: None,
+                },
+            ),
+            envelope(
+                2,
+                SessionEvent::AssistantMessage {
+                    turn: 1,
+                    step: 1,
+                    blocks: vec![ContentBlock::Text {
+                        text: "first work".into(),
+                    }],
+                    usage: None,
+                    interrupted: false,
+                    source_event_seqs: Vec::new(),
+                    first_token_time: None,
+                },
+            ),
+            envelope(
+                3,
+                SessionEvent::CompactionSummary {
+                    turn: 1,
+                    step: 2,
+                    summary: "summary one".into(),
+                    replaces_from: 1,
+                    replaces_to: 2,
+                    keep_from: 4,
+                    pre_tokens: 100,
+                    post_tokens: 10,
+                },
+            ),
+            envelope(
+                4,
+                SessionEvent::UserMessage {
+                    text: "second request".into(),
+                    injected: false,
+                    images: Vec::new(),
+                    channel: None,
+                },
+            ),
+            envelope(
+                5,
+                SessionEvent::AssistantMessage {
+                    turn: 1,
+                    step: 3,
+                    blocks: vec![ContentBlock::Text {
+                        text: "second work".into(),
+                    }],
+                    usage: None,
+                    interrupted: false,
+                    source_event_seqs: Vec::new(),
+                    first_token_time: None,
+                },
+            ),
+            // 第二次压缩把 1..=5 全部折叠 —— 覆盖了第一次摘要(定位 seq 为 3)所在区间。
+            envelope(
+                6,
+                SessionEvent::CompactionSummary {
+                    turn: 1,
+                    step: 4,
+                    summary: "summary two".into(),
+                    replaces_from: 1,
+                    replaces_to: 5,
+                    keep_from: 7,
+                    pre_tokens: 200,
+                    post_tokens: 20,
+                },
+            ),
+            envelope(
+                7,
+                SessionEvent::UserMessage {
+                    text: "now this".into(),
+                    injected: false,
+                    images: Vec::new(),
+                    channel: None,
+                },
+            ),
+        ];
+        let messages = derive_messages(&events);
+        let joined: String = messages
+            .iter()
+            .map(|m| m.content.clone())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(joined.contains("summary two"), "最新摘要必须保留: {joined}");
+        assert!(!joined.contains("summary one"), "被覆盖的旧摘要不能残留: {joined}");
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].content, "summary two");
+        assert_eq!(messages[1].content, "now this");
+    }
+
+    #[test]
+    fn derive_keeps_only_the_latest_of_three_successive_compactions() {
+        // 验收标准要求的是"连续三次压缩不残留已被替换摘要":两次覆盖只能
+        // 证明一对一的替换，推不出链式淘汰。这里把三次压缩链完整跑一遍。
+        let mut events = vec![envelope(
+            1,
+            SessionEvent::UserMessage {
+                text: "turn one".into(),
+                injected: false,
+                images: Vec::new(),
+                channel: None,
+            },
+        )];
+        let mut seq = 2u64;
+        for (round, summary) in [(1u32, "summary one"), (2, "summary two"), (3, "summary three")] {
+            events.push(envelope(
+                seq,
+                SessionEvent::AssistantMessage {
+                    turn: round,
+                    step: 1,
+                    blocks: vec![ContentBlock::Text {
+                        text: format!("work {round}"),
+                    }],
+                    usage: None,
+                    interrupted: false,
+                    source_event_seqs: Vec::new(),
+                    first_token_time: None,
+                },
+            ));
+            // 每次压缩都盖住到目前为止的全部历史,保留窗口从下一条开始。
+            events.push(envelope(
+                seq + 1,
+                SessionEvent::CompactionSummary {
+                    turn: round,
+                    step: 2,
+                    summary: summary.into(),
+                    replaces_from: 1,
+                    replaces_to: seq,
+                    keep_from: seq + 2,
+                    pre_tokens: 100 * round as u64,
+                    post_tokens: 10,
+                },
+            ));
+            seq += 2;
+            events.push(envelope(
+                seq,
+                SessionEvent::UserMessage {
+                    text: format!("next {round}"),
+                    injected: false,
+                    images: Vec::new(),
+                    channel: None,
+                },
+            ));
+            seq += 1;
+        }
+        let messages = derive_messages(&events);
+        let joined: String = messages
+            .iter()
+            .map(|m| m.content.clone())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(joined.contains("summary three"), "最新摘要必须保留: {joined}");
+        assert!(!joined.contains("summary two"), "中间摘要不能残留: {joined}");
+        assert!(!joined.contains("summary one"), "最早摘要不能残留: {joined}");
+        assert_eq!(
+            messages
+                .iter()
+                .filter(|m| m.content.contains("summary"))
+                .count(),
+            1,
+            "任意时刻只应有一份有效摘要: {joined}"
+        );
+    }
+
+    #[test]
+    fn task_event_round_trips_and_keeps_kebab_tags() {
+        // 新变体的 tag 是 `task`,内部操作 tag 是 `kind`(与 `goal` 同构),
+        // 都在 kebab-case 约定下 —— 绑定生成与前端折叠按同一套名字读。
+        let env = envelope(
+            11,
+            SessionEvent::Task {
+                op: crate::task::TaskOp::Revise {
+                    revision: crate::task::RevisionId::new("rev-2"),
+                    reason: "用户追加了验收项".into(),
+                    goal: None,
+                    requirements: Vec::new(),
+                },
+            },
+        );
+        let json = serde_json::to_string(&env).unwrap();
+        assert!(json.contains(r#""type":"task""#), "{json}");
+        assert!(json.contains(r#""kind":"revise""#), "{json}");
+        assert!(json.contains(r#""revision":"rev-2""#), "{json}");
+        // 未给的 goal / requirements 不落盘(旧读程序看不到多余字段)。
+        assert!(!json.contains(r#""goal""#), "{json}");
+        assert!(!json.contains(r#""requirements""#), "{json}");
+        assert_eq!(serde_json::from_str::<SessionEnvelope>(&json).unwrap(), env);
+    }
+
+    #[test]
+    fn task_close_event_round_trips_as_unit_variant() {
+        let env = envelope(
+            12,
+            SessionEvent::Task {
+                op: crate::task::TaskOp::Close,
+            },
+        );
+        let json = serde_json::to_string(&env).unwrap();
+        assert_eq!(
+            json,
+            r#"{"seq":12,"time":1700000000012,"type":"task","op":{"kind":"close"}}"#
+        );
+        assert_eq!(serde_json::from_str::<SessionEnvelope>(&json).unwrap(), env);
+    }
+
+    #[test]
+    fn legacy_log_lines_without_task_events_still_parse() {
+        // 旧日志:没有任何 task 变体。新程序必须原样读进来(格式兼容方向
+        // 只有单向:新读旧,不给旧读新留口子)。
+        let legacy = [
+            r#"{"seq":1,"time":1700000000001,"type":"turn-start","turn":1}"#,
+            r#"{"seq":2,"time":1700000000002,"type":"todo-write","todos":[]}"#,
+            r#"{"seq":3,"time":1700000000003,"type":"goal","op":{"kind":"clear"}}"#,
+        ];
+        let parsed: Vec<SessionEnvelope> = legacy
+            .iter()
+            .map(|line| serde_json::from_str(line).expect("旧日志行必须可读"))
+            .collect();
+        assert_eq!(parsed.len(), 3);
+        assert!(
+            !parsed
+                .iter()
+                .any(|envelope| matches!(envelope.event, SessionEvent::Task { .. })),
+            "旧日志里不应有任务事件"
+        );
     }
 }

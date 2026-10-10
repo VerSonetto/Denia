@@ -8,8 +8,9 @@
 //!   stderr,混进 stdout 会污染协议帧);
 //! - **fail loud 但不拖垮别人**:单个服务器握手/拉取失败只把它自己标成
 //!   error,其它服务器照常可用;错误文本是中文且可执行(模型与 UI 共用);
-//! - **工具结果预算**:MCP 工具返回的长结果在工具层按字符预算截断,并提供
-//!   offset/limit 分页(与 `read_file` 同形态),再由落盘层的统一输出
+//! - **工具结果预算**:MCP 工具返回的长结果在工具层按字符预算截断,并按
+//!   **结果身份**(`result_id`)提供续读——参数相同但没有令牌的调用都会
+//!   真实执行外部工具,续读则只读那一次已有的结果;再由落盘层的统一输出
 //!   预算兜底——两层都不让超长外呼结果撑爆上下文。
 
 pub mod client;
@@ -24,7 +25,8 @@ pub use config::{
     is_supported_transport, is_valid_server_id, is_valid_url, qualify_tool_name,
 };
 pub use manager::{
-    McpManager, McpServerState, McpServerStatus, McpSnapshot, McpToolState, PAGE_CHARS, PagedResult,
+    MAX_PAGE_CHARS, McpManager, McpServerState, McpServerStatus, McpSnapshot, McpToolState,
+    PAGE_CHARS, PageCall, PagedError, PagedResult,
 };
 pub use protocol::{McpCallResult, McpToolDef};
 pub use transport::McpTransport;

@@ -208,9 +208,9 @@ fn render_outcome(outcome: CommandOutcome, ctx: &ToolContext, screenshot: bool) 
         let _ = data;
     }
     ToolOutput {
-        artifact: None,
         content: text,
         is_error: !outcome.ok,
+        ..Default::default()
     }
 }
 
@@ -226,9 +226,9 @@ impl Tool for BrowserTool {
             Ok(value) => value,
             Err(error) => {
                 return ToolOutput {
-                    artifact: None,
                     content: format!("invalid arguments: {error}"),
                     is_error: true,
+                    ..Default::default()
                 };
             }
         };
@@ -236,11 +236,11 @@ impl Tool for BrowserTool {
             Ok(command) => command,
             Err(error) => {
                 return ToolOutput {
-                    artifact: None,
                     content: format!(
                         "invalid browser command: {error};命令面:navigate/back/forward/reload/getState/snapshot/screenshot/click/fill/type/press/scroll/hover/select/check/drag/elementInfo/evaluate/waitFor/getDialog/handleDialog/newTab/list/activate/close/viewportSet/viewportReset"
                     ),
                     is_error: true,
+                    ..Default::default()
                 };
             }
         };
@@ -339,6 +339,7 @@ mod ownership_tests {
             ask: None,
             call_id: None,
             goal_reader: None,
+            task_ledger: None,
             read_state: None,
         }
     }

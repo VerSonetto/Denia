@@ -199,7 +199,7 @@
   padding: 0;
   border: none;
   background: transparent;
-  color: var(--label-caption);
+  color: var(--label-tertiary);
   cursor: pointer;
   outline: none;
 }
@@ -209,7 +209,7 @@
   height: 2px;
   border-radius: 1px;
   background: currentColor;
-  opacity: 0.4;
+  opacity: 0.65;
   transform: scaleX(calc(0.2308 + 0.7692 * var(--marker-progress)));
   transform-origin: left center;
   transition: transform 160ms linear(0, 0.398 10%, 0.682 20%, 0.843 30%, 0.925 40%, 0.972 50%, 1.004 60%, 1.008 70%, 1.003 80%, 1);
@@ -220,7 +220,7 @@
 }
 
 .axis-mark-current .axis-mark-line {
-  opacity: 0.6;
+  opacity: 0.9;
 }
 
 .axis-list:not([data-scrubbing]):hover .axis-mark:has(+ .axis-mark:hover) .axis-mark-line,
@@ -259,12 +259,12 @@
 
 .axis-list:hover .axis-mark-current:not(:hover):not(:focus-visible):not(.is-scrub),
 .axis-list[data-scrubbing] .axis-mark-current:not(.is-scrub) {
-  color: var(--label-caption);
+  color: var(--label-tertiary);
 }
 
 .axis-list:hover .axis-mark-current:not(:hover):not(:focus-visible):not(.is-scrub) .axis-mark-line,
 .axis-list[data-scrubbing] .axis-mark-current:not(.is-scrub) .axis-mark-line {
-  opacity: 0.4;
+  opacity: 0.65;
 }
 
 .axis-list[data-scrubbing] .axis-mark-line {

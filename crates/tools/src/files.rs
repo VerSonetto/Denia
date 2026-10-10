@@ -16,7 +16,7 @@ use denia_core::tool::ToolSchema;
 use serde::Deserialize;
 
 use crate::support::{parse_tool_args, tool_error};
-use crate::{Tool, ToolContext, ToolOutput, resolve_within};
+use crate::{ExecutionReport, Tool, ToolContext, ToolOutput, end_reason, resolve_within};
 
 /// read_file 默认最多读取的行数。
 const DEFAULT_READ_LIMIT: u64 = 400;
@@ -308,9 +308,12 @@ impl Tool for ReadFileTool {
         // 只回一句提示让模型引用此前的结果。实测同一会话中 77% 的
         // read_file 调用是冗余的,这一层直接把它们清零。
         let read_key = crate::read_state::ReadKey::new(&path, Some(args.offset), Some(args.limit));
+        // 去重判定只需要 `(mtime, size)`:命中缓存时本来就不该把文件读一遍,
+        // 内容指纹留给"真读了文件"之后记录条目时算。
         let stamp = {
             let path = path.clone();
-            tokio::task::spawn_blocking(move || crate::read_state::FileStamp::of(&path)).await
+            tokio::task::spawn_blocking(move || crate::read_state::FileStamp::stat_only(&path))
+                .await
         }
         .ok()
         .flatten();
@@ -357,8 +360,17 @@ impl Tool for ReadFileTool {
                         end + 1
                     ));
                 }
-                // 记录读取状态:供后续去重与写前校验使用。
-                if let (Some(shared), Some(stamp)) = (ctx.read_state.as_ref(), stamp) {
+                // 记录读取状态:供后续去重与写前校验使用。条目上的
+                // mtime/size/指纹都取"读完这一刻"的口径(刚刚真读过这个
+                // 文件,顺手把内容指纹算上)。
+                let fresh_stamp = {
+                    let path = path.clone();
+                    tokio::task::spawn_blocking(move || crate::read_state::FileStamp::of(&path))
+                        .await
+                }
+                .ok()
+                .flatten();
+                if let (Some(shared), Some(stamp)) = (ctx.read_state.as_ref(), fresh_stamp) {
                     // 单行被截断意味着内容不完整,标记为部分视图(不得作为写依据)。
                     let is_partial_view = truncated_lines > 0;
                     let is_full_read = args.offset <= 1 && reached_eof && !is_partial_view;
@@ -369,10 +381,14 @@ impl Tool for ReadFileTool {
                     let entry = crate::read_state::ReadEntry {
                         mtime_ms: stamp.mtime_ms,
                         size_bytes: stamp.size_bytes,
+                        fingerprint: stamp.fingerprint,
                         is_partial_view,
                         is_full_read,
                         read_at: std::time::SystemTime::now(),
                         content: keep_content.then(|| body.clone()),
+                        // 记下这次调用:结果被微压缩清成占位符时,
+                        // 去重提示指向的内容已不存在,那条读记录要按 id 失效。
+                        call_id: ctx.call_id.clone(),
                     };
                     if let Ok(mut state) = shared.lock() {
                         state.record(read_key, entry);
@@ -483,6 +499,30 @@ impl Tool for WriteFileTool {
                 "确认路径合法且当前权限允许写该目录",
             );
         }
+        // 路径级临界区:同一路径的"写前校验 → 备份 → 写入 → 刷新读状态"必须
+        // 原子。guard 跨 await 持有(读写都在 spawn_blocking 里),不同路径各持
+        // 一把锁,互不阻塞。
+        //
+        // 它挡不住 arbitrary shell 命令、外部编辑器与其他进程的写入——那些
+        // 变化靠写前的内容指纹发现。
+        //
+        // **等锁必须可取消**:持锁方可能正卡在慢速的文件历史备份上,此时用户
+        // 中断本次调用,等待方不能等到锁释放才返回。取锁与取消赛跑,取消分支
+        // 与 bash 走同一套语义(错误文本 + `cancelled` 结束原因)。
+        //
+        // 赌注只在"等锁"这一段:guard 一旦拿到,下面的写前校验 → 备份 → 写入
+        // → 刷新读状态仍全部在它的覆盖之下,临界区不因加了 select 而缩小。
+        let _guard = tokio::select! {
+            biased;
+            _ = ctx.cancel.cancelled() => {
+                return tool_error(
+                    "写入被用户中断",
+                    "中断发生在等待同一路径上的其他写入完成时;文件未被改动,可重试",
+                )
+                .with_report(ExecutionReport::ended(end_reason::CANCELLED));
+            }
+            guard = crate::coordination::PathLocks::shared().lock(&path) => guard,
+        };
         // 写前新鲜度校验:
         // 覆盖一个已存在的文件前,要求模型在本会话里读过它、且读过之后
         // 文件没有被外部改动。新建文件不需要校验。
@@ -520,7 +560,19 @@ impl Tool for WriteFileTool {
                     }
                     crate::read_state::WriteCheck::Stale => {
                         return tool_error(
-                            format!("{} 自上次读取以来已被改动(可能被用户或工具修改)", args.path),
+                            format!(
+                                "{} 自上次读取以来已被改动(可能被用户、编辑器或其他进程修改)",
+                                args.path
+                            ),
+                            "重新读取该文件获取最新内容,再执行写入",
+                        );
+                    }
+                    crate::read_state::WriteCheck::ContentChanged => {
+                        return tool_error(
+                            format!(
+                                "{} 的内容自上次读取以来已被改写(大小与修改时间未变,内容指纹不符)",
+                                args.path
+                            ),
                             "重新读取该文件获取最新内容,再执行写入",
                         );
                     }
@@ -599,6 +651,7 @@ mod tests {
             ask: None,
             call_id: None,
             goal_reader: None,
+            task_ledger: None,
             read_state: None,
         };
         (tempfile_like::TempDir(dir), context)
@@ -697,6 +750,86 @@ mod tests {
         assert!(out.content.contains("offset=401"), "{}", out.content);
     }
 
+    /// 带读状态与调用 id 的上下文(去重复读场景)。
+    fn read_ctx(
+        ctx: &ToolContext,
+        shared: &crate::read_state::SharedReadState,
+        call_id: &str,
+    ) -> ToolContext {
+        ToolContext {
+            read_state: Some(shared.clone()),
+            call_id: Some(call_id.to_string()),
+            ..ctx.clone()
+        }
+    }
+
+    /// 去重成立的前提是"那条读取结果还在上下文里"。旧工具结果被微压缩清成
+    /// 占位符后,同页重读必须返回真实内容,而不是"未变更"提示。
+    #[tokio::test]
+    async fn reread_after_microcompact_clear_returns_real_content() {
+        let (_guard, ctx) = workspace();
+        std::fs::write(ctx.cwd.join("notes.txt"), "MARKER-ONE\nsecond line").unwrap();
+        let shared = crate::read_state::shared();
+        let reader = ReadFileTool::new();
+        let call = "call_1";
+        let args = r#"{"path":"notes.txt","offset":1,"limit":400}"#;
+
+        // 第一次读取:真实内容 + 读记录(call_1)。
+        let first = reader.execute(args, &read_ctx(&ctx, &shared, call)).await;
+        assert!(first.content.contains("MARKER-ONE"), "{}", first.content);
+
+        // 同页重读:文件未变 → 去重命中,不返回内容。
+        let second = reader.execute(args, &read_ctx(&ctx, &shared, call)).await;
+        assert!(second.content.contains("未变更"), "{}", second.content);
+
+        // 微压缩把 call_1 的结果清成占位符 → 该调用产生的读记录按 id 失效。
+        assert_eq!(
+            shared.lock().unwrap().invalidate_calls([call]),
+            1,
+            "被清理调用的读记录必须失效"
+        );
+
+        // 重读同页:内容已不在上下文里,必须重新返回真实内容。
+        let third = reader.execute(args, &read_ctx(&ctx, &shared, call)).await;
+        assert!(
+            third.content.contains("MARKER-ONE"),
+            "清理后同页重读必须返回真实内容,实际:{}",
+            third.content
+        );
+        assert!(!third.content.contains("未变更"), "{}", third.content);
+    }
+
+    /// 只清一部分时,没被清的文件照旧保留去重收益。
+    #[tokio::test]
+    async fn clearing_one_result_keeps_dedupe_for_the_other_file() {
+        let (_guard, ctx) = workspace();
+        std::fs::write(ctx.cwd.join("a.txt"), "AAA\nbbb").unwrap();
+        std::fs::write(ctx.cwd.join("b.txt"), "BBB\nccc").unwrap();
+        let shared = crate::read_state::shared();
+        let reader = ReadFileTool::new();
+        let args = |name: &str| format!(r#"{{"path":"{name}","offset":1,"limit":400}}"#);
+
+        for (name, call) in [("a.txt", "call_a"), ("b.txt", "call_b")] {
+            let out = reader
+                .execute(&args(name), &read_ctx(&ctx, &shared, call))
+                .await;
+            assert!(!out.is_error, "{}", out.content);
+        }
+
+        assert_eq!(shared.lock().unwrap().invalidate_calls(["call_a"]), 1);
+
+        // a.txt 的结果已被清理 → 重读拿到真实内容。
+        let a = reader
+            .execute(&args("a.txt"), &read_ctx(&ctx, &shared, "call_a"))
+            .await;
+        assert!(a.content.contains("AAA"), "{}", a.content);
+        // b.txt 未被清理 → 去重照旧命中。
+        let b = reader
+            .execute(&args("b.txt"), &read_ctx(&ctx, &shared, "call_b"))
+            .await;
+        assert!(b.content.contains("未变更"), "{}", b.content);
+    }
+
     #[tokio::test]
     async fn overly_long_line_is_guarded() {
         let (_guard, ctx) = workspace();
@@ -789,6 +922,7 @@ mod tests {
                 ask: None,
                 call_id: None,
                 goal_reader: None,
+                task_ledger: None,
                 read_state: None,
             };
             let reader = ReadFileTool::new();
@@ -831,6 +965,7 @@ mod tests {
             ask: None,
             call_id: None,
             goal_reader: None,
+            task_ledger: None,
             read_state: None,
         };
         let reader = ReadFileTool::new();
@@ -839,5 +974,210 @@ mod tests {
         assert!(out.content.contains("识图"), "{}", out.content);
 
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// 写前并发计数后端:记录"同时处在写前阶段"的最大并发数,并把窗口撑开,
+    /// 让并发的两次写真的重叠在同一段时间里。
+    #[derive(Default)]
+    struct OverlapHistory {
+        inflight: std::sync::atomic::AtomicUsize,
+        peak: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait]
+    impl crate::FileHistoryBackend for OverlapHistory {
+        async fn track_before_write(&self, _path: &std::path::Path) -> Result<(), String> {
+            use std::sync::atomic::Ordering;
+            let now = self.inflight.fetch_add(1, Ordering::SeqCst) + 1;
+            self.peak.fetch_max(now, Ordering::SeqCst);
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            self.inflight.fetch_sub(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    /// 并发写**不同**文件:两次都必须成功,而且要真的并行——临界区不能是
+    /// 一把全局互斥(那会把整个工具层串行化)。峰值并发 2 才是证据。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_writes_to_different_files_stay_parallel() {
+        let (_guard, ctx) = workspace();
+        let overlap = Arc::new(OverlapHistory::default());
+        let ctx = ToolContext {
+            file_history: Some(overlap.clone() as Arc<dyn crate::FileHistoryBackend>),
+            ..ctx
+        };
+        let writer = Arc::new(WriteFileTool::new());
+        let one = {
+            let writer = writer.clone();
+            let ctx = ctx.clone();
+            tokio::spawn(async move {
+                writer
+                    .execute(r#"{"path":"one.txt","content":"ONE"}"#, &ctx)
+                    .await
+            })
+        };
+        let two = {
+            let writer = writer.clone();
+            let ctx = ctx.clone();
+            tokio::spawn(async move {
+                writer
+                    .execute(r#"{"path":"two.txt","content":"TWO"}"#, &ctx)
+                    .await
+            })
+        };
+        let (one, two) = tokio::join!(one, two);
+        let one = one.unwrap();
+        let two = two.unwrap();
+        assert!(!one.is_error, "{}", one.content);
+        assert!(!two.is_error, "{}", two.content);
+        assert_eq!(
+            std::fs::read_to_string(ctx.cwd.join("one.txt")).unwrap(),
+            "ONE"
+        );
+        assert_eq!(
+            std::fs::read_to_string(ctx.cwd.join("two.txt")).unwrap(),
+            "TWO"
+        );
+        assert_eq!(
+            overlap.peak.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "两个不同路径的写必须能同时处在临界区里;峰值 1 说明被一把全局锁串行化了"
+        );
+    }
+
+    /// 不同路径各有一把锁:持着 A 的锁仍能立刻拿到 B 的锁(不依赖时序的
+    /// 确定性检查,和上面的峰值并发互补)。
+    #[tokio::test]
+    async fn different_paths_hold_their_locks_simultaneously() {
+        let locks = crate::coordination::PathLocks::shared();
+        let a = locks.lock(std::path::Path::new("denia-lock-a.txt")).await;
+        let b = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            locks.lock(std::path::Path::new("denia-lock-b.txt")),
+        )
+        .await
+        .expect("不同路径必须能同时持锁,否则工具层就被全局串行化了");
+        drop((a, b));
+    }
+
+    /// 同尺寸改写 + mtime 拨回原值:写前校验必须靠内容指纹发现它。
+    #[tokio::test]
+    async fn write_file_refuses_a_same_size_rewrite_hidden_by_the_same_mtime() {
+        let (_guard, ctx) = workspace();
+        let path = ctx.cwd.join("notes.txt");
+        std::fs::write(&path, "hello\nworld\n").unwrap();
+        let shared = crate::read_state::shared();
+        let reader = ReadFileTool::new();
+        let out = reader
+            .execute(
+                r#"{"path":"notes.txt"}"#,
+                &read_ctx(&ctx, &shared, "call_1"),
+            )
+            .await;
+        assert!(!out.is_error, "{}", out.content);
+
+        // 读取之后:同尺寸改写(hello → hella),再把 mtime 拨回读到的时刻。
+        let modified = std::fs::metadata(&path).unwrap().modified().unwrap();
+        std::fs::write(&path, "hella\nworld\n").unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(modified)
+            .unwrap();
+
+        let writer = WriteFileTool::new();
+        let ctx = ToolContext {
+            read_state: Some(shared.clone()),
+            ..ctx
+        };
+        let out = writer
+            .execute(r#"{"path":"notes.txt","content":"overwritten"}"#, &ctx)
+            .await;
+        assert!(out.is_error, "{}", out.content);
+        assert!(out.content.contains("内容指纹不符"), "{}", out.content);
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "hella\nworld\n",
+            "拒写就是没写"
+        );
+    }
+
+    /// read_file 必须把内容指纹记进读状态——写前校验就是靠它。
+    #[tokio::test]
+    async fn read_file_records_the_content_fingerprint() {
+        let (_guard, ctx) = workspace();
+        let path = ctx.cwd.join("notes.txt");
+        std::fs::write(&path, "abcd").unwrap();
+        let shared = crate::read_state::shared();
+        let reader = ReadFileTool::new();
+        let out = reader
+            .execute(
+                r#"{"path":"notes.txt","offset":1,"limit":400}"#,
+                &read_ctx(&ctx, &shared, "call_1"),
+            )
+            .await;
+        assert!(!out.is_error, "{}", out.content);
+
+        let key = crate::read_state::ReadKey::new(&path, Some(1), Some(400));
+        let entry = shared
+            .lock()
+            .unwrap()
+            .get(&key)
+            .cloned()
+            .expect("读记录必须存在");
+        assert_eq!(
+            entry.fingerprint,
+            Some(crate::coordination::ContentFingerprint::of_bytes(b"abcd"))
+        );
+        // 去重的热路径不带指纹:命中缓存时不该把文件再整读一遍。
+        assert_eq!(
+            crate::read_state::FileStamp::stat_only(&path)
+                .unwrap()
+                .fingerprint,
+            None
+        );
+    }
+
+    /// write_file 的等锁同样可取消:A 持锁不放时,B 被中断必须立刻返回。
+    ///
+    /// 与 `edit` 那边的同名用例同理——锁确实被占着,裸 `lock().await` 会一直
+    /// 等到 A 放锁,只有取消分支能让 B 及时收尾。
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn cancel_while_waiting_for_the_path_lock_returns_immediately() {
+        let (_guard, ctx) = workspace();
+        let path = ctx.cwd.join("notes.txt");
+        let cancel = CancellationToken::new();
+        let ctx = ToolContext {
+            cancel: cancel.clone(),
+            ..ctx
+        };
+
+        let held = crate::coordination::PathLocks::shared().lock(&path).await;
+
+        let writer = WriteFileTool::new();
+        let waiter = tokio::spawn(async move {
+            writer
+                .execute(r#"{"path":"notes.txt","content":"fresh"}"#, &ctx)
+                .await
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        cancel.cancel();
+
+        let out = tokio::time::timeout(std::time::Duration::from_secs(5), waiter)
+            .await
+            .expect("等锁被取消后必须立刻返回,不该等到锁释放")
+            .unwrap();
+        assert!(out.is_error, "{}", out.content);
+        assert!(out.content.contains("中断"), "{}", out.content);
+        assert_eq!(
+            out.report
+                .as_ref()
+                .and_then(|report| report.end_reason.as_deref()),
+            Some(end_reason::CANCELLED)
+        );
+        assert!(!path.exists(), "被取消的那次不该留下文件");
+
+        drop(held);
     }
 }

@@ -2,9 +2,10 @@
 //!
 //! 行为:
 //! - `initialize` → 返回协议版本与能力;
-//! - `tools/list` → 两个工具:`echo`(回显)与 `big`(产出长文本,用于验证
-//!   分页截断);
-//! - `tools/call` → 按工具名返回 text content;`big` 支持 `chars` 参数。
+//! - `tools/list` → 三个工具:`echo`(回显)、`big`(产出长文本,用于验证
+//!   分页截断,可带 `isError` 声名业务失败)与 `count`(返回本进程被调用过的
+//!   次数——测试靠它区分「真实执行」与「复用旧结果」);
+//! - `tools/call` → 按工具名返回 text content;`big` 支持 `chars`/`isError`。
 //!
 //! 只依赖标准库,任何平台都能直接 spawn。**逐行读 stdin**:MCP 是长连接
 //! 交互式协议,读到 EOF 再统一处理会让客户端永远等不到响应。
@@ -14,6 +15,8 @@ use std::io::{self, BufRead, Write};
 fn main() {
     let stdin = io::stdin();
     let mut stdout = io::stdout();
+    // 本进程累计的工具调用次数:`count` 工具把它回给测试。
+    let mut calls = 0usize;
     for line in stdin.lock().lines() {
         let Ok(line) = line else { break };
         let trimmed = line.trim();
@@ -59,13 +62,27 @@ fn main() {
                             "description": "产出指定长度的文本,用于验证分页",
                             "inputSchema": {
                                 "type": "object",
-                                "properties": { "chars": { "type": "integer" } }
+                                "properties": {
+                                    "chars": { "type": "integer" },
+                                    "isError": { "type": "boolean" }
+                                }
+                            }
+                        },
+                        {
+                            "name": "count",
+                            "description": "返回本进程已执行过的工具调用次数",
+                            "inputSchema": {
+                                "type": "object",
+                                "properties": {}
                             }
                         }
                     ]
                 }),
             ),
-            "tools/call" => ok(&id, call_result(&request)),
+            "tools/call" => {
+                calls += 1;
+                ok(&id, call_result(&request, calls))
+            }
             other => serde_json::json!({
                 "jsonrpc": "2.0",
                 "id": id,
@@ -81,7 +98,7 @@ fn ok(id: &serde_json::Value, result: serde_json::Value) -> serde_json::Value {
     serde_json::json!({ "jsonrpc": "2.0", "id": id, "result": result })
 }
 
-fn call_result(request: &serde_json::Value) -> serde_json::Value {
+fn call_result(request: &serde_json::Value, calls: usize) -> serde_json::Value {
     let params = request.get("params").cloned().unwrap_or_default();
     let name = params.get("name").and_then(|n| n.as_str()).unwrap_or("");
     let args = params.get("arguments").cloned().unwrap_or_default();
@@ -92,10 +109,21 @@ fn call_result(request: &serde_json::Value) -> serde_json::Value {
         }
         "big" => {
             let chars = args.get("chars").and_then(|c| c.as_u64()).unwrap_or(10) as usize;
-            serde_json::json!({
+            let mut result = serde_json::json!({
                 "content": [ { "type": "text", "text": "A".repeat(chars) } ]
-            })
+            });
+            if args
+                .get("isError")
+                .and_then(|flag| flag.as_bool())
+                .unwrap_or(false)
+            {
+                result["isError"] = serde_json::json!(true);
+            }
+            result
         }
+        "count" => serde_json::json!({
+            "content": [ { "type": "text", "text": calls.to_string() } ]
+        }),
         other => serde_json::json!({
             "content": [ { "type": "text", "text": format!("unknown tool: {other}") } ],
             "isError": true

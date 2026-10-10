@@ -324,9 +324,9 @@ impl Tool for AskTool {
             };
             let (text, is_error) = render_resolution(&resolution);
             return ToolOutput {
-                artifact: None,
                 content: text,
                 is_error,
+                ..Default::default()
             };
         };
         let Some(session_id) = ctx.session_id.as_deref() else {
@@ -337,9 +337,9 @@ impl Tool for AskTool {
             };
             let (text, is_error) = render_resolution(&resolution);
             return ToolOutput {
-                artifact: None,
                 content: text,
                 is_error,
+                ..Default::default()
             };
         };
         // request_id 与 call_id 分离:dsh 用同一 id 承担两者,重试时旧请求
@@ -359,9 +359,9 @@ impl Tool for AskTool {
             .await;
         let (text, is_error) = render_resolution(&resolution);
         ToolOutput {
-            artifact: None,
             content: text,
             is_error,
+            ..Default::default()
         }
     }
 }
@@ -414,6 +414,7 @@ mod tests {
             ask: bridge,
             call_id: Some("call-1".to_string()),
             goal_reader: None,
+            task_ledger: None,
             read_state: None,
         }
     }

@@ -59,6 +59,8 @@ impl Session {
                     permission_mode: PermissionMode::AutoEdit,
                     agent_preset: None,
                     goal: None,
+                    task: None,
+                    retired_revisions: Vec::new(),
                     title: None,
                     derived_surface: None,
                     derived_revision: 0,
