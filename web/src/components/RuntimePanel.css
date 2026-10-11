@@ -1,35 +1,621 @@
-.runtime-panel { position: relative; margin-left: 8px; font-size: 12px; }
-.runtime-toggle { display: inline-flex; align-items: center; gap: 5px; min-height: 28px; padding: 4px 8px; color: var(--label-secondary); background: transparent; border: 1px solid transparent; border-radius: 8px; cursor: pointer; }
-.runtime-toggle:hover, .runtime-panel.open .runtime-toggle { color: var(--label-primary); background: var(--hover-fill); border-color: var(--border-l2); }
-.runtime-toggle-icon { font-size: 15px; line-height: 1; }
-.runtime-activity-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--success); box-shadow: 0 0 0 3px var(--accent-soft); animation: runtime-pulse 1.8s ease-in-out infinite; }
-.runtime-content { position: absolute; top: calc(100% + 8px); right: 0; z-index: 20; width: min(430px, calc(100vw - 32px)); max-height: min(70vh, 560px); overflow: auto; padding: 12px; background: var(--bg-layer-1); border: 1px solid var(--border-l2); border-radius: 12px; box-shadow: var(--shadow-float); }
-.runtime-tabs { display: flex; gap: 8px; margin-bottom: 8px; }
-.runtime-panel button { font: inherit; color: inherit; cursor: pointer; }
-.runtime-tabs button, .runtime-row button, .runtime-message button, .runtime-preview > button { border: 1px solid var(--border-l2); border-radius: 6px; background: var(--bg-layer-1); padding: 4px 8px; }
-.runtime-tabs [aria-selected=true] { color: var(--accent); border-color: currentColor; }
-.runtime-rows { max-height: 240px; overflow: auto; }
-.runtime-row { display: flex; align-items: center; gap: 8px; padding: 8px 0; border-bottom: 1px solid var(--border-l2); }
-.runtime-row > div { flex: 1; min-width: 0; }
-.runtime-row span { overflow-wrap: anywhere; }
-.runtime-row small { display: block; margin-top: 3px; color: var(--label-secondary); }
-.runtime-empty { color: var(--label-secondary); margin: 8px 0; }
-.runtime-error { color: var(--error); }
-.runtime-message textarea { display: block; width: 100%; min-height: 64px; margin: 8px 0; resize: vertical; color: var(--label-primary); background: var(--bg-layer-1); border: 1px solid var(--border-l2); border-radius: 6px; }
-.runtime-preview { max-height: 260px; overflow: auto; padding: 10px; margin-top: 8px; background: var(--bg-layer-1); border: 1px solid var(--border-l2); border-radius: 6px; }
-.runtime-preview pre { white-space: pre-wrap; overflow-wrap: anywhere; }
-.runtime-panel button:disabled { opacity: .45; cursor: default; }
-.runtime-child-composer { display: flex; align-items: center; justify-content: center; flex-wrap: wrap; gap: 10px; padding: 16px; color: var(--label-secondary); text-align: center; }
-.runtime-child-back-button { border: 1px solid var(--border-l2); border-radius: var(--r-sm); padding: 6px 12px; color: var(--label-primary); background: var(--bg-layer-2); cursor: pointer; transition: background .15s var(--ease), border-color .15s var(--ease); }
-.runtime-child-back-button:hover { background: var(--hover-fill); border-color: var(--border-l3); }
-.runtime-child-back-button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-@keyframes runtime-pulse { 0%, 100% { opacity: .55; } 50% { opacity: 1; } }
+/* 运行时面板(右上角):折叠时是一个带活动计数的小按钮，展开时是浮在会话头上
+   的一层浮层。浮层里的每一行都要在余光里分得清"在跑 / 在等人 / 已经完了 /
+   炸了"，所以状态同时用颜色、左侧竖条和脉冲点编码，不只靠文字。 */
 
-.runtime-meta { color: var(--label-tertiary, var(--label-secondary)); }
-.runtime-waiting { color: var(--warning, #d97706); font-weight: 600; }
-.runtime-result { color: var(--label-secondary); overflow-wrap: anywhere; }
-.runtime-snapshot { padding: 10px; margin-top: 8px; background: var(--bg-layer-1); border: 1px solid var(--border-l2); border-radius: 6px; }
-.runtime-snapshot > div { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
-.runtime-snapshot dl { display: grid; grid-template-columns: max-content 1fr; gap: 4px 10px; margin: 8px 0; }
-.runtime-snapshot dt { color: var(--label-secondary); }
-.runtime-snapshot dd { margin: 0; overflow-wrap: anywhere; }
+.runtime-panel {
+  position: relative;
+  margin-left: 8px;
+  font-size: 12px;
+}
+
+/* ---- 折叠态按钮 ---- */
+
+.runtime-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-height: 28px;
+  padding: 4px 8px;
+  color: var(--label-secondary);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: var(--r-xs);
+  cursor: pointer;
+  transition:
+    color 0.15s var(--ease),
+    background 0.15s var(--ease),
+    border-color 0.15s var(--ease);
+}
+
+.runtime-toggle:hover {
+  color: var(--label-primary);
+  background: var(--hover-fill);
+  border-color: var(--border-l2);
+}
+
+.runtime-panel.open .runtime-toggle {
+  color: var(--label-primary);
+  background: var(--hover-fill);
+  border-color: var(--border-l2);
+}
+
+.runtime-toggle:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.runtime-toggle-icon {
+  font-size: 15px;
+  line-height: 1;
+}
+
+.runtime-toggle-label {
+  white-space: nowrap;
+}
+
+.runtime-activity-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: var(--r-pill);
+  background: var(--success-fg);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--success-fg) 18%, transparent);
+  animation: runtime-pulse 1.8s var(--ease) infinite;
+}
+
+/* ---- 浮层 ---- */
+
+.runtime-content {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 0;
+  z-index: 20;
+  width: min(430px, calc(100vw - 32px));
+  max-height: min(70vh, 560px);
+  overflow: auto;
+  padding: 12px;
+  /* 明确浮在内容之上:比 shadow-float 多一层深投影 + 一道更亮的外描边。 */
+  background: var(--bg-layer-1);
+  border: 1px solid var(--border-l3);
+  border-radius: var(--r-md);
+  box-shadow:
+    0 0 0 1px rgba(0, 0, 0, 0.28),
+    var(--shadow-lv2),
+    var(--shadow-float);
+  animation: runtime-pop-in 0.14s var(--ease);
+}
+
+.runtime-content:focus-within {
+  border-color: var(--border-l3);
+}
+
+/* ---- 选项卡 ---- */
+
+.runtime-tabs {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.runtime-tabs button {
+  padding: 4px 8px;
+  color: var(--label-secondary);
+  background: var(--bg-layer-1);
+  border: 1px solid var(--border-l2);
+  border-radius: var(--r-xs);
+  cursor: pointer;
+  transition:
+    color 0.15s var(--ease),
+    border-color 0.15s var(--ease),
+    background 0.15s var(--ease);
+}
+
+.runtime-tabs button:hover {
+  color: var(--label-primary);
+  background: var(--hover-fill);
+  border-color: var(--border-l3);
+}
+
+.runtime-tabs button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.runtime-tabs [aria-selected='true'] {
+  color: var(--label-primary);
+  background: var(--active-fill);
+  border-color: var(--border-l3);
+  box-shadow: inset 0 0 0 1px var(--accent-tint);
+  font-weight: 600;
+}
+
+/* ---- 行 ---- */
+
+.runtime-rows {
+  max-height: 240px;
+  overflow: auto;
+}
+
+.runtime-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 8px 8px 8px 10px;
+  border-bottom: 1px solid var(--border-l1);
+  border-left: 2px solid transparent;
+  border-radius: 0 var(--r-xs) var(--r-xs) 0;
+  transition: background 0.15s var(--ease);
+}
+
+.runtime-row:last-child {
+  border-bottom: none;
+}
+
+.runtime-row:hover {
+  background: var(--hover-fill);
+}
+
+.runtime-row-main {
+  flex: 1;
+  min-width: 0;
+}
+
+/* 长名字 / 长路径:名称单行省略，元信息整行折行 —— 任一层都不能把行撑破。 */
+.runtime-row-name {
+  display: block;
+  max-width: 100%;
+  overflow: hidden;
+  color: var(--label-primary);
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.runtime-row-status {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 3px 6px;
+}
+
+.runtime-row-model {
+  color: var(--label-tertiary);
+  overflow-wrap: anywhere;
+}
+
+.runtime-row small {
+  display: block;
+  margin-top: 3px;
+  color: var(--label-secondary);
+}
+
+.runtime-row-actions {
+  display: flex;
+  flex-shrink: 0;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 4px;
+}
+
+/* ---- 行状态编码 ---- */
+
+/* running:主色 + 脉冲点 */
+.runtime-row[data-tone='running'] {
+  border-left-color: var(--success-fg);
+}
+
+.runtime-row[data-tone='running'] .runtime-row-name {
+  color: var(--label-primary);
+  font-weight: 600;
+}
+
+.runtime-row[data-tone='running'] .runtime-status-dot {
+  background: var(--success-fg);
+  animation: runtime-pulse 1.4s var(--ease) infinite;
+}
+
+/* waiting:等审批/等回答 → 警示色(黄)+ 常亮点 */
+.runtime-row[data-tone='waiting'] {
+  border-left-color: var(--warn-fg);
+  background: color-mix(in srgb, var(--warn-fg) 7%, transparent);
+}
+
+.runtime-row[data-tone='waiting'] .runtime-status-dot {
+  background: var(--warn-fg);
+}
+
+/* stopping:弱化 + 停止感(方点) */
+.runtime-row[data-tone='stopping'] {
+  border-left-color: var(--label-caption);
+  opacity: 0.75;
+}
+
+.runtime-row[data-tone='stopping'] .runtime-status-dot {
+  background: var(--label-caption);
+  border-radius: 2px;
+}
+
+/* settled / completed:弱化色,不该抢注意力 */
+.runtime-row[data-tone='idle'] {
+  border-left-color: var(--border-l2);
+  opacity: 0.72;
+}
+
+.runtime-row[data-tone='idle'] .runtime-status-dot {
+  background: var(--label-caption);
+}
+
+/* failed:最醒目 —— 危险色描边 + 淡红底 */
+.runtime-row[data-tone='failed'] {
+  border-left-color: var(--danger);
+  background: var(--danger-soft);
+}
+
+.runtime-row[data-tone='failed'] .runtime-row-name {
+  color: var(--danger);
+}
+
+.runtime-row[data-tone='failed'] .runtime-status-dot {
+  background: var(--danger);
+}
+
+.runtime-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  white-space: nowrap;
+}
+
+.runtime-status[data-tone='running'] {
+  color: var(--success-fg);
+}
+
+.runtime-status[data-tone='waiting'] {
+  color: var(--warn-fg);
+  font-weight: 600;
+}
+
+.runtime-status[data-tone='failed'] {
+  color: var(--danger);
+  font-weight: 600;
+}
+
+.runtime-status[data-tone='stopping'],
+.runtime-status[data-tone='idle'] {
+  color: var(--label-tertiary);
+}
+
+.runtime-status-dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  flex-shrink: 0;
+  border-radius: var(--r-pill);
+  background: currentcolor;
+}
+
+/* ---- 行内按钮 ---- */
+
+.runtime-action {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 7px;
+  color: var(--label-secondary);
+  background: var(--bg-layer-1);
+  border: 1px solid var(--border-l2);
+  border-radius: var(--r-xs);
+  cursor: pointer;
+  white-space: nowrap;
+  transition:
+    color 0.12s var(--ease),
+    background 0.12s var(--ease),
+    border-color 0.12s var(--ease);
+}
+
+.runtime-action:hover:not(:disabled) {
+  color: var(--label-primary);
+  background: var(--hover-fill);
+  border-color: var(--border-l3);
+}
+
+.runtime-action:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.runtime-action[aria-expanded='true'] {
+  color: var(--label-primary);
+  background: var(--active-fill);
+  border-color: var(--border-l3);
+}
+
+.runtime-action-primary {
+  color: var(--accent-on);
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+.runtime-action-primary:hover:not(:disabled) {
+  color: var(--accent-on);
+  background: var(--accent);
+  border-color: var(--accent);
+  opacity: 0.88;
+}
+
+.runtime-action-danger:hover:not(:disabled) {
+  color: var(--danger);
+  background: var(--danger-soft);
+  border-color: var(--danger-border);
+}
+
+.runtime-action:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+/* 只锁住正在跑的那一个按钮,其他行照常可点。 */
+.runtime-action[data-pending='true'] {
+  opacity: 0.75;
+  cursor: progress;
+}
+
+.runtime-spinner {
+  display: inline-block;
+  width: 9px;
+  height: 9px;
+  border: 1.5px solid var(--border-l3);
+  border-top-color: currentcolor;
+  border-radius: var(--r-pill);
+  animation: runtime-spin 0.7s linear infinite;
+}
+
+/* ---- 空态 / 错误 ---- */
+
+.runtime-empty {
+  margin: 8px 0;
+  color: var(--label-tertiary);
+}
+
+.runtime-error {
+  padding: 6px 8px;
+  margin: 0 0 8px;
+  color: var(--danger);
+  background: var(--danger-soft);
+  border: 1px solid var(--danger-border);
+  border-radius: var(--r-xs);
+  overflow-wrap: anywhere;
+}
+
+/* ---- 元信息 ---- */
+
+.runtime-meta {
+  color: var(--label-tertiary);
+  overflow-wrap: anywhere;
+}
+
+.runtime-waiting {
+  color: var(--warn-fg);
+  font-weight: 600;
+}
+
+.runtime-result {
+  color: var(--label-secondary);
+  overflow-wrap: anywhere;
+}
+
+/* ---- 快照详情 ---- */
+
+.runtime-snapshot {
+  padding: 10px;
+  margin-top: 8px;
+  background: var(--bg-layer-2);
+  border: 1px solid var(--border-l2);
+  border-radius: var(--r-xs);
+}
+
+.runtime-snapshot > div {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.runtime-snapshot dl {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 4px 10px;
+  margin: 8px 0;
+}
+
+.runtime-snapshot dt {
+  color: var(--label-secondary);
+}
+
+.runtime-snapshot dd {
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+/* ---- 发消息表单 ---- */
+
+.runtime-message {
+  display: flex;
+  flex-direction: column;
+  padding: 10px;
+  margin-top: 8px;
+  background: var(--bg-layer-2);
+  border: 1px solid var(--border-l2);
+  border-radius: var(--r-xs);
+}
+
+.runtime-message label {
+  color: var(--label-secondary);
+  overflow-wrap: anywhere;
+}
+
+.runtime-message textarea {
+  display: block;
+  width: 100%;
+  min-height: 64px;
+  margin: 6px 0 4px;
+  padding: 6px 8px;
+  resize: vertical;
+  color: var(--label-primary);
+  background: var(--bg-layer-1);
+  border: 1px solid var(--border-l2);
+  border-radius: var(--r-xs);
+  font: inherit;
+}
+
+.runtime-message textarea:focus-visible {
+  border-color: var(--accent);
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.runtime-message-hint {
+  color: var(--label-tertiary);
+  font-size: 11px;
+}
+
+.runtime-message-actions {
+  display: flex;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+/* ---- 输出预览 ---- */
+
+.runtime-preview {
+  max-height: 260px;
+  overflow: auto;
+  padding: 10px;
+  margin-top: 8px;
+  background: var(--bg-layer-2);
+  border: 1px solid var(--border-l2);
+  border-radius: var(--r-xs);
+}
+
+.runtime-preview-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.runtime-preview-head strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.runtime-preview pre {
+  margin: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.runtime-preview-state {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 4px 0;
+  color: var(--label-tertiary);
+}
+
+.runtime-preview-state[data-error='true'] {
+  color: var(--danger);
+  overflow-wrap: anywhere;
+}
+
+/* ---- 子会话横幅(SessionsPage 用同一份类名) ---- */
+
+.runtime-child-composer {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding: 16px;
+  color: var(--label-secondary);
+  text-align: center;
+}
+
+.runtime-child-back-button {
+  padding: 6px 12px;
+  color: var(--label-primary);
+  background: var(--bg-layer-2);
+  border: 1px solid var(--border-l2);
+  border-radius: var(--r-sm);
+  cursor: pointer;
+  transition:
+    background 0.15s var(--ease),
+    border-color 0.15s var(--ease);
+}
+
+.runtime-child-back-button:hover {
+  background: var(--hover-fill);
+  border-color: var(--border-l3);
+}
+
+.runtime-child-back-button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* ---- 动效 ---- */
+
+@keyframes runtime-pulse {
+  0%,
+  100% {
+    opacity: 0.55;
+  }
+
+  50% {
+    opacity: 1;
+  }
+}
+
+@keyframes runtime-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes runtime-pop-in {
+  from {
+    opacity: 0;
+    transform: translateY(-4px);
+  }
+
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .runtime-activity-dot,
+  .runtime-row[data-tone='running'] .runtime-status-dot,
+  .runtime-spinner {
+    animation: none;
+  }
+
+  .runtime-content,
+  .runtime-toggle,
+  .runtime-action,
+  .runtime-tabs button,
+  .runtime-row,
+  .runtime-child-back-button {
+    animation: none;
+    transition: none;
+  }
+
+  /* 脉冲点停掉动画后仍要能被看见：给一个静态的实心环。 */
+  .runtime-activity-dot {
+    opacity: 1;
+  }
+}

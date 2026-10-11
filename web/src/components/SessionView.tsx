@@ -133,6 +133,15 @@ export function SessionView({
   const [nodes, setNodes] = useState<TranscriptNode[]>([])
   /** 会话头 cwd(不可变):产物 chip 的相对路径锚点。 */
   const [cwd, setCwd] = useState<string | null>(null)
+  /**
+   * 父会话 id(子会话才有):agent-delivery 的**方向判据** ——
+   * source 等于 `agent:<父 id>` 的那条就是「主代理发给本会话的消息」,
+   * 在对话流里按用户消息气泡渲染。缺省 = 不认任何 agent 投递为来信。
+   */
+  const [parentSessionId, setParentSessionId] = useState<string | undefined>(undefined)
+  /** 父会话 id 的 ref 镜像:订阅 effect 只依赖 id,闭包里读 ref 才是新会话的值。 */
+  const parentSessionIdRef = useRef<string | undefined>(undefined)
+  parentSessionIdRef.current = parentSessionId
   // 原始事件流:轨迹视图的 fold 源(与 transcript 共用一次订阅)。
   const [events, setEvents] = useState<SessionEnvelope[]>([])
   const [pageMeta, setPageMeta] = useState<SessionPageMeta>({ total: 0, hasMoreBefore: false, anchors: [], totals: emptyTotals() })
@@ -240,7 +249,7 @@ export function SessionView({
         viewRef.current === 'trajectory' || windowStart > 0 ||
         batch.some((env) => !isTransientEvent(env))
       if (needsEvents) publishEvents()
-      if (windowStart > 0) setNodes(foldEvents(accRef.current))
+      if (windowStart > 0) setNodes(foldEvents(accRef.current, parentSessionIdRef.current))
       else setNodes((previous) => applyEnvelopes(previous, batch))
     }
     const scheduleFlush = () => {
@@ -279,9 +288,10 @@ export function SessionView({
         setEvents(snapshot)
         setPageMeta(pageInfo)
         pageMetaRef.current = pageInfo
-        setNodes(foldEvents(snapshot))
+        setNodes(foldEvents(snapshot, header.parent_session))
         // 会话头 cwd 不可变,产物 chip 的相对路径锚点取它(不依赖侧栏会话摘要)。
         setCwd(header.cwd)
+        setParentSessionId(header.parent_session)
         publishTodos(snapshot)
         settlePending(snapshot)
         goalTouchRef.current?.()
@@ -357,7 +367,7 @@ export function SessionView({
       const merged = [...page.events, ...accRef.current]
       accRef.current = merged
       publishEvents()
-      setNodes(foldEvents(merged))
+      setNodes(foldEvents(merged, parentSessionIdRef.current))
       const pageInfo = {
         total: Math.max(pageMetaRef.current.total, page.total),
         hasMoreBefore: page.hasMoreBefore,

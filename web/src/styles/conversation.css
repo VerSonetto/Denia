@@ -778,6 +778,30 @@
   font-family: inherit;
 }
 
+/* 主代理发给子会话的消息:右对齐用户气泡 + 一枚"来自主代理"角标。
+   气泡本身完全复用 .user-message-stack / .msg-user,与用户手打的消息
+   同一套视觉;角标只承担"谁在说话",不重复正文首行(见 parentAgentBody)。 */
+.agent-parent-head {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  max-width: 100%;
+  padding: 2px 10px;
+  border-radius: var(--r-pill);
+  background: var(--accent-soft);
+  color: var(--label-secondary);
+  font-size: 12px;
+  line-height: 18px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.agent-parent-head svg {
+  flex: none;
+  opacity: 0.75;
+}
+
 .inject-card pre {
   max-height: 141px;
 }

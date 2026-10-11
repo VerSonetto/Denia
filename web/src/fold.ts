@@ -34,7 +34,22 @@ export interface UiBlock {
 
 export type TranscriptNode =
   | { kind: 'user'; text: string; anchor?: number; images?: UserMessageImage[] }
-  | { kind: 'context-injection'; text: string; seq?: number }
+  | {
+      kind: 'context-injection'
+      text: string
+      seq?: number
+      /**
+       * 投递来源（`agent:<sender>` / `subagent-settled` / `job-completed` / …）。
+       * 只有 agent-delivery 才有；其它注入通道缺省。UI 据此判方向。
+       */
+      source?: string
+      /**
+       * 本条由**本会话的父代理**投递（`agent:<header.parent_session>`）。
+       * 与「子代理/其它代理 → 本会话」相反：前者是对话（用户气泡），
+       * 后者是系统反馈（折叠行）。消息文本一字不改，只是 UI 投影不同。
+       */
+      fromParentAgent?: boolean
+    }
   | { kind: 'system-prompt'; text: string }
   | {
       kind: 'assistant'
@@ -362,11 +377,37 @@ function appendLive(
 }
 
 /**
+ * agent-delivery 的 UI 投影:来源 + 是否来自父代理。
+ *
+ * 方向判据只有一条:**投递来源与本会话父 id 比对**。`source` 是后端写死的
+ * 稳定事实(`agent:<发信方会话 id>` / `subagent-settled` / `job-completed`),
+ * 且在 `SessionEvent::AgentDelivery` 里是非可选 `String`(没有 default,
+ * 缺字段整条日志都反序列化不了),所以不存在"没有 source"的历史数据,
+ * 也就没有按中文正文猜方向的第二条路径 —— 正文里的 `[父代理 … 委派任务]`
+ * 是给模型看的人话,换措辞就失效,拿它当判据迟早把子代理的完成通知画成对话。
+ *
+ * `parentSessionId` 来自会话头 `parentSession`;缺省(主会话 / 头缺失)
+ * 一律按反馈处理 —— 宁可少画一个气泡,也不把系统反馈说成"用户在说话"。
+ */
+export function deliveryProjection(
+  event: { text: string; source: string },
+  parentSessionId?: string,
+): Pick<Extract<TranscriptNode, { kind: 'context-injection' }>, 'source' | 'fromParentAgent'> {
+  return {
+    source: event.source,
+    fromParentAgent: parentSessionId !== undefined && event.source === `agent:${parentSessionId}`,
+  }
+}
+
+/**
  * The deterministic fold: identical output for cold history and live
  * streaming. Chunk deltas accumulate into an in-progress assistant node;
  * the settled `assistant-message` replaces it with authoritative blocks.
+ *
+ * `parentSessionId` 只影响 agent-delivery 节点的 UI 方向标记（见
+ * [`deliveryProjection`]），不参与任何去重与折叠判定。
  */
-export function foldEvents(events: SessionEnvelope[]): TranscriptNode[] {
+export function foldEvents(events: SessionEnvelope[], parentSessionId?: string): TranscriptNode[] {
   const nodes: TranscriptNode[] = []
   let open: Extract<TranscriptNode, { kind: 'assistant' }> | null = null
   const tools = new Map<string, Extract<TranscriptNode, { kind: 'tool' }>>()
@@ -394,7 +435,12 @@ export function foldEvents(events: SessionEnvelope[]): TranscriptNode[] {
     switch (event.type) {
       case 'agent-delivery':
         closeOpen()
-        nodes.push({ kind: 'context-injection', text: event.text, seq: event.seq })
+        nodes.push({
+          kind: 'context-injection',
+          text: event.text,
+          seq: event.seq,
+          ...deliveryProjection(event, parentSessionId),
+        })
         break
       case 'tool-output-chunk': {
         // 实时输出增量:挂到对应工具行上(命令还在跑才有;结果一到作废,
@@ -613,6 +659,7 @@ export function foldEvents(events: SessionEnvelope[]): TranscriptNode[] {
   // 可能因与旧会话文本相同而被误吞,todo 也会比对出假变化。
   incrementalLastTodos = lastTodos
   incrementalLastSystemPrompt = lastSystemPrompt
+  incrementalParentSessionId = parentSessionId
   incrementalStepStarts.clear()
   for (const [key, time] of stepStarts) incrementalStepStarts.set(key, time)
   return nodes
@@ -646,6 +693,13 @@ let incrementalLastTodos: TodoSnapshotItem[] | undefined
 
 /** 增量 fold 的 system-prompt 暂存:与冷启动路径同规则的内容去重依据。 */
 let incrementalLastSystemPrompt: string | null = null
+
+/**
+ * 增量 fold 的父会话 id 暂存:agent-delivery 方向判据的另一半(见
+ * [`deliveryProjection`])。同样由冷启动对齐 —— 换会话后必须跟着新头走,
+ * 否则旧会话的 id 会把新会话里的 `agent:*` 投递误判成父代理来信。
+ */
+let incrementalParentSessionId: string | undefined
 
 /**
  * Incremental fold: applies one envelope to an existing node list without
@@ -750,7 +804,15 @@ function applyEnvelopeStep(
 ): TranscriptNode[] {
   switch (event.type) {
     case 'agent-delivery':
-      return [...nodes, { kind: 'context-injection', text: event.text, seq: event.seq }]
+      return [
+        ...nodes,
+        {
+          kind: 'context-injection',
+          text: event.text,
+          seq: event.seq,
+          ...deliveryProjection(event, incrementalParentSessionId),
+        },
+      ]
     case 'command-run':
       return [
         ...nodes,
@@ -1243,7 +1305,11 @@ function closedTurnRows(
   // 可见部分只剩其后的最终回答。
   const foldEnd = lastTool + 1
   const prefix = span.slice(0, foldEnd)
-  const hidden = prefix.filter((node) => node.kind !== 'user')
+  // 用户消息与**父代理来信**一样是对话,必须留在原位(任务正文被藏进
+  // "worked X" 概览里,子代理视角下就读不到主代理到底交代了什么)。
+  const inPlace = (node: TranscriptNode) =>
+    node.kind === 'user' || (node.kind === 'context-injection' && node.fromParentAgent === true)
+  const hidden = prefix.filter((node) => !inPlace(node))
   // The overview is inserted where the first folded row would sit; when there
   // is nothing expandable, no overview is shown at all.
   const overview: TranscriptRow | null = hidden.some(rendersContent)
@@ -1257,7 +1323,7 @@ function closedTurnRows(
   const rows: TranscriptRow[] = []
   let placed = false
   for (const node of prefix) {
-    const foldable = node.kind !== 'user'
+    const foldable = !inPlace(node)
     if (!foldable || overview === null) {
       rows.push({ kind: 'node', node })
       continue

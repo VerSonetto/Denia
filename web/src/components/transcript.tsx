@@ -180,7 +180,12 @@ export function Transcript({
         ) : (
           <TurnOverview key={key} row={row} />
         )
-        return row.kind === 'node' && row.node.kind === 'user' ? content : (
+        // 父代理来信与用户消息一样常驻(不虚拟化),否则长会话向上翻页时
+        // 主代理的任务正文会跟着概览一起消失。
+        const inPlace = row.kind === 'node' &&
+          (row.node.kind === 'user' ||
+            (row.node.kind === 'context-injection' && row.node.fromParentAgent === true))
+        return inPlace ? content : (
           <ViewportRow key={key} eager={index >= rows.length - 12}>{content}</ViewportRow>
         )
       })}
@@ -295,7 +300,7 @@ const NodeView = memo(function NodeView({
         </div>
       )
     case 'context-injection':
-      return <ContextInjectionRow text={node.text} />
+      return <ContextInjectionRow text={node.text} fromParentAgent={node.fromParentAgent} />
     case 'command-echo':
       // 本地斜杠命令回显(如 /goal):右对齐"指令输入"行,按事件 seq 排序。
       return (
@@ -558,7 +563,49 @@ function injectionDisplay(text: string): { title: string; body: string } {
   return { title: t('contextInjectionTitle'), body: text }
 }
 
-function ContextInjectionRow({ text }: { text: string }) {
+/**
+ * agent-delivery 的两种方向在 UI 上截然不同:
+ *   - 主代理 → 本会话(父代理委派任务 / 发来消息):这是**对话**,
+ *     渲染成右对齐的用户消息气泡(与用户自己说的话同一套组件/样式),
+ *     角标标明来自主代理。
+ *   - 子代理 → 主代理(执行结束汇报 / 后台任务完成 / 其它代理来信):
+ *     那是**系统反馈**,继续走折叠行。
+ *
+ * 判据是 fold 带过来的 `fromParentAgent`(由 source 与会话头父 id 比对得出,
+ * 见 fold.ts 的 deliveryProjection),不在这里重新猜正文。
+ */
+/**
+ * 父代理来信的首行(通道头):`[父代理 <会话 id> 委派任务]` /
+ * `[代理 <会话 id> 发来消息]`。这一行是给模型看的 —— 会话 id 对读日志的人
+ * 毫无意义,界面上由"来自主代理"角标承担,正文从第二行开始。
+ *
+ * 只在方向已判定为父代理来信时调用;其余通道的首行照旧当标题用。
+ */
+export function parentAgentBody(text: string): string {
+  const nl = text.indexOf('\n')
+  const head = nl < 0 ? text : text.slice(0, nl)
+  if (!head.startsWith('[父代理') && !head.startsWith('[代理 ')) return text
+  return nl < 0 ? '' : text.slice(nl + 1).replace(/^\n+/, '')
+}
+
+function ContextInjectionRow({ text, fromParentAgent }: { text: string; fromParentAgent?: boolean }) {
+  if (fromParentAgent) {
+    const body = parentAgentBody(text)
+    return (
+      <div className="user-row agent-parent-row">
+        <div className="user-message-stack msg-copy-anchor">
+          <div className="agent-parent-head">
+            <IconAgentList size={13} />
+            <span>{t('injectionFromParentAgent')}</span>
+          </div>
+          <div className="msg-user">{body}</div>
+          <div className="message-actions">
+            <CopyMessageButton text={body} />
+          </div>
+        </div>
+      </div>
+    )
+  }
   const display = injectionDisplay(text)
   return <DisclosureRow title={display.title} icon={<IconTool size={14} />} text={display.body} />
 }
