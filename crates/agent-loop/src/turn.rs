@@ -745,7 +745,7 @@ pub(crate) fn section_tools(section: &str) -> Option<&'static [&'static str]> {
         "tool:browser" => &["browser"],
         "tool:ask" => &["ask"],
         "tool:goal" => &["get_goal", "update_goal"],
-        "tool:task" => &["get_task", "update_task", "run_checks"],
+        "tool:task" => &["run_checks"],
         "tool:plan" => &["exit_plan"],
         "tool:preset" => &["create_preset"],
         "tool:webfetch" => &["web_fetch"],

@@ -43,16 +43,15 @@ use denia_core::session::{
     TurnEndReason, apply_goal_op,
 };
 use denia_core::stream::ContentBlock;
-use denia_core::task::{RevisionId, TaskOp, TaskState};
+use denia_core::task::{RevisionId, TaskState};
 use denia_token_meter::{ContextBreakdown, ContextMeter, ContextPressure, TurnTokenUsage};
 use thiserror::Error;
 
 pub use history::{HistoryProjection, LEGACY_HISTORY_PROJECTION_VERSION, legacy_subagent_drop_set};
 pub use history::{SUBAGENT_SEED_VERSION, SubagentSeed, build_subagent_seed};
 pub use task_projection::{
-    TaskFoldScope, fresh_evidence_id, fresh_note_id, fresh_requirement_id, fresh_revision_id,
-    fresh_task_id, project_task, project_task_outcome, project_task_outcome_scoped,
-    project_task_scoped,
+    TaskFoldScope, fresh_revision_id, project_task, project_task_outcome,
+    project_task_outcome_scoped, project_task_scoped,
 };
 
 /// 历史投影文件名（会话目录内，与会话日志同级）。
@@ -149,10 +148,14 @@ struct SessionInner {
     agent_preset: Option<String>,
     /// 当前会话目标(goal 事件折叠;None = 无目标)。
     goal: Option<GoalState>,
-    /// 当前任务账本(任务事件折叠;None = 日志里没有任务事件)。
+    /// 当前任务验证账本(`Task` 事件与写入类 `ToolCall` 折叠;None = 日志里
+    /// 没有任务事件)。
     ///
-    /// 与 goal 的 O(1) 状态机单步不同,任务折叠要重放整条日志:事实引用
-    /// 要在日志里核对用户原话(见 [`SessionInner::refold_task`])。
+    /// 与 goal 的 O(1) 状态机单步不同,任务折叠要重放整条日志:结局取决于
+    /// 验证结论与写入类工具调用之间的先后,还取决于折叠作用域(本会话身份 +
+    /// rewind 报废的 revision)。折叠**不读用户消息**,也不看模型声明 ——
+    /// 进它输入的只有 `Task` 事件与 `edit` / `write_file` 的目标路径
+    /// (见 [`SessionInner::refold_task`] 与 `crate::task_projection`)。
     task: Option<TaskState>,
     /// 已报废的 revision id:被 rewind **物理截断**掉的旧分支身份。
     ///
@@ -216,12 +219,12 @@ fn task_fold_scope(session_id: &str, retired: &[RevisionId]) -> TaskFoldScope {
 }
 
 impl SessionInner {
-    /// 由整条驻留日志重算任务账本。
+    /// 由整条驻留日志重算任务验证账本。
     ///
-    /// 为什么是重放而不是状态机单步:折叠器要核对事实引用里的用户原话
-    /// (`FactCitation::User` 拿 `time_ms`/`seq` 回日志里找那条非注入用户
-    /// 消息),只有看到整条日志才做得出来。成本落在"写一条任务事件"上
-    /// (每个约束/换版/收口一条),不在每 step 派生两次的热路径上。
+    /// 账本要按**折叠方身份**(本会话 id)与**已报废 revision**裁决,所以重放
+    /// 必须带上作用域 —— 子代理不继承父的验收结论、rewind 之后旧身份不复活
+    /// 这两条都靠它成立。成本落在写一条验证结论上(一次 run_checks 一条),
+    /// 不在每 step 派生两次的热路径上。
     fn refold_task(&mut self, session_id: &str) {
         let scope = task_fold_scope(session_id, &self.retired_revisions);
         self.task = project_task_scoped(&self.events, &scope);
@@ -818,8 +821,8 @@ fn excerpt_text(text: &str, max_chars: usize) -> String {
 mod tests {
     use super::*;
     use denia_core::task::{
-        CheckRun, FileFingerprint, RequirementClaim, RequirementId, RequirementKind, SourceRef,
-        StaleReason, TaskId, TaskOutcome, TaskStatus, ValidationResult, VerificationState,
+        CheckRun, FileFingerprint, StaleReason, TaskOp, TaskOutcome, ValidationResult,
+        VerificationState,
     };
 
     #[test]
@@ -2532,36 +2535,18 @@ mod tests {
         std::fs::remove_dir_all(&root).unwrap();
     }
 
-    /// 一次开账:验收项引用日志里那条用户消息(seq 与时间戳都要对得上,
-    /// 否则折叠层按“核不到出处”处理)。
-    fn task_open_event(user: &SessionEnvelope, revision: &str) -> SessionEvent {
-        SessionEvent::Task {
-            op: TaskOp::Open {
-                task_id: TaskId::new("task-1"),
-                revision: RevisionId::new(revision),
-                goal: "修好解析器".into(),
-                requirements: vec![RequirementClaim {
-                    id: RequirementId::new("req-1"),
-                    kind: RequirementKind::Acceptance,
-                    text: "cargo test 全绿".into(),
-                    source: SourceRef {
-                        session: None,
-                        seq: user.seq,
-                        time_ms: user.time,
-                        quote: Some("跑通测试".into()),
-                    },
-                }],
-            },
-        }
-    }
-
-    /// 一次通过的验证结论(宿主执行链产物;冻结 `src/lib.rs` 的摘要)。
-    fn task_validation_event(session: &Session, revision: &str, at: u64) -> SessionEvent {
+    /// 一次验证结论(宿主执行链产物;冻结 `src/lib.rs` 的摘要,退出码决定结论)。
+    fn task_validation_event(
+        session: &Session,
+        revision: &str,
+        exit_code: i32,
+        at: u64,
+    ) -> SessionEvent {
         let result = ValidationResult::from_check_runs(
             RevisionId::new(revision),
             vec![CheckRun {
                 command: "cargo test".into(),
-                exit_code: Some(0),
+                exit_code: Some(exit_code),
                 expect_exit_code: 0,
                 workdir: ".".into(),
                 fingerprints: vec![FileFingerprint {
@@ -2569,7 +2554,6 @@ mod tests {
                     digest: "d1".into(),
                 }],
             }],
-            vec![RequirementId::new("req-1")],
             Some(session.id().to_string()),
             at,
         )
@@ -2579,19 +2563,26 @@ mod tests {
         }
     }
 
-    fn task_revise_event(revision: &str) -> SessionEvent {
-        SessionEvent::Task {
-            op: TaskOp::Revise {
-                revision: RevisionId::new(revision),
-                reason: "用户追加了要求".into(),
-                goal: None,
-                requirements: Vec::new(),
-            },
+    /// 旧日志里逐字落盘的一行 `task` 事件(当年 `TaskOp` 的形状)。
+    fn legacy_task_line(seq: u64, op: &str) -> String {
+        format!(
+            "{{\"seq\":{seq},\"time\":{},\"type\":\"task\",\"op\":{op}}}",
+            1_000 + seq
+        )
+    }
+
+    /// 一条非注入的用户消息。
+    fn user_note(text: &str) -> SessionEvent {
+        SessionEvent::UserMessage {
+            text: text.into(),
+            injected: false,
+            images: Vec::new(),
+            channel: None,
         }
     }
 
-    /// 任务账本的事件源折叠:开账 → 验证 → 收口。热加载、冷加载两条路径
-    /// 必须折出逐字段相同的账本(冷态不驻留事件,只能靠解析时的聚合)。
+    /// 任务验证账本的事件源折叠:宿主写下通过结论 → 验收通过。热加载与冷加载
+    /// 两条路径必须折出逐字段相同的账本(冷态不驻留事件,只能靠解析时的聚合)。
     #[test]
     fn task_ledger_folds_across_hot_and_cold_loads() {
         let root = temp_root();
@@ -2602,41 +2593,25 @@ mod tests {
         let id = session.id().to_string();
         assert_eq!(session.task(), None, "没有任务事件就没有账本");
 
-        let user = session
-            .append(SessionEvent::UserMessage {
-                text: "修好解析器,跑通测试再说完事".into(),
-                injected: false,
-                images: Vec::new(),
-                channel: None,
-            })
+        session
+            .append(user_note("修好解析器,跑通测试再说完事"))
             .unwrap();
-        session.append(task_open_event(&user, "rev-a")).unwrap();
-        let state = session.task().expect("开账后账本在");
-        assert_eq!(state.status, TaskStatus::Active);
-        assert_eq!(state.outcome(), None, "进行中不产生结局");
+        session
+            .append(task_validation_event(&session, "rev-a", 0, 2_000))
+            .unwrap();
+        let state = session.task().expect("写下验证结论后账本在");
+        assert_eq!(state.revision.as_str(), "rev-a");
         assert_eq!(
             state.session.as_deref(),
             Some(id.as_str()),
             "折叠方身份写进账本"
         );
-        assert_eq!(state.requirements.len(), 1);
-
-        session
-            .append(task_validation_event(&session, "rev-a", 2_000))
-            .unwrap();
-        session
-            .append(SessionEvent::Task { op: TaskOp::Close })
-            .unwrap();
-        assert_eq!(
-            session.task().unwrap().outcome(),
-            Some(TaskOutcome::Passed),
-            "覆盖全部验收项的有效通过结论才能判通过"
-        );
+        assert_eq!(state.outcome(), TaskOutcome::Passed, "通过结论即验收通过");
         let expected = session.task().unwrap();
         drop(session);
 
         let hot = store.load(&id).unwrap();
-        assert_eq!(hot.task().as_ref(), Some(&expected), "退回放逐字段相同");
+        assert_eq!(hot.task().as_ref(), Some(&expected), "热加载折出同一份账本");
         drop(hot);
 
         let cold = store.open_cold(&id).unwrap();
@@ -2652,8 +2627,8 @@ mod tests {
     }
 
     /// rewind 要把任务账本**同时**重置与重放(只清不重放会丢账本,只重放
-    /// 不清会留下被截掉的旧状态),并且被截断区间的 revision 身份保持报废:
-    /// 那些事件在日志里已经查不到,防线只能来自宿主交出的报废集合。
+    /// 不清会留下被截掉的旧结论),并且被截断区间里出现过的 revision 身份保持
+    /// 报废:那些事件在日志里已经查不到,防线只能来自宿主交出的报废集合。
     #[test]
     fn rewind_refolds_task_ledger_and_retires_truncated_revisions() {
         let root = temp_root();
@@ -2663,74 +2638,50 @@ mod tests {
         let session = store.create(&cwd, true).unwrap();
         let dir = session.directory().to_path_buf();
 
-        let user = session
-            .append(SessionEvent::UserMessage {
-                text: "修好解析器,跑通测试再说完事".into(),
-                injected: false,
-                images: Vec::new(),
-                channel: None,
-            })
-            .unwrap();
-        session.append(task_open_event(&user, "rev-a")).unwrap();
         session
-            .append(task_validation_event(&session, "rev-a", 2_000))
+            .append(user_note("修好解析器,跑通测试再说完事"))
             .unwrap();
         session
-            .append(SessionEvent::Task { op: TaskOp::Close })
+            .append(task_validation_event(&session, "rev-a", 0, 2_000))
             .unwrap();
-        assert_eq!(session.task().unwrap().outcome(), Some(TaskOutcome::Passed));
+        assert_eq!(session.task().unwrap().outcome(), TaskOutcome::Passed);
 
-        // 被截断的分支:换到 rev-b 后收口。
-        let second = session
-            .append(SessionEvent::UserMessage {
-                text: "再改一处导入顺序".into(),
-                injected: false,
-                images: Vec::new(),
-                channel: None,
-            })
+        // 被截断的分支:第二轮又跑了一次检查(这次失败),然后回退掉。
+        let second = session.append(user_note("再改一处导入顺序")).unwrap();
+        session
+            .append(task_validation_event(&session, "rev-a", 1, 2_100))
             .unwrap();
-        session.append(task_revise_event("rev-b")).unwrap();
-        assert_eq!(session.task().unwrap().revision.as_str(), "rev-b");
+        assert_eq!(session.task().unwrap().outcome(), TaskOutcome::Failed);
 
         session.rewind(second.seq).unwrap();
         let state = session.task().expect("回退后账本还在");
-        assert_eq!(
-            state.revision.as_str(),
-            "rev-a",
-            "回退后账本回到被截断前的版本,不得残留 rev-b"
-        );
-        assert_eq!(state.status, TaskStatus::Closed);
-        assert_eq!(state.outcome(), Some(TaskOutcome::Passed));
-        assert!(!state.revision_conflict);
-
-        // 复用被截断掉的 rev-b:必须被拒(它已经是报废身份)。
-        session.append(task_revise_event("rev-b")).unwrap();
-        let state = session.task().unwrap();
-        assert_eq!(state.revision.as_str(), "rev-a", "旧身份不得复活");
-        assert!(state.revision_conflict, "拒绝必须可见");
-        assert_eq!(state.revision_rejected, 1);
+        assert_eq!(state.revision.as_str(), "rev-a", "回退后回到被截断前的版本");
+        assert_eq!(state.validations.len(), 1, "被截掉的结论不得残留");
+        assert!(state.revision_retired, "被截断区间里出现过的身份已报废");
         assert_eq!(
             state.verification(),
             VerificationState::Unverified {
-                reason: StaleReason::RevisionConflict
+                reason: StaleReason::RevisionChanged
             }
         );
-        assert_eq!(state.outcome(), Some(TaskOutcome::Unverified));
-
-        // 拒绝的是“复用”,不是换版本身:新身份照常推进。
-        session.append(task_revise_event("rev-c")).unwrap();
-        let state = session.task().unwrap();
-        assert_eq!(state.revision.as_str(), "rev-c");
-        assert!(!state.revision_conflict, "合法新版本让身份重新干净");
         assert_eq!(
-            state.status,
-            TaskStatus::Active,
-            "换版让已收口的任务重新活跃"
+            state.outcome(),
+            TaskOutcome::Unverified,
+            "旧分支的通过结论不得被继承"
         );
+
+        // 重新取证:宿主换新身份。旧身份不复活,新结论照常生效。
+        session
+            .append(task_validation_event(&session, "rev-b", 0, 2_200))
+            .unwrap();
+        let state = session.task().unwrap();
+        assert_eq!(state.revision.as_str(), "rev-b");
+        assert!(!state.revision_retired, "换新身份之后账本重新可裁决");
+        assert_eq!(state.outcome(), TaskOutcome::Passed);
 
         let audit = std::fs::read_to_string(dir.join("rewinds.jsonl")).unwrap();
         assert!(
-            audit.contains(r#""retiredRevisions":["rev-b"]"#),
+            audit.contains(r#""retiredRevisions":["rev-a"]"#),
             "回退审计必须带上本次截掉的身份:{audit}"
         );
         drop(session);
@@ -2738,8 +2689,8 @@ mod tests {
         std::fs::remove_dir_all(&root).unwrap();
     }
 
-    /// 报废集合必须活过重启:`session.jsonl` 里已经没有 rev-b 的痕迹,
-    /// 重开(冷态 → 写路径升级整份重读)之后仍然拒绝复用。
+    /// 报废集合必须活过重启:`session.jsonl` 里已经没有被截断分支的痕迹,重开
+    /// (冷态读 → 写路径升级整份重读)之后仍然不继承旧身份的结论。
     #[test]
     fn retired_revisions_survive_a_reload() {
         let root = temp_root();
@@ -2749,34 +2700,99 @@ mod tests {
         let session = store.create(&cwd, true).unwrap();
         let id = session.id().to_string();
 
-        let user = session
-            .append(SessionEvent::UserMessage {
-                text: "修好解析器,跑通测试再说完事".into(),
-                injected: false,
-                images: Vec::new(),
-                channel: None,
-            })
+        session
+            .append(user_note("修好解析器,跑通测试再说完事"))
             .unwrap();
-        session.append(task_open_event(&user, "rev-a")).unwrap();
-        let second = session
-            .append(SessionEvent::UserMessage {
-                text: "再改一处导入顺序".into(),
-                injected: false,
-                images: Vec::new(),
-                channel: None,
-            })
+        session
+            .append(task_validation_event(&session, "rev-a", 0, 2_000))
             .unwrap();
-        session.append(task_revise_event("rev-b")).unwrap();
+        let second = session.append(user_note("再改一处导入顺序")).unwrap();
+        session
+            .append(task_validation_event(&session, "rev-a", 1, 2_100))
+            .unwrap();
         session.rewind(second.seq).unwrap();
         drop(session);
 
         let reopened = store.open_cold(&id).unwrap();
-        assert_eq!(reopened.task().unwrap().revision.as_str(), "rev-a");
-        // append 会先把冷会话升级为热(整份重读),报废集合从 rewinds.jsonl 回来。
-        reopened.append(task_revise_event("rev-b")).unwrap();
         let state = reopened.task().unwrap();
         assert_eq!(state.revision.as_str(), "rev-a");
-        assert!(state.revision_conflict, "重开之后旧分支的身份仍然不得复活");
+        assert!(state.revision_retired, "重开之后旧分支身份仍然报废");
+        assert_eq!(state.outcome(), TaskOutcome::Unverified);
+        // append 会先把冷会话升级为热(整份重读),报废集合从 rewinds.jsonl 回来。
+        reopened
+            .append(task_validation_event(&reopened, "rev-b", 0, 2_200))
+            .unwrap();
+        assert_eq!(reopened.task().unwrap().outcome(), TaskOutcome::Passed);
+        drop(reopened);
+        drop(store);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    /// 旧日志里落过账的记账事件(`open` / `amend` / `record-change` / `close`)
+    /// 在裁剪掉记账层之后由 `TaskOp::Legacy` 兜底反序列化:整个会话照常打开,
+    /// 账本只认宿主写下的验证结论 —— 当年的目标、验收项与事实不再进裁决,
+    /// 但也不阻塞加载。
+    #[test]
+    fn legacy_task_events_in_an_old_log_still_load() {
+        let root = temp_root();
+        let store = SessionStore::open(&root).unwrap();
+        let cwd = root.join("work");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let session = store.create(&cwd, true).unwrap();
+        let id = session.id().to_string();
+        session
+            .append(user_note("修好解析器,跑通测试再说完事"))
+            .unwrap();
+        let file = session.file().to_path_buf();
+        drop(session);
+
+        // 逐字写进当年落盘的那几行(不是今天 `TaskOp` 的形状)。
+        {
+            use std::io::Write as _;
+            let mut f = OpenOptions::new().append(true).open(&file).unwrap();
+            for line in [
+                legacy_task_line(
+                    2,
+                    r#"{"kind":"open","task_id":"task-1","revision":"rev-legacy","goal":"修好解析器","requirements":[{"id":"req-1","kind":"acceptance","text":"cargo test 全绿","source":{"session":null,"seq":1,"time_ms":1001,"quote":"跑通测试"}}]}"#,
+                ),
+                legacy_task_line(
+                    3,
+                    r#"{"kind":"amend","notes":[{"kind":"question","id":"note-1","text":"要不要兼容旧格式?"}]}"#,
+                ),
+                legacy_task_line(
+                    4,
+                    r#"{"kind":"record-change","summary":"改了 src/lib.rs","fingerprints":[]}"#,
+                ),
+                legacy_task_line(5, r#"{"kind":"close"}"#),
+            ] {
+                writeln!(f, "{line}").unwrap();
+            }
+            f.flush().unwrap();
+        }
+
+        let reopened = store.load(&id).unwrap();
+        let events = reopened.events();
+        assert_eq!(events.len(), 5, "旧事件必须一条不少地读进来:{events:?}");
+        assert!(
+            matches!(events[2].event, SessionEvent::Task { op: TaskOp::Legacy }),
+            "被裁掉的记账 op 由 Legacy 兜底:{:?}",
+            events[2].event
+        );
+        assert_eq!(
+            reopened.task(),
+            None,
+            "只有被裁掉的记账事件:折不出账本,也没把谁判成通过"
+        );
+
+        // 旧会话继续可用:宿主写下新的验证结论,账本按新语义折出结局。
+        reopened
+            .append(task_validation_event(&reopened, "rev-legacy", 0, 2_000))
+            .unwrap();
+        assert_eq!(
+            reopened.task().unwrap().outcome(),
+            TaskOutcome::Passed,
+            "旧日志里的记账事件被忽略,新的验证结论照常生效"
+        );
         drop(reopened);
         drop(store);
         std::fs::remove_dir_all(&root).unwrap();

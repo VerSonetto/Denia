@@ -76,9 +76,9 @@ pub struct PresetFeatures {
     pub compaction: bool,
     /// goal 模式:工具、纪律段、状态注入与自动续跑。
     pub goal: bool,
-    /// 任务账本:工具(get_task/update_task/run_checks)与 `tool:task` 纪律段。
+    /// 任务验证账本:`run_checks` 工具与 `tool:task` 纪律段。
     ///
-    /// 关掉它就只剩"干活"没有"记账":完成判定退回到模型自己的说法。
+    /// 关掉它就只剩"干活"没有"取证":完成判定退回到模型自己的说法。
     pub task_ledger: bool,
     /// 技能:skill 工具、纪律段与技能目录注入。
     pub skills: bool,
@@ -112,9 +112,10 @@ impl Default for PresetFeatures {
     }
 }
 
-/// 任务账本工具族(`features.taskLedger` 关闭时摘除;与 tools crate 的
-/// `default_registry` 注册保持同步)。
-pub const TASK_TOOLS: &[&str] = &["get_task", "update_task", "run_checks"];
+/// 任务验证账本工具族(`features.taskLedger` 关闭时摘除;与 tools crate 的
+/// `default_registry` 注册保持同步)。裁剪掉记账层后只剩跑检查这一件工具:
+/// 结论由宿主按退出码写出,模型侧没有读账本、写账本的入口。
+pub const TASK_TOOLS: &[&str] = &["run_checks"];
 
 /// 后台任务工具族(`features.jobs` 关闭时摘除;与 tools crate 的
 /// capabilities 注册保持同步)。
@@ -397,16 +398,20 @@ mod tests {
     }
 
     #[test]
-    fn task_ledger_switch_defaults_on_and_narrows_the_three_tools() {
-        // 缺省开启:旧 preset 文件不改动也能拿到账本工具。
+    fn task_ledger_switch_defaults_on_and_narrows_the_verification_tool() {
+        // 缺省开启:旧 preset 文件不改动也能拿到取证工具。
         let features: PresetFeatures = serde_yaml::from_str("{}").unwrap();
         assert!(features.task_ledger);
         assert!(features.excluded_tools().is_empty());
-        // 显式关闭:三个工具与工具纪律段一起被摘掉。
+        // 显式关闭:工具与工具纪律段一起被摘掉。
         let features: PresetFeatures = serde_yaml::from_str("taskLedger: false\n").unwrap();
         assert!(!features.task_ledger);
         assert_eq!(features.excluded_tools(), TASK_TOOLS.to_vec());
-        assert!(PresetFeatures::all_off().excluded_tools().contains(&"run_checks"));
+        assert!(
+            PresetFeatures::all_off()
+                .excluded_tools()
+                .contains(&"run_checks")
+        );
     }
 
     #[test]
@@ -425,8 +430,6 @@ mod tests {
         for name in [
             "get_goal",
             "update_goal",
-            "get_task",
-            "update_task",
             "run_checks",
             "skill",
             "spawn_agent",

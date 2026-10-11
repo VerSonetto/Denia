@@ -68,8 +68,8 @@ pub enum SectionOrder {
     /// 会话目标工具(get_goal/update_goal)的纪律段;随 default_registry
     /// 注册,仅存在目标的会话在上下文注入里携带目标详情。
     ToolGoal,
-    /// 任务账本工具(get_task/update_task/run_checks)的纪律段;随
-    /// default_registry 注册,preset 关闭 taskLedger 时与工具一起消失。
+    /// 任务验证账本工具(run_checks)的纪律段;随 default_registry 注册,
+    /// preset 关闭 taskLedger 时与工具一起消失。
     ToolTask,
     /// 计划呈交工具(exit_plan)的纪律段;仅计划模式注入。
     ToolPlan,

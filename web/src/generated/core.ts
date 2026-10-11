@@ -66,9 +66,9 @@ compaction: boolean,
  */
 goal: boolean, 
 /**
- * 任务账本:工具(get_task/update_task/run_checks)与 `tool:task` 纪律段。
+ * 任务验证账本:`run_checks` 工具与 `tool:task` 纪律段。
  *
- * 关掉它就只剩"干活"没有"记账":完成判定退回到模型自己的说法。
+ * 关掉它就只剩"干活"没有"取证":完成判定退回到模型自己的说法。
  */
 taskLedger: boolean, 
 /**
@@ -406,86 +406,9 @@ roundsStarted: number, createdAt: number, updatedAt: number, };
 
 export type GoalOp = { "kind": "set", objective: string, token_budget?: number, } | { "kind": "edit", objective?: string, token_budget?: number, } | { "kind": "pause" } | { "kind": "resume" } | { "kind": "round" } | { "kind": "complete" } | { "kind": "block", reason: string, } | { "kind": "budget-limit" } | { "kind": "clear" };
 
-export type TaskId = string;
-
 export type RevisionId = string;
 
-export type EvidenceId = string;
-
-export type RequirementId = string;
-
-export type NoteId = string;
-
-export type SourceRef = { session?: string, 
-/**
- * 记录时刻该事件的日志序号(reference 用,不是身份)。
- */
-seq: number, 
-/**
- * 该事件的落盘时间(epoch ms):跨 fork 重编号仍稳定的身份。
- */
-timeMs: number, 
-/**
- * 有界短摘录;仅供人核对,不作为事实依据。
- */
-quote?: string, };
-
-export type RequirementKind = "goal" | "task-type" | "constraint" | "acceptance";
-
-export type RequirementClaim = { id: RequirementId, kind: RequirementKind, text: string, source: SourceRef, };
-
-export type Requirement = { id: RequirementId, revision: RevisionId, kind: RequirementKind, text: string, source: SourceRef, declaredAt: number, };
-
-export type RevisionRecord = { id: RevisionId, 
-/**
- * 展示序号(第几版)。只是界面用的计数器,不做身份:rewind 之后序号会从头
- * 数,而 id 不会。
- */
-ordinal: number, 
-/**
- * 换版原因(解释"为什么旧验证不算数")。
- */
-reason: string, at: number, };
-
-export type FactCitation = { "kind": "user", reference: SourceRef, } | { "kind": "evidence", evidence: EvidenceId, };
-
-export type NoteClaim = { "kind": "fact", id: NoteId, text: string, citation: FactCitation, } | { "kind": "assumption", id: NoteId, text: string, rationale?: string, } | { "kind": "failed-attempt", id: NoteId, text: string, evidence?: EvidenceId, } | { "kind": "open-question", id: NoteId, text: string, };
-
-export type Fact = { id: NoteId, revision: RevisionId, text: string, citation: FactCitation, at: number, };
-
-export type Assumption = { id: NoteId, revision: RevisionId, text: string, 
-/**
- * 为什么这么猜;来源核不实时这里记明原因(如"引用的用户消息不在日志里")。
- */
-rationale?: string, at: number, };
-
-export type FailedAttempt = { id: NoteId, revision: RevisionId, text: string, evidence?: EvidenceId, at: number, };
-
-export type OpenQuestion = { id: NoteId, revision: RevisionId, text: string, at: number, };
-
 export type FileFingerprint = { path: string, digest: string, };
-
-export type EvidenceSource = { "kind": "tool-call", call_id: string, tool: string, } | { "kind": "check", command: string, exit_code: number, } | { "kind": "file-read", path: string, };
-
-export type Evidence = { id: EvidenceId, 
-/**
- * 产生这条证据时所属的 revision。换版后旧证据仍可被引用(它是材料),
- * 但**不能**单独支撑新 revision 的验收结论 —— 那是 [`ValidationResult`] 的
- * 职责。
- */
-revision: RevisionId, source: EvidenceSource, 
-/**
- * 这条证据观察到的工作区状态。
- */
-fingerprints?: Array<FileFingerprint>, 
-/**
- * 有界摘要(超出 [`MAX_CLAIM_CHARS`] 由折叠截断);正文留在日志/产物里。
- */
-summary: string, 
-/**
- * 产生它的会话。跨会话 seed(父 / 分支)带进来的记录靠它被识别为外来。
- */
-originSession?: string, at: number, };
 
 export type CheckRun = { command: string, 
 /**
@@ -509,76 +432,54 @@ export type ValidationVerdict = "passed" | "failed";
 
 export type ValidationResult = { revision: RevisionId, runs?: Array<CheckRun>, 
 /**
- * 本次验证声明覆盖的验收项。检查通过只代表它声明的范围。
- */
-covered?: Array<RequirementId>, 
-/**
  * 结论产生时的会话;与折叠方会话不一致时只作审计,不进裁决。
  */
 originSession?: string, at: number, };
 
-export type TaskChange = { revision: RevisionId, summary: string, fingerprints: Array<FileFingerprint>, at: number, };
+export type LedgerOverflow = { validations: number, };
 
-export type LedgerOverflow = { requirements: number, facts: number, assumptions: number, failedAttempts: number, openQuestions: number, evidence: number, validations: number, changes: number, remaining: number, revisions: number, };
+export type TaskOutcome = "unverified" | "passed" | "failed";
 
-export type TaskStatus = "active" | "blocked" | "closed";
-
-export type TaskOutcome = "unverified" | "passed" | "failed" | "blocked";
-
-export type StaleReason = { "kind": "never-run" } | { "kind": "revision-changed" } | { "kind": "inputs-changed", paths: Array<string>, } | { "kind": "no-check-run" } | { "kind": "foreign-origin" } | { "kind": "revision-conflict" };
+export type StaleReason = { "kind": "never-run" } | { "kind": "revision-changed" } | { "kind": "inputs-changed", paths: Array<string>, } | { "kind": "no-check-run" } | { "kind": "foreign-origin" };
 
 export type VerificationState = { "kind": "unverified", reason: StaleReason, } | { "kind": "verified", revision: RevisionId, verdict: ValidationVerdict, 
 /**
  * 这次结论冻结的输入指纹(可展示"验证的是这些字节")。
  */
-fingerprints: Array<FileFingerprint>, 
-/**
- * 它声明覆盖的验收项。
- */
-covered: Array<RequirementId>, at: number, };
+fingerprints: Array<FileFingerprint>, at: number, };
 
-export type TaskState = { id: TaskId, 
+export type TaskState = { 
 /**
- * 当前 revision(当前要求集的身份)。
+ * 当前 revision = 宿主最近一次取证绑定的身份。
  */
 revision: RevisionId, 
+/**
+ * 当前 revision 已被 rewind 报废(旧分支的身份):绑在它上面的结论一律
+ * 不继承。rewind 是物理截断,被截掉的 id 在日志里查不到,只有宿主交出的
+ * 报废集合还记得(见 `TaskFoldScope::retired_revisions`)。
+ */
+revisionRetired?: boolean, 
 /**
  * 本账本所属会话(折叠时由作用域带入):把跨会话 seed 继承来的验证结论挡
  * 在裁决之外 —— 子代理不继承父的验收结论。
  */
-session?: string, status: TaskStatus, goal: string, blockedReason?: string, 
+session?: string, validations: Array<ValidationResult>, 
 /**
- * 拒绝过复用旧 revision id 的换版:当前版本身份不干净,结论一律不可信,
- * 直到出现合法的新 revision。rewind 之后宿主复用旧 id 的兜底。
- */
-revisionConflict?: boolean, 
-/**
- * 被拒绝的换版次数(复用旧 id)。拒绝这件事本身也必须可见。
- */
-revisionRejected: number, 
-/**
- * 历次 revision(有界;首个是初版)。
- */
-revisions: Array<RevisionRecord>, 
-/**
- * 要求与验收项(跨 revision 保留原始来源引用)。
- */
-requirements: Array<Requirement>, facts: Array<Fact>, assumptions: Array<Assumption>, failedAttempts: Array<FailedAttempt>, openQuestions: Array<OpenQuestion>, changes: Array<TaskChange>, 
-/**
- * 待完成工作(整表替换,latest-wins)。
- */
-remaining: Array<string>, evidence: Array<Evidence>, validations: Array<ValidationResult>, 
-/**
- * 当前生效的文件内容指纹基线(path → digest,后写的覆盖先写的)。
- * 由变更范围事件维护;验证结论据此判断是否已失效。
+ * 当前生效的文件内容指纹基线(path → digest,后写的覆盖先写的)。验证结论
+ * 据此判断是否已失效:基线里没有该路径 = 没有记录显示它被改过,不算失效。
+ *
+ * 生产者在折叠期(见 `denia-session::task_projection`),两处都不读磁盘:
+ * - 记下一条验证结论时,把它冻结的输入重新锚到基线上 —— 那些摘要就是运行
+ *   开始那一刻磁盘上的字节;
+ * - 会话日志里经**工具层**写文件的调用(`edit` / `write_file`)按目标路径
+ *   记一个"已与冻结时不同"的记号(`digest` 这时可能不是哈希,而是这个记号)。
+ *
+ * 边界:只有经工具层的写入会在这里留痕。`bash` 改文件、外部编辑器改动不在
+ * 覆盖范围 —— 那是工具侧"写前内容指纹"那条防线,基线认不出来,也不假装认得。
  */
 fingerprints: Array<FileFingerprint>, overflow: LedgerOverflow, createdAt: number, updatedAt: number, };
 
-export type TaskOp = { "kind": "open", task_id: TaskId, revision: RevisionId, goal: string, requirements?: Array<RequirementClaim>, } | { "kind": "revise", revision: RevisionId, 
-/**
- * 为什么换版(用户加了约束 / 改了验收 / 上一版理解错了……)。
- */
-reason: string, goal?: string, requirements?: Array<RequirementClaim>, } | { "kind": "amend", notes?: Array<NoteClaim>, } | { "kind": "resolve-question", id: NoteId, } | { "kind": "set-remaining", items?: Array<string>, } | { "kind": "record-change", summary: string, fingerprints?: Array<FileFingerprint>, } | { "kind": "record-evidence", evidence: Evidence, } | { "kind": "record-validation", result: ValidationResult, } | { "kind": "block", reason: string, } | { "kind": "unblock" } | { "kind": "close" };
+export type TaskOp = { "kind": "record-validation", result: ValidationResult, };
 
 export type RequestHeaderReason = "initial" | "resume" | "change" | "series";
 

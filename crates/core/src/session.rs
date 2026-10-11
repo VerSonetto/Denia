@@ -2841,44 +2841,58 @@ mod tests {
     }
 
     #[test]
-    fn task_event_round_trips_and_keeps_kebab_tags() {
-        // 新变体的 tag 是 `task`,内部操作 tag 是 `kind`(与 `goal` 同构),
+    fn task_validation_event_round_trips_and_keeps_kebab_tags() {
+        // 变体的 tag 是 `task`,内部操作 tag 是 `kind`(与 `goal` 同构),
         // 都在 kebab-case 约定下 —— 绑定生成与前端折叠按同一套名字读。
+        let result = crate::task::ValidationResult::from_check_runs(
+            crate::task::RevisionId::new("rev-2"),
+            vec![crate::task::CheckRun {
+                command: "cargo test".into(),
+                exit_code: Some(0),
+                expect_exit_code: 0,
+                workdir: ".".into(),
+                fingerprints: vec![crate::task::FileFingerprint {
+                    path: "src/lib.rs".into(),
+                    digest: "d1".into(),
+                }],
+            }],
+            Some("s-1".into()),
+            1_000,
+        )
+        .expect("有检查运行才构成结论");
         let env = envelope(
             11,
             SessionEvent::Task {
-                op: crate::task::TaskOp::Revise {
-                    revision: crate::task::RevisionId::new("rev-2"),
-                    reason: "用户追加了验收项".into(),
-                    goal: None,
-                    requirements: Vec::new(),
-                },
+                op: crate::task::TaskOp::RecordValidation { result },
             },
         );
         let json = serde_json::to_string(&env).unwrap();
         assert!(json.contains(r#""type":"task""#), "{json}");
-        assert!(json.contains(r#""kind":"revise""#), "{json}");
+        assert!(json.contains(r#""kind":"record-validation""#), "{json}");
         assert!(json.contains(r#""revision":"rev-2""#), "{json}");
-        // 未给的 goal / requirements 不落盘(旧读程序看不到多余字段)。
-        assert!(!json.contains(r#""goal""#), "{json}");
-        assert!(!json.contains(r#""requirements""#), "{json}");
         assert_eq!(serde_json::from_str::<SessionEnvelope>(&json).unwrap(), env);
     }
 
     #[test]
-    fn task_close_event_round_trips_as_unit_variant() {
-        let env = envelope(
-            12,
-            SessionEvent::Task {
-                op: crate::task::TaskOp::Close,
-            },
-        );
-        let json = serde_json::to_string(&env).unwrap();
-        assert_eq!(
-            json,
-            r#"{"seq":12,"time":1700000000012,"type":"task","op":{"kind":"close"}}"#
-        );
-        assert_eq!(serde_json::from_str::<SessionEnvelope>(&json).unwrap(), env);
+    fn legacy_task_ops_parse_as_legacy_instead_of_failing_the_load() {
+        // 旧日志里落过账的记账操作(open / revise / close …):折叠层已经不看它们,
+        // 但整份日志必须照常读得进来 —— 反序列化落到 `TaskOp::Legacy` 兜底。
+        for line in [
+            r#"{"seq":12,"time":1700000000012,"type":"task","op":{"kind":"close"}}"#,
+            r#"{"seq":13,"time":1700000000013,"type":"task","op":{"kind":"revise","revision":"rev-2","reason":"用户追加了验收项"}}"#,
+            r#"{"seq":14,"time":1700000000014,"type":"task","op":{"kind":"open","task_id":"task-1","revision":"rev-1","goal":"修好解析器","requirements":[]}}"#,
+        ] {
+            let envelope: SessionEnvelope = serde_json::from_str(line).expect("旧日志行必须可读");
+            assert!(
+                matches!(
+                    envelope.event,
+                    SessionEvent::Task {
+                        op: crate::task::TaskOp::Legacy
+                    }
+                ),
+                "{line}"
+            );
+        }
     }
 
     #[test]

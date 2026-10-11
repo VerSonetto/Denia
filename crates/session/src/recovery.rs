@@ -1,19 +1,6 @@
 //! Session recovery responsibilities.
 use super::*;
 
-/// 折叠任务账本必须看到的事件:任务事件本身,以及事实引用要核对的非注入
-/// 用户消息(见 `task_projection::reference_resolves`;其余事件折叠器不读)。
-fn task_fold_relevant(envelope: &SessionEnvelope) -> bool {
-    matches!(envelope.event, SessionEvent::Task { .. })
-        || matches!(
-            &envelope.event,
-            SessionEvent::UserMessage {
-                injected: false,
-                ..
-            }
-        )
-}
-
 /// 读取 `rewinds.jsonl` 里累计的报废 revision 集合。
 ///
 /// 为什么是它:`session.jsonl` 被 rewind **物理截断**,被截掉的身份在日志里
@@ -182,10 +169,12 @@ impl Session {
         let mut title: Option<String> = None;
         let mut meter = ContextMeter::new();
         let mut pending_turn: Vec<SessionEnvelope> = Vec::new();
-        // 任务账本折叠所需的极小切片:任务事件 + 非注入用户消息(事实引用要
-        // 回日志里核对原话)。冷态不驻留事件,但折叠需要完整的任务脉络;
-        // 热态也只保留这两类,于是冷/热两条路径折出的账本逐字段相同 ——
-        // parity 由"两条路径用同一份切片"保证,而不是靠两处都记得改。
+        // 任务账本折叠所需的极小切片:只放折叠器真正读的事件,口径只有一处
+        // (`task_projection::task_fold_input`)—— `SessionEvent::Task`,以及写入类
+        // 工具的 `ToolCall`(只留目标路径,参数正文不进内存)。冷态不驻留事件,
+        // 但折叠需要完整的任务脉络;热态也只保留这一类,于是冷/热两条路径折出的
+        // 账本逐字段相同 —— parity 由"两条路径用同一份切片"保证,而不是靠两处都
+        // 记得改。
         let mut task_events: Vec<SessionEnvelope> = Vec::new();
         let mut last_seq = 0u64;
         let mut first_prompt_excerpt = None;
@@ -241,8 +230,8 @@ impl Session {
                     if let SessionEvent::Goal { op } = &envelope.event {
                         goal = apply_goal_op(goal, op, envelope.time, meter.turn_usage().total());
                     }
-                    if task_fold_relevant(&envelope) {
-                        task_events.push(envelope.clone());
+                    if let Some(reduced) = crate::task_projection::task_fold_input(&envelope) {
+                        task_events.push(reduced);
                     }
                     if retain && !transient {
                         events.push(envelope);
@@ -606,6 +595,77 @@ mod interaction_tests {
                 .count(),
             1
         );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// 冷载切片必须带上**写入类工具调用**:否则热态折出"结论被后来的写入推翻",
+    /// 冷载却折出"验收通过" —— 同一条日志两个结局。
+    #[test]
+    fn cold_load_sees_the_write_tool_calls_that_invalidate_a_conclusion() {
+        use denia_core::task::{
+            CheckRun, FileFingerprint, RevisionId, TaskOp, TaskOutcome, ValidationResult,
+        };
+
+        let (root, work) = setup("task-writes");
+        let store = crate::SessionStore::open(&root).unwrap();
+        let session = store.create(&work, true).unwrap();
+        let id = session.id().to_string();
+        let result = ValidationResult::from_check_runs(
+            RevisionId::new("rev-a"),
+            vec![CheckRun {
+                command: "cargo test".into(),
+                exit_code: Some(0),
+                expect_exit_code: 0,
+                workdir: ".".into(),
+                fingerprints: vec![FileFingerprint {
+                    path: "src/lib.rs".into(),
+                    digest: "d1".into(),
+                }],
+            }],
+            Some(id.clone()),
+            2_000,
+        )
+        .expect("有检查运行才构成结论");
+        session
+            .append(SessionEvent::Task {
+                op: TaskOp::RecordValidation { result },
+            })
+            .unwrap();
+        // 结论之后补一次 edit:热态立刻失效;冷载必须折出同一份账本。
+        session
+            .append(SessionEvent::ToolCall {
+                turn: 1,
+                step: 1,
+                call_id: "call-1".into(),
+                name: "edit".into(),
+                arguments: serde_json::json!({
+                    "path": "src/lib.rs",
+                    "old_string": "a",
+                    "new_string": "b",
+                    "content": "x".repeat(4_000),
+                })
+                .to_string(),
+            })
+            .unwrap();
+        let hot = session.task().expect("账本在");
+        assert_eq!(hot.outcome(), TaskOutcome::Unverified, "热态:写入推翻结论");
+        session.flush().unwrap();
+        drop(session);
+
+        let cold = store.open_cold(&id).unwrap();
+        assert!(!cold.is_hot());
+        assert_eq!(
+            cold.task().as_ref(),
+            Some(&hot),
+            "冷热折出的账本必须逐字段相同"
+        );
+        assert_eq!(
+            cold.task().map(|state| state.outcome()),
+            Some(TaskOutcome::Unverified),
+            "冷载也必须看到这次写入"
+        );
+        drop(cold);
+        drop(store);
         std::fs::remove_dir_all(root).unwrap();
     }
 }

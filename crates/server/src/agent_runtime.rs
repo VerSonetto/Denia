@@ -8,7 +8,7 @@ use async_trait::async_trait;
 use denia_core::{
     config::ModelSelection,
     session::{GoalOp, SessionEnvelope, SessionEvent, SubagentDescriptor, TurnEndReason},
-    task::{StaleReason, TaskOutcome, TaskState, TaskStatus, ValidationVerdict, VerificationState},
+    task::{StaleReason, TaskState, ValidationVerdict, VerificationState},
 };
 use denia_tools::{ToolContext, capabilities::AgentRuntime};
 use serde::{Deserialize, Serialize};
@@ -1576,7 +1576,7 @@ pub enum TerminalOutcome {
     Completed,
     /// 失败:本轮以错误 / 死循环 / 输出预算耗尽结束,或账本上的结论是验收失败。
     Failed,
-    /// 没有正常终态(被取消 / 中断 / 无终态事件)或账本标记外部受阻:需要父代理处置。
+    /// 没有正常终态(被取消 / 中断 / 无终态事件):需要父代理处置。
     NeedsDecision,
 }
 
@@ -1599,8 +1599,6 @@ pub enum TerminalBasis {
     HostVerified,
     /// 只有子代理自己的轮次终态(它最后那句话);宿主拿不到可核验的结论。
     SelfReported,
-    /// 宿主证据:账本标记外部受阻。
-    HostBlocked,
     /// 本轮被取消 / 中断(含崩溃孤儿轮次的合成闭合)。
     Interrupted,
     /// 子会话里没有终态事件。
@@ -1612,7 +1610,6 @@ impl TerminalBasis {
         match self {
             Self::HostVerified => "host_verified",
             Self::SelfReported => "self_reported",
-            Self::HostBlocked => "host_blocked",
             Self::Interrupted => "interrupted",
             Self::NoTerminalEvent => "no_terminal_event",
         }
@@ -1631,8 +1628,8 @@ pub struct TerminalState {
     pub basis: TerminalBasis,
     /// 子会话轮次终态的中文标签(如"已完成");`None` = 没有终态事件。
     pub reason: Option<String>,
-    /// 宿主证据是否支持"完成"。只有账本上"结论通过"且"任务已收口且验收项被
-    /// 全部覆盖"同时成立才为 `true`。
+    /// 宿主证据是否支持"完成"。只有账本上绑当前 revision 的验收结论是通过时
+    /// 才为 `true`。
     pub host_verified: bool,
     /// `false` = 子代理仍在运行,以下终态取自当前日志快照,不是最终结果。
     pub finalized: bool,
@@ -1818,11 +1815,7 @@ fn subagent_handoff_at(
             .descriptor
             .effective_tools
             .as_ref()
-            .is_some_and(|tools| {
-                tools
-                    .iter()
-                    .any(|name| name == "run_checks" || name == "get_task")
-            })
+            .is_some_and(|tools| tools.iter().any(|name| name == "run_checks"))
     });
     let task = denia_session::task_projection::project_task_scoped(events, &session.task_fold_scope());
     let verification = task.as_ref().and_then(|state| match state.verification() {
@@ -1834,12 +1827,7 @@ fn subagent_handoff_at(
     let verification_note = verification_note(task.as_ref(), verification.as_ref(), ledger_tools);
     // 日志取一次、三处共用(终态 / 变更文件 / 产物),不重复扫描。
     let reason = last_turn_end_reason(events);
-    let terminal = terminal_state(
-        reason.as_ref(),
-        task.as_ref(),
-        verification.as_ref(),
-        running,
-    );
+    let terminal = terminal_state(reason.as_ref(), verification.as_ref(), running);
     // `denia-server` 不直接依赖 `denia-token-meter`:这里不写 `TurnTokenUsage`
     // 这个类型名,只读它暴露的五个分量与总数(`total()` 是计费口径的唯一来源,
     // 不在这里重算一份会漂移的总量)。
@@ -1852,7 +1840,7 @@ fn subagent_handoff_at(
         reasoning_tokens: raw_usage.reasoning_tokens,
         total_tokens: raw_usage.total(),
     };
-    let (changed_paths, changed_paths_note) = changed_paths(events, session, task.as_ref());
+    let (changed_paths, changed_paths_note) = changed_paths(events, session);
     let artifacts = artifacts(events);
     let advisories = advisories(&terminal, verification.as_ref(), &verification_note);
     SubagentHandoff {
@@ -1895,104 +1883,76 @@ fn last_turn_end_reason(events: &[SessionEnvelope]) -> Option<TurnEndReason> {
 /// 终态判定:账本证据优先于子代理自己的轮次终态。
 fn terminal_state(
     reason: Option<&TurnEndReason>,
-    task: Option<&TaskState>,
     verification: Option<&VerificationState>,
     running: bool,
 ) -> TerminalState {
+    // 结论与结局同源:账本上"可用结论"的唯一来源是宿主写入的验证结论,而
+    // `TaskState::outcome` 也由它算出 —— 所以"结论通过"与"结局通过"是同一件
+    // 事,不在这里再各判一遍。也正因如此,原来那条"账本标记外部受阻"的终态没有
+    // 依据了(记账层删掉后,没有任何写入点能产生"受阻")。
     let verdict = match verification {
         Some(VerificationState::Verified { verdict, .. }) => Some(*verdict),
         _ => None,
     };
-    let outcome_at_ledger = task.and_then(TaskState::outcome);
-    let (outcome, basis, host_verified, detail) = if matches!(
-        outcome_at_ledger,
-        Some(TaskOutcome::Blocked)
-    ) || matches!(
-        task.map(|state| state.status),
-        Some(TaskStatus::Blocked)
-    ) {
-        (
-            TerminalOutcome::NeedsDecision,
-            TerminalBasis::HostBlocked,
-            false,
-            format!(
-                "子代理在自己的任务账本上标记为外部受阻（{}），需要父代理处置。",
-                task.and_then(|state| state.blocked_reason.clone())
-                    .unwrap_or_else(|| "未给原因".to_string())
-            ),
-        )
+    // 失败型轮次终态:账本上的失败结论比子代理自己的话更硬。
+    let failure_basis = if verdict == Some(ValidationVerdict::Failed) {
+        TerminalBasis::HostVerified
     } else {
-        // 失败型轮次终态:账本上的失败结论比子代理自己的话更硬。
-        let failure_basis = if verdict == Some(ValidationVerdict::Failed) {
-            TerminalBasis::HostVerified
-        } else {
-            TerminalBasis::SelfReported
-        };
-        match reason {
-            Some(TurnEndReason::Completed) => match verdict {
-                Some(ValidationVerdict::Passed)
-                    if matches!(outcome_at_ledger, Some(TaskOutcome::Passed)) =>
-                {
-                    (
-                        TerminalOutcome::Completed,
-                        TerminalBasis::HostVerified,
-                        true,
-                        "子代理正常结束，且任务账本上绑当前 revision 的验收结论是通过（验收通过）。"
-                            .to_string(),
-                    )
-                }
-                Some(ValidationVerdict::Passed) => (
-                    TerminalOutcome::Completed,
-                    TerminalBasis::SelfReported,
-                    false,
-                    "子代理正常结束，账本上有通过的检查结论，但任务未收口或验收项未被全部覆盖，不构成验收通过。"
-                        .to_string(),
-                ),
-                Some(ValidationVerdict::Failed) => (
-                    TerminalOutcome::Failed,
-                    TerminalBasis::HostVerified,
-                    false,
-                    "子代理正常结束，但任务账本上绑当前 revision 的结论是验收失败。".to_string(),
-                ),
-                None => (
-                    TerminalOutcome::Completed,
-                    TerminalBasis::SelfReported,
-                    false,
-                    "子代理自称完成（本轮正常结束），宿主没有可核验的验证结论——这个\"完成\"只来自它自己的最后发言。"
-                        .to_string(),
-                ),
-            },
-            Some(TurnEndReason::MaxTokens) => (
-                TerminalOutcome::Failed,
-                failure_basis,
-                false,
-                "子代理输出预算耗尽，本轮没有正常结束。".to_string(),
+        TerminalBasis::SelfReported
+    };
+    let (outcome, basis, host_verified, detail) = match reason {
+        Some(TurnEndReason::Completed) => match verdict {
+            Some(ValidationVerdict::Passed) => (
+                TerminalOutcome::Completed,
+                TerminalBasis::HostVerified,
+                true,
+                "子代理正常结束，且任务账本上绑当前 revision 的验收结论是通过（验收通过）。"
+                    .to_string(),
             ),
-            Some(TurnEndReason::LoopDetected { repeats }) => (
+            Some(ValidationVerdict::Failed) => (
                 TerminalOutcome::Failed,
-                failure_basis,
+                TerminalBasis::HostVerified,
                 false,
-                format!("宿主检测到死循环（连续 {repeats} 次重复）后强制中断本轮。"),
-            ),
-            Some(TurnEndReason::Error { failure }) => (
-                TerminalOutcome::Failed,
-                failure_basis,
-                false,
-                format!("子代理本轮失败：{}（{}）。", failure.message, failure.code),
-            ),
-            Some(TurnEndReason::Aborted { .. }) | Some(TurnEndReason::Interrupted) => (
-                TerminalOutcome::NeedsDecision,
-                TerminalBasis::Interrupted,
-                false,
-                "子代理本轮被取消 / 中断，没有正常终态，需要父代理决定是否继续。".to_string(),
+                "子代理正常结束，但任务账本上绑当前 revision 的结论是验收失败。".to_string(),
             ),
             None => (
-                TerminalOutcome::NeedsDecision,
-                TerminalBasis::NoTerminalEvent,
+                TerminalOutcome::Completed,
+                TerminalBasis::SelfReported,
                 false,
-                "子会话里没有终态事件，无法判定子代理是否真的结束，需要父代理确认。".to_string(),
+                "子代理自称完成（本轮正常结束），宿主没有可核验的验证结论——这个\"完成\"只来自它自己的最后发言。"
+                    .to_string(),
             ),
-        }
+        },
+        Some(TurnEndReason::MaxTokens) => (
+            TerminalOutcome::Failed,
+            failure_basis,
+            false,
+            "子代理输出预算耗尽，本轮没有正常结束。".to_string(),
+        ),
+        Some(TurnEndReason::LoopDetected { repeats }) => (
+            TerminalOutcome::Failed,
+            failure_basis,
+            false,
+            format!("宿主检测到死循环（连续 {repeats} 次重复）后强制中断本轮。"),
+        ),
+        Some(TurnEndReason::Error { failure }) => (
+            TerminalOutcome::Failed,
+            failure_basis,
+            false,
+            format!("子代理本轮失败：{}（{}）。", failure.message, failure.code),
+        ),
+        Some(TurnEndReason::Aborted { .. }) | Some(TurnEndReason::Interrupted) => (
+            TerminalOutcome::NeedsDecision,
+            TerminalBasis::Interrupted,
+            false,
+            "子代理本轮被取消 / 中断，没有正常终态，需要父代理决定是否继续。".to_string(),
+        ),
+        None => (
+            TerminalOutcome::NeedsDecision,
+            TerminalBasis::NoTerminalEvent,
+            false,
+            "子会话里没有终态事件，无法判定子代理是否真的结束，需要父代理确认。".to_string(),
+        ),
     };
     TerminalState {
         outcome,
@@ -2018,17 +1978,16 @@ fn verification_note(
         (_, Some(VerificationState::Verified {
             revision,
             verdict,
-            covered,
+            fingerprints,
             at,
-            ..
         })) => format!(
-            "{}（revision {}，覆盖 {} 个验收项，时间戳 {}）",
+            "{}（revision {}，冻结 {} 个输入指纹，时间戳 {}）",
             match verdict {
                 ValidationVerdict::Passed => "验收通过",
                 ValidationVerdict::Failed => "验收失败",
             },
             revision.as_str(),
-            covered.len(),
+            fingerprints.len(),
             at
         ),
         (Some(state), _) => match state.verification() {
@@ -2039,10 +1998,10 @@ fn verification_note(
             VerificationState::Verified { .. } => "无：账本在，但当前 revision 上拿不到可用结论。".to_string(),
         },
         (None, _) if ledger_tools => {
-            "无：该子代理的授权里含 get_task / run_checks，但账本上没有任何记录，没有可核验的验证结论。"
+            "无：该子代理的授权里含 run_checks，但账本上没有任何记录，没有可核验的验证结论。"
                 .to_string()
         }
-        (None, _) => "无：该子代理没有任务账本（内置的 develop / explore / verify 授权里都不含 get_task / run_checks），天然不会产生验证结论。"
+        (None, _) => "无：该子代理没有任务账本（内置的 develop / explore / verify 授权里都不含 run_checks），天然不会产生验证结论。"
             .to_string(),
     }
 }
@@ -2057,7 +2016,6 @@ fn stale_reason_label(reason: &StaleReason) -> String {
         }
         StaleReason::NoCheckRun => "有记录但没有可用的检查运行（空报告）".to_string(),
         StaleReason::ForeignOrigin => "结论来自别的会话，不参与本会话的裁决".to_string(),
-        StaleReason::RevisionConflict => "换版复用了旧 revision id，当前版本身份不干净".to_string(),
     }
 }
 
@@ -2093,21 +2051,20 @@ fn advisories(
 
 /// 归集"该子会话写过的文件"与它的口径说明。
 ///
-/// 为什么是这个来源:宿主的变更账本(`RecordChange`)目前没有生产写入点,文件
-/// 历史后端只按会话持有 `tracked` 且不对外暴露 —— 所以从**子会话日志**归集:
+/// 为什么是这个来源:宿主的变更账本(原来的 `RecordChange`)已随记账层一起删除,
+/// 账本里不再有变更范围可读;文件历史后端只按会话持有 `tracked` 且不对外暴露
+/// —— 所以从**子会话日志**归集:
 /// `write_file` / `edit` 调用里带 `path` 且**执行成功**(对应 `ToolResult` 不是
 /// 错误)的那些。被拒的调用不算改动(否则只读子代理的幻觉写也会被报成更改),
 /// `bash` 的重定向 / 删除 / 脚本写入推断不出来(命令是任意程序),一律不计入
-/// —— 宁可少报也不猜。账本里已有的变更范围一并并入。
+/// —— 宁可少报也不猜。
 fn changed_paths(
     events: &[SessionEnvelope],
     session: &denia_session::Session,
-    task: Option<&TaskState>,
 ) -> (Vec<String>, String) {
     let cwd = PathBuf::from(session.header().cwd.clone());
     let mut paths: Vec<String> = Vec::new();
     let mut saw_log_write = false;
-    let mut from_ledger = 0usize;
     {
         let mut succeeded: HashSet<&str> = HashSet::new();
         for envelope in events {
@@ -2141,15 +2098,6 @@ fn changed_paths(
             push_unique(&mut paths, display_path(&cwd, &path));
         }
     }
-    if let Some(state) = task {
-        for change in &state.changes {
-            for fingerprint in &change.fingerprints {
-                if push_unique(&mut paths, fingerprint.path.clone()) {
-                    from_ledger += 1;
-                }
-            }
-        }
-    }
     let mut note = if events.is_empty() {
         "口径：会话日志为空（子会话没有任何事件）—— 无法判断落盘改动。".to_string()
     } else if saw_log_write {
@@ -2158,9 +2106,6 @@ fn changed_paths(
         "口径：子会话日志里没有执行成功的 write_file / edit 调用。".to_string()
     };
     note.push_str("bash 的重定向 / 删除 / 脚本写入推断不出来，不计入。");
-    if from_ledger > 0 {
-        note.push_str(&format!("另含任务账本上记录的 {from_ledger} 个变更文件。"));
-    }
     if paths.is_empty() {
         note.push_str("本字段为空 = 没有可识别的落盘改动，不是读取失败。");
     }
@@ -5665,16 +5610,15 @@ mod tests {
 
     /// 有账本且验收通过时,"宿主验证"必须为真 —— 与"自称完成"分开。
     ///
-    /// 这里直接给子会话塞账本事件(它们本就是宿主执行链的产物)再算交接信息,
+    /// 这里直接给子会话塞一条账本事件(它就是宿主执行链的产物)再算交接信息,
     /// 断言终态依据从 `self_reported` 变成 `host_verified`,且不再出现未验证提醒。
+    /// 账本现在只有验证结论这一类记录:当前 revision 跟着最新一条结论走,不再有
+    /// `open` / `close` 那样的开账与收口事件。
     #[tokio::test]
     async fn handoff_marks_host_verified_when_the_ledger_concludes_passed() {
         use denia_core::config::ModelSelection;
         use denia_core::session::{SessionEvent, SubagentDescriptor};
-        use denia_core::task::{
-            CheckRun, FileFingerprint, RequirementClaim, RequirementId, RequirementKind,
-            RevisionId, SourceRef, TaskId, TaskOp, ValidationResult,
-        };
+        use denia_core::task::{CheckRun, FileFingerprint, RevisionId, TaskOp, ValidationResult};
 
         let (state, ctx) = setup().await;
         let parent = ctx.session_id.clone().unwrap();
@@ -5697,42 +5641,6 @@ mod tests {
             path: "src/lib.rs".into(),
             digest: "d1".into(),
         };
-        let user = session
-            .append(SessionEvent::UserMessage {
-                text: "改完跑通测试再说完事".into(),
-                injected: false,
-                images: Vec::new(),
-                channel: None,
-            })
-            .unwrap();
-        session
-            .append(SessionEvent::Task {
-                op: TaskOp::Open {
-                    task_id: TaskId::new("task-1"),
-                    revision: RevisionId::new("rev-a"),
-                    goal: "改好解析器".into(),
-                    requirements: vec![RequirementClaim {
-                        id: RequirementId::new("req-1"),
-                        kind: RequirementKind::Acceptance,
-                        text: "cargo test 全绿".into(),
-                        source: SourceRef {
-                            session: None,
-                            seq: user.seq,
-                            time_ms: user.time,
-                            quote: Some("跑通测试".into()),
-                        },
-                    }],
-                },
-            })
-            .unwrap();
-        session
-            .append(SessionEvent::Task {
-                op: TaskOp::RecordChange {
-                    summary: "改了 src/lib.rs".into(),
-                    fingerprints: vec![fingerprint.clone()],
-                },
-            })
-            .unwrap();
         let result = ValidationResult::from_check_runs(
             RevisionId::new("rev-a"),
             vec![CheckRun {
@@ -5742,7 +5650,6 @@ mod tests {
                 workdir: ".".into(),
                 fingerprints: vec![fingerprint],
             }],
-            vec![RequirementId::new("req-1")],
             Some(child_id.clone()),
             1,
         )
@@ -5751,9 +5658,6 @@ mod tests {
             .append(SessionEvent::Task {
                 op: TaskOp::RecordValidation { result },
             })
-            .unwrap();
-        session
-            .append(SessionEvent::Task { op: TaskOp::Close })
             .unwrap();
         session
             .append(SessionEvent::TurnEnd {
@@ -5795,10 +5699,17 @@ mod tests {
             handoff.verification_note
         );
         assert!(handoff.advisories.is_empty(), "{:?}", handoff.advisories);
-        // 账本里记录的变更范围也并入 changedPaths,并在口径里注明来源。
-        assert!(handoff.changed_paths.contains(&"src/lib.rs".to_string()));
+        // 变更范围不再有账本来源(记账层已删):只从子会话日志归集。这里没有
+        // 成功的写调用,所以给空 + 口径,而不是为了填满从别处补一条。
         assert!(
-            handoff.changed_paths_note.contains("任务账本"),
+            handoff.changed_paths.is_empty(),
+            "{:?}",
+            handoff.changed_paths
+        );
+        assert!(
+            handoff
+                .changed_paths_note
+                .contains("没有执行成功的 write_file / edit"),
             "{}",
             handoff.changed_paths_note
         );

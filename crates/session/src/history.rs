@@ -1,4 +1,6 @@
 //! Session history responsibilities.
+use denia_core::task::TaskOp;
+
 use super::*;
 
 /// 收集一次任务操作里引用到的 revision id。
@@ -8,12 +10,10 @@ use super::*;
 /// 让旧分支的验证结论复活。
 fn collect_revision_ids(op: &TaskOp, out: &mut Vec<RevisionId>) {
     match op {
-        TaskOp::Open { revision, .. } | TaskOp::Revise { revision, .. } => {
-            push_unique_revision(out, revision)
-        }
-        TaskOp::RecordEvidence { evidence } => push_unique_revision(out, &evidence.revision),
         TaskOp::RecordValidation { result } => push_unique_revision(out, result.revision()),
-        _ => {}
+        // 旧日志里被裁掉的记账操作:不再贡献身份(当年的记账 id 已无对应语义),
+        // 旧的验证结论身份仍按上面的分支收。
+        TaskOp::Legacy => {}
     }
 }
 
@@ -78,9 +78,9 @@ pub fn build_subagent_seed(events: &[SessionEnvelope]) -> SubagentSeed {
                 mark("agent-inbox", &mut dropped)
             }
             SessionEvent::Goal { .. } => mark("goal-state", &mut dropped),
-            // 任务账本是父会话的验证结论与约束脉络;子代理重新开自己的账本,
-            // 不继承父的未决问题、待完成与验收结论(继承过来的结论也会被
-            // `TaskState::verification` 按来源挡掉,这里直接不让它进种子)。
+            // 任务验证账本是父会话的验收结论;子代理重新开始自己的取证,
+            // 不继承父的验证结论(就算混进来也会被 `TaskState::verification`
+            // 按来源挡掉,这里直接不让它进种子)。
             SessionEvent::Task { .. } => mark("task-ledger", &mut dropped),
             SessionEvent::PermissionMode { .. } => mark("permission-state", &mut dropped),
             SessionEvent::AgentPreset { .. } => mark("agent-preset", &mut dropped),

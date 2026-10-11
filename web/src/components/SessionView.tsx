@@ -85,7 +85,6 @@ export function SessionView({
   onAskAnswer,
   onAskCancel,
   onGoalTouch,
-  onTaskTouch,
 }: {
   id: string
   /** 内容视图:对话 transcript 或轨迹台账(共用同一事件流订阅)。 */
@@ -119,11 +118,6 @@ export function SessionView({
   onAskCancel?: (requestId: string) => void
   /** 目标状态可能变化(goal 事件 / 轮次闭合 / 快照重建):父级刷新 GoalBar。 */
   onGoalTouch?: () => void
-  /**
-   * 任务账本可能变化(task 事件 / 轮次闭合):父级重拉只读任务视图。
-   * 任务状态不进对话流(见 fold.ts):它由服务端折叠裁决,重拉即可。
-   */
-  onTaskTouch?: () => void
   /**
    * 压缩进行中:传发起时刻(epoch ms)则在对话流尾部挂占位行,传 null 移除。
    * 由父级驱动 —— 压缩请求在父级发出,这里只负责把状态画出来。
@@ -163,8 +157,6 @@ export function SessionView({
   todosChangeRef.current = onTodosChange
   const goalTouchRef = useRef(onGoalTouch)
   goalTouchRef.current = onGoalTouch
-  const taskTouchRef = useRef(onTaskTouch)
-  taskTouchRef.current = onTaskTouch
   const pendingCountRef = useRef(pendingMessages.length)
   pendingCountRef.current = pendingMessages.length
 
@@ -295,9 +287,6 @@ export function SessionView({
         publishTodos(snapshot)
         settlePending(snapshot)
         goalTouchRef.current?.()
-        // 与 goal 同款:快照重建(重连 / 重载)也重拉一次,断流期间落账的
-        // 任务状态不会停在旧结论上。
-        taskTouchRef.current?.()
         setLoading(false)
       },
       onEnvelope: (envelope) => {
@@ -312,10 +301,6 @@ export function SessionView({
         // 目标状态或轮次记账变化:父级重拉服务端权威的 goal 视图。
         if (envelope.type === 'goal' || envelope.type === 'turn-end') {
           goalTouchRef.current?.()
-        }
-        // 任务账本变化:同样的口径重拉只读视图(状态与裁决只在服务端折叠)。
-        if (envelope.type === 'task' || envelope.type === 'turn-end') {
-          taskTouchRef.current?.()
         }
         scheduleFlush()
       },

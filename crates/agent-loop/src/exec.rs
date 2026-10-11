@@ -389,9 +389,7 @@ fn decide_for(
     let mode = state.permission_mode();
     // 只读档 bash 完全不开放(schema 已收窄,这里兜底幻觉调用/绕过面):
     // 读命令也不放行,与工具面口径一致。
-    if mode.is_read_only()
-        && matches!(call.name.as_str(), "bash" | "job_start" | "run_checks")
-    {
+    if mode.is_read_only() && matches!(call.name.as_str(), "bash" | "job_start" | "run_checks") {
         return Decision::Deny(
             "当前为只读模式,跑命令不可用(包括 run_checks 的检查命令);请改用 ls/glob/grep/read_file 做阅读与检索,或请用户切换权限模式。".into(),
         );
@@ -402,7 +400,7 @@ fn decide_for(
         && child.permission_ceiling == denia_core::subagent::PermissionCeiling::ReadOnly
         && matches!(
             call.name.as_str(),
-            "write_file" | "edit" | "bash" | "job_start" | "todo_write" | "update_task" | "run_checks"
+            "write_file" | "edit" | "bash" | "job_start" | "todo_write" | "run_checks"
         )
     {
         return Decision::Deny(
@@ -493,10 +491,6 @@ fn classify_call(
         // 启发式(取不到命令会落到读类放行)。直接按"有写副作用的命令"
         // 归类:自动编辑档弹审批,只读/计划档拒绝。
         "run_checks" => ActionClass::BashWrite,
-        // 账本写是**会话内**写(不改工作区文件):按写类收窄,只读与计划档
-        // 拒绝;自动编辑档放行(与 todo_write 同性质,但它确实改状态,
-        // 所以进了写分支而不是读分支)。
-        "update_task" => ActionClass::WriteInside,
         _ => ActionClass::Read,
     }
 }
@@ -596,8 +590,8 @@ fn dispatch_tool_call(
                 let used = goal_session.goal_tokens_used().unwrap_or(0);
                 Some((goal, used))
             })),
-            // 任务账本的读写入口:折叠在会话日志锁内跑(零拷贝),工具层不
-            // 读日志、也不缓存第二份状态;id 由宿主分配(不可复用)。
+            // 任务验证账本的取证入口:折叠在会话日志锁内跑(零拷贝),工具层不
+            // 读日志、也不缓存第二份状态;revision 由宿主分配(不可复用)。
             task_ledger: Some(Arc::new(SessionTaskLedger {
                 session: ledger_session,
                 // 作用域(会话身份 + rewind 报废集合)只有会话自己知道;
@@ -619,8 +613,8 @@ fn dispatch_tool_call(
     })
 }
 
-/// 会话任务账本宿主:把折叠快照与 id 分配交给工具面
-///(`get_task` / `update_task` / `run_checks`)。
+/// 会话任务验证账本宿主:把折叠快照与新的 revision 身份交给工具面
+///(`run_checks`)。
 ///
 /// 折叠是纯函数且只读,所以直接在会话日志锁内跑(零拷贝);工具层拿到的
 /// 是快照,不是会话句柄 —— 账本的真值始终只有 `task_projection` 一处。
@@ -637,52 +631,8 @@ impl denia_tools::TaskLedgerHost for SessionTaskLedger {
             .with_events(|events| denia_session::project_task_scoped(events, scope))
     }
 
-    fn new_task_id(&self) -> denia_core::task::TaskId {
-        denia_session::fresh_task_id()
-    }
-
     fn new_revision_id(&self) -> denia_core::task::RevisionId {
         denia_session::fresh_revision_id()
-    }
-
-    fn new_note_id(&self) -> denia_core::task::NoteId {
-        denia_session::fresh_note_id()
-    }
-
-    fn new_requirement_id(&self) -> denia_core::task::RequirementId {
-        denia_session::fresh_requirement_id()
-    }
-
-    /// 引用用户原话:在日志里找**非注入**用户消息里的这段摘录,给出稳定
-    /// 坐标(seq 记录时刻、time_ms 跨 fork 重编号仍稳定的身份)。
-    ///
-    /// 核不到就返回 `None`:要求会被拒绝、事实会被折成假设 —— 引用能不能
-    /// 核对只能由看到日志的一侧判,模型自己填的坐标不作数。
-    fn user_reference(&self, quote: &str) -> Option<denia_core::task::SourceRef> {
-        let quote = quote.trim();
-        if quote.is_empty() {
-            return None;
-        }
-        let session = self.session.id().to_string();
-        self.session.with_events(|events| {
-            events
-                .iter()
-                .rev()
-                .find(|envelope| match &envelope.event {
-                    SessionEvent::UserMessage {
-                        text,
-                        injected: false,
-                        ..
-                    } => text.contains(quote),
-                    _ => false,
-                })
-                .map(|envelope| denia_core::task::SourceRef {
-                    session: Some(session.clone()),
-                    seq: envelope.seq,
-                    time_ms: envelope.time,
-                    quote: Some(quote.to_string()),
-                })
-        })
     }
 }
 

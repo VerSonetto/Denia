@@ -61,7 +61,7 @@ pub use prompt::{
     shipped_with_persona_and_browser_and_ask,
 };
 pub use shell_session::{Captured, PersistentShell, ShellHub};
-pub use task::{GetTaskTool, RunChecksTool, TaskLedgerHost, UpdateTaskTool};
+pub use task::{RunChecksTool, TaskLedgerHost};
 pub use todo::TodoWriteTool;
 pub use web_fetch::WebFetchTool;
 
@@ -142,11 +142,11 @@ pub struct ToolContext {
     /// 会话目标状态。返回 `(当前目标快照, 激活后的 token 用量)`。
     pub goal_reader:
         Option<Arc<dyn Fn() -> Option<(denia_core::session::GoalState, u64)> + Send + Sync>>,
-    /// 会话任务账本的宿主接口(`get_task` / `update_task` / `run_checks` 用)。
+    /// 会话任务验证账本的宿主接口(`run_checks` 用)。
     ///
-    /// `None` = 当前调用没有归属的代理会话(单测、宿主配置面):三个工具会
-    /// 以"读不到账本"显式拒绝,而不是静默把操作落到别处。折叠快照与 id
-    /// 分配都由宿主给([`TaskLedgerHost`]),工具层不读会话日志。
+    /// `None` = 当前调用没有归属的代理会话(单测、宿主配置面):该工具会
+    /// 以"读不到账本"显式拒绝,而不是静默把结论落到别处。折叠快照与新的
+    /// revision 身份都由宿主给([`TaskLedgerHost`]),工具层不读会话日志。
     pub task_ledger: Option<Arc<dyn TaskLedgerHost>>,
     /// 会话共享的文件读取状态表。
     ///
@@ -341,8 +341,6 @@ pub fn default_registry() -> ToolRegistry {
     registry.register(Arc::new(ExitPlanTool));
     registry.register(Arc::new(GetGoalTool));
     registry.register(Arc::new(UpdateGoalTool));
-    registry.register(Arc::new(GetTaskTool::default()));
-    registry.register(Arc::new(UpdateTaskTool::default()));
     registry.register(Arc::new(RunChecksTool::default()));
     registry.register(Arc::new(WebFetchTool::new()));
     registry

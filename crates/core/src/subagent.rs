@@ -543,12 +543,11 @@ pub enum ToolCapability {
 /// 只对"需要特殊准入"的名字逐项列举；未知名字归 [`ToolCapability::Other`]，
 /// 仍受父级授权与权限引擎约束。
 ///
-/// 任务账本三件套的分工：`get_task` 是读（只读账本），`update_task` 是写
-/// （改的是**本会话自己**的账本），`run_checks` 是 `Shell`（它真的启动进程，
-/// 与 `bash` 同性质）。三者都**不**归 [`ToolCapability::SessionControl`]：
-/// 那个分类被 [`child_hard_denied`] 硬禁，而账本是每个会话自己的工作记录
-/// ——子代理写的是它自己的账本，碰不到父会话的目标与收口，所以按父级授权
-/// 使用即可，不必硬禁。
+/// 任务账本里现存的工具只有 `run_checks`，归 [`ToolCapability::Shell`]：
+/// 它真的启动进程，与 `bash` 同性质。它**不**归
+/// [`ToolCapability::SessionControl`]：那个分类被 [`child_hard_denied`]
+/// 硬禁，而账本是每个会话自己的工作记录——子代理写的是它自己的账本，碰不到
+/// 父会话的目标与收口，所以按父级授权使用即可，不必硬禁。
 pub fn tool_capability(name: &str) -> ToolCapability {
     if name.starts_with("mcp__") || name == "mcp_list" {
         return ToolCapability::Mcp;
@@ -563,11 +562,12 @@ pub fn tool_capability(name: &str) -> ToolCapability {
         "bash" | "job_start" | "job_output" | "job_kill" | "job_list" | "run_checks" => {
             ToolCapability::Shell
         }
-        "write_file" | "edit" | "todo_write" | "update_task" => ToolCapability::Write,
+        "write_file" | "edit" | "todo_write" => ToolCapability::Write,
         "ask" => ToolCapability::Interaction,
         "browser" => ToolCapability::Browser,
-        "read_file" | "read_tool_output" | "ls" | "glob" | "grep" | "skill" | "web_fetch"
-        | "get_task" => ToolCapability::Read,
+        "read_file" | "read_tool_output" | "ls" | "glob" | "grep" | "skill" | "web_fetch" => {
+            ToolCapability::Read
+        }
         _ => ToolCapability::Other,
     }
 }

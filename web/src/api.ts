@@ -4,14 +4,11 @@ import type {
   AskAnswer,
   CredentialInfo,
   DiscoveredModel,
-  EvidenceSource,
-  LedgerOverflow,
   ModelCatalog,
   ModelSelection,
   PermissionMode,
   ProfileWriteScope,
   ProviderInfo,
-  RequirementKind,
   SessionEnvelope,
   SessionHeader,
   SessionSummary,
@@ -24,11 +21,7 @@ import type {
   SubagentProfile,
   SubagentProfileView,
   SubagentToolsView,
-  TaskOutcome,
-  TaskStatus,
   TokenUsage,
-  ValidationVerdict,
-  VerificationState,
   WorkspaceRecord,
   WireProtocol,
 } from './types'
@@ -1281,116 +1274,6 @@ export function goalAction(
       echoText,
     }),
   })
-}
-
-/* ---- 任务账本(只读投影) ----
- * 服务端 `GET /api/sessions/{id}/task` 的展示形状。裁决与结局都不在这里算:
- * `verification` / `outcome` 是折叠出来的结论,前端只负责画出来 —— 没有任何
- * 写入口(状态由模型用 update_task 声明,结论由 run_checks 跑出来)。
- */
-
-/** 一条要求 / 验收项(`kind === 'acceptance'` 才是完成判定要对上的那类)。 */
-export interface TaskRequirement {
-  id: string
-  revision: string
-  kind: RequirementKind
-  text: string
-  declaredAt: number
-}
-
-/** 未决问题的摘要条目(正文级内容留在会话日志里)。 */
-export interface TaskClaim {
-  id: string
-  text: string
-  at: number
-}
-
-/** 一条执行证据(工具调用 / 检查运行 / 文件读取)。 */
-export interface TaskEvidenceEntry {
-  id: string
-  revision: string
-  source: EvidenceSource
-  summary: string
-  /** 这条证据观察到的工作区输入指纹条数(指纹清单本身留在日志里)。 */
-  fingerprintCount: number
-  originSession?: string
-  at: number
-}
-
-/** 一次检查命令的运行记录:命令、退出码与工作目录都冻结。 */
-export interface TaskCheckRun {
-  command: string
-  /** 缺失 = 没跑起来(启动失败 / 超时 / 取消),按未通过计。 */
-  exitCode?: number
-  expectExitCode: number
-  passed: boolean
-  workdir: string
-}
-
-/** 一次验证结论(由检查命令的退出码算出,不是可填字段)。 */
-export interface TaskValidation {
-  revision: string
-  /** `null` = 回放出来的空报告,不构成结论。 */
-  verdict?: ValidationVerdict | null
-  checks: TaskCheckRun[]
-  /** 本次验证声明覆盖的验收项 id。 */
-  covered: string[]
-  fingerprintCount: number
-  originSession?: string
-  at: number
-}
-
-/** 一版 revision 的审计记录(`ordinal` 只用于展示,身份是 `id`)。 */
-export interface TaskRevisionRecord {
-  id: string
-  ordinal: number
-  reason: string
-  at: number
-}
-
-/** 本视图没有展开正文的集合条数(正文留在会话日志里)。 */
-export interface TaskCounts {
-  facts: number
-  assumptions: number
-  failedAttempts: number
-  changes: number
-}
-
-/** 当前会话的任务账本投影。 */
-export interface TaskSnapshot {
-  id: string
-  revision: string
-  status: TaskStatus
-  /** 结局由折叠裁决;`null` = 仍在进行(尚未收口)。 */
-  outcome: TaskOutcome | null
-  /** 当前 revision 的裁决,**含"为什么不是通过"的原因**。 */
-  verification: VerificationState
-  goal: string
-  blockedReason?: string
-  /** 拒绝过复用旧 revision id 的换版:当前版本身份不干净,结论一律不可信。 */
-  revisionConflict: boolean
-  revisionRejected: number
-  revisions: TaskRevisionRecord[]
-  requirements: TaskRequirement[]
-  openQuestions: TaskClaim[]
-  remaining: string[]
-  evidence: TaskEvidenceEntry[]
-  validations: TaskValidation[]
-  counts: TaskCounts
-  /** 有界保存的丢弃计数:超限被丢掉的条数必须看得见。 */
-  overflow: LedgerOverflow
-  createdAt: number
-  updatedAt: number
-}
-
-/** 顶层信封:`task` 为 `null` = 会话里没有任务事件(旧会话、普通问答)。 */
-export interface TaskView {
-  task: TaskSnapshot | null
-}
-
-/** 读取当前会话的任务账本投影(只读;没有任务事件时 `task` 为 null)。 */
-export function getTask(id: string): Promise<TaskView> {
-  return http(`/api/sessions/${encodeURIComponent(id)}/task`)
 }
 
 /** 一个 MCP 工具(服务器声明 + 是否交给模型)。 */

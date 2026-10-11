@@ -1,31 +1,45 @@
-//! 任务账本的纯折叠与完成裁决(共享给 server / 工具面 / 前端快照)。
+//! 任务验证账本的纯折叠与完成裁决(共享给宿主、工具面与前端快照)。
 //!
-//! 与 `apply_goal_op`(goal 状态机)同一套路,只是账本字段更多、还多一层
-//! "证据能不能支撑结论"的裁决。三条不变量:
+//! 账本只剩下"有证据的完成判定"这一条链路:宿主跑检查、写下结论,折叠层按
+//! 结论算结局。四条不变量:
 //!
-//! 1. **纯函数、确定性、可重放**:只读 `&[SessionEnvelope]`,不读时钟、不取
-//!    随机数、不看磁盘;同一份日志折叠两次逐字段相等。时间字段一律取事件时间。
-//! 2. **revision 不复用**:换版事件里的 id 必须是新的(既不在本任务用过的
-//!    revision 历史里,也不在宿主声明的 [`TaskFoldScope::retired_revisions`]
-//!    里)。复用即拒绝换版,并把当前版本标成 [`TaskState::revision_conflict`] ——
-//!    当前结论一律作废,宁可判"未验证"。
+//! 1. **纯函数、确定性、可重放**:只读 `&[SessionEnvelope]` 与折叠作用域,
+//!    不读时钟、不取随机数、不看磁盘;同一份日志折叠两次逐字段相等。时间字段
+//!    一律取事件时间。
+//! 2. **revision 不复用**:当前 revision 取最新一条验证结论绑定的身份;宿主
+//!    换版本(包括 rewind 之后重新推进)必须分配新的 id。被 rewind 物理截断
+//!    掉的旧身份由宿主交出的 [`TaskFoldScope::retired_revisions`] 挡掉 ——
+//!    日志里查不到它们,只有报废集合还记得,落在里面的当前版本结论一律作废。
 //! 3. **缺证据不得通过**:结局由 [`TaskState::outcome`] 算;没有绑在当前
 //!    revision、来源属于本会话、且冻结指纹仍然成立的验证结论,就只能是
 //!    "未验证完成"。折叠层没有任何入口能写"通过"。
+//! 4. **失效也折自日志,不来自磁盘**:结论绑的是那次运行看到的那批字节的摘要,
+//!    "之后又有人写过它"同样从日志里读 —— 折叠看工具调用
+//!    ([`SessionEvent::ToolCall`])里 `edit` / `write_file` 的目标路径,与结论
+//!    冻结的输入路径比对,命中就让那条结论失效(失效表示复用
+//!    [`StaleReason::InputsChanged`],没有第二套判定)。
 //!
-//! 本模块还提供宿主侧的 id 分配助手([`fresh_task_id`] 等)。它们**不属于**
+//!    **覆盖范围就是这么窄,这是刻意的**:折叠是纯函数,读不到文件系统,也不
+//!    知道工作目录,只有参数里带得出目标路径的工具能在这里留痕。`bash` 里改
+//!    文件、外部编辑器、构建脚本产物**不在覆盖范围** —— 它们改没改、改了哪个
+//!    文件,日志里无从判断。别把这里当成"文件变了就一定认得出来":经工具层
+//!    写入之外的那条防线是工具侧"写前内容指纹"(改写前校验磁盘上的字节与上次
+//!    读到的概览一致),与折叠层这条各管一段,不互相冒充。
+//!
+//! 记账层(`open` / `amend` / `close` 那批模型声明意图的操作)已经裁掉:它们
+//! 在旧日志里由 [`denia_core::task::TaskOp::Legacy`] 兜底反序列化,折叠时被
+//! 忽略 —— 读得进来,但不进裁决。当年由 `RecordChange` 事件写入的指纹基线也
+//! 随之消失,现在改由折叠从工具调用推导(见上面的第 4 条)。
+//!
+//! 本模块还提供宿主侧的 id 分配助手([`fresh_revision_id`])。它**不属于**
 //! 折叠:折叠只读事件里的 id,从不自己造一个 —— 这样重放才确定。
 
 use std::collections::HashSet;
 
 use denia_core::session::{SessionEnvelope, SessionEvent};
 use denia_core::task::{
-    Assumption, Evidence, EvidenceId, Fact, FactCitation, FailedAttempt, FileFingerprint,
-    LedgerOverflow, MAX_ASSUMPTIONS, MAX_CHANGES, MAX_EVIDENCE, MAX_FACTS, MAX_FAILED_ATTEMPTS,
-    MAX_OPEN_QUESTIONS, MAX_REMAINING, MAX_REQUIREMENTS, MAX_REVISIONS, MAX_VALIDATIONS, NoteClaim,
-    NoteId, OPEN_REVISION_REASON, OpenQuestion, Requirement, RequirementClaim, RequirementId,
-    RevisionId, RevisionRecord, SourceRef, TaskId, TaskOp, TaskOutcome, TaskState, TaskStatus,
-    ValidationResult, truncate_claim, upsert_fingerprint,
+    FileFingerprint, LedgerOverflow, MAX_VALIDATIONS, RevisionId, TaskOp, TaskOutcome, TaskState,
+    ValidationResult, upsert_fingerprint,
 };
 
 /// 折叠作用域:折叠方是谁,以及 rewind 之后哪些 revision 已经报废。
@@ -36,12 +50,11 @@ pub struct TaskFoldScope {
     /// 当前裁决 —— 子代理不继承父的验收结论。
     pub session: Option<String>,
     /// 已报废的 revision id。rewind 物理截断日志后,这些 id 在日志里已经不存在,
-    /// 只有宿主还记得(回退审计/内存);折叠再看到它们就拒绝换版,防止旧分支的
-    /// 验证结论被"复用同一个 id"带回新分支。
+    /// 只有宿主还记得(回退审计/内存);落在这里的身份上的结论一律不继承。
     pub retired_revisions: Vec<RevisionId>,
 }
 
-/// 折叠整份日志得到当前任务账本。`None` = 日志里没有任务事件(旧会话、
+/// 折叠整份日志得到当前验证账本。`None` = 日志里没有任务事件(旧会话、
 /// 普通问答会话)—— 旧日志不阻塞,也不被推导出 verified。
 pub fn project_task(events: &[SessionEnvelope]) -> Option<TaskState> {
     project_task_scoped(events, &TaskFoldScope::default())
@@ -49,16 +62,16 @@ pub fn project_task(events: &[SessionEnvelope]) -> Option<TaskState> {
 
 /// [`project_task`] 的带作用域版本(会话身份 + 已报废 revision)。
 pub fn project_task_scoped(events: &[SessionEnvelope], scope: &TaskFoldScope) -> Option<TaskState> {
-    let mut folder = Folder::new(events, scope);
+    let mut folder = Folder::new(scope);
     for envelope in events {
         folder.apply(envelope);
     }
     folder.state
 }
 
-/// 折叠出任务结局;`None` = 没有任务,或任务仍在进行(尚未收口)。
+/// 折叠出任务结局;`None` = 日志里没有任务事件(没有可裁决的账本)。
 pub fn project_task_outcome(events: &[SessionEnvelope]) -> Option<TaskOutcome> {
-    project_task(events).and_then(|state| state.outcome())
+    project_task(events).map(|state| state.outcome())
 }
 
 /// [`project_task_outcome`] 的带作用域版本。
@@ -66,54 +79,120 @@ pub fn project_task_outcome_scoped(
     events: &[SessionEnvelope],
     scope: &TaskFoldScope,
 ) -> Option<TaskOutcome> {
-    project_task_scoped(events, scope).and_then(|state| state.outcome())
+    project_task_scoped(events, scope).map(|state| state.outcome())
 }
 
-/// 宿主侧 id 分配:任务 id。
+/// 折叠输入:折叠器**只读**这些事件,宿主(冷载切片、整份重放)必须用同一口径
+/// 构建输入 —— 口径只此一处,冷/热两条路径不会各自漂移。
 ///
-/// 稳定、不随 rewind / 分支改变;折叠与证据引用只认它。uuid v4 不依赖日志
-/// 状态,所以 rewind 之后不会与截断掉的旧身份撞号。
-pub fn fresh_task_id() -> TaskId {
-    TaskId::new(format!("task-{}", uuid::Uuid::new_v4()))
+/// 返回的是**归约后**的事件:写入类工具调用只保留目标路径,参数正文(`write_file`
+/// 的整份内容可能有几十 KB)对折叠没用,而切片是全会话驻留的。
+///
+/// 为什么写入类工具调用必须进折叠输入:验证结论的失效判定要看“结论之后有谁
+/// 写过它冻结的输入”(见 `Folder::note_tool_write`)。切片里没有这类事件,冷载
+/// 就会折出和热态相反的结局。
+#[must_use]
+pub fn task_fold_input(envelope: &SessionEnvelope) -> Option<SessionEnvelope> {
+    match &envelope.event {
+        SessionEvent::Task { .. } => Some(envelope.clone()),
+        SessionEvent::ToolCall {
+            turn,
+            step,
+            call_id,
+            name,
+            arguments,
+        } => {
+            let path = write_target(name, arguments)?;
+            Some(SessionEnvelope {
+                seq: envelope.seq,
+                time: envelope.time,
+                event: SessionEvent::ToolCall {
+                    turn: *turn,
+                    step: *step,
+                    call_id: call_id.clone(),
+                    name: name.clone(),
+                    arguments: serde_json::json!({ "path": path }).to_string(),
+                },
+            })
+        }
+        _ => None,
+    }
 }
 
 /// 宿主侧 id 分配:revision id。
 ///
-/// **必须**从不会复用的来源取。任务要求/验收项一变就换一版,而 rewind 会
-/// 把旧分支的事件整段截掉:如果新版本沿用旧 id,旧分支的验证结论就会"对上号"
-/// 被当成当前结论。折叠端另有一道拒绝复用旧 id 的防线,但那是兜底,不是许可。
+/// **必须**从不会复用的来源取。换版本(用户加了要求 / rewind 之后重新推进)
+/// 就要换一版,而 rewind 会把旧分支的事件整段截掉:如果新版本沿用旧 id,旧分支
+/// 的验证结论就会"对上号"被当成当前结论。报废集合是兜底防线,不是复用许可。
 pub fn fresh_revision_id() -> RevisionId {
     RevisionId::new(format!("rev-{}", uuid::Uuid::new_v4()))
 }
 
-/// 宿主侧 id 分配:证据 id(证据关联用它,不用会被 fork 重编号的 seq)。
-pub fn fresh_evidence_id() -> EvidenceId {
-    EvidenceId::new(format!("ev-{}", uuid::Uuid::new_v4()))
+/// 会改写工作区文件、且参数里带得出目标路径的工具。只有这两个:其余工具要么
+/// 不改文件,要么改文件也说不清改了哪个(`bash`)。
+const WRITE_TOOLS: &[&str] = &["edit", "write_file"];
+
+/// 写入类工具参数里的路径键:`path` 优先,其后是工具侧的宽容别名口径
+/// (模型偶尔把路径放在 `file` / `file_path` 里,见 `denia-tools` 的参数解析)。
+const PATH_KEYS: &[&str] = &["path", "file", "filepath", "filename", "file_path"];
+
+/// 工具层写入留在指纹基线里的记号。
+///
+/// 折叠不读文件系统,算不出写后内容的真实摘要;能确定的只有"这个路径现在的内容
+/// 与冻结时不同"(严格说未必 —— 把同样的字节再写一遍也会走到这里,那时会保守地
+/// 误判失效,方向是安全的:宁可要求重新取证,也不放过一次真改动)。宿主侧的真实
+/// 摘要是 16 位十六进制,这个记号不可能与之相撞,于是
+/// [`TaskState::paths_changed_since`] 一律把它判成"已改"。
+const TOOL_WRITE_DIGEST: &str = "written-by-tool-layer";
+
+/// 从工具调用参数里取写入的目标路径。
+///
+/// 参数是模型给的原文(未必严格符合 schema),所以按工具侧的宽容口径来:取第一个
+/// JSON 值,`path` 优先,其次常见别名。取不到就返回 `None` —— 认不出的调用宁可
+/// 不记账,也不猜一个路径出来。
+///
+/// 口径对齐只做纯字符串能做的两件事:抹平反斜杠与 `./` 前缀(冻结侧记的是工作区
+/// 内的相对路径、分隔符统一为 `/`)。真正的路径解析(绝对路径 ↔ 相对、大小写、
+/// `..`、软链接)需要 cwd 与文件系统,这里不做 —— 认不出就是这条防线的已知边界。
+/// 写入类工具调用的目标路径;不是写入类工具就返回 `None`。折叠用它的两处
+/// ([`task_fold_input`] 与 `Folder::note_tool_write`)共享同一个“算不算写入”的口径。
+fn write_target(name: &str, arguments: &str) -> Option<String> {
+    if !WRITE_TOOLS.contains(&name) {
+        return None;
+    }
+    written_path(arguments)
 }
 
-/// 宿主侧 id 分配:要求/验收项 id(验证结论按它声明覆盖范围)。
-pub fn fresh_requirement_id() -> RequirementId {
-    RequirementId::new(format!("req-{}", uuid::Uuid::new_v4()))
-}
-
-/// 宿主侧 id 分配:断言 id(未决问题按它被关闭)。
-pub fn fresh_note_id() -> NoteId {
-    NoteId::new(format!("note-{}", uuid::Uuid::new_v4()))
+fn written_path(arguments: &str) -> Option<String> {
+    let value = serde_json::Deserializer::from_str(arguments.trim())
+        .into_iter::<serde_json::Value>()
+        .next()?
+        .ok()?;
+    let raw = PATH_KEYS
+        .iter()
+        .find_map(|key| value.get(*key).and_then(serde_json::Value::as_str))?;
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let normalized = trimmed.replace('\\', "/");
+    Some(match normalized.strip_prefix("./") {
+        Some(rest) => rest.to_string(),
+        None => normalized,
+    })
 }
 
 /// 折叠器:一缕事件一条状态。字段都是折叠期的簿记,不落盘。
 struct Folder<'a> {
-    events: &'a [SessionEnvelope],
     scope: &'a TaskFoldScope,
-    /// 已经用过的 revision id(含宿主声明报废的):换版必须换新 id。
+    /// 已报废的 revision id:落在里面的身份上的结论不继承。
     retired: HashSet<RevisionId>,
     state: Option<TaskState>,
 }
 
 impl<'a> Folder<'a> {
-    fn new(events: &'a [SessionEnvelope], scope: &'a TaskFoldScope) -> Self {
+    fn new(scope: &'a TaskFoldScope) -> Self {
         Self {
-            events,
             scope,
             retired: scope.retired_revisions.iter().cloned().collect(),
             state: None,
@@ -121,415 +200,89 @@ impl<'a> Folder<'a> {
     }
 
     fn apply(&mut self, envelope: &SessionEnvelope) {
-        if let SessionEvent::Task { op } = &envelope.event {
-            self.apply_op(op, envelope.time);
+        match &envelope.event {
+            SessionEvent::Task { op } => self.apply_op(op, envelope.time),
+            SessionEvent::ToolCall {
+                name, arguments, ..
+            } => self.note_tool_write(name, arguments),
+            _ => {}
         }
+    }
+
+    /// 记下一次**经工具层**的文件写入(`edit` / `write_file`)。
+    ///
+    /// 这是"结论绑字节"那条保证在生产侧唯一的写入点:`RecordChange` 事件(当年的
+    /// 指纹基线生产者)已经裁掉,改成从会话日志里已有的工具调用推导。判定本身不在
+    /// 这里做 —— 只把"这个路径被写过"写进基线,失效与否仍由
+    /// [`TaskState::paths_changed_since`] 拿结论冻结的输入路径去比。
+    ///
+    /// 两个刻意的取舍:
+    /// - **只看路径,不看内容**。折叠读不到写后的字节(纯函数、不读盘),记的是
+    ///   [`TOOL_WRITE_DIGEST`] 这个"已与冻结时不同"的记号。
+    /// - **也不看这次写入成没成**。判定绑在 `ToolCall` 上,失败的 `edit`(旧串没
+    ///   匹配上、路径不存在)同样留痕。往保守方向偏:多判一次失效只是让宿主重新
+    ///   取证;漏判才是那条"改完文件照旧算通过"的老毛病。
+    fn note_tool_write(&mut self, name: &str, arguments: &str) {
+        // 账本还不存在(日志里还没有任何验证结论)= 没有可失效的结论,不必记账。
+        let Some(state) = self.state.as_mut() else {
+            return;
+        };
+        let Some(path) = write_target(name, arguments) else {
+            return;
+        };
+        upsert_fingerprint(
+            &mut state.fingerprints,
+            &FileFingerprint {
+                path,
+                digest: TOOL_WRITE_DIGEST.to_string(),
+            },
+        );
     }
 
     fn apply_op(&mut self, op: &TaskOp, now: u64) {
         match op {
-            TaskOp::Open {
-                task_id,
-                revision,
-                goal,
-                requirements,
-            } => self.open(task_id, revision, goal, requirements, now),
-            TaskOp::Revise {
-                revision,
-                reason,
-                goal,
-                requirements,
-            } => self.revise(revision, reason, goal, requirements, now),
-            TaskOp::Amend { notes } => self.amend(notes, now),
-            TaskOp::ResolveQuestion { id } => self.resolve_question(id, now),
-            TaskOp::SetRemaining { items } => self.set_remaining(items, now),
-            TaskOp::RecordChange {
-                summary,
-                fingerprints,
-            } => self.record_change(summary, fingerprints, now),
-            TaskOp::RecordEvidence { evidence } => self.record_evidence(evidence, now),
             TaskOp::RecordValidation { result } => self.record_validation(result, now),
-            TaskOp::Block { reason } => self.block(reason, now),
-            TaskOp::Unblock => self.unblock(now),
-            TaskOp::Close => self.close(now),
+            // 旧日志里被裁掉的记账操作:忽略。整份会话照常打开,裁决只看
+            // 宿主写下的验证结论。
+            TaskOp::Legacy => {}
         }
     }
 
-    /// 换版是否被接受:新 id 必须是全新的。
-    fn accepts_revision(&self, id: &RevisionId) -> bool {
-        if self.retired.contains(id) {
-            return false;
-        }
-        match &self.state {
-            Some(state) => !state.used_revisions().any(|used| used == id),
-            None => true,
-        }
-    }
-
-    /// 拒绝换版:当前版本的要求集已经变了却没有合法的新身份,所以当前结论
-    /// 一律不可信(见 [`TaskState::revision_conflict`])。拒绝本身也要可见。
-    fn reject_revision(&mut self, now: u64) {
-        let Some(state) = self.state.as_mut() else {
-            return;
-        };
-        state.revision_conflict = true;
-        state.revision_rejected = state.revision_rejected.saturating_add(1);
-        state.updated_at = now;
-    }
-
-    fn open(
-        &mut self,
-        task_id: &TaskId,
-        revision: &RevisionId,
-        goal: &str,
-        requirements: &[RequirementClaim],
-        now: u64,
-    ) {
-        // 已有任务:未收口时忽略(不能偷偷换身份);已收口时视为用户重新出发,
-        // 替换旧任务(与 `GoalOp::Set` 对待 complete 目标同策)。
-        if let Some(existing) = &self.state {
-            if existing.status != TaskStatus::Closed {
-                return;
-            }
-            // 旧任务的 revision 一并进报废集:新任务也不能复用旧身份。
-            for record in &existing.revisions {
-                self.retired.insert(record.id.clone());
-            }
-        }
-        if !self.accepts_revision(revision) {
-            self.reject_revision(now);
-            return;
-        }
-        let mut state = TaskState {
-            id: task_id.clone(),
+    fn record_validation(&mut self, result: &ValidationResult, now: u64) {
+        let revision = result.revision().clone();
+        let session = self.scope.session.clone();
+        let state = self.state.get_or_insert_with(|| TaskState {
             revision: revision.clone(),
-            // 折叠方身份写进账本:结论裁决据此识别外来记录。
-            session: self.scope.session.clone(),
-            status: TaskStatus::Active,
-            goal: truncate_claim(goal),
-            blocked_reason: None,
-            revision_conflict: false,
-            revision_rejected: 0,
-            revisions: Vec::new(),
-            requirements: Vec::new(),
-            facts: Vec::new(),
-            assumptions: Vec::new(),
-            failed_attempts: Vec::new(),
-            open_questions: Vec::new(),
-            changes: Vec::new(),
-            remaining: Vec::new(),
-            evidence: Vec::new(),
+            revision_retired: false,
+            session,
             validations: Vec::new(),
             fingerprints: Vec::new(),
             overflow: LedgerOverflow::default(),
             created_at: now,
             updated_at: now,
-        };
-        // 初版 revision 没有"上一版"可解释,理由用固定值保持记录形状统一。
-        state.revisions.push(RevisionRecord {
-            id: revision.clone(),
-            ordinal: 1,
-            reason: OPEN_REVISION_REASON.to_string(),
-            at: now,
         });
-        for claim in requirements {
-            push_requirement(&mut state, claim, revision, now);
+        // 绑到新 revision 的结论 = 宿主换了一版(rewind 之后重新推进同理)。
+        // 当前 revision 随最新一条结论走,旧 id 上的结论不再是当前版本的结论。
+        if state.revision != revision {
+            state.revision = revision;
         }
-        self.state = Some(state);
-    }
-
-    fn revise(
-        &mut self,
-        revision: &RevisionId,
-        reason: &str,
-        goal: &Option<String>,
-        requirements: &[RequirementClaim],
-        now: u64,
-    ) {
-        if self.state.is_none() {
-            return;
+        // 当前身份若已被 rewind 报废,结论一律不继承(见 TaskState::revision_retired)。
+        state.revision_retired = self.retired.contains(&state.revision);
+        // 这条结论冻结的输入 = 这次运行开始那一刻磁盘上的字节:把基线重新锚到这些
+        // 摘要上。顺序敏感就落在这里 —— 只有**结论之后**发生的写入才让结论失效;
+        // 结论之前那些写入的字节已经被这次运行看过,不倒扣(见 note_tool_write)。
+        for fingerprint in result.fingerprints() {
+            upsert_fingerprint(&mut state.fingerprints, &fingerprint);
         }
-        if !self.accepts_revision(revision) {
-            self.reject_revision(now);
-            return;
-        }
-        // 上一版进报废集:即便之后有人把旧 id 再写回来,也不会被当成本版。
-        if let Some(state) = self.state.as_ref() {
-            self.retired.insert(state.revision.clone());
-        }
-        let state = self.state.as_mut().expect("checked above");
-        state.revision = revision.clone();
-        // 新身份是干净的:上一次的冲突到此为止(旧结论本来也绑在旧 id 上)。
-        state.revision_conflict = false;
-        // 受阻是外部条件,换版不解除它;其余情形视为任务重新活跃(已收口的
-        // 任务被换版 = 用户加了新要求,重新算在办)。
-        if state.status != TaskStatus::Blocked {
-            state.status = TaskStatus::Active;
-        }
-        let ordinal = state.revisions.len() as u32 + 1;
-        state.overflow.revisions += push_bounded(
-            &mut state.revisions,
-            RevisionRecord {
-                id: revision.clone(),
-                ordinal,
-                reason: truncate_claim(reason),
-                at: now,
-            },
-            MAX_REVISIONS,
-        );
-        if let Some(goal) = goal
-            && !goal.trim().is_empty()
-        {
-            state.goal = truncate_claim(goal);
-        }
-        for claim in requirements {
-            push_requirement(state, claim, revision, now);
-        }
-        state.updated_at = now;
-    }
-
-    fn amend(&mut self, notes: &[NoteClaim], now: u64) {
-        let events = self.events;
-        let Some(state) = self.state.as_mut() else {
-            return;
-        };
-        let revision = state.revision.clone();
-        for claim in notes {
-            match claim {
-                NoteClaim::Fact { id, text, citation } => {
-                    // 引用要能核对:用户原话必须在日志里,证据必须在账本上。
-                    let resolved = match citation {
-                        FactCitation::User { reference }
-                            if reference_resolves(events, reference) =>
-                        {
-                            Some(citation.clone())
-                        }
-                        FactCitation::Evidence { evidence }
-                            if state.evidence.iter().any(|item| &item.id == evidence) =>
-                        {
-                            Some(citation.clone())
-                        }
-                        _ => None,
-                    };
-                    match resolved {
-                        Some(citation) => {
-                            state.overflow.facts += push_bounded(
-                                &mut state.facts,
-                                Fact {
-                                    id: id.clone(),
-                                    revision: revision.clone(),
-                                    text: truncate_claim(text),
-                                    citation,
-                                    at: now,
-                                },
-                                MAX_FACTS,
-                            );
-                        }
-                        None => {
-                            // 核不到引用的事实主张只能算假设,并把原因写明 ——
-                            // 这正是"复制一份文本就算出处"的堵口。
-                            let rationale = match citation {
-                                FactCitation::User { .. } => {
-                                    "引用的用户消息在日志里核对不到,按假设处理"
-                                }
-                                FactCitation::Evidence { .. } => "引用的证据不在账本上,按假设处理",
-                            };
-                            state.overflow.assumptions += push_bounded(
-                                &mut state.assumptions,
-                                Assumption {
-                                    id: id.clone(),
-                                    revision: revision.clone(),
-                                    text: truncate_claim(text),
-                                    rationale: Some(rationale.to_string()),
-                                    at: now,
-                                },
-                                MAX_ASSUMPTIONS,
-                            );
-                        }
-                    }
-                }
-                NoteClaim::Assumption {
-                    id,
-                    text,
-                    rationale,
-                } => {
-                    state.overflow.assumptions += push_bounded(
-                        &mut state.assumptions,
-                        Assumption {
-                            id: id.clone(),
-                            revision: revision.clone(),
-                            text: truncate_claim(text),
-                            rationale: rationale.as_deref().map(truncate_claim),
-                            at: now,
-                        },
-                        MAX_ASSUMPTIONS,
-                    );
-                }
-                NoteClaim::FailedAttempt { id, text, evidence } => {
-                    // 失败尝试不是事实主张:证据引用核不到就退回"无证据",
-                    // 不去编造。
-                    let evidence = evidence
-                        .clone()
-                        .filter(|id| state.evidence.iter().any(|item| &item.id == id));
-                    state.overflow.failed_attempts += push_bounded(
-                        &mut state.failed_attempts,
-                        FailedAttempt {
-                            id: id.clone(),
-                            revision: revision.clone(),
-                            text: truncate_claim(text),
-                            evidence,
-                            at: now,
-                        },
-                        MAX_FAILED_ATTEMPTS,
-                    );
-                }
-                NoteClaim::OpenQuestion { id, text } => {
-                    state.overflow.open_questions += push_bounded(
-                        &mut state.open_questions,
-                        OpenQuestion {
-                            id: id.clone(),
-                            revision: revision.clone(),
-                            text: truncate_claim(text),
-                            at: now,
-                        },
-                        MAX_OPEN_QUESTIONS,
-                    );
-                }
-            }
-        }
-        state.updated_at = now;
-    }
-
-    fn resolve_question(&mut self, id: &NoteId, now: u64) {
-        let Some(state) = self.state.as_mut() else {
-            return;
-        };
-        let before = state.open_questions.len();
-        state.open_questions.retain(|item| &item.id != id);
-        if state.open_questions.len() != before {
-            state.updated_at = now;
-        }
-    }
-
-    fn set_remaining(&mut self, items: &[String], now: u64) {
-        let Some(state) = self.state.as_mut() else {
-            return;
-        };
-        state.overflow.remaining += items.len().saturating_sub(MAX_REMAINING) as u32;
-        state.remaining = items
-            .iter()
-            .take(MAX_REMAINING)
-            .map(|item| truncate_claim(item))
-            .collect();
-        state.updated_at = now;
-    }
-
-    fn record_change(&mut self, summary: &str, fingerprints: &[FileFingerprint], now: u64) {
-        let Some(state) = self.state.as_mut() else {
-            return;
-        };
-        // 指纹基线更新 = 旧验证的失效判据;所以这一步必须发生在收口之后也照算
-        // ("验证后又被改过"不能靠时间顺序赖掉)。
-        for fingerprint in fingerprints {
-            upsert_fingerprint(&mut state.fingerprints, fingerprint);
-        }
-        state.overflow.changes += push_bounded(
-            &mut state.changes,
-            denia_core::task::TaskChange {
-                revision: state.revision.clone(),
-                summary: truncate_claim(summary),
-                fingerprints: fingerprints.to_vec(),
-                at: now,
-            },
-            MAX_CHANGES,
-        );
-        state.updated_at = now;
-    }
-
-    fn record_evidence(&mut self, evidence: &Evidence, now: u64) {
-        let Some(state) = self.state.as_mut() else {
-            return;
-        };
-        // 外来来源(父/分支 seed)照样留档供审计;能"继承"的只有验证结论,
-        // 而结论由 `TaskState::verification` 按来源挡掉。
-        let mut evidence = evidence.clone();
-        evidence.summary = truncate_claim(&evidence.summary);
-        state.overflow.evidence += push_bounded(&mut state.evidence, evidence, MAX_EVIDENCE);
-        state.updated_at = now;
-    }
-
-    fn record_validation(&mut self, result: &ValidationResult, now: u64) {
-        let Some(state) = self.state.as_mut() else {
-            return;
-        };
-        // 绑在别的 revision、来源不属于本会话、指纹已被推翻的记录都留档,
-        // 是否算数由 `TaskState::verification` 裁决。
         state.overflow.validations +=
             push_bounded(&mut state.validations, result.clone(), MAX_VALIDATIONS);
         state.updated_at = now;
     }
-
-    fn block(&mut self, reason: &str, now: u64) {
-        let Some(state) = self.state.as_mut() else {
-            return;
-        };
-        if state.status == TaskStatus::Closed {
-            return;
-        }
-        state.status = TaskStatus::Blocked;
-        state.blocked_reason = (!reason.trim().is_empty()).then(|| truncate_claim(reason));
-        state.updated_at = now;
-    }
-
-    fn unblock(&mut self, now: u64) {
-        let Some(state) = self.state.as_mut() else {
-            return;
-        };
-        if state.status == TaskStatus::Blocked {
-            state.status = TaskStatus::Active;
-            state.blocked_reason = None;
-            state.updated_at = now;
-        }
-    }
-
-    fn close(&mut self, now: u64) {
-        let Some(state) = self.state.as_mut() else {
-            return;
-        };
-        // 受阻时谈"收口"没有意义(结局已经是外部受阻),先 `Unblock`;已收口
-        // 再收口是无操作。
-        if state.status == TaskStatus::Active {
-            state.status = TaskStatus::Closed;
-            state.updated_at = now;
-        }
-    }
-}
-
-/// 追加一条要求,超出上限时保留最新的并把丢弃条数记账。
-fn push_requirement(
-    state: &mut TaskState,
-    claim: &RequirementClaim,
-    revision: &RevisionId,
-    now: u64,
-) {
-    state.overflow.requirements += push_bounded(
-        &mut state.requirements,
-        Requirement {
-            id: claim.id.clone(),
-            revision: revision.clone(),
-            kind: claim.kind,
-            text: truncate_claim(&claim.text),
-            source: claim.source.clone(),
-            declared_at: now,
-        },
-        MAX_REQUIREMENTS,
-    );
 }
 
 /// 追加并把集合压到上限:保留最新的,返回丢弃条数。
 ///
-/// 上限造成的损失必须可见 —— 调用方把它累加进 [`LedgerOverflow`],"用户约束
-/// 被悄悄删掉"正是要防的事。
+/// 上限造成的损失必须可见 —— 调用方把它累加进 [`LedgerOverflow`]。
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) -> u32 {
     items.push(item);
     let dropped = items.len().saturating_sub(cap);
@@ -539,38 +292,12 @@ fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) -> u32 {
     dropped as u32
 }
 
-/// 来源引用能不能在日志里核对到"用户原话"那一条事件。
-///
-/// 先按 `time_ms`(分支种子回放保留源事件时间戳,重编号也稳定),再退化到
-/// `seq`(同一份日志内的坐标)。两边都对不上就是核不到 —— 引用不算数,主张
-/// 降级为假设。
-fn reference_resolves(events: &[SessionEnvelope], reference: &SourceRef) -> bool {
-    let is_user_message = |envelope: &SessionEnvelope| {
-        matches!(
-            &envelope.event,
-            SessionEvent::UserMessage {
-                injected: false,
-                ..
-            }
-        )
-    };
-    if reference.time_ms != 0
-        && events
-            .iter()
-            .any(|envelope| envelope.time == reference.time_ms && is_user_message(envelope))
-    {
-        return true;
-    }
-    reference.seq != 0
-        && events
-            .iter()
-            .any(|envelope| envelope.seq == reference.seq && is_user_message(envelope))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use denia_core::task::{CheckRun, EvidenceSource, RequirementKind, StaleReason};
+    use denia_core::task::{
+        CheckRun, FileFingerprint, StaleReason, ValidationVerdict, VerificationState,
+    };
 
     fn envelope(seq: u64, event: SessionEvent) -> SessionEnvelope {
         SessionEnvelope {
@@ -596,51 +323,46 @@ mod tests {
         envelope(seq, SessionEvent::Task { op })
     }
 
+    /// 一条工具调用事件(写入类工具的路径就在参数里)。
+    fn tool_call(seq: u64, name: &str, arguments: &str) -> SessionEnvelope {
+        envelope(
+            seq,
+            SessionEvent::ToolCall {
+                turn: 1,
+                step: 1,
+                call_id: format!("call-{seq}"),
+                name: name.into(),
+                arguments: arguments.into(),
+            },
+        )
+    }
+
+    /// 一次 `edit`:改的是 `path`。
+    fn edit(seq: u64, path: &str) -> SessionEnvelope {
+        tool_call(
+            seq,
+            "edit",
+            &format!(r#"{{"path":"{path}","old_string":"a","new_string":"b"}}"#),
+        )
+    }
+
     fn rev(id: &str) -> RevisionId {
         RevisionId::new(id)
     }
 
-    /// 指向 seq 这条用户消息的来源引用(时间戳与日志里那条一致)。
-    fn cite(seq: u64) -> SourceRef {
-        SourceRef {
-            session: None,
-            seq,
-            time_ms: 1_000 + seq,
-            quote: Some("跑通测试".into()),
-        }
-    }
-
-    fn acceptance(id: &str, seq: u64) -> RequirementClaim {
-        RequirementClaim {
-            id: RequirementId::new(id),
-            kind: RequirementKind::Acceptance,
-            text: "cargo test 全绿".into(),
-            source: cite(seq),
-        }
-    }
-
-    fn open(revision: &str, requirements: Vec<RequirementClaim>) -> TaskOp {
-        TaskOp::Open {
-            task_id: TaskId::new("task-1"),
-            revision: rev(revision),
-            goal: "修好解析器".into(),
-            requirements,
-        }
-    }
-
-    /// 一次通过的检查运行:冻结 `src/lib.rs` 的摘要 `digest`。
-    fn passing(
+    /// 一次检查运行:冻结 `src/lib.rs` 的摘要 `digest`,退出码决定结论。
+    fn check(
         revision: &str,
-        covered: &[&str],
+        exit_code: i32,
         digest: &str,
         origin: Option<&str>,
         at: u64,
-    ) -> ValidationResult {
-        ValidationResult::from_check_runs(
+    ) -> TaskOp {
+        let result = ValidationResult::from_check_runs(
             rev(revision),
             vec![CheckRun {
                 command: "cargo test".into(),
-                exit_code: Some(0),
+                exit_code: Some(exit_code),
                 expect_exit_code: 0,
                 workdir: ".".into(),
                 fingerprints: vec![FileFingerprint {
@@ -648,23 +370,16 @@ mod tests {
                     digest: digest.into(),
                 }],
             }],
-            covered.iter().map(|id| RequirementId::new(*id)).collect(),
             origin.map(str::to_string),
             at,
         )
-        .expect("有检查运行才构成结论")
-    }
-
-    fn evidence(id: &str) -> EvidenceSource {
-        EvidenceSource::ToolCall {
-            call_id: format!("call-{id}"),
-            tool: "read_file".into(),
-        }
+        .expect("有检查运行才构成结论");
+        TaskOp::RecordValidation { result }
     }
 
     #[test]
     fn legacy_log_without_task_events_folds_to_empty_state() {
-        // 旧日志(与普通问答会话):没有任务事件 → 折叠出"没有任务",
+        // 旧日志(与普通问答会话):没有任务事件 → 折叠出"没有账本",
         // 既不阻塞也不被推导出 verified。
         let events = vec![user(1), user(2), user(3)];
         assert_eq!(project_task(&events), None);
@@ -672,62 +387,33 @@ mod tests {
     }
 
     #[test]
+    fn legacy_ledger_ops_are_ignored_and_do_not_block_the_fold() {
+        // 旧日志里那些被裁掉的记账事件照样读进来(由 TaskOp::Legacy 兜底),
+        // 但不再贡献任何状态;同一条日志里宿主写下的验证结论照常生效。
+        let events = vec![
+            user(1),
+            task(2, TaskOp::Legacy),
+            task(3, check("rev-a", 0, "d1", None, 1_003)),
+            task(4, TaskOp::Legacy),
+        ];
+        let state = project_task(&events).expect("有验证结论就有账本");
+        assert_eq!(state.revision, rev("rev-a"));
+        assert_eq!(state.validations.len(), 1);
+        assert!(!state.revision_retired);
+        assert_eq!(state.outcome(), TaskOutcome::Passed);
+
+        // 整份日志只有被裁掉的操作:折不出账本,但也没有把谁判成通过。
+        let legacy_only = vec![user(1), task(2, TaskOp::Legacy), task(3, TaskOp::Legacy)];
+        assert_eq!(project_task(&legacy_only), None);
+        assert_eq!(project_task_outcome(&legacy_only), None);
+    }
+
+    #[test]
     fn fold_is_deterministic_and_replayable() {
         let events = vec![
             user(1),
-            task(2, open("rev-a", vec![acceptance("req-1", 1)])),
-            task(
-                3,
-                TaskOp::RecordChange {
-                    summary: "改了 src/lib.rs 的解析分支".into(),
-                    fingerprints: vec![FileFingerprint {
-                        path: "src/lib.rs".into(),
-                        digest: "d1".into(),
-                    }],
-                },
-            ),
-            task(
-                4,
-                TaskOp::RecordEvidence {
-                    evidence: Evidence {
-                        id: EvidenceId::new("ev-1"),
-                        revision: rev("rev-a"),
-                        source: evidence("ev-1"),
-                        fingerprints: vec![FileFingerprint {
-                            path: "src/lib.rs".into(),
-                            digest: "d1".into(),
-                        }],
-                        summary: "读到解析分支".into(),
-                        origin_session: None,
-                        at: 1_004,
-                    },
-                },
-            ),
-            task(
-                5,
-                TaskOp::Amend {
-                    notes: vec![NoteClaim::Fact {
-                        id: NoteId::new("n1"),
-                        text: "解析分支在 src/lib.rs".into(),
-                        citation: FactCitation::Evidence {
-                            evidence: EvidenceId::new("ev-1"),
-                        },
-                    }],
-                },
-            ),
-            task(
-                6,
-                TaskOp::SetRemaining {
-                    items: vec!["补一条回归测试".into()],
-                },
-            ),
-            task(
-                7,
-                TaskOp::RecordValidation {
-                    result: passing("rev-a", &["req-1"], "d1", None, 1_007),
-                },
-            ),
-            task(8, TaskOp::Close),
+            task(2, check("rev-a", 0, "d1", None, 1_002)),
+            task(3, check("rev-a", 1, "d2", None, 1_003)),
         ];
         let first = project_task(&events).expect("有任务事件就有账本");
         let second = project_task(&events).expect("重放必须得到同一份账本");
@@ -737,217 +423,99 @@ mod tests {
             serde_json::to_string(&second).unwrap(),
             "序列化形状也必须一致(快照/绑定同源)"
         );
-        // 账本内容抽查:来源引用、指纹基线、结局。
-        assert_eq!(first.requirements.len(), 1);
-        assert_eq!(first.requirements[0].source.seq, 1);
-        assert_eq!(first.fingerprint_of("src/lib.rs"), Some("d1"));
-        assert_eq!(first.facts.len(), 1);
-        assert_eq!(first.remaining, vec!["补一条回归测试".to_string()]);
-        assert_eq!(first.outcome(), Some(TaskOutcome::Passed));
+        // 结论是算出来的:最新一条(退出码 1)说了算,不挑早先那条通过的。
+        assert_eq!(first.outcome(), TaskOutcome::Failed);
         assert_eq!(first.overflow, LedgerOverflow::default());
     }
 
-    #[test]
-    fn revision_reuse_after_rewind_is_rejected_and_invalidates_conclusions() {
-        // 完整分支:rev-a 上跑过检查、收口 → 验收通过。
-        let full = vec![
-            user(1),
-            task(2, open("rev-a", vec![acceptance("req-1", 1)])),
-            task(
-                3,
-                TaskOp::RecordValidation {
-                    result: passing("rev-a", &["req-1"], "d1", None, 1_003),
-                },
-            ),
-            task(4, TaskOp::Close),
-        ];
-        assert_eq!(project_task_outcome(&full), Some(TaskOutcome::Passed));
-
-        // rewind 到任务创建之后(把验证与收口截掉),宿主在旧状态上继续推进却
-        // 复用了 rev-a:换版必须被拒,而且当前结论作废 —— 旧分支的"通过"不能
-        // 靠复用同一个 id 借尸还魂。
-        let after_rewind = vec![
-            user(1),
-            task(2, open("rev-a", vec![acceptance("req-1", 1)])),
-            task(
-                3,
-                TaskOp::Revise {
-                    revision: rev("rev-a"),
-                    reason: "用户追加了验收项".into(),
-                    goal: None,
-                    requirements: vec![acceptance("req-2", 1)],
-                },
-            ),
-            task(
-                4,
-                TaskOp::RecordValidation {
-                    result: passing("rev-a", &["req-1"], "d1", None, 1_004),
-                },
-            ),
-            task(5, TaskOp::Close),
-        ];
-        let state = project_task(&after_rewind).expect("账本还在");
-        assert_eq!(state.revision_rejected, 1, "复用旧 id 的换版被拒");
-        assert!(state.revision_conflict, "当前版本身份不干净必须可见");
-        assert_eq!(state.revisions.len(), 1, "被拒的换版不落新 revision");
-        assert_eq!(state.requirements.len(), 1, "被拒的换版不落新要求");
-        assert_eq!(
-            state.verification(),
-            denia_core::task::VerificationState::Unverified {
-                reason: StaleReason::RevisionConflict
-            }
-        );
-        assert_eq!(
-            state.outcome(),
-            Some(TaskOutcome::Unverified),
-            "复用旧 revision id 之后,旧的通过结论不得被继承"
-        );
+    /// 一条没有任何检查运行的空报告(回放出来的彤形记录)。
+    fn empty_report(revision: &str) -> TaskOp {
+        TaskOp::RecordValidation {
+            result: serde_json::from_value(serde_json::json!({
+                "revision": revision,
+                "runs": [],
+                "at": 1_004,
+            }))
+            .expect("空报告是合法的事件负载"),
+        }
     }
 
     #[test]
-    fn retired_revision_from_before_the_rewind_is_rejected() {
-        // rewind 到任务创建之前:日志里连 rev-a 都没有,只有宿主记得它报废过。
-        // 不加报废集时同一份日志会被判通过 —— 说明这道防线确实在起作用。
-        let replayed = vec![
-            user(1),
-            task(2, open("rev-a", vec![acceptance("req-1", 1)])),
-            task(
-                3,
-                TaskOp::RecordValidation {
-                    result: passing("rev-a", &["req-1"], "d1", None, 1_003),
-                },
-            ),
-            task(4, TaskOp::Close),
-        ];
+    fn the_newest_conclusion_on_the_current_revision_decides() {
+        // 宿主写下通过结论:验收通过。
+        let passed = vec![user(1), task(2, check("rev-a", 0, "d1", None, 1_002))];
         assert_eq!(
-            project_task_outcome(&replayed),
+            project_task_outcome(&passed),
             Some(TaskOutcome::Passed),
-            "没有报废集时,复用 rev-a 的日志确实能判通过"
+            "宿主写下通过结论就是验收通过"
         );
+        // 最新一条失败 → 验收失败(即使更早有一条通过)。
+        let failed = vec![
+            user(1),
+            task(2, check("rev-a", 0, "d1", None, 1_002)),
+            task(3, check("rev-a", 1, "d1", None, 1_003)),
+        ];
+        let state = project_task(&failed).expect("账本在");
+        assert!(matches!(
+            state.verification(),
+            VerificationState::Verified {
+                verdict: ValidationVerdict::Failed,
+                ..
+            }
+        ));
+        assert_eq!(state.outcome(), TaskOutcome::Failed);
+        // 当前 revision 上没有可用结论、但更早的结论绑在别的 revision 上:
+        // 旧的不能拿来充当当前版本的结论。
+        let mixed = vec![
+            user(1),
+            task(2, check("rev-a", 0, "d1", None, 1_002)),
+            task(3, empty_report("rev-b")),
+        ];
+        let state = project_task(&mixed).expect("账本在");
+        assert_eq!(state.revision, rev("rev-b"), "当前 revision 随最新结论走");
+        assert_eq!(
+            state.verification(),
+            VerificationState::Unverified {
+                reason: StaleReason::RevisionChanged
+            }
+        );
+        assert_eq!(state.outcome(), TaskOutcome::Unverified);
+    }
+
+    #[test]
+    fn no_task_events_means_no_outcome_to_judge() {
+        let unchecked = vec![user(1)];
+        assert_eq!(project_task(&unchecked), None);
+        assert_eq!(project_task_outcome(&unchecked), None);
+    }
+
+    #[test]
+    fn a_retired_revision_is_never_inherited() {
+        // rewind 把 rev-a 的身份报废(它在被截断的区间里出现过):日志里还留着
+        // 的那条通过结论不算数 —— 旧分支的"通过"不能借尸还魂。
+        let events = vec![user(1), task(2, check("rev-a", 0, "d1", None, 1_002))];
+        assert_eq!(project_task_outcome(&events), Some(TaskOutcome::Passed));
         let scope = TaskFoldScope {
             session: None,
             retired_revisions: vec![rev("rev-a")],
         };
-        let state = project_task_scoped(&replayed, &scope);
-        assert!(state.is_none(), "宿主声明 rev-a 已报废后,复用被拒");
-    }
-
-    #[test]
-    fn fresh_revision_after_rewind_does_not_inherit_the_old_conclusion() {
-        // 正确做法:rewind 之后换新 id。旧结论绑在旧 id 上,新版本从未验证开始。
-        let events = vec![
-            user(1),
-            task(2, open("rev-a", vec![acceptance("req-1", 1)])),
-            task(
-                3,
-                TaskOp::RecordValidation {
-                    result: passing("rev-a", &["req-1"], "d1", None, 1_003),
-                },
-            ),
-            task(
-                4,
-                TaskOp::Revise {
-                    // 同一条要求,但换了一版身份(宿主重新分配 id)。
-                    revision: rev("rev-b"),
-                    reason: "rewind 后重新推进".into(),
-                    goal: None,
-                    requirements: vec![acceptance("req-1", 1)],
-                },
-            ),
-            task(5, TaskOp::Close),
-        ];
-        let state = project_task(&events).expect("账本在");
-        assert_eq!(state.revision, rev("rev-b"));
-        assert!(!state.revision_conflict);
+        let state = project_task_scoped(&events, &scope).expect("账本还在");
+        assert!(state.revision_retired, "报废身份必须可见");
         assert_eq!(
             state.verification(),
-            denia_core::task::VerificationState::Unverified {
+            VerificationState::Unverified {
                 reason: StaleReason::RevisionChanged
             }
         );
-        assert_eq!(
-            state.outcome(),
-            Some(TaskOutcome::Unverified),
-            "新 revision 不继承旧 revision 的验证结论"
-        );
-    }
+        assert_eq!(state.outcome(), TaskOutcome::Unverified);
 
-    #[test]
-    fn missing_or_uncovered_evidence_never_passes() {
-        // 没有验收定义时收口:可以结束,但不能冒充 verified。
-        let no_acceptance = vec![
-            user(1),
-            task(2, open("rev-a", Vec::new())),
-            task(3, TaskOp::Close),
-        ];
-        assert_eq!(
-            project_task_outcome(&no_acceptance),
-            Some(TaskOutcome::Unverified)
-        );
-
-        // 有验收定义但没跑过检查:同样只是"未验证完成"。
-        let unchecked = vec![
-            user(1),
-            task(2, open("rev-a", vec![acceptance("req-1", 1)])),
-            task(3, TaskOp::Close),
-        ];
-        assert_eq!(
-            project_task_outcome(&unchecked),
-            Some(TaskOutcome::Unverified)
-        );
-
-        // 跑了检查但没声明覆盖任何验收项:检查通过只代表它声明的范围。
-        let uncovered = vec![
-            user(1),
-            task(2, open("rev-a", vec![acceptance("req-1", 1)])),
-            task(
-                3,
-                TaskOp::RecordValidation {
-                    result: passing("rev-a", &[], "d1", None, 1_003),
-                },
-            ),
-            task(4, TaskOp::Close),
-        ];
-        assert_eq!(
-            project_task_outcome(&uncovered),
-            Some(TaskOutcome::Unverified)
-        );
-    }
-
-    #[test]
-    fn change_after_validation_invalidates_the_conclusion() {
-        // 收口之后文件又被改过(指纹变了):旧结论作废,结局退回未验证。
-        let events = vec![
-            user(1),
-            task(2, open("rev-a", vec![acceptance("req-1", 1)])),
-            task(
-                3,
-                TaskOp::RecordValidation {
-                    result: passing("rev-a", &["req-1"], "d1", None, 1_003),
-                },
-            ),
-            task(4, TaskOp::Close),
-            task(
-                5,
-                TaskOp::RecordChange {
-                    summary: "收口后又改了一行".into(),
-                    fingerprints: vec![FileFingerprint {
-                        path: "src/lib.rs".into(),
-                        digest: "d2".into(),
-                    }],
-                },
-            ),
-        ];
-        let state = project_task(&events).expect("账本在");
-        assert_eq!(
-            state.verification(),
-            denia_core::task::VerificationState::Unverified {
-                reason: StaleReason::InputsChanged {
-                    paths: vec!["src/lib.rs".into()]
-                }
-            }
-        );
-        assert_eq!(state.outcome(), Some(TaskOutcome::Unverified));
+        // 宿主换新 id 重新取证:新版本从零开始,旧的报废身份不再挡路。
+        let mut events = events;
+        events.push(task(3, check("rev-b", 0, "d1", None, 1_003)));
+        let state = project_task_scoped(&events, &scope).expect("账本在");
+        assert_eq!(state.revision, rev("rev-b"));
+        assert!(!state.revision_retired);
+        assert_eq!(state.outcome(), TaskOutcome::Passed);
     }
 
     #[test]
@@ -955,14 +523,7 @@ mod tests {
         // 父会话写的结论被 seed 进子会话(或折叠方是另一个会话):只作审计。
         let events = vec![
             user(1),
-            task(2, open("rev-a", vec![acceptance("req-1", 1)])),
-            task(
-                3,
-                TaskOp::RecordValidation {
-                    result: passing("rev-a", &["req-1"], "d1", Some("parent"), 1_003),
-                },
-            ),
-            task(4, TaskOp::Close),
+            task(2, check("rev-a", 0, "d1", Some("parent"), 1_002)),
         ];
         let child_scope = TaskFoldScope {
             session: Some("child".into()),
@@ -972,234 +533,171 @@ mod tests {
         assert_eq!(child.session.as_deref(), Some("child"));
         assert_eq!(
             child.verification(),
-            denia_core::task::VerificationState::Unverified {
+            VerificationState::Unverified {
                 reason: StaleReason::ForeignOrigin
             }
         );
-        assert_eq!(child.outcome(), Some(TaskOutcome::Unverified));
+        assert_eq!(child.outcome(), TaskOutcome::Unverified);
         // 不声明会话身份时也一样保守:标注了来源、但与本折叠方不一致的记录不算数。
         assert_eq!(project_task_outcome(&events), Some(TaskOutcome::Unverified));
     }
 
     #[test]
-    fn unsourced_fact_claims_are_demoted_to_assumptions() {
-        let events = vec![
-            user(1),
-            task(2, open("rev-a", vec![acceptance("req-1", 1)])),
-            task(
-                3,
-                TaskOp::RecordEvidence {
-                    evidence: Evidence {
-                        id: EvidenceId::new("ev-1"),
-                        revision: rev("rev-a"),
-                        source: evidence("ev-1"),
-                        fingerprints: Vec::new(),
-                        summary: "读到解析分支".into(),
-                        origin_session: None,
-                        at: 1_003,
-                    },
-                },
-            ),
-            task(
-                4,
-                TaskOp::Amend {
-                    notes: vec![
-                        // 引用得到用户原话:是事实。
-                        NoteClaim::Fact {
-                            id: NoteId::new("n1"),
-                            text: "用户要求跑通测试".into(),
-                            citation: FactCitation::User { reference: cite(1) },
-                        },
-                        // 引用的用户消息在日志里核不到:降级为假设。
-                        NoteClaim::Fact {
-                            id: NoteId::new("n2"),
-                            text: "用户要求兼容 Windows".into(),
-                            citation: FactCitation::User {
-                                reference: SourceRef {
-                                    session: None,
-                                    seq: 99,
-                                    time_ms: 9_999,
-                                    quote: Some("要兼容 Windows".into()),
-                                },
-                            },
-                        },
-                        // 引用的证据不在账本上:同样只能算假设。
-                        NoteClaim::Fact {
-                            id: NoteId::new("n3"),
-                            text: "测试已经全绿了".into(),
-                            citation: FactCitation::Evidence {
-                                evidence: EvidenceId::new("ev-404"),
-                            },
-                        },
-                        // 引用得到账本上的证据:是事实。
-                        NoteClaim::Fact {
-                            id: NoteId::new("n4"),
-                            text: "解析分支在 src/lib.rs".into(),
-                            citation: FactCitation::Evidence {
-                                evidence: EvidenceId::new("ev-1"),
-                            },
-                        },
-                    ],
-                },
-            ),
-        ];
-        let state = project_task(&events).expect("账本在");
-        let facts: Vec<&str> = state.facts.iter().map(|item| item.id.as_str()).collect();
-        assert_eq!(facts, vec!["n1", "n4"], "只有核得到的引用才配叫事实");
-        let demoted: Vec<&str> = state
-            .assumptions
-            .iter()
-            .map(|item| item.id.as_str())
-            .collect();
-        assert_eq!(demoted, vec!["n2", "n3"], "核不到引用的一律降级为假设");
-        for item in &state.assumptions {
-            assert!(
-                item.rationale
-                    .as_deref()
-                    .is_some_and(|text| text.contains("按假设处理")),
-                "降级原因必须写明: {item:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn ledger_bounds_hold_and_dropped_items_are_counted() {
-        let mut events = vec![
-            user(1),
-            task(2, open("rev-a", vec![acceptance("req-1", 1)])),
-        ];
-        let mut seq = 3;
-        let assumptions = MAX_ASSUMPTIONS + 5;
-        for index in 0..assumptions {
+    fn ledger_bounds_hold_and_dropped_conclusions_are_counted() {
+        let mut events = vec![user(1)];
+        let total = MAX_VALIDATIONS + 5;
+        for index in 0..total {
             events.push(task(
-                seq,
-                TaskOp::Amend {
-                    notes: vec![NoteClaim::Assumption {
-                        id: NoteId::new(format!("note-{index}")),
-                        text: format!("猜测 {index}"),
-                        rationale: None,
-                    }],
-                },
+                2 + index as u64,
+                check("rev-a", 0, "d1", None, 1_002 + index as u64),
             ));
-            seq += 1;
-        }
-        let evidences = MAX_EVIDENCE + 3;
-        for index in 0..evidences {
-            events.push(task(
-                seq,
-                TaskOp::RecordEvidence {
-                    evidence: Evidence {
-                        id: EvidenceId::new(format!("ev-{index}")),
-                        revision: rev("rev-a"),
-                        source: evidence(&format!("ev-{index}")),
-                        fingerprints: Vec::new(),
-                        summary: "读到一段".into(),
-                        origin_session: None,
-                        at: 1_000 + seq,
-                    },
-                },
-            ));
-            seq += 1;
         }
         let state = project_task(&events).expect("账本在");
+        assert_eq!(state.validations.len(), MAX_VALIDATIONS, "结论按上限截住");
         assert_eq!(
-            state.assumptions.len(),
-            MAX_ASSUMPTIONS,
-            "假设条目按上限截住"
-        );
-        assert_eq!(
-            state.overflow.assumptions as usize,
-            assumptions - MAX_ASSUMPTIONS,
-            "被丢弃的假设条数必须记账"
-        );
-        assert_eq!(state.evidence.len(), MAX_EVIDENCE, "证据条目按上限截住");
-        assert_eq!(
-            state.overflow.evidence as usize,
-            evidences - MAX_EVIDENCE,
-            "被丢弃的证据条数必须记账"
-        );
-        // 保留的是最新的:最早的 note-0 已被挤掉,最新的还在。
-        assert_eq!(
-            state.assumptions.first().map(|item| item.id.as_str()),
-            Some("note-5")
+            state.overflow.validations as usize,
+            total - MAX_VALIDATIONS,
+            "被丢弃的结论条数必须记账"
         );
     }
 
     #[test]
-    fn blocked_and_unblocked_are_visible_in_the_outcome() {
-        let blocked = vec![
-            user(1),
-            task(2, open("rev-a", vec![acceptance("req-1", 1)])),
-            task(
-                3,
-                TaskOp::Block {
-                    reason: "等用户提供凭据".into(),
-                },
-            ),
-        ];
-        let state = project_task(&blocked).expect("账本在");
-        assert_eq!(state.status, TaskStatus::Blocked);
-        assert_eq!(state.blocked_reason.as_deref(), Some("等用户提供凭据"));
-        assert_eq!(state.outcome(), Some(TaskOutcome::Blocked));
-
-        let mut resumed = blocked.clone();
-        resumed.push(task(4, TaskOp::Unblock));
-        resumed.push(task(5, TaskOp::Close));
-        let state = project_task(&resumed).expect("账本在");
-        assert_eq!(state.status, TaskStatus::Closed);
-        assert_eq!(state.blocked_reason, None);
-        assert_eq!(
-            state.outcome(),
-            Some(TaskOutcome::Unverified),
-            "解除受阻并不会把任务变成验收通过,只是回到可验证状态"
-        );
-    }
-
-    #[test]
-    fn revoked_question_disappears_from_the_ledger() {
-        let events = vec![
-            user(1),
-            task(2, open("rev-a", Vec::new())),
-            task(
-                3,
-                TaskOp::Amend {
-                    notes: vec![
-                        NoteClaim::OpenQuestion {
-                            id: NoteId::new("q1"),
-                            text: "要不要兼容旧格式?".into(),
-                        },
-                        NoteClaim::OpenQuestion {
-                            id: NoteId::new("q2"),
-                            text: "日志要不要轮转?".into(),
-                        },
-                    ],
-                },
-            ),
-            task(
-                4,
-                TaskOp::ResolveQuestion {
-                    id: NoteId::new("q1"),
-                },
-            ),
-        ];
-        let state = project_task(&events).expect("账本在");
-        let open: Vec<&str> = state
-            .open_questions
-            .iter()
-            .map(|item| item.id.as_str())
-            .collect();
-        assert_eq!(open, vec!["q2"]);
-    }
-
-    #[test]
-    fn host_id_allocators_never_reuse() {
-        assert!(fresh_task_id().as_str().starts_with("task-"));
+    fn host_revision_allocator_never_reuses() {
         assert!(fresh_revision_id().as_str().starts_with("rev-"));
-        assert!(fresh_evidence_id().as_str().starts_with("ev-"));
-        assert!(fresh_requirement_id().as_str().starts_with("req-"));
-        assert!(fresh_note_id().as_str().starts_with("note-"));
         // rewind 之后的重新分配不依赖日志状态,所以不可能与旧身份撞号。
         assert_ne!(fresh_revision_id(), fresh_revision_id());
-        assert_ne!(fresh_task_id(), fresh_task_id());
+    }
+
+    /// 验证通过 → 工具层改了被冻结的输入(`edit`)→ 这条结论立刻失效,结局回到
+    /// 未验证完成。这就是那条"跑完检查、补一个 edit、结论照旧算通过"的收紧。
+    #[test]
+    fn edit_after_the_conclusion_invalidates_it() {
+        let events = vec![
+            user(1),
+            task(2, check("rev-a", 0, "d1", None, 1_002)),
+            edit(3, "src/lib.rs"),
+        ];
+        let state = project_task(&events).expect("账本在");
+        assert_eq!(
+            state.verification(),
+            VerificationState::Unverified {
+                reason: StaleReason::InputsChanged {
+                    paths: vec!["src/lib.rs".into()]
+                }
+            },
+            "结论冻结过的输入被工具层改过:那条结论不再是可用结论"
+        );
+        assert_eq!(
+            state.outcome(),
+            TaskOutcome::Unverified,
+            "结局回到未验证完成"
+        );
+        // 结论本身还在账上(审计用):失效说的是"不算数",不是"被抹掉"。
+        assert_eq!(state.validations.len(), 1);
+        // 折叠仍然纯函数:同一份日志折两次逐字段相等。
+        assert_eq!(project_task(&events), Some(state));
+    }
+
+    /// 改的是无关文件:写入确实被记下,但它不在结论冻结的输入集合里 —— 结论照
+    /// 旧有效(否则"只要动过手就失效"就没法干活了)。
+    #[test]
+    fn a_write_to_an_unrelated_file_leaves_the_conclusion_intact() {
+        let events = vec![
+            user(1),
+            task(2, check("rev-a", 0, "d1", None, 1_002)),
+            tool_call(3, "write_file", r#"{"path":"docs/notes.md","content":"x"}"#),
+        ];
+        let state = project_task(&events).expect("账本在");
+        // 写入在基线上留了痕(只是与这条结论无关):关掉新判定时首先断在这里。
+        assert_eq!(
+            state.fingerprint_of("docs/notes.md"),
+            Some(TOOL_WRITE_DIGEST),
+            "工具层写入要在基线上留痕"
+        );
+        assert_eq!(
+            state.verification(),
+            VerificationState::Verified {
+                revision: rev("rev-a"),
+                verdict: ValidationVerdict::Passed,
+                fingerprints: vec![FileFingerprint {
+                    path: "src/lib.rs".into(),
+                    digest: "d1".into(),
+                }],
+                at: 1_002,
+            }
+        );
+        assert_eq!(state.outcome(), TaskOutcome::Passed);
+    }
+
+    /// 结论之后没有任何写入:当然照旧有效 —— 读文件、跑命令这类调用不改字节,
+    /// 一根指纹也不该进基线。
+    #[test]
+    fn a_conclusion_without_any_later_write_stays_valid() {
+        let events = vec![
+            user(1),
+            task(2, check("rev-a", 0, "d1", None, 1_002)),
+            tool_call(3, "read_file", r#"{"path":"src/lib.rs"}"#),
+            tool_call(4, "bash", r#"{"command":"cargo test --locked"}"#),
+        ];
+        let state = project_task(&events).expect("账本在");
+        assert_eq!(
+            state.fingerprints.len(),
+            1,
+            "只有结论冻结的那一条输入在基线上:{:?}",
+            state.fingerprints
+        );
+        assert_eq!(state.outcome(), TaskOutcome::Passed);
+    }
+
+    /// 顺序敏感:写入发生在结论**之前** —— 那些字节已经被这次运行看过,不倒扣。
+    /// (这就是"只要日志里有写入就失效"那种写法会踩的坑;顺序敏感靠的是记结论时
+    /// 把基线重新锚回它冻结的摘要。)
+    #[test]
+    fn a_write_before_the_conclusion_does_not_invalidate_it() {
+        let events = vec![
+            user(1),
+            edit(2, "src/lib.rs"),
+            task(3, check("rev-a", 0, "d1", None, 1_003)),
+        ];
+        assert_eq!(
+            project_task_outcome(&events),
+            Some(TaskOutcome::Passed),
+            "结论里冻结的就是写入之后的字节"
+        );
+    }
+
+    /// 参数口径:路径放在别名键里、带反斜杠或 `./` 前缀时要认得出;取不到路径的
+    /// 调用不记账 —— 宁可不记,也不猜。
+    #[test]
+    fn written_paths_are_read_leniently_from_the_tool_arguments() {
+        for (name, arguments) in [
+            (
+                "edit",
+                r#"{"file_path":"src/lib.rs","old_string":"a","new_string":"b"}"#,
+            ),
+            ("write_file", r#"{"path":".\\src\\lib.rs","content":"x"}"#),
+        ] {
+            let events = vec![
+                user(1),
+                task(2, check("rev-a", 0, "d1", None, 1_002)),
+                tool_call(3, name, arguments),
+            ];
+            let state = project_task(&events).expect("账本在");
+            assert_eq!(
+                state.outcome(),
+                TaskOutcome::Unverified,
+                "{name} {arguments} 的目标路径必须与冻结路径对上"
+            );
+        }
+        // 参数里给不出路径(残缺调用 / 不是 JSON):不记账,结论不受影响。
+        let events = vec![
+            user(1),
+            task(2, check("rev-a", 0, "d1", None, 1_002)),
+            tool_call(3, "write_file", r#"{"content":"x"}"#),
+            tool_call(4, "edit", "不是 JSON"),
+        ];
+        let state = project_task(&events).expect("账本在");
+        assert_eq!(state.fingerprints.len(), 1, "认不出路径的调用不该污染基线");
+        assert_eq!(state.outcome(), TaskOutcome::Passed);
     }
 }

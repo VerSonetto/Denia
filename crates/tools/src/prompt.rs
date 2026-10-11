@@ -386,24 +386,23 @@ pub fn register_goal_prompt_section(prompt: &mut SystemPrompt) -> Result<(), Str
     Ok(())
 }
 
-/// 任务账本工具(get_task/update_task/run_checks)的纪律段。
+/// 任务验证账本工具(`run_checks`)的纪律段。
 ///
-/// 与 `default_registry` 严格同步:三个工具在所有部署注册,本段同样总是注入
+/// 与 `default_registry` 严格同步:工具在所有部署注册,本段同样总是注入
 /// (与 tool:goal 这些基础段同性质)。preset 的 `taskLedger` 开关关闭时,工具
 /// 与本段一起消失(段↔工具映射见 `denia_agent_loop::turn::section_tools`)。
 ///
-/// 纪律与 description 分工不重叠:description 写参数机制,本段写"账本用来
-/// 干什么、什么时候写、完成判定怎么才算数、什么做不到"。
+/// 纪律与 description 分工不重叠:description 写参数机制,本段写“什么时候该跑
+/// 检查、结论由谁写、什么做不到”。
 pub fn register_task_prompt_section(prompt: &mut SystemPrompt) -> Result<(), String> {
     prompt.section(PromptSection {
         name: "tool:task".to_string(),
         order: SectionOrder::ToolTask.value(),
         text: PromptText::Static(
-            "任务账本记的是「这次任务要达成什么、有什么证据支撑完成」。多步任务开工前先用 update_task 的 open 声明目标与验收项(acceptance);用户要求或验收变了用 revise 换版(旧验证结论随之作废);过程中把事实、假设、失败尝试、未决问题用 amend 记下来;待完成工作用 set-remaining 整表替换;卡在外部条件上用 block,解除后 unblock;做完用 close 收口。\n\
-             验收项由你声明,完成也只看它:收口时当前 revision 的验收项必须全部被「通过的检查」覆盖才算验收通过,否则结局是「未验证完成」——不要用「我做完了」替代它。\n\
-             你**不能**自称验证通过:验证结论只能由 run_checks 真跑完命令后由宿主按退出码写出。要主张完成就跑检查(命令、期望退出码、工作目录、超时),用 covered 声明本次覆盖哪些验收项;检查失败就如实报告失败,不要绕过检查,也不要把没跑完的说成通过。\n\
-             事实必须能追溯:引用用户原话要在日志里核对得到,核不到会被降级为假设;拿不出处就用 assumption,不要把自己的推断写成 fact。\n\
-             run_checks 的输入快照只覆盖工作目录与文件内容指纹(没有环境变量快照):验证之后相关文件又被改过,旧结论就失效,需要重跑。动手前后用 get_task 确认状态、结局与当前 revision(它给出验收项、未决问题、证据的 id)。"
+            "改完代码要主张“做完了”就跑 run_checks:给出检查命令(命令、期望退出码、工作目录、超时),宿主真的跑它,并按退出码把结论写进账本 —— 通过与否由退出码算,不由你声明。\n\
+             你**不能**自称验证通过:结论只有宿主写得出,模型侧没有写结论的入口。检查失败就如实报告失败,不要绕过检查,也不要把没跑完的命令说成通过;一条通过的命令只代表它真跑过的那件事,别拿它冒充整件任务完成。\n\
+             run_checks 的输入快照只覆盖工作目录与文件内容指纹(没有环境变量快照):验证之后相关文件又被改过,旧结论就失效,需要重跑。\n\
+             账本上的结局由宿主按**最新一条**有效结论裁决(未验证完成 / 验收通过 / 验收失败):再跑一次失败的检查,早先那条通过就作废 —— 所以不要用“挑一条通过的”来宣称完成。"
                 .to_string(),
         ),
         complete: false,
@@ -1043,8 +1042,8 @@ mod tests {
         );
         assert!(!render_context_snapshot(&assembly).is_empty());
         // bash/read/write/todo/ls/glob/grep/edit/exit_plan/get_goal/update_goal/web_fetch
-        // + 任务账本三件套 get_task/update_task/run_checks。
-        assert_eq!(assembly.tools.len(), 16);
+        // + 任务验证账本 run_checks。
+        assert_eq!(assembly.tools.len(), 14);
         assert!(
             assembly
                 .tools
