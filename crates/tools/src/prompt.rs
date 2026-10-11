@@ -12,6 +12,14 @@ use crate::browser::BrowserHub;
 use crate::shell;
 use crate::{Tool, ToolRegistry};
 
+/// 语言纪律的唯一权威正文。
+///
+/// 它平时由 `harness:communication` 承担,但那条段落在 persona 独占档
+/// (`persona_complete` 会把系统提示收成只剩 `deployment:persona`)里会被
+/// 一起摘掉,所以 persona 侧必须能把这句话随身带走。抽成常量是为了让两侧
+/// 引用同一份字节:同一句话写两遍,改一处漏一处只是时间问题。
+pub const LANGUAGE_RULE: &str = "**始终使用简体中文回复**,除非用户明确要求其他语言。";
+
 /// Register tool schemas, tool guidance sections, runtime facts, and variables.
 pub fn register_shipped_prompt(
     prompt: &mut SystemPrompt,
@@ -61,7 +69,7 @@ pub fn register_shipped_prompt(
         name: "tool:ls".to_string(),
         order: SectionOrder::ToolLs.value(),
         text: PromptText::Static(
-            "用 ls 查看一个目录里有哪些条目——不要用 shell 的 ls/dir/Get-ChildItem。默认只列一层;确实要看更深时显式给 depth(上限 5),不要用 shell 递归摊平整棵树。不要猜文件路径;读取失败时先用 ls 列目录再重试。"
+            "用 ls 查看一个目录里有哪些条目。默认只列一层;确实要看更深时显式给 depth(上限 5)。不要猜文件路径;读取失败时先用 ls 列目录再重试。"
                 .to_string(),
         ),
         complete: false,
@@ -70,9 +78,7 @@ pub fn register_shipped_prompt(
     prompt.section(PromptSection {
         name: "tool:read".to_string(),
         order: SectionOrder::ToolRead.value(),
-        text: PromptText::Static(
-            "用 read_file 查看文本文件,不要用 bash 的 cat/type,也不要写 PowerShell 的 Get-Content。大文件可分段读取。".to_string(),
-        ),
+        text: PromptText::Static("用 read_file 查看文本文件。大文件可分段读取。".to_string()),
         complete: false,
         audience: SectionAudience::Model,
     })?;
@@ -103,7 +109,7 @@ pub fn register_shipped_prompt(
         name: "tool:glob".to_string(),
         order: SectionOrder::ToolGlob.value(),
         text: PromptText::Static(
-            "用 glob 工具——不要用 shell 的 find,也不要写 PowerShell 的 Get-ChildItem -Recurse——按路径模式找文件。无 \"/\" 的模式在任意深度匹配 basename,所以 \"*.rs\" 搜整棵树;结果只含文件、按修改时间排序。只想看目录里有什么就用 ls,不要拿 glob 绕。"
+            "用 glob 工具按路径模式找文件。无 \"/\" 的模式在任意深度匹配 basename,所以 \"*.rs\" 搜整棵树;结果只含文件、按修改时间排序。只想看目录里有什么就用 ls,不要拿 glob 绕。"
                 .to_string(),
         ),
         complete: false,
@@ -113,7 +119,7 @@ pub fn register_shipped_prompt(
         name: "tool:grep".to_string(),
         order: SectionOrder::ToolGrep.value(),
         text: PromptText::Static(
-            "用 grep 工具——不要用 shell 的 grep/rg/findstr,也不要写 PowerShell 的 Select-String——全文搜索;搜索大目录可加 include 收窄,命中上限后收窄 pattern 再看更多;命中的文件用 read_file 读上下文。"
+            "用 grep 工具全文搜索;搜索大目录可加 include 收窄,命中上限后收窄 pattern 再看更多;命中的文件用 read_file 读上下文。"
                 .to_string(),
         ),
         complete: false,
@@ -123,7 +129,7 @@ pub fn register_shipped_prompt(
         name: "tool:edit".to_string(),
         order: SectionOrder::ToolEdit.value(),
         text: PromptText::Static(
-            "精确小改动用 edit 工具:先 read_file 确认原文,再按下面两种格式严格二选一。只改一处时只给 {path, old_string, new_string},可选 replace_all;同一文件改多处时只给 {path, edits:[{old_string, new_string, replace_all?}, ...]},至少一个 edits 项。**不要同时提供 edits 和 old_string/new_string/replace_all,也不要传空 edits 数组**。每个 old_string 必须与当前文件逐字符一致(空白与换行都算),默认只能出现一次;replace_all=true 时才替换全部出现。多处 edits 按顺序应用且全有或全无;不要为多处修改拆成多次调用。改完用 read_file 或 grep 验证结果。"
+            "精确小改动用 edit 工具:按下面两种格式严格二选一。只改一处时只给 {path, old_string, new_string},可选 replace_all;同一文件改多处时只给 {path, edits:[{old_string, new_string, replace_all?}, ...]},至少一个 edits 项。**不要同时提供 edits 和 old_string/new_string/replace_all,也不要传空 edits 数组**。每个 old_string 必须与当前文件逐字符一致(空白与换行都算),默认只能出现一次;replace_all=true 时才替换全部出现。多处 edits 按顺序应用且全有或全无;不要为多处修改拆成多次调用。改完用 read_file 或 grep 验证结果。"
                 .to_string(),
         ),
         complete: false,
@@ -190,7 +196,15 @@ pub fn register_capability_prompt_sections(prompt: &mut SystemPrompt) -> Result<
         name: "tool:jobs".to_string(),
         order: SectionOrder::ToolJobs.value(),
         text: PromptText::Static(
-            "长时间命令用 job_start 后台运行,job_output 立即领取当前输出,job_kill 停止。job_output 的 wait=true 也不前台等待;未完成返回 pending,完成结果会自动送达。不要循环轮询或用 sleep 等结果;可以继续独立工作,或先向用户回复当前进度并结束本轮。结果到达后再检查状态与输出并继续回复,不要把 pending 或 ready 当作执行成功。"
+            // 探索禁令在这里回指一句是为了补齐只读/计划档的空档:那两个档会摘掉
+            // `tool:bash`,而 job_start/job_output/job_kill 仍在工具面、与 bash
+            // 共用同一套命令启发式(读类命令放行)—— 总纲只挂在 tool:bash 上的话,
+            // 模型在只读档等于没被约束。这里说清规则本身(句法不与 tool:bash 的
+            // 总纲逐字重复,去重断言另有其表),并且与 jobs 三件套同进退。
+            // “等待期间……”一句自足表述,不再回指 `tool:agents` 段——
+            // subagents 关闭时那段不存在,悬空引用会让模型去找一段没有的东西。
+            "长时间命令用 job_start 后台运行,job_output 立即领取当前输出,job_kill 停止。job_output 的 wait=true 也不前台等待;未完成返回 pending,完成结果会自动送达。等待期间不轮询、不用 sleep 占住轮次、结果到达前不当作成功。\n\
+             job_start 与 bash 是同一套 shell 访问:列目录、找文件、搜内容、读文本这四件探索类的事,同样不许用后台命令代替 ls/glob/grep/read_file——禁令按动作界定,不看命令叫什么名;bash 工具不在工具面时(如只读档),这条约束对 job_start 依旧成立。"
                 .to_string(),
         ),
         complete: false,
@@ -464,14 +478,15 @@ pub fn register_working_style_section(prompt: &mut SystemPrompt) -> Result<(), S
              - 不要重新推导对话里已经确立的事实,不要重开用户已经拍板的决定,不要罗列你不打算做的选项。\n\
              - 要在两个方案之间取舍时,直接给推荐和理由,不要做面面俱到的综述。\n\
              - 用户不在实时旁观,中途问\"要不要我……?\"\"需要我……吗?\"会直接卡住工作。\
-             属于原始请求范围内、可逆的动作,直接做;只有破坏性操作或真正的范围变更才停下来问。\n\
+             属于原始请求范围内、可逆的动作,直接做;不可逆或对外的操作按风险纪律先确认,\n\
+             真正的范围变更才停下来问。\n\
              - 例外:当用户是在描述问题、提问或自言自语式地思考,而不是要求改动时,交付物就是你的判断。\
              汇报发现后停下,不要顺手把修复做了。\n\
              \n\
              结束本轮之前,检查你最后一段话:\n\
              - 如果它是计划、分析、提问、下一步清单,或对尚未完成工作的承诺(\"我会……\"\"你可以让我……\"),\
              那就现在用工具把它做掉。\n\
-             - 包括重试失败的操作、自己去补齐缺失的信息。不要因为上下文或会话变长就停下。\n\
+             - 包括重试失败的操作、自己去补齐缺失的信息。\n\
              - 只有任务完成、或卡在只有用户能提供的信息上时,才结束本轮。\n\
              \n\
              改动系统状态的命令(重启、删除、改配置)执行前,先确认证据确实支持这一步;\
@@ -492,8 +507,8 @@ pub fn register_communication_section(prompt: &mut SystemPrompt) -> Result<(), S
     prompt.section(PromptSection {
         name: "harness:communication".to_string(),
         order: SectionOrder::Communication.value(),
-        text: PromptText::Static(
-            "**始终使用简体中文回复**,除非用户明确要求其他语言。\n\
+        text: PromptText::Static(format!(
+            "{LANGUAGE_RULE}\n\
              \n\
              你的文字输出就是用户看到的东西;他们看不到你的思考过程,通常也看不到原始工具结果。\
              把输出写给一个刚离开工位、正在补进度的同事——他不知道你中途起的代号和简写,\
@@ -515,8 +530,7 @@ pub fn register_communication_section(prompt: &mut SystemPrompt) -> Result<(), S
              - **Markdown 语法写完整**。标题的 `#` 后面必须有空格(`## 验证结果`,不是 `##验证结果`);\
              标题、表格、列表、代码围栏各自独占一行,不要在标题行末尾直接接表格表头或正文。\
              写歪的语法不会被渲染成结构,而是把 `##`、`|---|` 这些标记原样展示给用户。"
-                .to_string(),
-        ),
+        )),
         complete: false,
         audience: SectionAudience::Model,
     })?;
@@ -1136,11 +1150,14 @@ mod tests {
             .find(|section| section.name == "tool:ls")
             .expect("tool:ls section registered with the ls tool");
         assert_eq!(section.audience, SectionAudience::Model);
-        assert!(section.text.contains("Get-ChildItem"), "{}", section.text);
+        // 段里只留本工具独有的用法(depth 上限、别猜路径):"探索类动作不许走 shell"
+        // 的总纲收在 tool:bash 一段——tool:bash 与 bash 工具同进退,有 shell 可误用
+        // 时它必然在,没有 shell 时禁令本来就无意义。
         assert!(section.text.contains("depth"), "{}", section.text);
+        assert!(section.text.contains("不要猜文件路径"), "{}", section.text);
         let user_body = denia_system_prompt::render_prompt_for_user(&assembly);
         assert!(
-            !user_body.contains("不要用 shell 的 ls"),
+            !user_body.contains("不要猜文件路径"),
             "tool:ls 段泄进了用户可见副本"
         );
     }

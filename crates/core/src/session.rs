@@ -1128,6 +1128,79 @@ pub fn derive_messages(events: &[SessionEnvelope]) -> Vec<ChatMessage> {
         .collect()
 }
 
+/// 按"当前有效基线"语义折叠的自动注入通道:同一通道在模型面上只保留
+/// **最新一条**,更早的版本退出模型面(事件仍在日志里,append-only)。
+///
+/// 判据是**内容语义**,不是"是不是注入":只有内容等于"当前快照"、新版本
+/// 取代旧版本的通道才折叠。逐条独立、每条都带新信息的注入通道一律不折叠
+/// ——图片(`image`)、指向某条具体用户消息的通知(`file-notice` /
+/// `quote` /
+/// `image-notice`)、纠错(`feedback`)、`loop-warning` /
+/// `output-continuation` /
+/// `gesture-skill`、压缩后回填(`post-compact-read-state` /
+/// `compact-breaker`)这些通道上的每一条都是独立事实,折叠等于把模型该看到
+/// 的内容删掉(注入的图片被折叠后既不在模型面、也不会再补发)。
+///
+/// 名单与注入侧的幂等基准同源:下列通道正是 `agent-loop` 的
+/// `InjectionBaselines` 逐 step 比较"模型面上最后一条本通道文本"的那些,
+/// 外加运行时上下文快照(其头部本身就宣告取代更早的快照)。新增基线通道时
+/// 要一并登记到这里,否则它会在模型面上按版本累积。
+pub const BASELINE_INJECTION_CHANNELS: &[&str] = &[
+    "workspace-instructions",
+    "capability",
+    "skill-catalog",
+    "project-memory",
+    "goal",
+    "subagent-catalog",
+    "system-prompt-update",
+    "runtime-context",
+];
+
+/// 该注入通道是否按"最新有效基线"折叠旧版本。
+pub fn is_baseline_channel(channel: &str) -> bool {
+    BASELINE_INJECTION_CHANNELS.contains(&channel)
+}
+
+/// 旧日志(还没有 `channel` 字段)里注入块的文本前缀 → 通道名。
+///
+/// 表里只放**注入侧的基准也这么认**的三条:能力上下文 / 工作区指令 /
+/// 技能目录(`agent-loop` 的 `InjectionBaselines::restore` 给这三条留了
+/// 前缀 fallback)。投影与基准必须用同一条身份判据:基准按前缀认、投影不
+/// 认的话,老块与新块会被算成两个通道,模型面上同时留下两份互相矛盾的
+/// 基线——正是"一半折叠、一半不折叠"。其余通道(项目记忆、目标、子代理
+/// 目录、系统提示更新、运行时上下文)在基准侧只认通道字段,投影这边也就
+/// 只认通道字段,不做无边界的文本猜测。
+///
+/// 无通道字段的日志本来就属于"旧格式不自动迁移"的范畴,不补认不是遗漏,
+/// 是让投影与基准的口径严格相等。
+const LEGACY_INJECTION_PREFIXES: &[(&str, &str)] = &[
+    ("[denia 能力上下文]", "capability"),
+    ("<system-reminder>\n工作区指令:", "workspace-instructions"),
+    ("<system-reminder>\n技能目录:", "skill-catalog"),
+];
+
+/// 一条用户消息的注入通道身份(`None` = 普通消息,不参与按通道折叠)。
+///
+/// `channel` 字段优先;旧日志(无该字段)按 [`LEGACY_INJECTION_PREFIXES`]
+/// 的文本前缀回退。前缀回退只对 `injected: true` 的消息生效:用户把会话
+/// 片段整段粘进对话时,正文完全可能以同样的前缀开头,那种消息不是 harness
+/// 注入,按通道折叠它等于把用户的话从模型面抹掉。
+pub fn injection_channel<'a>(
+    text: &'a str,
+    injected: bool,
+    channel: Option<&'a str>,
+) -> Option<&'a str> {
+    if let Some(channel) = channel {
+        return Some(channel);
+    }
+    if !injected {
+        return None;
+    }
+    LEGACY_INJECTION_PREFIXES
+        .iter()
+        .find_map(|(prefix, name)| text.starts_with(prefix).then_some(*name))
+}
+
 /// 一条派生 surface 消息及其来源事件 seq。压缩器用它把消息切回事件区间。
 #[derive(Debug, Clone)]
 pub struct SurfaceMessage {
@@ -1139,6 +1212,17 @@ pub struct SurfaceMessage {
     /// (wire 层不需要它)。微压缩需要这个信息来保护错误结果不被清理——
     /// 错误信息往往是模型纠正自己的唯一线索。
     pub is_error: bool,
+    /// 本条消息来自哪个自动注入通道(非注入消息为 None)。
+    ///
+    /// 自动注入的幂等基准是"模型面上最后一条本通道文本":注入方只比内容
+    /// 不看位置,一旦压缩把注入块移出 surface,光看日志会以为"已经注入过"
+    /// 而不再补发。通道身份必须随 surface 一起走,判断才有正确来源。
+    ///
+    /// 身份口径见 [`injection_channel`](事件自带 `channel` 优先,旧日志按
+    /// 文本前缀回退)。通道属于 [`BASELINE_INJECTION_CHANNELS`] 时,本条还
+    /// 会参与"同通道只留最新"的投影折叠——折叠只影响哪些消息进 surface,
+    /// 字段本身记录的仍是来源身份,不受折叠影响。
+    pub channel: Option<String>,
 }
 
 /// 派生模型可见历史,带事件 seq(压缩折叠同 [`derive_messages`])。
@@ -1154,14 +1238,17 @@ fn derive_surface_inner(events: &[SessionEnvelope]) -> Vec<SurfaceMessage> {
         message: ChatMessage,
         /// 仅 tool-result 有意义:该结果是否为错误结果。
         is_error: bool,
+        /// 仅注入消息有意义:来源通道名(见 [`SurfaceMessage::channel`])。
+        channel: Option<String>,
     }
 
-    /// 构造非 tool 类节点(错误标记恒为 false)。
+    /// 构造非 tool 类节点(错误标记恒为 false、非注入)。
     fn plain(seq: u64, message: ChatMessage) -> SurfaceItem {
         SurfaceItem {
             seq,
             message,
             is_error: false,
+            channel: None,
         }
     }
 
@@ -1188,7 +1275,12 @@ fn derive_surface_inner(events: &[SessionEnvelope]) -> Vec<SurfaceMessage> {
             SessionEvent::AgentDelivery { text, .. } => {
                 surface.push(plain(seq, ChatMessage::user(text)));
             }
-            SessionEvent::UserMessage { text, images, .. } => {
+            SessionEvent::UserMessage {
+                text,
+                images,
+                injected,
+                channel,
+            } => {
                 if !unanswered.is_empty() && !images.is_empty() {
                     pending_tool_images.extend(images.clone());
                     // 事件不进 surface:图片由下一条 tool-result 携带。
@@ -1199,7 +1291,24 @@ fn derive_surface_inner(events: &[SessionEnvelope]) -> Vec<SurfaceMessage> {
                 } else {
                     ChatMessage::user_with_images(text, images.clone())
                 };
-                surface.push(plain(seq, message));
+                // 通道身份:字段优先、旧日志前缀回退(与注入侧基准同一条判据)。
+                let channel = injection_channel(text, *injected, channel.as_deref());
+                if let Some(folded) = channel.filter(|name| is_baseline_channel(name)) {
+                    // 基线通道只留最新一条:同通道的旧版本从模型面退出,事件仍
+                    // 留在日志里(append-only)。不做这一步的话,正文每变一次就
+                    // 在模型面上多留一份过期基线——工作区指令、能力上下文、记忆
+                    // 索引这些逐 step 刷新的通道会稳定膨胀,而且模型同时看到
+                    // 互相矛盾的多个版本。
+                    surface.retain(|item| item.channel.as_deref() != Some(folded));
+                }
+                surface.push(SurfaceItem {
+                    seq,
+                    message,
+                    is_error: false,
+                    // 注入通道身份随消息进 surface:基线的幂等判断必须知道
+                    // "模型面上还有没有本通道的最新文本"。
+                    channel: channel.map(str::to_owned),
+                });
             }
             SessionEvent::CompactionSummary {
                 summary,
@@ -1251,6 +1360,7 @@ fn derive_surface_inner(events: &[SessionEnvelope]) -> Vec<SurfaceMessage> {
                         seq,
                         message: ChatMessage::tool_result(call_id, content),
                         is_error: *is_error,
+                        channel: None,
                     });
                 } else {
                     // 带图合并:截图等工具图片挂到本条 tool-result 上,
@@ -1264,6 +1374,7 @@ fn derive_surface_inner(events: &[SessionEnvelope]) -> Vec<SurfaceMessage> {
                         seq,
                         message,
                         is_error: *is_error,
+                        channel: None,
                     });
                 }
             }
@@ -1309,6 +1420,7 @@ fn derive_surface_inner(events: &[SessionEnvelope]) -> Vec<SurfaceMessage> {
                 seq: summary.seq,
                 message: ChatMessage::user(summary.text),
                 is_error: false,
+                channel: None,
             },
         );
     }
@@ -1319,6 +1431,7 @@ fn derive_surface_inner(events: &[SessionEnvelope]) -> Vec<SurfaceMessage> {
             seq: item.seq,
             message: item.message,
             is_error: item.is_error,
+            channel: item.channel,
         })
         .collect();
     for call_id in unanswered {
@@ -1326,6 +1439,7 @@ fn derive_surface_inner(events: &[SessionEnvelope]) -> Vec<SurfaceMessage> {
             seq: u64::MAX - messages.len() as u64,
             message: ChatMessage::tool_result(call_id, INTERRUPTED_TOOL_RESULT),
             is_error: true,
+            channel: None,
         });
     }
     messages
@@ -1452,6 +1566,162 @@ mod tests {
             "截图应并入 tool-result: {messages:?}"
         );
         assert!(messages[2].content.contains("截图"));
+    }
+
+    fn injection(seq: u64, channel: Option<&str>, text: &str) -> SessionEnvelope {
+        envelope(
+            seq,
+            SessionEvent::UserMessage {
+                text: text.into(),
+                injected: true,
+                channel: channel.map(str::to_owned),
+                images: Vec::new(),
+            },
+        )
+    }
+
+    fn assistant_text(seq: u64, text: &str) -> SessionEnvelope {
+        envelope(
+            seq,
+            SessionEvent::AssistantMessage {
+                turn: 1,
+                step: 1,
+                blocks: vec![ContentBlock::Text { text: text.into() }],
+                usage: None,
+                interrupted: false,
+                source_event_seqs: Vec::new(),
+                first_token_time: None,
+            },
+        )
+    }
+
+    /// surface 的 `(seq, 正文)` 快照:折叠的断言只看"哪些消息进了模型面"。
+    fn surface_pairs(events: &[SessionEnvelope]) -> Vec<(u64, String)> {
+        derive_surface(events)
+            .into_iter()
+            .map(|item| (item.seq, item.message.content.clone()))
+            .collect()
+    }
+
+    /// 基线通道的注入块在模型面上只留最新一条:旧版本的 seq 不再出现在
+    /// surface 上(事件仍在日志里)。
+    #[test]
+    fn baseline_channel_keeps_only_the_latest_injection() {
+        let events = vec![
+            assistant_text(1, "先做这个"),
+            injection(2, Some("workspace-instructions"), "工作区指令 v1"),
+            assistant_text(3, "继续"),
+            injection(4, Some("workspace-instructions"), "工作区指令 v2"),
+        ];
+        assert_eq!(
+            surface_pairs(&events),
+            vec![
+                (1, "先做这个".to_string()),
+                (3, "继续".to_string()),
+                (4, "工作区指令 v2".to_string()),
+            ],
+            "旧版本(seq 2)必须退出模型面,而不是与新版并存"
+        );
+        // 同内容重复注入(幂等基准失算时的兜底)也只有一个节点。
+        let repeated = vec![
+            injection(1, Some("capability"), "能力 v1"),
+            injection(2, Some("capability"), "能力 v1"),
+        ];
+        assert_eq!(surface_pairs(&repeated), vec![(2, "能力 v1".to_string())]);
+    }
+
+    /// 不同通道各留各的最新一条,互不淘汰。
+    #[test]
+    fn different_channels_do_not_fold_each_other() {
+        let events = vec![
+            injection(1, Some("capability"), "能力 v1"),
+            injection(2, Some("workspace-instructions"), "工作区 v1"),
+            injection(3, Some("capability"), "能力 v2"),
+            injection(4, Some("goal"), "目标 v1"),
+        ];
+        assert_eq!(
+            surface_pairs(&events),
+            vec![
+                (2, "工作区 v1".to_string()),
+                (3, "能力 v2".to_string()),
+                (4, "目标 v1".to_string()),
+            ]
+        );
+    }
+
+    /// 逐条独立的注入通道(图片、通知、纠错)永不折叠:每一条都是独立事实,
+    /// 图片被折叠后既不在模型面、也不会再补发。
+    #[test]
+    fn per_event_injection_channels_are_never_folded() {
+        let events = vec![
+            injection(1, Some("image"), "[harness] 读取图片:a.png"),
+            injection(2, Some("file-notice"), "[harness] 用户附了 a.rs"),
+            injection(3, Some("image"), "[harness] 读取图片:b.png"),
+            injection(4, Some("feedback"), "请求被拒:工具参数不合法"),
+            injection(5, Some("feedback"), "请求被拒:上下文超限"),
+        ];
+        let pairs = surface_pairs(&events);
+        assert_eq!(pairs.len(), 5, "逐条注入不得折叠:{pairs:?}");
+        assert_eq!(pairs[0].1, "[harness] 读取图片:a.png");
+    }
+
+    /// 旧日志(无 `channel` 字段)里靠前缀识别的注入块,按与注入侧基准同一条
+    /// 口径折叠;不被任何基线通道认领的旧注入与真实用户消息一律不动。
+    #[test]
+    fn legacy_injections_fold_only_when_the_prefix_identifies_a_baseline_channel() {
+        let pasted = "<system-reminder>\n工作区指令:这是我复制的会话片段";
+        let events = vec![
+            // 旧日志:无通道字段,靠前缀认成 workspace-instructions。
+            injection(1, None, "<system-reminder>\n工作区指令:v1"),
+            // 新日志:同一通道的新版本——旧块必须退出模型面,否则模型同时
+            // 看到两份互相矛盾的工作区指令。
+            injection(2, Some("workspace-instructions"), "工作区指令 v2"),
+            // 旧日志里没有前缀判据的注入块:保持追加(猜错就会误删)。
+            injection(3, None, "[harness] 浏览器截图已注入"),
+            injection(4, None, "[harness] 浏览器截图已注入"),
+            // 真实用户消息:正文以同样的前缀开头也不折叠。
+            envelope(
+                5,
+                SessionEvent::UserMessage {
+                    text: pasted.into(),
+                    injected: false,
+                    channel: None,
+                    images: Vec::new(),
+                },
+            ),
+        ];
+        assert_eq!(
+            surface_pairs(&events),
+            vec![
+                (2, "工作区指令 v2".to_string()),
+                (3, "[harness] 浏览器截图已注入".to_string()),
+                (4, "[harness] 浏览器截图已注入".to_string()),
+                (5, pasted.to_string()),
+            ]
+        );
+    }
+
+    /// 通道身份只有一条判据(`injection_channel`):字段优先、旧日志前缀回退,
+    /// 且回退只认注入侧基准也认的那三条前缀。
+    #[test]
+    fn injection_channel_is_the_single_identity_predicate() {
+        assert_eq!(
+            injection_channel("[denia 能力上下文]v1", true, None),
+            Some("capability")
+        );
+        assert_eq!(
+            injection_channel("任意正文", true, Some("capability")),
+            Some("capability"),
+            "通道字段压过前缀"
+        );
+        assert_eq!(injection_channel("[denia 能力上下文]v1", false, None), None);
+        assert_eq!(
+            injection_channel("<system-reminder>\n项目记忆:索引", true, None),
+            None,
+            "基准侧没有前缀判据的通道,投影这边也不猜"
+        );
+        assert!(is_baseline_channel("runtime-context"));
+        assert!(!is_baseline_channel("image"));
     }
 
     #[test]
@@ -2474,7 +2744,10 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
         assert!(joined.contains("summary two"), "最新摘要必须保留: {joined}");
-        assert!(!joined.contains("summary one"), "被覆盖的旧摘要不能残留: {joined}");
+        assert!(
+            !joined.contains("summary one"),
+            "被覆盖的旧摘要不能残留: {joined}"
+        );
         assert_eq!(messages.len(), 2);
         assert_eq!(messages[0].content, "summary two");
         assert_eq!(messages[1].content, "now this");
@@ -2494,7 +2767,11 @@ mod tests {
             },
         )];
         let mut seq = 2u64;
-        for (round, summary) in [(1u32, "summary one"), (2, "summary two"), (3, "summary three")] {
+        for (round, summary) in [
+            (1u32, "summary one"),
+            (2, "summary two"),
+            (3, "summary three"),
+        ] {
             events.push(envelope(
                 seq,
                 SessionEvent::AssistantMessage {
@@ -2541,9 +2818,18 @@ mod tests {
             .map(|m| m.content.clone())
             .collect::<Vec<_>>()
             .join("\n");
-        assert!(joined.contains("summary three"), "最新摘要必须保留: {joined}");
-        assert!(!joined.contains("summary two"), "中间摘要不能残留: {joined}");
-        assert!(!joined.contains("summary one"), "最早摘要不能残留: {joined}");
+        assert!(
+            joined.contains("summary three"),
+            "最新摘要必须保留: {joined}"
+        );
+        assert!(
+            !joined.contains("summary two"),
+            "中间摘要不能残留: {joined}"
+        );
+        assert!(
+            !joined.contains("summary one"),
+            "最早摘要不能残留: {joined}"
+        );
         assert_eq!(
             messages
                 .iter()

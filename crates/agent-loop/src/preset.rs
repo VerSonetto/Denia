@@ -17,6 +17,7 @@
 
 use denia_core::preset::{AgentPreset, DEFAULT_PRESET_ID};
 use denia_system_prompt::{PERSONA_SECTION, PromptAssembly};
+use denia_tools::prompt::LANGUAGE_RULE;
 
 use crate::turn::section_tools;
 
@@ -96,14 +97,26 @@ pub(crate) fn apply_preset(assembly: &mut PromptAssembly, preset: &AgentPreset) 
             .iter_mut()
             .find(|section| section.name == PERSONA_SECTION)
     {
-        section.text = format!("{persona}\n始终使用简体中文回复，除非用户明确要求其他语言。");
+        section.text = persona.to_string();
     }
     // persona 独占:系统提示只留 persona 一段。运行时上下文快照(contexts)
     // 保留——cwd/平台/权限语义是执行层与注入管线的依赖,极简 agent 同样需要。
+    //
+    // 语言纪律要随 persona 一起活下来:它平时由 `harness:communication` 承担,
+    // 收窄后那条段落没了,不在这里补回等于 personaComplete 的会话彻底没有语言
+    // 约束。非独占档不补——communication 段已经讲过一遍,再补就是同一条约束
+    // 在同一份系统提示里出现两次(防回归断言在 `prompt_sections_probe`)。
     if preset.persona_complete {
         assembly
             .sections
             .retain(|section| section.name == PERSONA_SECTION);
+        if let Some(section) = assembly
+            .sections
+            .iter_mut()
+            .find(|section| section.name == PERSONA_SECTION)
+        {
+            section.text = format!("{}\n{}", section.text.trim_end(), LANGUAGE_RULE);
+        }
     }
     // features 先收窄(工具 + 纪律段联动),tools 白名单在其上继续收窄。
     let excluded = preset.features.excluded_tools();
@@ -169,6 +182,16 @@ mod tests {
         }
     }
 
+    /// 语言纪律的权威段:真实部署里它由出厂提示词注册,这里用同一份常量正文
+    /// 搭出等价形态——本模块的断言靠“这句话在哪些段落里出现”区分收窄行为。
+    fn communication_section() -> denia_system_prompt::AssembledSection {
+        denia_system_prompt::AssembledSection {
+            name: "harness:communication".to_string(),
+            text: format!("{}\n\n你的文字输出就是用户看到的东西。", LANGUAGE_RULE),
+            audience: SectionAudience::Model,
+        }
+    }
+
     fn assembly() -> PromptAssembly {
         PromptAssembly {
             sections: vec![
@@ -177,6 +200,7 @@ mod tests {
                 section("tool:goal"),
                 section("tool:memory"),
                 section("context:file-reference"),
+                communication_section(),
                 section("harness:context-management"),
                 section("harness:runtime"),
             ],
@@ -220,6 +244,7 @@ mod tests {
                 "deployment:persona",
                 "tool:bash",
                 "context:file-reference",
+                "harness:communication",
                 "harness:context-management",
                 "harness:runtime"
             ],
@@ -234,8 +259,20 @@ mod tests {
         assert_eq!(assembly.tools.len(), 6);
         let persona = &assembly.sections[0];
         assert!(persona.text.starts_with("自定义 {{cwd}}"));
-        assert!(persona.text.contains("简体中文"));
-        assert_eq!(assembly.sections.len(), 7);
+        // 语言纪律只留一处:非独占档的权威段是 `harness:communication`,
+        // persona 不追写第二遍(重复由 prompt_sections_probe 的断言兜住)。
+        assert!(
+            !persona.text.contains(LANGUAGE_RULE),
+            "非 persona 独占档不该在 persona 里重复语言纪律:{}",
+            persona.text
+        );
+        let communication = assembly
+            .sections
+            .iter()
+            .find(|section| section.name == "harness:communication")
+            .expect("非独占档必须保留 harness:communication");
+        assert!(communication.text.contains(LANGUAGE_RULE));
+        assert_eq!(assembly.sections.len(), 8);
     }
 
     #[test]
@@ -254,8 +291,27 @@ mod tests {
         assert_eq!(assembly.sections.len(), 1);
         assert_eq!(assembly.sections[0].name, PERSONA_SECTION);
         assert!(assembly.sections[0].text.starts_with("一句话人格"));
+        // 收窄到只剩 persona 时,语言纪律必须随 persona 活下来——它在
+        // harness:communication 里,而那条段落正好是被摘掉的那一段。
+        assert!(
+            assembly.sections[0].text.contains(LANGUAGE_RULE),
+            "personaComplete 档丢了语言纪律:{}",
+            assembly.sections[0].text
+        );
         // 工具 schema 保留:工具仍可用,只是没有指引(dsh complete 语义)。
         assert_eq!(assembly.tools.len(), 6);
+    }
+
+    #[test]
+    fn persona_complete_without_a_persona_still_carries_the_language_rule() {
+        // personaComplete + 未给 persona 时 persona 段是出厂身份句,语言纪律
+        // 没有别的去处——它必须挂在这一段上,否则该会话彻底没有语言约束。
+        let mut assembly = assembly();
+        let mut p = preset(None, None);
+        p.persona_complete = true;
+        apply_preset(&mut assembly, &p);
+        assert_eq!(assembly.sections.len(), 1);
+        assert!(assembly.sections[0].text.contains(LANGUAGE_RULE));
     }
 
     #[test]

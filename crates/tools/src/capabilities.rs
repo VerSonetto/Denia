@@ -72,8 +72,17 @@ pub trait AgentRuntime: Send + Sync {
     /// 项目记忆索引(MEMORY.md)注入文本;None = 未启用。记忆启用时实现方
     /// 必须给出注入(空桶给目录路径,有索引给全文)——路径是主代理读写
     /// 记忆的前提。幂等去重由驱动器按通道基准承担(内容不变不重发)。
-    async fn project_memory_index(&self, cwd: &std::path::Path) -> Result<Option<String>, String> {
-        let _ = cwd;
+    ///
+    /// `touched` 是本轮已触碰的文件路径(装配层从 read_file/write_file/edit
+    /// 的 path 参数收集),`recent_user` 是最新一条真实用户消息文本;实现方
+    /// 据此选择相关条目,并给被省略的条目留全文指针(全文按需 read_file)。
+    async fn project_memory_index(
+        &self,
+        cwd: &std::path::Path,
+        touched: &[std::path::PathBuf],
+        recent_user: Option<&str>,
+    ) -> Result<Option<String>, String> {
+        let _ = (cwd, touched, recent_user);
         Ok(None)
     }
 

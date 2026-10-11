@@ -6,6 +6,7 @@
 //! - [`resolver`] —— 纯解析/校验：定义 + 父能力 → 不可变派遣快照；
 //! - [`migration`] —— `settings.yaml` 旧字段一次性迁移。
 
+pub(crate) mod delivery;
 pub mod migration;
 pub mod policy;
 pub mod profiles;

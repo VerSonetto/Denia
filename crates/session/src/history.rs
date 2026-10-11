@@ -352,7 +352,11 @@ impl Session {
                 let slice = std::mem::take(&mut inner.pending_turn);
                 inner.meter.fold_turn(&slice);
             }
-            inner.meter.apply_one(envelope);
+            // 回放同样吃历史投影(判据只有 `meter_visible` 一处):重放完的
+            // meter 必须与增量路径、加载路径给出同一份表面。
+            let model_visible =
+                crate::append::meter_visible(inner.history_projection.as_ref(), envelope.seq);
+            inner.meter.apply_one_projected(envelope, model_visible);
             if let SessionEvent::Goal { op } = &envelope.event {
                 let total = inner.meter.turn_usage().total();
                 inner.goal = apply_goal_op(inner.goal.take(), op, envelope.time, total);

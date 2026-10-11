@@ -2,11 +2,13 @@
 use crate::{
     jobs::Jobs,
     state::{LiveSessions, RunningGuard, ServerEvent},
+    subagents::delivery::{Delivery, Notice},
 };
 use async_trait::async_trait;
 use denia_core::{
     config::ModelSelection,
     session::{GoalOp, SessionEnvelope, SessionEvent, SubagentDescriptor, TurnEndReason},
+    task::{StaleReason, TaskOutcome, TaskState, TaskStatus, ValidationVerdict, VerificationState},
 };
 use denia_tools::{ToolContext, capabilities::AgentRuntime};
 use serde::{Deserialize, Serialize};
@@ -97,6 +99,18 @@ pub struct GoalsConfig {
     /// 连续执行失败(Error/LoopDetected)达到该次数即标记 blocked
     /// (codex `stop_active_goal_after_repeated_execution_failures`)。
     pub max_consecutive_failures: u32,
+    /// 执行预算:一个 turn 内允许的模型步骤上限(默认 128)。
+    ///
+    /// 归在 goals 命名空间下而不是新建一个:命名空间注册在 `state.rs`。
+    /// 执行预算本就是目标执行策略的一部分——它护栏的正是“目标续跑把一整轮
+    /// 跑飞”这个失效模式。
+    pub max_execution_steps: u64,
+    /// 执行预算:一个 turn 内的物理请求尝试上限(默认 256;含注册表内部
+    /// 重试、流重试、续写与压缩请求)。
+    pub max_execution_requests: u64,
+    /// 执行预算:一个 turn 的主动执行时间上限,毫秒(默认 60 分钟;
+    /// 等待用户审批/提问的区间已排除)。
+    pub max_execution_active_ms: u64,
 }
 impl Default for GoalsConfig {
     fn default() -> Self {
@@ -104,6 +118,9 @@ impl Default for GoalsConfig {
             max_goal_token_budget: 10_000_000,
             max_rounds: 256,
             max_consecutive_failures: 3,
+            max_execution_steps: 128,
+            max_execution_requests: 256,
+            max_execution_active_ms: 3_600_000,
         }
     }
 }
@@ -113,6 +130,10 @@ pub fn validate_goals_config(value: Value) -> Result<Value, String> {
     if !(1..=100_000_000).contains(&c.max_goal_token_budget)
         || !(1..=10_000).contains(&c.max_rounds)
         || !(1..=16).contains(&c.max_consecutive_failures)
+        // 执行预算允许 0:显式关掉某一道边界(其余两道仍生效)。
+        || !(0..=100_000).contains(&c.max_execution_steps)
+        || !(0..=1_000_000).contains(&c.max_execution_requests)
+        || !(0..=86_400_000).contains(&c.max_execution_active_ms)
     {
         return Err("goals 配置超出允许范围".into());
     }
@@ -124,6 +145,25 @@ struct Child {
     id: String,
     parent_id: String,
     descriptor: SubagentDescriptor,
+}
+
+/// 从设置存储读执行预算上限。
+///
+/// 驱动器每轮取一次快照(调用者把它包成一个限源):读失败或字段缺失都回退
+/// [`GoalsConfig::default`],即防护基线——预算闸门不会因为读不到配置而消失。
+fn execution_limits_from(
+    settings: &denia_settings::SettingsStore,
+) -> denia_agent_loop::ExecutionLimits {
+    let config: GoalsConfig = settings
+        .resolved("goals")
+        .ok()
+        .and_then(|value| serde_json::from_value(value).ok())
+        .unwrap_or_default();
+    denia_agent_loop::ExecutionLimits {
+        max_steps: config.max_execution_steps,
+        max_requests: config.max_execution_requests,
+        max_active_ms: config.max_execution_active_ms,
+    }
 }
 #[derive(Default)]
 struct Inbox {
@@ -142,6 +182,22 @@ struct Inner {
     inboxes: Mutex<HashMap<String, Inbox>>,
     selections: Mutex<HashMap<String, ModelSelection>>,
     wakes: Mutex<HashMap<String, usize>>,
+    /// 被占用而挂起的唤醒:目标会话当时正在跑,唤醒请求记在这里,由它的
+    /// [`RunningGuard`]/`on_idle` 消费。
+    ///
+    /// 没有这张表时,"主代理正卡在 wait_agent 等子代理、子代理刚好结束"这种
+    /// 常规交错会**永久丢消息**:子代理侧 enqueue 触发 wake,resume_pending
+    /// 的 running CAS 失败后直接返回;而主代理那次 wait_agent 轮次结束时
+    /// on_idle 只扫当时存在的 inbox 条目,投递与那一次扫描之间没有任何
+    /// 再唤醒边沿。表现就是子代理已完成、主代理停在"等结果",必须用户再
+    /// 发一条消息才收到。挂起表把"想唤醒"这个意图与"能不能现在唤醒"解耦。
+    deferred_wakes: Mutex<HashSet<String>>,
+    /// 完成通知的“已处理水位”：目标会话最后一次**真正开跑**时收件箱的
+    /// 最大待收 seq。同一批待收消息反复唤醒失败（如磁盘不可写导致
+    /// drain 失败）时，用它回到普通唤醒上限，避免“完成通知不受
+    /// 上限约束”退化成无界自旋。
+    completion_marks: Mutex<HashMap<String, u64>>,
+    delivery: Arc<Delivery>,
     paused: Mutex<HashSet<String>>,
     /// 统一准入:创建、终态 child 恢复、消息唤醒共用同一份槽位账。
     admission: crate::subagents::policy::Admission,
@@ -215,6 +271,9 @@ impl Runtime {
                 inboxes: Mutex::new(HashMap::new()),
                 selections: Mutex::new(HashMap::new()),
                 wakes: Mutex::new(HashMap::new()),
+                deferred_wakes: Mutex::new(HashSet::new()),
+                completion_marks: Mutex::new(HashMap::new()),
+                delivery: Arc::new(Delivery::default()),
                 paused: Mutex::new(HashSet::new()),
                 admission: crate::subagents::policy::Admission::new(),
                 goal_failures: Mutex::new(HashMap::new()),
@@ -229,7 +288,15 @@ impl Runtime {
         }))
     }
     pub fn attach(&self, driver: &Arc<denia_agent_loop::SessionDriver>) {
-        let _ = self.inner.driver.set(Arc::downgrade(driver));
+        if self.inner.driver.set(Arc::downgrade(driver)).is_err() {
+            return;
+        }
+        self.start_delivery_worker();
+        // 执行预算的上限来源:每轮读一次运行时配置(改配置下一轮生效;
+        // 在途轮次保持自己的快照)。只捕设置存储,不捕整个 Runtime——
+        // 后者会让驱动器把它拉活到进程末尾。
+        let settings = self.inner.settings.clone();
+        driver.set_execution_limits_source(Arc::new(move || execution_limits_from(&settings)));
         let runtime = self.clone();
         let mut done = self.inner.jobs.done.subscribe();
         tokio::spawn(async move {
@@ -345,6 +412,14 @@ impl Runtime {
             .ok()
             .and_then(|s| serde_json::from_value(s).ok())
             .unwrap_or_default()
+    }
+
+    /// 执行预算上限(步数 / 请求尝试 / 主动执行时间)。
+    ///
+    /// 在 **turn 开始时**读取一次:驱动器把它当本轮的一致快照,中途改配置不会
+    /// 改变在途轮次的限额(否则一次设置改动能把已经用掉的额度变小)。
+    pub fn execution_limits(&self) -> denia_agent_loop::ExecutionLimits {
+        execution_limits_from(&self.inner.settings)
     }
     pub fn human_turn(&self, id: &str, selection: &ModelSelection) {
         self.inner.paused.lock().unwrap().remove(id);
@@ -497,6 +572,9 @@ impl Runtime {
         if text.len() > self.config().output_bytes * 2 {
             return Err("代理消息超过配置的体积上限".into());
         }
+        if self.test_fault("completion-enqueue") && source == "subagent-settled" {
+            return Err("注入故障：完成通知入队失败".into());
+        }
         if source.starts_with("agent:") {
             self.inner.paused.lock().unwrap().remove(target);
             self.inner.wakes.lock().unwrap().insert(target.into(), 0);
@@ -532,14 +610,41 @@ impl Runtime {
         Ok(result_id)
     }
     fn wake(&self, id: &str) {
+        self.defer_wake(id);
+        if !self.inner.delivery.start_wake(id) {
+            return;
+        }
         let runtime = self.clone();
         let id = id.to_string();
         tokio::spawn(async move {
-            if let Err(error) = runtime.resume_pending(&id).await {
-                tracing::error!(session=%id,%error,"恢复代理消息失败");
+            use futures::FutureExt;
+            let before = runtime.inner.live.get(&id).map(|live| live.session.next_turn_number());
+            let result = std::panic::AssertUnwindSafe(runtime.resume_pending(&id))
+                .catch_unwind().await;
+            match result {
+                Ok(Err(error)) => tracing::error!(session=%id,%error,"恢复代理消息失败"),
+                Err(_) => tracing::error!(session=%id,"代理运行任务异常退出"),
+                _ => {}
+            }
+            runtime.inner.delivery.finish_wake(&id);
+            let after = runtime.inner.live.get(&id).map(|live| live.session.next_turn_number());
+            if after != before {
+                runtime.inner.delivery.changed.notify_one();
             }
         });
     }
+
+    /// 登记一次"现在跑不了、但必须跑"的唤醒。
+    ///
+    /// 消费点有两处,都不依赖消息到达那一刻的时序:
+    /// ① [`Runtime::on_idle`] —— 任何会话（含子代理自己）每轮结束时扫全量
+    ///    inbox 并逐个唤醒,这正是"主代理 wait_agent 轮次结束"的那个边沿;
+    /// ② 准入槽位释放 —— 见 `Admission` 释放路径的连带扫描。
+    fn defer_wake(&self, id: &str) {
+        self.inner.deferred_wakes.lock().unwrap().insert(id.into());
+        tracing::debug!(session = id, "唤醒已挂起,等待目标空闲后重试");
+    }
+
     async fn resume_pending(&self, id: &str) -> Result<(), String> {
         if self.inner.paused.lock().unwrap().contains(id) {
             return Ok(());
@@ -595,13 +700,22 @@ impl Runtime {
                 }
             }
         }
-        let pending = {
+        let (pending, completion, last_pending_seq) = {
             let mut inboxes = self.inner.inboxes.lock().unwrap();
             let inbox = inboxes.entry(id.into()).or_default();
             Self::sync_inbox(inbox, &live.session);
-            !inbox.pending.is_empty()
+            (
+                !inbox.pending.is_empty(),
+                inbox.pending.values().any(|(_, _, source)| source == "subagent-settled"),
+                inbox.pending.keys().next_back().copied(),
+            )
         };
         if !pending {
+            self.inner.deferred_wakes.lock().unwrap().remove(id);
+            self.inner.completion_marks.lock().unwrap().remove(id);
+            return Ok(());
+        }
+        if self.inner.delivery.is_cleaning(id) {
             return Ok(());
         }
         let selection = self
@@ -641,10 +755,19 @@ impl Runtime {
         let Some(selection) = selection else {
             return Ok(());
         };
+        // 这一批待收消息是否还没被“真正开跑”处理过：是则完成通知可以越过
+        // 普通唤醒上限；否则按普通上限计，避免失败重试无界自旋。
+        let completion_fresh = completion && {
+            let marks = self.inner.completion_marks.lock().unwrap();
+            match last_pending_seq {
+                Some(seq) => marks.get(id).copied() != Some(seq),
+                None => false,
+            }
+        };
         {
             let mut wakes = self.inner.wakes.lock().unwrap();
             let n = wakes.entry(id.into()).or_default();
-            if *n >= self.config().max_consecutive_wakes {
+            if !completion_fresh && *n >= self.config().max_consecutive_wakes {
                 return Ok(());
             }
             if live
@@ -652,6 +775,11 @@ impl Runtime {
                 .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
                 .is_err()
             {
+                // 目标正在跑（典型：主代理卡在 wait_agent 等子代理结果）。这次
+                // 唤醒没有别的边沿会再来,必须登记挂起,由它自己那轮结束时消费,
+                // 否则消息永久躺在 inbox 里直到用户手动发消息。
+                drop(wakes);
+                self.defer_wake(id);
                 return Ok(());
             }
             if live.session.header().subagent.is_some() {
@@ -659,12 +787,23 @@ impl Runtime {
                 let limit = self.policy().max_concurrent_runs;
                 if !self.inner.admission.reserve(id, limit) {
                     live.running.store(false, Ordering::SeqCst);
+                    // 槽位已满同样是"现在跑不了"而非"不需要跑"：别的子代理结束
+                    // 时会走 on_idle 的全量扫描重新捞起这里的挂起项,漏登记就是
+                    // 子代理补一条指令后永远收不到回复。
+                    drop(wakes);
+                    self.defer_wake(id);
                     return Ok(());
                 }
             }
-            *n += 1;
+            if !completion_fresh {
+                *n += 1;
+            } else if let Some(seq) = last_pending_seq {
+                self.inner.completion_marks.lock().unwrap().insert(id.into(), seq);
+            }
         }
-        let guard = RunningGuard::new(live.clone(), self.inner.events.clone());
+        self.inner.deferred_wakes.lock().unwrap().remove(id);
+        let runtime = self.clone();
+        let guard = RunningGuard::with_on_idle(live.clone(), self.inner.events.clone(), Arc::new(move |id| runtime.on_idle(id)));
         let token = CancellationToken::new();
         *live.cancel.lock().unwrap() = Some(token.clone());
         drop(admission);
@@ -679,7 +818,12 @@ impl Runtime {
             .and_then(Weak::upgrade)
             .ok_or("会话驱动器尚未就绪")?;
         let followers = live.followers.clone();
+        let runtime = self.clone();
+        let session_id = id.to_string();
         let emit: Arc<dyn Fn(&SessionEnvelope) + Send + Sync> = Arc::new(move |e| {
+            if matches!(e.event, SessionEvent::TurnEnd { .. }) {
+                runtime.capture_completion(&session_id);
+            }
             let _ = followers.send(e.clone());
         });
         driver
@@ -705,7 +849,6 @@ impl Runtime {
             )
             .await;
         drop(guard);
-        self.on_idle(id);
         Ok(())
     }
     /// 写一个 goal 操作事件(阻塞 fs → spawn_blocking)并推给 follow 订阅者。
@@ -806,6 +949,15 @@ impl Runtime {
                 Self::publish_goal(&live, GoalOp::Pause).await?;
                 return Ok(());
             }
+            // 执行预算耗尽不是“执行失败”:它是护栏生效。用 goal 预算语义
+            // 停下自动续跑(不累计连续失败、不标 blocked)——继续跑只会把
+            // 同一个失效模式再烧一轮。
+            Some(denia_core::session::TurnEndReason::Error { failure })
+                if failure.code == denia_core::error::codes::BUDGET_EXHAUSTED =>
+            {
+                Self::publish_goal(&live, GoalOp::BudgetLimit).await?;
+                return Ok(());
+            }
             // 执行失败:计数 +1;达到上限标记 blocked,未达限等用户处理
             // (自动重试大概率再失败,烧预算)。
             Some(
@@ -882,7 +1034,8 @@ impl Runtime {
         {
             return Ok(());
         }
-        let guard = RunningGuard::new(live.clone(), self.inner.events.clone());
+        let runtime = self.clone();
+        let guard = RunningGuard::with_on_idle(live.clone(), self.inner.events.clone(), Arc::new(move |id| runtime.on_idle(id)));
         let token = CancellationToken::new();
         *live.cancel.lock().unwrap() = Some(token.clone());
         let _ = self.inner.events.send(ServerEvent::RunningChanged {
@@ -915,7 +1068,12 @@ impl Runtime {
             .and_then(Weak::upgrade)
             .ok_or("会话驱动器尚未就绪")?;
         let followers = live.followers.clone();
+        let runtime = self.clone();
+        let session_id = id.to_string();
         let emit: Arc<dyn Fn(&SessionEnvelope) + Send + Sync> = Arc::new(move |e| {
+            if matches!(e.event, SessionEvent::TurnEnd { .. }) {
+                runtime.capture_completion(&session_id);
+            }
             let _ = followers.send(e.clone());
         });
         driver
@@ -932,16 +1090,12 @@ impl Runtime {
             )
             .await;
         drop(guard);
-        self.on_idle(id);
         Ok(())
     }
 
     pub fn on_idle(&self, id: &str) {
+        self.capture_completion(id);
         self.inner.admission.release(id);
-        // 与继续分类同一水位:goal 操作之前的 TurnEnd 已被那次操作消化。
-        // 否则 resume 之后(自动续跑不经过 human_turn,清不掉 paused)这里
-        // 会拿暂停前那条旧 Aborted 一直判定"用户刚停过",把已恢复的会话
-        // 卡在 paused 上:新轮次的唤醒全被挡住。
         let aborted = self.inner.live.get(id).is_some_and(|l| {
             l.session
                 .with_events(Self::outcome_since_goal_change)
@@ -950,170 +1104,21 @@ impl Runtime {
         if aborted {
             self.inner.paused.lock().unwrap().insert(id.into());
         } else {
+            // 这个会话刚走完一轮:自己的挂起唤醒先撤下再重推,语义是"我空闲了,
+            // 现在能不能跑由 resume_pending 判定";判定不过(忙/暂停/额度)会再登记回去。
+            self.inner.deferred_wakes.lock().unwrap().remove(id);
             self.wake(id);
         }
-        let queued: Vec<_> = self
-            .inner
-            .inboxes
-            .lock()
-            .unwrap()
-            .iter()
-            .filter(|(_, i)| !i.pending.is_empty())
-            .map(|(id, _)| id.clone())
-            .collect();
+        self.inner.delivery.expedite(id);
+        let queued: Vec<_> = self.inner.inboxes.lock().unwrap().iter()
+            .filter(|(_, inbox)| !inbox.pending.is_empty())
+            .map(|(id, _)| id.clone()).collect();
         for queued_id in queued {
             if queued_id != id {
                 self.wake(&queued_id);
             }
         }
-        // goal 续跑检查:active 目标在会话空闲时自动开新轮(子代理无 goal,
-        // 内部自检跳过;与 inbox 唤醒靠 running CAS 互斥)。
         self.continue_goal(id);
-        let runtime = self.clone();
-        let id = id.to_string();
-        tokio::spawn(async move {
-            let current = id;
-            let child = runtime
-                .inner
-                .children
-                .lock()
-                .unwrap()
-                .get(&current)
-                .cloned();
-            let Some(child) = child else {
-                return;
-            };
-            // 记忆提取子代理对用户与父代理都不可见:结束时静默清理,
-            // 不发"子代理执行结束"通知。
-            if child.descriptor.mode == "memory" {
-                return;
-            }
-            if runtime
-                .descendants(&current)
-                .iter()
-                .any(|c| runtime.is_active(&c.id))
-            {
-                return;
-            }
-            if runtime.is_active(&current) {
-                return;
-            }
-            if let Ok(live) = runtime.live(&current).await {
-                let events = live.session.events();
-                let last = events.iter().rev().find_map(|e| {
-                    if let SessionEvent::AssistantMessage { blocks, .. } = &e.event {
-                        Some(blocks.clone())
-                    } else {
-                        None
-                    }
-                });
-                let text = last
-                    .unwrap_or_default()
-                    .iter()
-                    .filter_map(|b| {
-                        if let denia_core::stream::ContentBlock::Text { text } = b {
-                            Some(text.as_str())
-                        } else {
-                            None
-                        }
-                    })
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                let reason = events.iter().rev().find_map(|e| {
-                    if let SessionEvent::TurnEnd { reason, .. } = &e.event {
-                        Some(reason)
-                    } else {
-                        None
-                    }
-                });
-                // 子代理不得脱离 child 遗留后台任务（计划 10.4）：正常结束前
-                // 检查它仍在运行的 job，取消并在结果里注明被取消的未完成工作。
-                let leftover: Vec<_> = runtime
-                    .inner
-                    .jobs
-                    .list(&current)
-                    .into_iter()
-                    .filter(|job| job.finished_at.is_none())
-                    .collect();
-                let cancelled_note = if leftover.is_empty() {
-                    String::new()
-                } else {
-                    runtime.inner.jobs.cancel_owner(&current).await;
-                    format!(
-                        "\n[已取消的子代理后台工作] 共 {} 项在子代理结束前仍未完成，已终止（长时间服务应交回主代理启动）：{}",
-                        leftover.len(),
-                        leftover
-                            .iter()
-                            .map(|job| job.label.clone())
-                            .collect::<Vec<_>>()
-                            .join("、")
-                    )
-                };
-                // 摘要只放前若干字符并**明示截断**；全文留在子会话日志与产物里。
-                let limit = (runtime.config().output_bytes / 4).max(512);
-                let body: String = text.chars().take(limit).collect();
-                let truncated = if text.chars().count() > limit {
-                    format!(
-                        "\n（摘要已截断：子代理输出共 {} 字符，全文见子会话日志与产物。）",
-                        text.chars().count()
-                    )
-                } else {
-                    String::new()
-                };
-                let usage = live.session.turn_token_usage();
-                let name = child
-                    .descriptor
-                    .name
-                    .clone()
-                    .unwrap_or_else(|| child.descriptor.label.clone());
-                let profile = child
-                    .descriptor
-                    .profile
-                    .as_ref()
-                    .map(|profile| profile.qualified_id.clone())
-                    .unwrap_or_else(|| "-".to_string());
-                let state = match reason {
-                    Some(reason) => turn_end_label(reason),
-                    None => "未知（没有终态事件）".to_string(),
-                };
-                let summary = format!(
-                    "[子代理执行结束] {name}\n\
-                     子代理：{current}（{profile}）\n\
-                     结果：{state}\n\
-                     本次子代理用量：{} tokens（输入 {} / 输出 {} / 缓存读 {} / 推理 {}）\n\
-                     结果引用：会话 {current} 的日志与产物（read_tool_output 只能读本会话，父代理需要全文时用 wait_agent 查看该子代理）\n\
-                     {body}{truncated}{cancelled_note}",
-                    usage.total(),
-                    usage.uncached_input_tokens,
-                    usage.output_tokens,
-                    usage.cache_read_tokens,
-                    usage.reasoning_tokens,
-                );
-                // 锁守卫不能跨 await：先取出中枢句柄再 await。
-                let hub = runtime.browser_hub();
-                if let Some(hub) = hub {
-                    let closed = hub.close_owned(&current).await;
-                    if closed > 0 {
-                        tracing::info!(
-                            session = %current,
-                            closed,
-                            "子代理结束时关闭了它名下的浏览器 tab"
-                        );
-                    }
-                }
-                if let Err(error) = runtime
-                    .enqueue(
-                        &child.parent_id,
-                        format!("settled:{}:{}", current, live.session.next_turn_number()),
-                        summary,
-                        "subagent-settled".into(),
-                    )
-                    .await
-                {
-                    tracing::error!(%error,"子代理结果通知失败");
-                }
-            }
-        });
     }
     pub async fn interrupt(&self, owner: &str, target: &str) -> Result<(), String> {
         let _admission = self.inner.admission.enter().await;
@@ -1176,6 +1181,8 @@ impl Runtime {
         }
         self.inner.jobs.cancel_owner(owner).await;
         self.inner.children.lock().unwrap().remove(owner);
+        // 会话没了,它名下的挂起唤醒再被消费也只是对着空会话空转。
+        self.inner.deferred_wakes.lock().unwrap().remove(owner);
         Ok(())
     }
     async fn rollback_child(&self, id: &str) {
@@ -1183,6 +1190,8 @@ impl Runtime {
         self.inner.children.lock().unwrap().remove(id);
         self.inner.selections.lock().unwrap().remove(id);
         self.inner.inboxes.lock().unwrap().remove(id);
+        self.inner.delivery.forget(id);
+        self.inner.completion_marks.lock().unwrap().remove(id);
         self.inner.live.remove(id);
         self.inner.workspaces.detach_session(id);
         let sessions = self.inner.sessions.clone();
@@ -1558,6 +1567,672 @@ fn background_result(mut result: Value, pending: bool) -> Value {
     result
 }
 
+/// 子代理终态的三分类(宿主读子会话终态事件 + 任务账本算出)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TerminalOutcome {
+    /// 本轮正常结束。**注意**:它不等于验收通过 —— 宿主证据是否支持见
+    /// [`TerminalState::host_verified`]。
+    Completed,
+    /// 失败:本轮以错误 / 死循环 / 输出预算耗尽结束,或账本上的结论是验收失败。
+    Failed,
+    /// 没有正常终态(被取消 / 中断 / 无终态事件)或账本标记外部受阻:需要父代理处置。
+    NeedsDecision,
+}
+
+impl TerminalOutcome {
+    /// 同一套字面量:JSON 枚举名与通知文本共用一个来源,不各写一份。
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Completed => "completed",
+            Self::Failed => "failed",
+            Self::NeedsDecision => "needs_decision",
+        }
+    }
+}
+
+/// 终态的依据:把"子代理自己说完成"与"宿主证据说了算"分开。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TerminalBasis {
+    /// 宿主证据支持:账本上绑当前 revision 的验收结论是通过。
+    HostVerified,
+    /// 只有子代理自己的轮次终态(它最后那句话);宿主拿不到可核验的结论。
+    SelfReported,
+    /// 宿主证据:账本标记外部受阻。
+    HostBlocked,
+    /// 本轮被取消 / 中断(含崩溃孤儿轮次的合成闭合)。
+    Interrupted,
+    /// 子会话里没有终态事件。
+    NoTerminalEvent,
+}
+
+impl TerminalBasis {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::HostVerified => "host_verified",
+            Self::SelfReported => "self_reported",
+            Self::HostBlocked => "host_blocked",
+            Self::Interrupted => "interrupted",
+            Self::NoTerminalEvent => "no_terminal_event",
+        }
+    }
+}
+
+/// 子代理的终态:枚举 + 依据 + 原因 + 一句人读交代。
+///
+/// `outcome == completed` 与 `host_verified == true` 是两件事:前者可能是子代理
+/// 自称的("这轮没发工具调用"),后者要求宿主账本上绑当前 revision 的验收结论
+/// 是通过。两者的差别必须能一眼看出来,否则"自称完成"就会被当成验收通过。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TerminalState {
+    pub outcome: TerminalOutcome,
+    pub basis: TerminalBasis,
+    /// 子会话轮次终态的中文标签(如"已完成");`None` = 没有终态事件。
+    pub reason: Option<String>,
+    /// 宿主证据是否支持"完成"。只有账本上"结论通过"且"任务已收口且验收项被
+    /// 全部覆盖"同时成立才为 `true`。
+    pub host_verified: bool,
+    /// `false` = 子代理仍在运行,以下终态取自当前日志快照,不是最终结果。
+    pub finalized: bool,
+    /// 一句人读交代。
+    pub detail: String,
+}
+
+/// 结构化的子代理用量(provider 精确 usage 累计),不是拼进文本的字符串。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HandoffUsage {
+    pub uncached_input_tokens: u64,
+    pub output_tokens: u64,
+    pub cache_read_tokens: u64,
+    pub cache_write_tokens: u64,
+    pub reasoning_tokens: u64,
+    /// 计费口径的全量(五分量之和)。
+    pub total_tokens: u64,
+}
+
+/// 一条产物引用(`ToolResult.meta.outputArtifact`)。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArtifactRef {
+    /// 产物 id(`outputArtifact.output_id`);`read_tool_output` 按它读取。
+    pub output_id: String,
+    /// 产生它的工具调用 id 与工具名(`-` = 日志里找不到对应的调用)。
+    pub call_id: String,
+    pub tool: String,
+    /// 输出是否完整保留;`None` = 工具没报这个事实。
+    pub complete: Option<bool>,
+}
+
+/// 子代理交接信息。
+///
+/// **单一计算来源**:完成通知(注入父会话的那条 `AgentDelivery` 文本)与
+/// `wait_agent` 的返回对象都从这一份结构渲染(见 [`subagent_handoff`])。两处各
+/// 算一份必然会漂移 —— 父代理在通知里读到的字段与查询到的字段必须逐项相等。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SubagentHandoff {
+    /// 子会话 id。
+    pub id: String,
+    /// 展示名(定义名优先,回退标签)。
+    pub name: String,
+    /// profile qualifiedId;`-` = 旧描述符没有 profile。
+    pub profile: String,
+    pub terminal: TerminalState,
+    pub usage: HandoffUsage,
+    /// 子代理改动过的文件;口径见 [`SubagentHandoff::changed_paths_note`]。
+    pub changed_paths: Vec<String>,
+    /// `changedPaths` 的口径,以及"为什么可能是空的"。
+    pub changed_paths_note: String,
+    /// 子会话产生的产物引用。
+    pub artifacts: Vec<ArtifactRef>,
+    /// 任务账本的验证状态;`None` = 拿不到可用结论(没有账本,或账本上没跑过
+    /// / 跑过但结论已失效)。**复用** `core::task::VerificationState`,不另造一套。
+    pub verification: Option<VerificationState>,
+    /// 验证面的人读交代(拿不到结论时说清原因)。
+    pub verification_note: String,
+    /// 父代理必须看到的提醒(未验证 / 验收失败);为空 = 确有可核验的通过结论。
+    pub advisories: Vec<String>,
+}
+
+impl SubagentHandoff {
+    /// 交接字段表(对象):`wait_agent` 的返回**直接用这一份**,不手抄一份键表
+    /// —— 手抄的键表会与通知文本漂移,而这里就是同源的接缝。
+    pub fn fields(&self) -> Value {
+        serde_json::to_value(self).unwrap_or_else(|_| json!({}))
+    }
+
+    /// 完成通知正文(父会话里那条 `AgentDelivery` 的文本)。
+    ///
+    /// 所有字段都从本结构取:通知里报的用量、终态、变更文件必须与 `wait_agent`
+    /// 返回的 JSON 逐项一致。`body` / `truncated` / `cancelled_note` 由调用方
+    /// 提供(摘要正文、截断说明、被取消的后台工作说明)。
+    pub fn notice_text(&self, body: &str, truncated: &str, cancelled_note: &str) -> String {
+        let changed = if self.changed_paths.is_empty() {
+            "（无）".to_string()
+        } else {
+            self.changed_paths.join("、")
+        };
+        let artifacts = if self.artifacts.is_empty() {
+            "（无）".to_string()
+        } else {
+            self.artifacts
+                .iter()
+                .map(|item| format!("{}（{}）", item.output_id, item.tool))
+                .collect::<Vec<_>>()
+                .join("、")
+        };
+        let reason = self
+            .terminal
+            .reason
+            .clone()
+            .unwrap_or_else(|| "未知（没有终态事件）".to_string());
+        let mut text = format!(
+            "[子代理执行结束] {name}\n\
+             子代理：{id}（{profile}）\n\
+             结果：{reason}\n\
+             终态：{outcome}（依据 {basis}，宿主验证 {verified}{provisional}）—— {detail}\n\
+             本次子代理用量：{total} tokens（输入 {input} / 输出 {output} / 缓存读 {cache_read} / 推理 {reasoning}）\n\
+             变更文件：{changed}\n\
+             产物：{artifacts}\n\
+             验证：{verification}\n\
+             结果引用：会话 {id} 的日志与产物（read_tool_output 只能读本会话，父代理需要全文时用 wait_agent 查看该子代理）",
+            name = self.name,
+            id = self.id,
+            profile = self.profile,
+            outcome = self.terminal.outcome.as_str(),
+            basis = self.terminal.basis.as_str(),
+            verified = if self.terminal.host_verified {
+                "有"
+            } else {
+                "无"
+            },
+            provisional = if self.terminal.finalized {
+                ""
+            } else {
+                "，非最终"
+            },
+            detail = self.terminal.detail,
+            total = self.usage.total_tokens,
+            input = self.usage.uncached_input_tokens,
+            output = self.usage.output_tokens,
+            cache_read = self.usage.cache_read_tokens,
+            reasoning = self.usage.reasoning_tokens,
+            verification = self.verification_note,
+        );
+        for advisory in &self.advisories {
+            text.push('\n');
+            text.push_str(advisory);
+        }
+        // 口径说明永远要写:空数组也必须能区分"没有改动"与"读不到改动"。
+        text.push_str("\n变更文件口径：");
+        text.push_str(&self.changed_paths_note);
+        text.push('\n');
+        text.push_str(body);
+        text.push_str(truncated);
+        text.push_str(cancelled_note);
+        text
+    }
+}
+
+/// 从子会话算出一份交接信息(**唯一入口**)。
+///
+/// `settle` 的完成通知与 `wait_agent` 的返回都调它;`running` 为 `true` 时终态
+/// 只是当前快照(`finalized = false`),不能当成最终结果。
+fn subagent_handoff(
+    child: Option<&Child>,
+    session: &denia_session::Session,
+    running: bool,
+) -> SubagentHandoff {
+    subagent_handoff_at(child, session, running, &subagent_events(session))
+}
+
+fn subagent_handoff_at(
+    child: Option<&Child>,
+    session: &denia_session::Session,
+    running: bool,
+    events: &[SessionEnvelope],
+) -> SubagentHandoff {
+    let id = session.id().to_string();
+    let (name, profile) = match child {
+        Some(child) => (
+            child
+                .descriptor
+                .name
+                .clone()
+                .unwrap_or_else(|| child.descriptor.label.clone()),
+            child
+                .descriptor
+                .profile
+                .as_ref()
+                .map(|profile| profile.qualified_id.clone())
+                .unwrap_or_else(|| "-".to_string()),
+        ),
+        None => (id.clone(), "-".to_string()),
+    };
+    // 冻结授权里有没有账本工具:决定"天然不会产生验证结论"是解释还是异常。
+    let ledger_tools = child.is_some_and(|child| {
+        child
+            .descriptor
+            .effective_tools
+            .as_ref()
+            .is_some_and(|tools| {
+                tools
+                    .iter()
+                    .any(|name| name == "run_checks" || name == "get_task")
+            })
+    });
+    let task = denia_session::task_projection::project_task_scoped(events, &session.task_fold_scope());
+    let verification = task.as_ref().and_then(|state| match state.verification() {
+        verified @ VerificationState::Verified { .. } => Some(verified),
+        // 拿不到可用结论一律给 `None`:父代理要判断的是"有没有可核验的结论",
+        // 失效原因放在 `verification_note` 里,不混进这个字段的语义。
+        VerificationState::Unverified { .. } => None,
+    });
+    let verification_note = verification_note(task.as_ref(), verification.as_ref(), ledger_tools);
+    // 日志取一次、三处共用(终态 / 变更文件 / 产物),不重复扫描。
+    let reason = last_turn_end_reason(events);
+    let terminal = terminal_state(
+        reason.as_ref(),
+        task.as_ref(),
+        verification.as_ref(),
+        running,
+    );
+    // `denia-server` 不直接依赖 `denia-token-meter`:这里不写 `TurnTokenUsage`
+    // 这个类型名,只读它暴露的五个分量与总数(`total()` 是计费口径的唯一来源,
+    // 不在这里重算一份会漂移的总量)。
+    let raw_usage = denia_session::Session::project_turn_token_usage(events);
+    let usage = HandoffUsage {
+        uncached_input_tokens: raw_usage.uncached_input_tokens,
+        output_tokens: raw_usage.output_tokens,
+        cache_read_tokens: raw_usage.cache_read_tokens,
+        cache_write_tokens: raw_usage.cache_write_tokens,
+        reasoning_tokens: raw_usage.reasoning_tokens,
+        total_tokens: raw_usage.total(),
+    };
+    let (changed_paths, changed_paths_note) = changed_paths(events, session, task.as_ref());
+    let artifacts = artifacts(events);
+    let advisories = advisories(&terminal, verification.as_ref(), &verification_note);
+    SubagentHandoff {
+        id,
+        name,
+        profile,
+        terminal,
+        usage,
+        changed_paths,
+        changed_paths_note,
+        artifacts,
+        verification,
+        verification_note,
+        advisories,
+    }
+}
+
+/// 取子会话日志(热/冷两条路唯一的入口)。
+///
+/// 热会话从内存取;冷会话的事件表**不驻留**(见 `state::LiveSessions::get_or_load`
+/// 的冷加载),`events_after` 会走磁盘回放。用 `events()` 会把"冷会话读不到事件"
+/// 静默说成"没有改动 / 没有终态" —— 那是假话,交接信息宁可说清楚读不到。
+/// 代价是一次全量克隆(冷会话再加一次日志扫描),与本路径上已有的
+/// `derive_messages` 相比不是瓶颈。
+fn subagent_events(session: &denia_session::Session) -> Vec<SessionEnvelope> {
+    session.events_after(0)
+}
+
+/// 子会话最近一次轮次终态(`None` = 日志里没有终态事件)。
+fn last_turn_end_reason(events: &[SessionEnvelope]) -> Option<TurnEndReason> {
+    events
+        .iter()
+        .rev()
+        .find_map(|envelope| match &envelope.event {
+            SessionEvent::TurnEnd { reason, .. } => Some(reason.clone()),
+            _ => None,
+        })
+}
+
+/// 终态判定:账本证据优先于子代理自己的轮次终态。
+fn terminal_state(
+    reason: Option<&TurnEndReason>,
+    task: Option<&TaskState>,
+    verification: Option<&VerificationState>,
+    running: bool,
+) -> TerminalState {
+    let verdict = match verification {
+        Some(VerificationState::Verified { verdict, .. }) => Some(*verdict),
+        _ => None,
+    };
+    let outcome_at_ledger = task.and_then(TaskState::outcome);
+    let (outcome, basis, host_verified, detail) = if matches!(
+        outcome_at_ledger,
+        Some(TaskOutcome::Blocked)
+    ) || matches!(
+        task.map(|state| state.status),
+        Some(TaskStatus::Blocked)
+    ) {
+        (
+            TerminalOutcome::NeedsDecision,
+            TerminalBasis::HostBlocked,
+            false,
+            format!(
+                "子代理在自己的任务账本上标记为外部受阻（{}），需要父代理处置。",
+                task.and_then(|state| state.blocked_reason.clone())
+                    .unwrap_or_else(|| "未给原因".to_string())
+            ),
+        )
+    } else {
+        // 失败型轮次终态:账本上的失败结论比子代理自己的话更硬。
+        let failure_basis = if verdict == Some(ValidationVerdict::Failed) {
+            TerminalBasis::HostVerified
+        } else {
+            TerminalBasis::SelfReported
+        };
+        match reason {
+            Some(TurnEndReason::Completed) => match verdict {
+                Some(ValidationVerdict::Passed)
+                    if matches!(outcome_at_ledger, Some(TaskOutcome::Passed)) =>
+                {
+                    (
+                        TerminalOutcome::Completed,
+                        TerminalBasis::HostVerified,
+                        true,
+                        "子代理正常结束，且任务账本上绑当前 revision 的验收结论是通过（验收通过）。"
+                            .to_string(),
+                    )
+                }
+                Some(ValidationVerdict::Passed) => (
+                    TerminalOutcome::Completed,
+                    TerminalBasis::SelfReported,
+                    false,
+                    "子代理正常结束，账本上有通过的检查结论，但任务未收口或验收项未被全部覆盖，不构成验收通过。"
+                        .to_string(),
+                ),
+                Some(ValidationVerdict::Failed) => (
+                    TerminalOutcome::Failed,
+                    TerminalBasis::HostVerified,
+                    false,
+                    "子代理正常结束，但任务账本上绑当前 revision 的结论是验收失败。".to_string(),
+                ),
+                None => (
+                    TerminalOutcome::Completed,
+                    TerminalBasis::SelfReported,
+                    false,
+                    "子代理自称完成（本轮正常结束），宿主没有可核验的验证结论——这个\"完成\"只来自它自己的最后发言。"
+                        .to_string(),
+                ),
+            },
+            Some(TurnEndReason::MaxTokens) => (
+                TerminalOutcome::Failed,
+                failure_basis,
+                false,
+                "子代理输出预算耗尽，本轮没有正常结束。".to_string(),
+            ),
+            Some(TurnEndReason::LoopDetected { repeats }) => (
+                TerminalOutcome::Failed,
+                failure_basis,
+                false,
+                format!("宿主检测到死循环（连续 {repeats} 次重复）后强制中断本轮。"),
+            ),
+            Some(TurnEndReason::Error { failure }) => (
+                TerminalOutcome::Failed,
+                failure_basis,
+                false,
+                format!("子代理本轮失败：{}（{}）。", failure.message, failure.code),
+            ),
+            Some(TurnEndReason::Aborted { .. }) | Some(TurnEndReason::Interrupted) => (
+                TerminalOutcome::NeedsDecision,
+                TerminalBasis::Interrupted,
+                false,
+                "子代理本轮被取消 / 中断，没有正常终态，需要父代理决定是否继续。".to_string(),
+            ),
+            None => (
+                TerminalOutcome::NeedsDecision,
+                TerminalBasis::NoTerminalEvent,
+                false,
+                "子会话里没有终态事件，无法判定子代理是否真的结束，需要父代理确认。".to_string(),
+            ),
+        }
+    };
+    TerminalState {
+        outcome,
+        basis,
+        reason: reason.map(turn_end_label),
+        host_verified,
+        finalized: !running,
+        detail: if running {
+            format!("[进行中，非最终] {detail}")
+        } else {
+            detail
+        },
+    }
+}
+
+/// 验证面的人读交代。
+fn verification_note(
+    task: Option<&TaskState>,
+    verification: Option<&VerificationState>,
+    ledger_tools: bool,
+) -> String {
+    match (task, verification) {
+        (_, Some(VerificationState::Verified {
+            revision,
+            verdict,
+            covered,
+            at,
+            ..
+        })) => format!(
+            "{}（revision {}，覆盖 {} 个验收项，时间戳 {}）",
+            match verdict {
+                ValidationVerdict::Passed => "验收通过",
+                ValidationVerdict::Failed => "验收失败",
+            },
+            revision.as_str(),
+            covered.len(),
+            at
+        ),
+        (Some(state), _) => match state.verification() {
+            VerificationState::Unverified { reason } => format!(
+                "无：账本在，但当前 revision 上拿不到可用结论（{}）。",
+                stale_reason_label(&reason)
+            ),
+            VerificationState::Verified { .. } => "无：账本在，但当前 revision 上拿不到可用结论。".to_string(),
+        },
+        (None, _) if ledger_tools => {
+            "无：该子代理的授权里含 get_task / run_checks，但账本上没有任何记录，没有可核验的验证结论。"
+                .to_string()
+        }
+        (None, _) => "无：该子代理没有任务账本（内置的 develop / explore / verify 授权里都不含 get_task / run_checks），天然不会产生验证结论。"
+            .to_string(),
+    }
+}
+
+/// [`StaleReason`] 的中文口径(tools crate 里的那份是私有的,这里只给交接文案用)。
+fn stale_reason_label(reason: &StaleReason) -> String {
+    match reason {
+        StaleReason::NeverRun => "当前 revision 上还没跑过任何验证".to_string(),
+        StaleReason::RevisionChanged => "只在别的 revision 上跑过验证".to_string(),
+        StaleReason::InputsChanged { paths } => {
+            format!("验证之后这些文件又被改过：{}", paths.join("、"))
+        }
+        StaleReason::NoCheckRun => "有记录但没有可用的检查运行（空报告）".to_string(),
+        StaleReason::ForeignOrigin => "结论来自别的会话，不参与本会话的裁决".to_string(),
+        StaleReason::RevisionConflict => "换版复用了旧 revision id，当前版本身份不干净".to_string(),
+    }
+}
+
+/// 父代理侧的提醒:没有可核验结论或结论是失败时必须显式说出来。
+///
+/// 这条提醒会随完成通知落进父会话的上下文(`AgentDelivery` 的文本) —— 注入通道
+/// 不变,标注加在文本里。它存在的理由很具体:子代理的"完成"只由它自己的轮次
+/// 终态决定([`TurnEndReason::Completed`] 的含义是"这轮没发工具调用"),宿主侧没有
+/// 验收,父代理不能据此判定验收通过。
+fn advisories(
+    terminal: &TerminalState,
+    verification: Option<&VerificationState>,
+    verification_note: &str,
+) -> Vec<String> {
+    if !terminal.finalized {
+        return vec![
+            "[进行中] 子代理仍未结束，以下交接信息取自当前日志快照，不是最终结果。".to_string(),
+        ];
+    }
+    match verification {
+        None => vec![format!(
+            "[未验证] 该子代理未产生可核验的验证结论（{verification_note}）；它的\"完成\"不等于验收通过，父代理不得据此判定完成，请自行核验（读回改动 / 跑测试 / 看子会话日志）。"
+        )],
+        Some(VerificationState::Verified {
+            verdict: ValidationVerdict::Failed,
+            ..
+        }) => vec![
+            "[验收失败] 宿主账本上的验证结论是验收失败，不能按已完成的子任务集成。".to_string(),
+        ],
+        Some(_) => Vec::new(),
+    }
+}
+
+/// 归集"该子会话写过的文件"与它的口径说明。
+///
+/// 为什么是这个来源:宿主的变更账本(`RecordChange`)目前没有生产写入点,文件
+/// 历史后端只按会话持有 `tracked` 且不对外暴露 —— 所以从**子会话日志**归集:
+/// `write_file` / `edit` 调用里带 `path` 且**执行成功**(对应 `ToolResult` 不是
+/// 错误)的那些。被拒的调用不算改动(否则只读子代理的幻觉写也会被报成更改),
+/// `bash` 的重定向 / 删除 / 脚本写入推断不出来(命令是任意程序),一律不计入
+/// —— 宁可少报也不猜。账本里已有的变更范围一并并入。
+fn changed_paths(
+    events: &[SessionEnvelope],
+    session: &denia_session::Session,
+    task: Option<&TaskState>,
+) -> (Vec<String>, String) {
+    let cwd = PathBuf::from(session.header().cwd.clone());
+    let mut paths: Vec<String> = Vec::new();
+    let mut saw_log_write = false;
+    let mut from_ledger = 0usize;
+    {
+        let mut succeeded: HashSet<&str> = HashSet::new();
+        for envelope in events {
+            if let SessionEvent::ToolResult {
+                call_id, is_error, ..
+            } = &envelope.event
+                && !*is_error
+            {
+                succeeded.insert(call_id.as_str());
+            }
+        }
+        for envelope in events {
+            let SessionEvent::ToolCall {
+                call_id,
+                name,
+                arguments,
+                ..
+            } = &envelope.event
+            else {
+                continue;
+            };
+            if !matches!(name.as_str(), "write_file" | "edit")
+                || !succeeded.contains(call_id.as_str())
+            {
+                continue;
+            }
+            let Some(path) = tool_path_argument(arguments) else {
+                continue;
+            };
+            saw_log_write = true;
+            push_unique(&mut paths, display_path(&cwd, &path));
+        }
+    }
+    if let Some(state) = task {
+        for change in &state.changes {
+            for fingerprint in &change.fingerprints {
+                if push_unique(&mut paths, fingerprint.path.clone()) {
+                    from_ledger += 1;
+                }
+            }
+        }
+    }
+    let mut note = if events.is_empty() {
+        "口径：会话日志为空（子会话没有任何事件）—— 无法判断落盘改动。".to_string()
+    } else if saw_log_write {
+        "口径：子会话日志里执行成功的 write_file / edit 调用的 path（去重）。".to_string()
+    } else {
+        "口径：子会话日志里没有执行成功的 write_file / edit 调用。".to_string()
+    };
+    note.push_str("bash 的重定向 / 删除 / 脚本写入推断不出来，不计入。");
+    if from_ledger > 0 {
+        note.push_str(&format!("另含任务账本上记录的 {from_ledger} 个变更文件。"));
+    }
+    if paths.is_empty() {
+        note.push_str("本字段为空 = 没有可识别的落盘改动，不是读取失败。");
+    }
+    (paths, note)
+}
+
+/// 一条工具调用的 `path` 参数(相对或绝对都可以)。
+fn tool_path_argument(arguments: &str) -> Option<PathBuf> {
+    let value: serde_json::Value = serde_json::from_str(arguments.trim()).ok()?;
+    let raw = value.get("path")?.as_str()?.trim();
+    (!raw.is_empty()).then(|| PathBuf::from(raw))
+}
+
+/// 展示口径:工作区内记相对路径(分隔符统一为 `/`),工作区外记绝对路径 ——
+/// 与 `run_checks` 冻结输入指纹时用的是同一套口径。
+fn display_path(cwd: &Path, path: &Path) -> String {
+    match path.strip_prefix(cwd) {
+        Ok(relative) => relative.to_string_lossy().replace('\\', "/"),
+        Err(_) => path.to_string_lossy().replace('\\', "/"),
+    }
+}
+
+/// 去重插入;返回值表示是否真的插入了(口径统计用)。
+fn push_unique(items: &mut Vec<String>, item: String) -> bool {
+    if items.iter().any(|existing| existing == &item) {
+        return false;
+    }
+    items.push(item);
+    true
+}
+
+/// 归集子会话产生的产物引用(`ToolResult.meta.outputArtifact`)。
+fn artifacts(events: &[SessionEnvelope]) -> Vec<ArtifactRef> {
+    let mut names: HashMap<&str, &str> = HashMap::new();
+    for envelope in events {
+        if let SessionEvent::ToolCall { call_id, name, .. } = &envelope.event {
+            names.insert(call_id.as_str(), name.as_str());
+        }
+    }
+    let mut out: Vec<ArtifactRef> = Vec::new();
+    for envelope in events {
+        let SessionEvent::ToolResult {
+            call_id,
+            meta: Some(meta),
+            ..
+        } = &envelope.event
+        else {
+            continue;
+        };
+        let Some(artifact) = meta.get("outputArtifact") else {
+            continue;
+        };
+        let Some(output_id) = artifact.get("output_id").and_then(Value::as_str) else {
+            continue;
+        };
+        if out.iter().any(|item| item.output_id == output_id) {
+            continue;
+        }
+        out.push(ArtifactRef {
+            output_id: output_id.to_string(),
+            call_id: call_id.clone(),
+            tool: names
+                .get(call_id.as_str())
+                .copied()
+                .unwrap_or("-")
+                .to_string(),
+            complete: artifact.get("complete").and_then(Value::as_bool),
+        });
+    }
+    out
+}
+
 /// 子代理运行快照文件：放在会话目录内的不可变大文本。
 ///
 /// header 只保存引用与 hash（否则会话列表每行都会携带最多 64 KiB 的角色全文）。
@@ -1752,10 +2427,18 @@ impl AgentRuntime for Runtime {
                         .take(1)
                         .collect::<Vec<_>>()
                 };
-                Ok(background_result(
-                    json!({"id":target,"running":pending,"messages":messages}),
-                    pending,
-                ))
+                // 交接信息与完成通知**同一份计算**(`subagent_handoff`):返回对象
+                // 直接铺开这份结构的字段(不是手抄一份键表),父代理在通知里读到
+                // 的字段与这里查到的因此不可能漂移。
+                let child = self.inner.children.lock().unwrap().get(&target).cloned();
+                let handoff = subagent_handoff(child.as_ref(), &live.session, pending);
+                let mut result = handoff.fields();
+                // 既有字段原位保留:调用方与前端读的就是这三个(`id` 与交接里的
+                // 子会话 id 同值,这里以命令参数为准重写一次)。
+                result["id"] = json!(target);
+                result["running"] = json!(pending);
+                result["messages"] = json!(messages);
+                Ok(background_result(result, pending))
             }
             RuntimeCommand::Delegate { fork, args } => {
                 let runtime = self.clone();
@@ -1776,7 +2459,7 @@ impl AgentRuntime for Runtime {
             .get(session)
             .map(|c| c.parent_id.clone());
         Ok(vec![format!(
-            "[denia 能力上下文]\n始终使用简体中文回复，除非用户明确要求其他语言。\n当前代理：{session}；父代理：{}。",
+            "[denia 能力上下文]\n当前代理：{session}；父代理：{}。",
             parent.as_deref().unwrap_or("无")
         )])
     }
@@ -1876,23 +2559,42 @@ impl AgentRuntime for Runtime {
         }
         Some(crate::project_memory::memory_root(&self.inner.home, cwd))
     }
-    async fn project_memory_index(&self, cwd: &Path) -> Result<Option<String>, String> {
+    /// 项目记忆索引(MEMORY.md)注入文本;None = 未启用。选择层按触碰路径
+    /// 与最近用户消息挑相关条目,被省略的条目在渲染层留全文指针。
+    async fn project_memory_index(
+        &self,
+        cwd: &Path,
+        touched: &[PathBuf],
+        recent_user: Option<&str>,
+    ) -> Result<Option<String>, String> {
         let config = self.config();
         if !config.memory_enabled {
             return Ok(None);
         }
         let home = self.inner.home.clone();
         let cwd = cwd.to_path_buf();
+        let touched = touched.to_vec();
+        let recent_user = recent_user.map(str::to_string);
         let max_bytes = config.project_memory_max_bytes as usize;
         // 索引非空才注入;空桶不注入——记忆目录路径已由 assemble 阶段
         // 内联进「# 项目记忆」段,模型任何 step 都可见。
 
         tokio::task::spawn_blocking(move || {
             let root = crate::project_memory::memory_root(&home, &cwd);
-            match crate::project_memory::read_index(&root, max_bytes) {
-                Some(index) if !index.trim().is_empty() => Ok(Some(
-                    crate::project_memory::render_index_block(&root, &index),
-                )),
+            match crate::project_memory::read_index_for_injection(
+                &root,
+                &cwd,
+                &touched,
+                recent_user.as_deref(),
+                max_bytes,
+            ) {
+                Some(selection) if !selection.body.trim().is_empty() => {
+                    Ok(Some(crate::project_memory::render_index_block(
+                        &root,
+                        &selection.body,
+                        selection.omitted,
+                    )))
+                }
                 _ => Ok(None),
             }
         })
@@ -2017,6 +2719,7 @@ impl AgentRuntime for Runtime {
             }
             live.session.flush().map_err(|e| e.to_string())?;
             Self::sync_inbox(inbox, &live.session);
+            inner.delivery.expedite(live.session.id());
             Ok(Vec::new())
         })
         .await
@@ -2102,6 +2805,8 @@ fn turn_end_label(reason: &denia_core::session::TurnEndReason) -> String {
         }
     }
 }
+
+include!("agent_runtime_delivery.rs");
 
 #[cfg(test)]
 mod tests {
@@ -3405,8 +4110,7 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
         assert!(!notice.is_empty(), "子代理结束通知必须送达父会话");
-        assert!(notice.contains("子代理执行结束"), "{notice}");
-        assert!(
+        assert!(notice.contains("子代理执行结束"), "{notice}");        assert!(
             notice.contains("inline:后台任务员"),
             "通知必须带 profile：{notice}"
         );
@@ -3426,15 +4130,23 @@ mod tests {
             notice.contains("[已取消的子代理后台工作]"),
             "遗留的后台任务必须被取消并注明：{notice}"
         );
-        assert!(
-            state
+        // 清理与结果投递已解耦:通知到达不等于清理已完成——但清理必须有界
+        // 完成,否则"只释放槽位、进程继续写文件"就是最坏结果。
+        let mut cleaned = false;
+        for _ in 0..300 {
+            if state
                 .runtime
                 .jobs()
                 .list(&child)
                 .iter()
-                .all(|job| job.finished_at.is_some()),
-            "子代理结束后不得留下未完成的后台任务"
-        );
+                .all(|job| job.finished_at.is_some())
+            {
+                cleaned = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert!(cleaned, "子代理结束后不得留下未完成的后台任务");
     }
 
     /// §10.1 崩溃窗口：派遣的每一步失败都必须回滚本次新增的会话、槽位与目录
@@ -3511,6 +4223,140 @@ mod tests {
                 |event| matches!(&event.event, SessionEvent::AgentInbox { source, .. } if source == "subagent-settled")
             ),
             "工具结果丢失不能导致完成通知丢失"
+        );
+    }
+
+    /// 唤醒不得因"目标正在跑"而丢失。
+    ///
+    /// 这条锁死了主代理"卡在 wait_agent 等子代理、子代理此刻结束"的交错：
+    /// 子代理 enqueue 触发 wake 时主代理 `running == true`，resume_pending 的
+    /// CAS 失败。以前这里直接 return，唤醒意图被静默丢弃，且主代理那轮
+    /// on_idle 的 inbox 扫描发生在投递之前的概率很大 —— 结果就是"子代理已经
+    /// 完成，主代理一直不醒，必须用户再发一条消息"。
+    #[tokio::test]
+    async fn wake_is_deferred_instead_of_dropped_when_target_is_running() {
+        let (state, ctx) = setup().await;
+        let parent = ctx.session_id.clone().unwrap();
+        let live = state.live.get(&parent).unwrap();
+
+        // 主代理正在跑（模拟 wait_agent 那一轮）：CAS 失败才走挂起分支。
+        live.running.store(true, Ordering::SeqCst);
+        assert!(
+            live.running.load(Ordering::SeqCst),
+            "测试前提：会话处于运行中"
+        );
+
+        let runtime = state.runtime.clone();
+        // resume_pending 从这里取模型上下文；不登记的话它会在取 selection
+        // 时提前返回，根本走不到 running CAS 那条分支，测试就成了假阳性。
+        runtime.inner.selections.lock().unwrap().insert(
+            parent.clone(),
+            ModelSelection {
+                provider: "runtime-test".into(),
+                model: "done".into(),
+                reasoning_effort: None,
+            },
+        );
+        // 投递一条消息：wake 会因 running 失败而挂起。
+        runtime
+            .enqueue(
+                &parent,
+                "m1".into(),
+                "结果".into(),
+                "subagent-settled".into(),
+            )
+            .await
+            .unwrap();
+
+        // wake 是 spawn 出去的异步任务，等它真正跑到 CAS 分支。
+        let mut deferred = false;
+        for _ in 0..200 {
+            if runtime
+                .inner
+                .deferred_wakes
+                .lock()
+                .unwrap()
+                .contains(&parent)
+            {
+                deferred = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert!(deferred, "目标正在跑时必须登记挂起唤醒，而不是静默丢弃");
+
+        // 主代理这一轮结束 → on_idle 消费挂起项。
+        // 消费是异步的(wake 在 spawn 的任务里真正推进):等它落地,而不是
+        // 要求同步清表。
+        live.running.store(false, Ordering::SeqCst);
+        runtime.on_idle(&parent);
+        let mut consumed = false;
+        for _ in 0..200 {
+            if !runtime
+                .inner
+                .deferred_wakes
+                .lock()
+                .unwrap()
+                .contains(&parent)
+            {
+                consumed = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert!(consumed, "会话空闲后必须消费自己的挂起唤醒");
+    }
+
+    /// 挂起唤醒必须在目标空闲后**真正跑起来**，而不只是被清掉标记。
+    ///
+    /// 只验标记会被"清表但没 wake"这种假修复骗过去，所以这里断言投递事件
+    /// 真的进入了模型可见历史（AgentDelivery）。
+    #[tokio::test]
+    async fn deferred_wake_actually_delivers_pending_message_after_target_goes_idle() {
+        let (state, ctx) = setup().await;
+        let parent = ctx.session_id.clone().unwrap();
+        let live = state.live.get(&parent).unwrap();
+        live.running.store(true, Ordering::SeqCst);
+
+        let runtime = state.runtime.clone();
+        runtime.inner.selections.lock().unwrap().insert(
+            parent.clone(),
+            ModelSelection {
+                provider: "runtime-test".into(),
+                model: "done".into(),
+                reasoning_effort: None,
+            },
+        );
+        runtime
+            .enqueue(
+                &parent,
+                "m1".into(),
+                "子代理已完成".into(),
+                "subagent-settled".into(),
+            )
+            .await
+            .unwrap();
+
+        live.running.store(false, Ordering::SeqCst);
+        runtime.on_idle(&parent);
+
+        // wake 是 spawn 出去的异步任务，给它落地时间。
+        let mut delivered = false;
+        for _ in 0..200 {
+            if state.live.get(&parent).is_some_and(|live| {
+                live.session
+                    .events()
+                    .iter()
+                    .any(|event| matches!(event.event, SessionEvent::AgentDelivery { .. }))
+            }) {
+                delivered = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert!(
+            delivered,
+            "挂起唤醒必须在目标空闲后真正把待收消息投进模型历史，不能只是清掉标记"
         );
     }
 
@@ -4042,9 +4888,13 @@ mod tests {
         );
 
         // 设置目标:空闲会话立即自动续跑,跑到轮次上限(maxRounds=2)停止。
+        // token 预算给得足够宽:本测试钉的是**轮次上限**(跑满两轮后不再
+        // 自动续跑)。“缺 usage 转保守估算”之后,一轮 mock 轮的估算用量会
+        // 达到数万 token——原先那个 123 的小预算在任何真实计费下都撑不过
+        // 一轮,会把这条断言挟持成预算耗尽路径。
         client
             .post(&goal_url)
-            .json(&json!({"action":"set","objective":"验证 goal 续跑","tokenBudget":123}))
+            .json(&json!({"action":"set","objective":"验证 goal 续跑","tokenBudget":10_000_000}))
             .send()
             .await
             .unwrap()
@@ -4576,5 +5426,1066 @@ mod tests {
             "能力上下文不应再携带技能正文：{context}"
         );
         server.abort();
+    }
+
+    /// 项目记忆索引注入(运行时接线):选择层按触碰路径与最近用户消息裁到
+    /// 相关条目,被省略的条目在渲染层留全文指针;空桶不注入。
+    #[tokio::test]
+    async fn memory_index_injection_selects_by_touched_path_and_prompt() {
+        let home =
+            std::env::temp_dir().join(format!("denia-memory-inject-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&home).unwrap();
+        let state = crate::state::build_state(&home, false, 3600).await.unwrap();
+        let cwd = home.join("ws");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let root = crate::project_memory::memory_root(&home, &cwd);
+        std::fs::create_dir_all(&root).unwrap();
+
+        // 空桶不注入——目录路径已由装配阶段内联进「# 项目记忆」段。
+        assert!(
+            state
+                .runtime
+                .project_memory_index(&cwd, &[], None)
+                .await
+                .unwrap()
+                .is_none()
+        );
+
+        std::fs::write(
+            root.join(crate::project_memory::MEMORY_INDEX_FILE),
+            "# 项目记忆\n- [注入通道](injections.md) — 每步注入与幂等基准\n- [面板配色](frontend-css.md) — 设置页样式\n",
+        )
+        .unwrap();
+        // 触碰路径命中一条:另一条省略,并附全文指针。
+        let block = state
+            .runtime
+            .project_memory_index(&cwd, &[cwd.join("src/injections.rs")], None)
+            .await
+            .unwrap()
+            .expect("有索引时必须注入");
+        assert!(block.contains("injections.md"), "{block}");
+        assert!(!block.contains("frontend-css.md"), "{block}");
+        assert!(block.contains("另有 1 条未列出"), "{block}");
+        assert!(block.contains("/MEMORY.md"), "{block}");
+
+        // 最近用户消息同样是选择依据(关键词命中另一条)。
+        let block = state
+            .runtime
+            .project_memory_index(&cwd, &[], Some("设置页样式调一下"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(block.contains("frontend-css.md"), "{block}");
+        assert!(!block.contains("injections.md"), "{block}");
+
+        std::fs::remove_dir_all(home).unwrap();
+    }
+
+    /// 交接信息的**单一来源**:同一个子代理上,`settle` 注入父会话的通知文本与
+    /// `wait_agent` 的返回对象必须由同一份结构渲染(逐项对得上);并且"子代理
+    /// 自称完成"与"宿主验证"必须能分开读出来 —— 默认 develop 子代理没有账本
+    /// 工具,`hostVerified` 必须是 false,未验证提醒必须落在注入文本里。
+    #[tokio::test]
+    async fn settlement_notice_and_wait_agent_agree_on_the_same_handoff() {
+        use denia_tools::capabilities::AgentRuntime;
+
+        let (state, base_ctx) = setup().await;
+        let state = Arc::new(state);
+        let workspace = state.home.join("handofffixture");
+        std::fs::create_dir_all(&workspace).unwrap();
+        std::fs::write(workspace.join("existing.txt"), "旧内容\n").unwrap();
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let router = crate::api::router().with_state(state.clone());
+        tokio::spawn(async move {
+            axum::serve(listener, router).await.unwrap();
+        });
+        let client = reqwest::Client::new();
+        let created: Value = client
+            .post(format!("{base}/api/sessions"))
+            .json(&json!({"cwd": workspace}))
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let parent = created["session"]["id"].as_str().unwrap().to_string();
+        assert!(
+            client
+                .put(format!("{base}/api/sessions/{parent}/permission"))
+                .json(&json!({"mode": "full"}))
+                .send()
+                .await
+                .unwrap()
+                .status()
+                .is_success()
+        );
+        assert!(
+            client
+                .post(format!("{base}/api/sessions/{parent}/prompt"))
+                .json(&json!({"prompt":"委派开发任务","provider":"runtime-test","model":"exec-parent"}))
+                .send()
+                .await
+                .unwrap()
+                .status()
+                .is_success()
+        );
+        let child = wait_for_child(&state, &parent).await;
+        wait_for_tool_results(&state, &child, 4).await;
+
+        // 等完成通知真的落进父会话:AgentInbox / AgentDelivery 里的那段文本就是
+        // 被注入父上下文的那份(注入通道不另改)。
+        let mut notice = String::new();
+        for _ in 0..1500 {
+            let delivered = state.live.get(&parent).map(|live| {
+                live.session
+                    .events()
+                    .iter()
+                    .filter_map(|event| match &event.event {
+                        SessionEvent::AgentInbox { text, source, .. }
+                        | SessionEvent::AgentDelivery { text, source, .. }
+                            if source == "subagent-settled" && text.contains(&child) =>
+                        {
+                            Some(text.clone())
+                        }
+                        _ => None,
+                    })
+                    .next_back()
+            });
+            if let Some(Some(text)) = delivered {
+                notice = text;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert!(!notice.is_empty(), "子代理结束通知必须送达父会话");
+
+        let mut ctx = base_ctx.clone();
+        ctx.session_id = Some(parent.clone());
+        let ready = state
+            .runtime
+            .execute("wait_agent", json!({"target":child}), &ctx)
+            .await
+            .unwrap();
+        // 既有契约不变(向后兼容:只加字段,不改既有字段的取值)。
+        assert_eq!(ready["status"], "ready");
+        assert_eq!(ready["running"], false);
+        assert_eq!(ready["id"], json!(child));
+
+        // 终态枚举能说出这是子代理自己说的完成,而不是宿主验收过了。
+        assert_eq!(ready["terminal"]["outcome"], "completed");
+        assert_eq!(ready["terminal"]["basis"], "self_reported");
+        assert_eq!(ready["terminal"]["hostVerified"], false);
+        assert_eq!(ready["terminal"]["finalized"], true);
+        assert_eq!(ready["terminal"]["reason"], "已完成");
+
+        // 用量是结构化字段,不是拼进文本的字符串。
+        // 用量是结构化字段,不是拼进文本的字符串:五个分量 + 总数都在。
+        for key in [
+            "uncachedInputTokens",
+            "outputTokens",
+            "cacheReadTokens",
+            "cacheWriteTokens",
+            "reasoningTokens",
+            "totalTokens",
+        ] {
+            assert!(
+                ready["usage"][key].is_u64(),
+                "usage.{key} 必须是数字字段:{ready}"
+            );
+        }
+        let total = ready["usage"]["totalTokens"].as_u64().unwrap();
+
+        // 变更文件:真写过的在里面;只读的文件不在;口径写清楚。
+        let changed: Vec<&str> = ready["changedPaths"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(Value::as_str)
+            .collect();
+        assert!(changed.contains(&"child-wrote.txt"), "{ready}");
+        assert!(
+            !changed.contains(&"existing.txt"),
+            "只读没改的文件不得计入:{ready}"
+        );
+        assert!(
+            ready["changedPathsNote"].as_str().unwrap().contains("bash"),
+            "{ready}"
+        );
+        // 没有产物时给空数组,不报错、不给 null。
+        assert!(ready["artifacts"].is_array(), "{ready}");
+
+        // 默认 develop 子代理没有账本工具:拿不到结论给 null,原因与提醒都写明。
+        assert!(ready["verification"].is_null(), "{ready}");
+        let note = ready["verificationNote"].as_str().unwrap();
+        assert!(note.starts_with('无'), "{ready}");
+        let advisories: Vec<&str> = ready["advisories"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(Value::as_str)
+            .collect();
+        assert!(
+            advisories.iter().any(|line| line.contains("[未验证]")),
+            "{ready}"
+        );
+
+        // —— 两处同源:通知文本与返回对象逐项对得上 ——
+        assert!(
+            notice.contains(&format!(
+                "子代理：{child}（{}）",
+                ready["profile"].as_str().unwrap()
+            )),
+            "{notice}"
+        );
+        assert!(
+            notice.contains(&format!(
+                "终态：{}",
+                ready["terminal"]["outcome"].as_str().unwrap()
+            )),
+            "{notice}"
+        );
+        assert!(
+            notice.contains(&format!("本次子代理用量：{total} tokens")),
+            "通知里的用量必须与 wait_agent 的 usage 同源:{notice}"
+        );
+        assert!(notice.contains("child-wrote.txt"), "{notice}");
+        for line in &advisories {
+            assert!(
+                notice.contains(line),
+                "父侧注入文本必须带上这条标注:{line}\n{notice}"
+            );
+        }
+        std::fs::remove_dir_all(state.home.clone()).ok();
+    }
+
+    /// 有账本且验收通过时,"宿主验证"必须为真 —— 与"自称完成"分开。
+    ///
+    /// 这里直接给子会话塞账本事件(它们本就是宿主执行链的产物)再算交接信息,
+    /// 断言终态依据从 `self_reported` 变成 `host_verified`,且不再出现未验证提醒。
+    #[tokio::test]
+    async fn handoff_marks_host_verified_when_the_ledger_concludes_passed() {
+        use denia_core::config::ModelSelection;
+        use denia_core::session::{SessionEvent, SubagentDescriptor};
+        use denia_core::task::{
+            CheckRun, FileFingerprint, RequirementClaim, RequirementId, RequirementKind,
+            RevisionId, SourceRef, TaskId, TaskOp, ValidationResult,
+        };
+
+        let (state, ctx) = setup().await;
+        let parent = ctx.session_id.clone().unwrap();
+        let selection = ModelSelection {
+            provider: "runtime-test".into(),
+            model: "ledger-child".into(),
+            reasoning_effort: None,
+        };
+        let session = state
+            .sessions
+            .create_subagent(
+                &ctx.cwd,
+                true,
+                &parent,
+                SubagentDescriptor::legacy("账本子代理", 1, "default", selection, None, None),
+            )
+            .unwrap();
+        let child_id = session.id().to_string();
+        let fingerprint = FileFingerprint {
+            path: "src/lib.rs".into(),
+            digest: "d1".into(),
+        };
+        let user = session
+            .append(SessionEvent::UserMessage {
+                text: "改完跑通测试再说完事".into(),
+                injected: false,
+                images: Vec::new(),
+                channel: None,
+            })
+            .unwrap();
+        session
+            .append(SessionEvent::Task {
+                op: TaskOp::Open {
+                    task_id: TaskId::new("task-1"),
+                    revision: RevisionId::new("rev-a"),
+                    goal: "改好解析器".into(),
+                    requirements: vec![RequirementClaim {
+                        id: RequirementId::new("req-1"),
+                        kind: RequirementKind::Acceptance,
+                        text: "cargo test 全绿".into(),
+                        source: SourceRef {
+                            session: None,
+                            seq: user.seq,
+                            time_ms: user.time,
+                            quote: Some("跑通测试".into()),
+                        },
+                    }],
+                },
+            })
+            .unwrap();
+        session
+            .append(SessionEvent::Task {
+                op: TaskOp::RecordChange {
+                    summary: "改了 src/lib.rs".into(),
+                    fingerprints: vec![fingerprint.clone()],
+                },
+            })
+            .unwrap();
+        let result = ValidationResult::from_check_runs(
+            RevisionId::new("rev-a"),
+            vec![CheckRun {
+                command: "cargo test".into(),
+                exit_code: Some(0),
+                expect_exit_code: 0,
+                workdir: ".".into(),
+                fingerprints: vec![fingerprint],
+            }],
+            vec![RequirementId::new("req-1")],
+            Some(child_id.clone()),
+            1,
+        )
+        .expect("有检查运行才构成结论");
+        session
+            .append(SessionEvent::Task {
+                op: TaskOp::RecordValidation { result },
+            })
+            .unwrap();
+        session
+            .append(SessionEvent::Task { op: TaskOp::Close })
+            .unwrap();
+        session
+            .append(SessionEvent::TurnEnd {
+                turn: 1,
+                reason: TurnEndReason::Completed,
+            })
+            .unwrap();
+        session.flush().unwrap();
+
+        let descriptor = session.header().subagent.clone().unwrap();
+        let child = Child {
+            id: child_id.clone(),
+            parent_id: parent.clone(),
+            descriptor,
+        };
+        // 冷加载的实例(事件不驻留)也要能算出同一份交接信息:日志走磁盘回放,
+        // 不能把"读不到事件"当成"什么都没做"。
+        let live = state.live.get_or_load(&state.sessions, &child_id).unwrap();
+        let handoff = subagent_handoff(Some(&child), &live.session, false);
+
+        assert_eq!(
+            handoff.terminal.outcome,
+            TerminalOutcome::Completed,
+            "{:?}",
+            handoff.terminal
+        );
+        assert_eq!(handoff.terminal.basis, TerminalBasis::HostVerified);
+        assert!(handoff.terminal.host_verified, "{:?}", handoff.terminal);
+        assert!(matches!(
+            handoff.verification,
+            Some(VerificationState::Verified {
+                verdict: ValidationVerdict::Passed,
+                ..
+            })
+        ));
+        assert!(
+            handoff.verification_note.contains("验收通过"),
+            "{}",
+            handoff.verification_note
+        );
+        assert!(handoff.advisories.is_empty(), "{:?}", handoff.advisories);
+        // 账本里记录的变更范围也并入 changedPaths,并在口径里注明来源。
+        assert!(handoff.changed_paths.contains(&"src/lib.rs".to_string()));
+        assert!(
+            handoff.changed_paths_note.contains("任务账本"),
+            "{}",
+            handoff.changed_paths_note
+        );
+        let notice = handoff.notice_text("正文", "", "");
+        assert!(notice.contains("宿主验证 有"), "{notice}");
+        assert!(notice.contains("验收通过"), "{notice}");
+        assert!(!notice.contains("[未验证]"), "{notice}");
+        std::fs::remove_dir_all(state.home.clone()).ok();
+    }
+
+    /// 日志归集的三条边界:执行成功的写算改动、**被拒的写不算改动**、产物引用
+    /// 按 `outputArtifact` 读出来;无内容时给空数组 / `None` + 口径,不报错。
+    #[tokio::test]
+    async fn changed_paths_and_artifacts_follow_the_session_log() {
+        use denia_core::config::ModelSelection;
+        use denia_core::session::{SessionEvent, SubagentDescriptor};
+
+        let (state, ctx) = setup().await;
+        let parent = ctx.session_id.clone().unwrap();
+        let selection = ModelSelection {
+            provider: "runtime-test".into(),
+            model: "log-child".into(),
+            reasoning_effort: None,
+        };
+        let session = state
+            .sessions
+            .create_subagent(
+                &ctx.cwd,
+                true,
+                &parent,
+                SubagentDescriptor::legacy("日志子代理", 1, "default", selection, None, None),
+            )
+            .unwrap();
+        let child_id = session.id().to_string();
+        let call = |call_id: &str, name: &str, arguments: Value| SessionEvent::ToolCall {
+            turn: 1,
+            step: 1,
+            call_id: call_id.into(),
+            name: name.into(),
+            arguments: arguments.to_string(),
+        };
+        session
+            .append(call(
+                "c1",
+                "write_file",
+                json!({"path": "child-a.txt", "content": "x"}),
+            ))
+            .unwrap();
+        session
+            .append(SessionEvent::ToolResult {
+                turn: 1,
+                step: 1,
+                call_id: "c1".into(),
+                content: "已写入 child-a.txt".into(),
+                is_error: false,
+                error: None,
+                error_identity: None,
+                meta: None,
+                truncation: None,
+                replaces: None,
+            })
+            .unwrap();
+        // 被拒的写:调用在日志里,但它没有改动任何东西。
+        session
+            .append(call(
+                "c2",
+                "write_file",
+                json!({"path": "refused.txt", "content": "x"}),
+            ))
+            .unwrap();
+        session
+            .append(SessionEvent::ToolResult {
+                turn: 1,
+                step: 1,
+                call_id: "c2".into(),
+                content: "子代理不能使用 write_file".into(),
+                is_error: true,
+                error: Some("tool-not-granted".into()),
+                error_identity: None,
+                meta: None,
+                truncation: None,
+                replaces: None,
+            })
+            .unwrap();
+        // bash:命令间接改动推断不出来(不计入 changedPaths),但产物引用在 meta 里。
+        session
+            .append(call("c3", "bash", json!({"command": "echo hi"})))
+            .unwrap();
+        session
+            .append(SessionEvent::ToolResult {
+                turn: 1,
+                step: 1,
+                call_id: "c3".into(),
+                content: "退出码: 0\nhi\n".into(),
+                is_error: false,
+                error: None,
+                error_identity: None,
+                meta: Some(json!({
+                    "exit_code": 0,
+                    "end_reason": "completed",
+                    "outputArtifact": {
+                        "output_id": "art-7",
+                        "streams": {},
+                        "complete": true,
+                        "storage_error": null,
+                    },
+                })),
+                truncation: None,
+                replaces: None,
+            })
+            .unwrap();
+        session
+            .append(SessionEvent::AssistantMessage {
+                turn: 1,
+                step: 1,
+                blocks: vec![denia_core::stream::ContentBlock::Text {
+                    text: "写完了".into(),
+                }],
+                usage: None,
+                interrupted: false,
+                source_event_seqs: Vec::new(),
+                first_token_time: None,
+            })
+            .unwrap();
+        session
+            .append(SessionEvent::TurnEnd {
+                turn: 1,
+                reason: TurnEndReason::Completed,
+            })
+            .unwrap();
+        session.flush().unwrap();
+
+        let child = Child {
+            id: child_id.clone(),
+            parent_id: parent.clone(),
+            descriptor: session.header().subagent.clone().unwrap(),
+        };
+        let live = state.live.get_or_load(&state.sessions, &child_id).unwrap();
+        let handoff = subagent_handoff(Some(&child), &live.session, false);
+
+        assert_eq!(handoff.changed_paths, vec!["child-a.txt".to_string()]);
+        assert!(
+            !handoff.changed_paths.contains(&"refused.txt".to_string()),
+            "被拒的写不算改动"
+        );
+        assert_eq!(handoff.artifacts.len(), 1, "{:?}", handoff.artifacts);
+        assert_eq!(handoff.artifacts[0].output_id, "art-7");
+        assert_eq!(handoff.artifacts[0].tool, "bash");
+        assert_eq!(handoff.artifacts[0].complete, Some(true));
+        // 没有账本:验证字段给 `None` + 原因,而不是报错。
+        assert!(handoff.verification.is_none());
+        assert!(!handoff.verification_note.is_empty());
+        // 判定沿用子代理自己的终态,但明确标出宿主没有验证结论。
+        assert_eq!(handoff.terminal.outcome, TerminalOutcome::Completed);
+        assert!(!handoff.terminal.host_verified);
+        std::fs::remove_dir_all(state.home.clone()).ok();
+    }
+
+    /// 空值的那一侧:`changedPaths` / `artifacts` 在"确实什么都没发生"时必须是
+    /// **空数组 + 口径说明**,不是 `null`、不报错 —— "没有改动"与"读不到改动"
+    /// 必须能分开读,否则父代理会把"读不到"当成"没改"。
+    #[tokio::test]
+    async fn handoff_reports_empty_changes_and_artifacts_without_failing() {
+        use denia_core::config::ModelSelection;
+        use denia_core::session::{SessionEvent, SubagentDescriptor};
+
+        let (state, ctx) = setup().await;
+        let parent = ctx.session_id.clone().unwrap();
+        let selection = ModelSelection {
+            provider: "runtime-test".into(),
+            model: "quiet-child".into(),
+            reasoning_effort: None,
+        };
+        let session = state
+            .sessions
+            .create_subagent(
+                &ctx.cwd,
+                true,
+                &parent,
+                SubagentDescriptor::legacy("只读子代理", 1, "default", selection, None, None),
+            )
+            .unwrap();
+        let child_id = session.id().to_string();
+        // 只读的一轮:没有写调用、没有产物、没有账本。
+        session
+            .append(SessionEvent::AssistantMessage {
+                turn: 1,
+                step: 1,
+                blocks: vec![denia_core::stream::ContentBlock::Text {
+                    text: "看完了,没问题".into(),
+                }],
+                usage: None,
+                interrupted: false,
+                source_event_seqs: Vec::new(),
+                first_token_time: None,
+            })
+            .unwrap();
+        session
+            .append(SessionEvent::TurnEnd {
+                turn: 1,
+                reason: TurnEndReason::Completed,
+            })
+            .unwrap();
+        session.flush().unwrap();
+
+        let child = Child {
+            id: child_id.clone(),
+            parent_id: parent.clone(),
+            descriptor: session.header().subagent.clone().unwrap(),
+        };
+        let live = state.live.get_or_load(&state.sessions, &child_id).unwrap();
+        let handoff = subagent_handoff(Some(&child), &live.session, false);
+
+        assert!(
+            handoff.changed_paths.is_empty(),
+            "{:?}",
+            handoff.changed_paths
+        );
+        assert!(handoff.artifacts.is_empty(), "{:?}", handoff.artifacts);
+        assert!(
+            handoff.changed_paths_note.contains("没有可识别的落盘改动"),
+            "{}",
+            handoff.changed_paths_note
+        );
+        assert!(
+            handoff.changed_paths_note.contains("bash"),
+            "口径必须说清哪些改动推断不出来:{}",
+            handoff.changed_paths_note
+        );
+        assert!(handoff.verification.is_none());
+        let notice = handoff.notice_text("正文", "", "");
+        assert!(notice.contains("变更文件：（无）"), "{notice}");
+        assert!(notice.contains("产物：（无）"), "{notice}");
+        assert!(notice.contains("没有可识别的落盘改动"), "{notice}");
+        // 顺手钉住 wire 形状:空就是空数组,验证拿不到就是 null。
+        let fields = handoff.fields();
+        assert_eq!(fields["changedPaths"], json!([]));
+        assert_eq!(fields["artifacts"], json!([]));
+        assert!(fields["verification"].is_null());
+        std::fs::remove_dir_all(state.home.clone()).ok();
+    }
+    #[test]
+    fn execution_budget_config_keeps_the_protection_baseline() {
+        let defaults = GoalsConfig::default();
+        assert_eq!(defaults.max_execution_steps, 128);
+        assert_eq!(defaults.max_execution_requests, 256);
+        assert_eq!(defaults.max_execution_active_ms, 60 * 60 * 1_000);
+        assert!(validate_goals_config(json!({})).is_ok());
+        // 0 = 显式关闭某一道边界(其余两道仍生效),允许。
+        assert!(validate_goals_config(json!({"maxExecutionSteps": 0})).is_ok());
+        assert!(validate_goals_config(json!({"maxExecutionSteps": 100_001})).is_err());
+        assert!(validate_goals_config(json!({"maxExecutionRequests": 1_000_001})).is_err());
+        assert!(validate_goals_config(json!({"maxExecutionActiveMs": 86_400_001})).is_err());
+        assert!(validate_goals_config(json!({"maxExecutionSteps": "128"})).is_err());
+    }
+
+    #[tokio::test]
+    async fn driver_reads_the_execution_budget_from_runtime_config() {
+        let (state, _ctx) = setup().await;
+        // 上限来源已经装在驱动器上:默认值就是防护基线。
+        assert_eq!(
+            state.driver.execution_limits(),
+            state.runtime.execution_limits()
+        );
+        assert_eq!(state.driver.execution_limits().max_steps, 128);
+        // 改配置 → 下一次取快照就是新值(在途轮次保持自己的快照,由
+        // `turn::budget_tests` 的边界测试钉住)。
+        state
+            .settings
+            .update("goals", json!({"maxExecutionSteps": 7}), None)
+            .unwrap();
+        assert_eq!(state.driver.execution_limits().max_steps, 7);
+        assert_eq!(state.runtime.execution_limits().max_requests, 256);
+        std::fs::remove_dir_all(state.home.clone()).ok();
+    }
+
+    /// 某个子代理在父会话里的完成通知正文(收件箱里的最后一条)。
+    fn last_settled_notice(state: &crate::state::AppState, parent: &str, child: &str) -> Option<String> {
+        state.live.get(parent).and_then(|live| {
+            live.session
+                .events()
+                .iter()
+                .filter_map(|event| match &event.event {
+                    SessionEvent::AgentInbox { text, source, .. }
+                        if source == "subagent-settled" && text.contains(child) =>
+                    {
+                        Some(text.clone())
+                    }
+                    _ => None,
+                })
+                .next_back()
+        })
+    }
+
+    /// 某个子代理在父会话里的完成通知条数(收件箱;已领取的也计)。
+    fn settled_notice_count(state: &crate::state::AppState, parent: &str, child: &str) -> usize {
+        state
+            .live
+            .get(parent)
+            .map(|live| {
+                live.session
+                    .events()
+                    .iter()
+                    .filter(|event| {
+                        matches!(&event.event, SessionEvent::AgentInbox { text, source, .. }
+                            if source == "subagent-settled" && text.contains(child))
+                    })
+                    .count()
+            })
+            .unwrap_or(0)
+    }
+
+    async fn wait_for_settled_notice(
+        state: &crate::state::AppState,
+        parent: &str,
+        child: &str,
+        needle: &str,
+    ) -> String {
+        for _ in 0..500 {
+            if let Some(text) = last_settled_notice(state, parent, child)
+                && text.contains(needle)
+            {
+                return text;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        panic!("父代理未在期限内收到包含 {needle:?} 的子代理完成通知");
+    }
+
+    /// 完成通知不受普通消息"连续唤醒上限"的限制:额度耗尽也必须把结果
+    /// 送给主代理。
+    ///
+    /// 锁死现象:同一用户轮次后分批完成超过 `maxConsecutiveWakes` 次,
+    /// 第 N+1 条完成消息只入队不唤醒,必须用户再发一条消息才收到。
+    #[tokio::test]
+    async fn completion_wake_bypasses_message_loop_guard() {
+        let (state, ctx) = setup().await;
+        let parent = ctx.session_id.clone().unwrap();
+        let live = state.live.get(&parent).unwrap();
+        live.running.store(false, Ordering::SeqCst);
+        let runtime = state.runtime.clone();
+        let selection = ModelSelection {
+            provider: "runtime-test".into(),
+            model: "done".into(),
+            reasoning_effort: None,
+        };
+        runtime
+            .inner
+            .selections
+            .lock()
+            .unwrap()
+            .insert(parent.clone(), selection.clone());
+        // 普通消息的唤醒额度已经耗尽。
+        runtime
+            .inner
+            .wakes
+            .lock()
+            .unwrap()
+            .insert(parent.clone(), runtime.config().max_consecutive_wakes);
+
+        let child = state
+            .sessions
+            .create_subagent(
+                &ctx.cwd,
+                true,
+                &parent,
+                SubagentDescriptor::legacy("回调子代理", 1, "default", selection, None, None),
+            )
+            .unwrap();
+        let child_id = child.id().to_string();
+        let notice_id = format!("settled:{child_id}:turn:1:seq:9");
+        runtime.inner.delivery.push(
+            Notice {
+                child: child_id.clone(),
+                parent: parent.clone(),
+                id: notice_id.clone(),
+                legacy_id: format!("settled:{child_id}:2"),
+                text: "[子代理执行结束] 分批完成".into(),
+            },
+            false,
+        );
+        runtime.retry_deliveries().await;
+
+        let mut consumed = false;
+        for _ in 0..300 {
+            let live = state.live.get(&parent).unwrap();
+            let events = live.session.events();
+            let delivered = events.iter().any(|event| {
+                matches!(&event.event, SessionEvent::AgentDelivery { id, .. } if id == &notice_id)
+            });
+            let turns = events
+                .iter()
+                .filter(|event| matches!(event.event, SessionEvent::TurnStart { .. }))
+                .count();
+            if delivered && turns == 1 && !live.running.load(Ordering::SeqCst) {
+                consumed = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert!(
+            consumed,
+            "唤醒额度耗尽后,子代理完成通知仍必须自动唤醒主代理并被消费"
+        );
+    }
+
+    /// 普通代理消息的防循环护栏仍然有效:额度耗尽后不再自动开轮。
+    #[tokio::test]
+    async fn ordinary_message_wake_still_respects_message_loop_guard() {
+        let (state, ctx) = setup().await;
+        let parent = ctx.session_id.clone().unwrap();
+        let live = state.live.get(&parent).unwrap();
+        live.running.store(false, Ordering::SeqCst);
+        let runtime = state.runtime.clone();
+        runtime.inner.selections.lock().unwrap().insert(
+            parent.clone(),
+            ModelSelection {
+                provider: "runtime-test".into(),
+                model: "done".into(),
+                reasoning_effort: None,
+            },
+        );
+        runtime
+            .inner
+            .wakes
+            .lock()
+            .unwrap()
+            .insert(parent.clone(), runtime.config().max_consecutive_wakes);
+        runtime
+            .enqueue(&parent, "m1".into(), "普通消息".into(), "job-completed".into())
+            .await
+            .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        assert!(
+            !live.running.load(Ordering::SeqCst),
+            "额度耗尽时普通消息不得再开轮"
+        );
+        assert!(
+            live.session
+                .events()
+                .iter()
+                .all(|event| !matches!(event.event, SessionEvent::TurnStart { .. })),
+            "普通消息的防循环护栏不得被完成通知的旁路改掉"
+        );
+    }
+
+    /// 完成通知的瞬时投递失败必须自动补投,且不得重复入队。
+    #[tokio::test]
+    async fn completion_notice_retries_after_transient_enqueue_failure() {
+        let (state, ctx) = setup().await;
+        let parent = ctx.session_id.clone().unwrap();
+        let runtime = state.runtime.clone();
+        let child = state
+            .sessions
+            .create_subagent(
+                &ctx.cwd,
+                true,
+                &parent,
+                SubagentDescriptor::legacy(
+                    "重试子代理",
+                    1,
+                    "default",
+                    ctx.selection.clone().unwrap(),
+                    None,
+                    None,
+                ),
+            )
+            .unwrap();
+        let child_id = child.id().to_string();
+        let notice_id = format!("settled:{child_id}:turn:1:seq:5");
+        runtime.set_test_fault("completion-enqueue");
+        runtime.inner.delivery.push(
+            Notice {
+                child: child_id.clone(),
+                parent: parent.clone(),
+                id: notice_id.clone(),
+                legacy_id: format!("settled:{child_id}:2"),
+                text: format!("[子代理执行结束] {child_id}"),
+            },
+            false,
+        );
+        runtime.retry_deliveries().await;
+        assert_eq!(
+            settled_notice_count(&state, &parent, &child_id),
+            0,
+            "首次投递失败时不得留下半截状态"
+        );
+
+        runtime
+            .inner
+            .faults
+            .lock()
+            .unwrap()
+            .remove("completion-enqueue");
+        let mut delivered = false;
+        for _ in 0..300 {
+            runtime.retry_deliveries().await;
+            if settled_notice_count(&state, &parent, &child_id) == 1 {
+                delivered = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+        }
+        assert!(delivered, "瞬时失败后必须自动补投");
+        // 幂等:已入队的通知再次补投不得重复。
+        runtime.retry_deliveries().await;
+        assert_eq!(settled_notice_count(&state, &parent, &child_id), 1);
+    }
+
+    /// 真实冷启动恢复:子代理终态已落盘、完成通知还没入队(崩溃窗口),
+    /// 新的 Runtime 必须自己发现并补投,不能等用户发消息。
+    #[tokio::test]
+    async fn restart_recovery_delivers_unnotified_completion() {
+        let (state, ctx) = setup().await;
+        let parent = ctx.session_id.clone().unwrap();
+        let selection = ctx.selection.clone().unwrap();
+        let child = state
+            .sessions
+            .create_subagent(
+                &ctx.cwd,
+                true,
+                &parent,
+                SubagentDescriptor::legacy("崩溃子代理", 1, "default", selection.clone(), None, None),
+            )
+            .unwrap();
+        let child_id = child.id().to_string();
+        child
+            .append(SessionEvent::AgentInbox {
+                id: "m1".into(),
+                text: "[父代理 委派任务]\n调查".into(),
+                source: format!("agent:{parent}"),
+            })
+            .unwrap();
+        child
+            .append(SessionEvent::AgentDelivery {
+                id: "m1".into(),
+                text: "[父代理 委派任务]\n调查".into(),
+                source: format!("agent:{parent}"),
+            })
+            .unwrap();
+        child.append(SessionEvent::TurnStart { turn: 1 }).unwrap();
+        child
+            .append(SessionEvent::AssistantMessage {
+                turn: 1,
+                step: 1,
+                blocks: vec![ContentBlock::Text {
+                    text: "已查完".into(),
+                }],
+                usage: None,
+                interrupted: false,
+                source_event_seqs: Vec::new(),
+                first_token_time: None,
+            })
+            .unwrap();
+        child
+            .append(SessionEvent::TurnEnd {
+                turn: 1,
+                reason: TurnEndReason::Completed,
+            })
+            .unwrap();
+        child.flush().unwrap();
+
+        // 新的运行时(等价于进程重启):目录从 header 重建,收件箱为空。
+        let restored = Runtime::new(
+            &state.home,
+            state.sessions.clone(),
+            state.live.clone(),
+            state.settings.clone(),
+            state.events.clone(),
+            state.registry.clone(),
+            state.workspaces.clone(),
+            state.subagent_profiles.clone(),
+        )
+        .unwrap();
+        restored
+            .inner
+            .selections
+            .lock()
+            .unwrap()
+            .insert(parent.clone(), selection);
+        state.live.get(&parent).unwrap().running.store(false, Ordering::SeqCst);
+        restored.attach(&state.driver);
+
+        let notice = wait_for_settled_notice(&state, &parent, &child_id, "子代理执行结束").await;
+        assert!(notice.contains("结果：已完成"), "{notice}");
+        // 幂等:重跑恢复不得重复通知同一次终态。
+        restored.recover_deliveries().await.unwrap();
+        assert_eq!(settled_notice_count(&state, &parent, &child_id), 1);
+    }
+
+    /// 崩溃窗口的另一半:收件箱已落盘、唤醒还没发生,重启后必须自动唤醒
+    /// 父代理并把消息投进模型历史。
+    #[tokio::test]
+    async fn restart_recovery_wakes_parent_for_pending_inbox() {
+        let (state, ctx) = setup().await;
+        let parent = ctx.session_id.clone().unwrap();
+        let selection = ctx.selection.clone().unwrap();
+        let notice_id = "settled:orphan:turn:2:seq:7";
+        let live = state.live.get(&parent).unwrap();
+        live.session
+            .append(SessionEvent::AgentInbox {
+                id: notice_id.into(),
+                text: "[子代理执行结束] 补投路径".into(),
+                source: "subagent-settled".into(),
+            })
+            .unwrap();
+        live.session.flush().unwrap();
+        live.running.store(false, Ordering::SeqCst);
+
+        let restored = Runtime::new(
+            &state.home,
+            state.sessions.clone(),
+            state.live.clone(),
+            state.settings.clone(),
+            state.events.clone(),
+            state.registry.clone(),
+            state.workspaces.clone(),
+            state.subagent_profiles.clone(),
+        )
+        .unwrap();
+        restored
+            .inner
+            .selections
+            .lock()
+            .unwrap()
+            .insert(parent.clone(), selection);
+        restored.attach(&state.driver);
+
+        let mut delivered = false;
+        for _ in 0..300 {
+            if state.live.get(&parent).unwrap().session.events().iter().any(
+                |event| matches!(&event.event, SessionEvent::AgentDelivery { id, .. } if id == notice_id),
+            ) {
+                delivered = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert!(delivered, "重启后必须自动唤醒父代理并领取待收消息");
+    }
+
+    /// 启动快照不可用 → 拒绝启动 → 失败终态必须通知父代理,且不得因为
+    /// 派遣消息还挂在收件箱而被当成"仍在运行"。
+    #[tokio::test]
+    async fn snapshot_failure_settles_child_and_notifies_parent_once() {
+        let (state, ctx) = setup().await;
+        let parent = ctx.session_id.clone().unwrap();
+        let runtime = state.runtime.clone();
+        let child = runtime
+            .execute("spawn_agent", json!({"prompt":"占用","model":"hold"}), &ctx)
+            .await
+            .unwrap()["childId"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        wait_for_running(&state, &child).await;
+        // 先让子代理正常收场,再破坏它的运行快照。
+        runtime.interrupt(&parent, &child).await.unwrap();
+        settle(&runtime, &child).await;
+        let before = settled_notice_count(&state, &parent, &child);
+        std::fs::write(
+            state.sessions.root().join(&child).join("subagent.json"),
+            "{\"broken\":true}",
+        )
+        .unwrap();
+
+        runtime
+            .execute("send_message", json!({"target":child,"message":"继续"}), &ctx)
+            .await
+            .unwrap();
+        let notice = wait_for_settled_notice(&state, &parent, &child, "拒绝启动").await;
+        assert!(notice.contains("子代理执行结束"), "{notice}");
+        assert!(
+            notice.contains("失败") || notice.contains("错误"),
+            "必须有明确失败终态:{notice}"
+        );
+        // 明确结算:不再停在"待处理",查询立即给一致快照。
+        let ready = runtime
+            .execute("wait_agent", json!({"target":child}), &ctx)
+            .await
+            .unwrap();
+        assert_eq!(ready["status"], "ready", "{ready}");
+        assert_eq!(ready["running"], false);
+        assert_eq!(
+            settled_notice_count(&state, &parent, &child),
+            before + 1,
+            "同一轮失败只允许一条完成通知"
+        );
     }
 }

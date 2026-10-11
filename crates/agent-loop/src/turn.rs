@@ -19,7 +19,7 @@ use denia_system_prompt::{
 use denia_token_meter::estimate_system_tokens;
 
 use crate::errors::MAX_FEEDBACK;
-use crate::injections::{InjectionBaselines, last_injected_channel, refresh_background_injections};
+use crate::injections::{InjectionBaselines, refresh_background_injections};
 use crate::rescue::{detect_fake_names, fake_tool_call_feedback, log_rescued, rescue_from_blocks};
 use crate::runtime_context::RuntimeContextProjection;
 use crate::workspace_instructions::skill_gesture;
@@ -34,8 +34,6 @@ struct TurnAssembly {
     /// system 字节冻结基准:日志最后一条请求头携带的 system 全文,即
     /// 提供方缓存前缀的第一段。None = 会话尚未发过任何请求。
     system_frozen: Option<String>,
-    /// 已通过系统提示更新通道追加的最新提示词全文(幂等基准)。
-    system_update: Option<String>,
     /// 子代理运行快照（角色补充 + 冻结授权）；非子代理为 None。
     subagent: Option<denia_tools::capabilities::SubagentPrompt>,
 }
@@ -86,6 +84,11 @@ pub(crate) async fn run_turn_inner(
         state.session.header().subagent.as_ref(),
     ) {
         (Some(runtime), Some(descriptor)) => {
+            // 本轮已尝试处理的派遣消息先结算；校验期间或之后到达的消息留给后续领取。
+            runtime
+                .drain(state.session.id())
+                .await
+                .map_err(|error| LlmFailure::new(codes::UNKNOWN, error))?;
             match runtime.subagent_prompt(state.session.id()).await {
                 Ok(Some(parts)) => Some(parts),
                 Ok(None) => Some(legacy_subagent_prompt(descriptor)),
@@ -123,20 +126,21 @@ pub(crate) async fn run_turn_inner(
         .and_then(|resolved| resolved.context_window);
 
     let mut assembly = TurnAssembly {
-        baselines: InjectionBaselines::restore(state),
+        baselines: InjectionBaselines::restore(&state.session),
         projection: RuntimeContextProjection::restore(&state.session),
         touched: Vec::new(),
         gesture_skill: detect_gesture_skill(driver, state, prompt, &cwd).await,
         system_frozen: last_request_header_system(&state.session),
-        system_update: last_injected_channel(
-            &state.session,
-            crate::injections::SYSTEM_UPDATE_CHANNEL,
-        )
-        .and_then(|message| extract_system_update(&message).map(|body| body.to_string())),
         subagent,
     };
 
     'step_loop: loop {
+        // —— 执行预算准入(步边界)——
+        // 超限走现有收尾路径(TurnEnd + Error),不新造 TurnEndReason:
+        // 上层(goal 续跑/失败计数)读的是同一套结局分类。
+        if let Err(refusal) = state.budget.admit_step() {
+            return close_budget(state, &refusal);
+        }
         // —— 背景注入(工作区指令/能力上下文/技能目录),失败不阻断 ——
         refresh_background_injections(driver, state, &mut assembly.baselines, &assembly.touched)
             .await?;
@@ -237,24 +241,35 @@ pub(crate) async fn run_turn_inner(
         // 最后一次发出的值;提示词变化(权限模式段位进退 / SYSTEM.md 热更新 /
         // 模型名插值)把新提示词全文以注入消息追加到已缓存历史之后,声明
         // 取代旧版。首个请求直接采用当前提示词(RequestHeader 落盘即基准)。
+        // 是否"已经发过"看**模型面**还留不留着这条注入(`InjectionBaselines::system_update`
+        // 从 surface 恢复):压缩只把事件移出模型面,日志仍 append-only,读日志会
+        // 得出"已经发过"的错误结论。冻结基准本身仍来自 `RequestHeader`——提示词
+        // 与冻结值一致时本来就不该发,这条语义不变。
         let framed_system = match assembly.system_frozen.as_deref() {
             Some(frozen) if frozen != framed_current => {
-                if assembly.system_update.as_deref() != Some(framed_current.as_str()) {
+                let already_sent = assembly
+                    .baselines
+                    .system_update
+                    .as_deref()
+                    .and_then(extract_system_update)
+                    == Some(framed_current.as_str());
+                if !already_sent {
+                    let text = format!(
+                        "<system-reminder>\n系统提示更新:以下为当前生效的完整系统指令,\
+                         取代此前系统消息中的旧版本;与旧版本冲突时以本更新为准。\n\n\
+                         {framed_current}\n</system-reminder>"
+                    );
                     append(
                         &state.session,
                         &state.emit,
                         SessionEvent::UserMessage {
-                            text: format!(
-                                "<system-reminder>\n系统提示更新:以下为当前生效的完整系统指令,\
-                                 取代此前系统消息中的旧版本;与旧版本冲突时以本更新为准。\n\n\
-                                 {framed_current}\n</system-reminder>"
-                            ),
+                            text: text.clone(),
                             injected: true,
                             channel: Some(crate::injections::SYSTEM_UPDATE_CHANNEL.into()),
                             images: Vec::new(),
                         },
                     )?;
-                    assembly.system_update = Some(framed_current.clone());
+                    assembly.baselines.system_update = Some(text);
                 }
                 frozen.to_string()
             }
@@ -466,6 +481,27 @@ pub(crate) async fn run_turn_inner(
             }
         }
     }
+}
+
+/// 预算拒绝的收尾:与 `close_error` 同一条路径(落 TurnEnd + 返回 Error),
+/// 但消息不走 `summarize_failure` —— 分类表里没有预算行,重写会把完整的
+/// 预算结论降级成“未知错误”;账本给的消息本来就是完整句子。
+fn close_budget(
+    state: &TurnState,
+    refusal: &denia_token_meter::BudgetRefusal,
+) -> Result<TurnEndReason, LlmFailure> {
+    let reason = TurnEndReason::Error {
+        failure: LlmFailure::new(codes::BUDGET_EXHAUSTED, refusal.message.clone()),
+    };
+    append(
+        &state.session,
+        &state.emit,
+        SessionEvent::TurnEnd {
+            turn: state.turn,
+            reason: reason.clone(),
+        },
+    )?;
+    Ok(reason)
 }
 
 /// turn 开始前的输入注入:上传文件通知 → 轨迹引用 → 图片通知 → 真实用户消息
@@ -866,6 +902,14 @@ pub(crate) fn apply_subagent_context(
     assembly: &mut PromptAssembly,
     child: &denia_tools::capabilities::SubagentPrompt,
 ) {
+    // 父 persona 快照覆盖 deployment:persona。父 preset 是“persona 独占”时,
+    // 本装配已在 apply_session_preset 里被收成只剩 persona 一段,语言纪律随之
+    // 消失——快照必须把它一起带回来;装配里还有 `harness:communication` 时则
+    // 不重复补,权威段已经讲过了。
+    let persona_only = !assembly
+        .sections
+        .iter()
+        .any(|section| section.name == "harness:communication");
     if let Some(persona) = child
         .parent_preset_persona
         .as_deref()
@@ -875,7 +919,11 @@ pub(crate) fn apply_subagent_context(
             .iter_mut()
             .find(|s| s.name == "deployment:persona")
     {
-        section.text = format!("{persona}\n始终使用简体中文回复，除非用户明确要求其他语言。");
+        section.text = if persona_only {
+            format!("{persona}\n{}", denia_tools::prompt::LANGUAGE_RULE)
+        } else {
+            persona.to_string()
+        };
     }
     crate::preset::apply_tool_allowlist(assembly, &child.effective_tools);
     // 后台命令的入口是 `job_start`：没被授予它时，bash 的 run_in_background
@@ -959,6 +1007,17 @@ mod subagent_section_tests {
     use super::*;
     use denia_system_prompt::{AssembleContext, SectionAudience};
     use denia_tools::capabilities::SubagentPrompt;
+    use denia_tools::prompt::LANGUAGE_RULE;
+
+    /// 同一份装配里语言纪律出现的次数:权威段是 `harness:communication`,
+    /// persona 只在“收窄到只剩 persona”的档位里把它随身带走。
+    fn language_rule_count(assembly: &PromptAssembly) -> usize {
+        assembly
+            .sections
+            .iter()
+            .map(|section| section.text.matches(LANGUAGE_RULE).count())
+            .sum()
+    }
 
     fn assembly() -> PromptAssembly {
         let (prompt, _registry) = denia_tools::default_shipped();
@@ -1071,6 +1130,34 @@ mod subagent_section_tests {
             .find(|section| section.name == "deployment:persona")
             .expect("persona 段仍在");
         assert!(persona.text.starts_with("父 preset 的快照 persona"));
+        // 装配里还有 harness:communication,中文纪律不追写第二遍。
+        assert!(!persona.text.contains(LANGUAGE_RULE), "{}", persona.text);
+        assert_eq!(language_rule_count(&a), 1, "语言纪律只该出现一次");
+    }
+
+    #[test]
+    fn persona_only_assembly_keeps_the_language_rule_once() {
+        // 父 preset 是 persona 独占时,子代理装配里只剩 deployment:persona
+        // (APPLY_SESSION_PRESET 已把它收窄),语言纪律只能随父 persona 快照
+        // 一起回来——少了这一手,该子代理就彻底没有语言约束。
+        let mut a = assembly();
+        a.sections
+            .retain(|section| section.name == denia_system_prompt::PERSONA_SECTION);
+        let mut child = child("", vec!["read_file"], "inherit");
+        child.parent_preset_persona = Some("父 preset 的快照 persona".to_string());
+        apply_subagent_context(&mut a, &child);
+        let persona = a
+            .sections
+            .iter()
+            .find(|section| section.name == "deployment:persona")
+            .expect("persona 段仍在");
+        assert!(persona.text.starts_with("父 preset 的快照 persona"));
+        assert!(
+            persona.text.contains(LANGUAGE_RULE),
+            "persona 独占档丢了语言纪律:{}",
+            persona.text
+        );
+        assert_eq!(language_rule_count(&a), 1, "语言纪律只该出现一次");
     }
 
     /// 后台命令的入口是 `job_start`：没有授予它时，bash 的 `run_in_background`
@@ -1119,6 +1206,467 @@ mod subagent_section_tests {
                 .get("run_in_background")
                 .is_some(),
             "授予 job_start 时后台参数保留"
+        );
+    }
+}
+
+/// 执行预算(阶段五)的端到端回归:三道边界各自"拒绝并走收尾",以及来源区分。
+///
+/// 断言只看用户可见的结局(turn-end 的失败码与消息、是否还有下一步、请求
+/// 有没有真的发出去),不看账本内部计数——那些由 token-meter 的单元测试钉。
+#[cfg(test)]
+mod budget_tests {
+    use super::*;
+    use std::collections::VecDeque;
+    use std::sync::Arc;
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+
+    use denia_core::config::ModelSelection;
+    use denia_core::error::LlmError;
+    use denia_core::stream::{BlockType, ContentBlock, StreamChunk, TokenUsage};
+    use denia_llm::{
+        ChunkStream, GenerateRequest, LlmAdapter, LlmModelInfo, LlmRegistry, LlmResolvedModelInfo,
+        ProviderInfo, RequestAdmission, RetryPolicy,
+    };
+    use denia_session::Session;
+    use denia_token_meter::{Clock, ExecutionBudget, ExecutionLimits};
+    use denia_tools::ToolRegistry;
+    use tokio_util::sync::CancellationToken;
+
+    /// 按脚本逐次返回响应(脚本用完重复最后一条),并记录请求次数。
+    struct ScriptedAdapter {
+        scripts: Mutex<VecDeque<Vec<StreamChunk>>>,
+        calls: AtomicU32,
+    }
+
+    #[async_trait::async_trait]
+    impl LlmAdapter for ScriptedAdapter {
+        fn provider_info(&self, provider: &str) -> ProviderInfo {
+            ProviderInfo {
+                id: provider.to_string(),
+                name: provider.to_string(),
+            }
+        }
+
+        async fn list_models(&self, _provider: &str) -> Result<Vec<LlmModelInfo>, LlmError> {
+            Ok(Vec::new())
+        }
+
+        async fn resolve_model(
+            &self,
+            provider: &str,
+            model: &str,
+        ) -> Result<LlmResolvedModelInfo, LlmError> {
+            Ok(LlmResolvedModelInfo {
+                info: LlmModelInfo {
+                    provider: provider.to_string(),
+                    id: model.to_string(),
+                    name: model.to_string(),
+                    description: None,
+                    input_modalities: vec!["text".to_string()],
+                },
+                context_window: Some(200_000),
+                default_max_tokens: Some(4_096),
+                reasoning: None,
+            })
+        }
+
+        async fn stream(
+            &self,
+            _provider: &str,
+            _request: &GenerateRequest,
+        ) -> Result<ChunkStream, LlmError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            let script = {
+                let mut scripts = self.scripts.lock().unwrap();
+                if scripts.len() > 1 {
+                    scripts.pop_front().unwrap_or_default()
+                } else {
+                    scripts.front().cloned().unwrap_or_default()
+                }
+            };
+            let items: Vec<Result<StreamChunk, LlmFailure>> = script.into_iter().map(Ok).collect();
+            Ok(Box::pin(futures::stream::iter(items)))
+        }
+    }
+
+    fn text_script(text: &str, finish: FinishReason) -> Vec<StreamChunk> {
+        vec![
+            StreamChunk::BlockStart {
+                index: 0,
+                block_type: BlockType::Text,
+            },
+            StreamChunk::TextDelta {
+                index: 0,
+                text: text.to_string(),
+            },
+            StreamChunk::BlockEnd {
+                index: 0,
+                block: ContentBlock::Text {
+                    text: text.to_string(),
+                },
+            },
+            StreamChunk::Finish { reason: finish },
+        ]
+    }
+
+    fn usage_chunk(input: u64, output: u64) -> StreamChunk {
+        StreamChunk::Usage {
+            usage: TokenUsage {
+                input_tokens: input,
+                output_tokens: output,
+                cache_read_tokens: None,
+                reasoning_tokens: None,
+            },
+        }
+    }
+
+    fn temp_session() -> Arc<Session> {
+        let dir = std::env::temp_dir().join(format!(
+            "denia-budget-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        Arc::new(Session::create(&dir, uuid::Uuid::new_v4().to_string(), &dir, true, None).unwrap())
+    }
+
+    /// 装配一个只有 mock 路由、无工具的驱动器:预算边界不依赖工具面。
+    fn scripted_driver(
+        scripts: Vec<Vec<StreamChunk>>,
+        limits: ExecutionLimits,
+        clock: Option<Clock>,
+    ) -> (SessionDriver, Arc<ScriptedAdapter>, Arc<Session>) {
+        let registry = Arc::new(LlmRegistry::new());
+        let adapter = Arc::new(ScriptedAdapter {
+            scripts: Mutex::new(VecDeque::from(scripts)),
+            calls: AtomicU32::new(0),
+        });
+        registry
+            .register(
+                &["mock".to_string()],
+                adapter.clone(),
+                RetryPolicy {
+                    // 注册表内部重试不睡:测试只验证准入次数,不验证退避曲线。
+                    max_retries: 2,
+                    initial_delay_ms: 0,
+                    max_delay_ms: 0,
+                    ..RetryPolicy::default()
+                },
+            )
+            .unwrap();
+        let mut prompt =
+            denia_system_prompt::SystemPrompt::new(denia_system_prompt::SystemPromptConfig {
+                include_runtime_context: false,
+                ..Default::default()
+            });
+        prompt
+            .variable("cwd", |context| context.cwd.clone())
+            .unwrap();
+        prompt
+            .variable("model", |context| context.model.clone())
+            .unwrap();
+        prompt
+            .variable("provider", |context| context.provider.clone())
+            .unwrap();
+        let mut driver = SessionDriver::new(
+            registry,
+            Arc::new(ToolRegistry::default()),
+            Arc::new(arc_swap::ArcSwap::from_pointee(prompt)),
+        );
+        driver.set_execution_limits_source(Arc::new(move || limits));
+        if let Some(clock) = clock {
+            driver = driver.with_budget_clock(clock);
+        }
+        (driver, adapter, temp_session())
+    }
+
+    async fn run_one_turn(driver: &SessionDriver, session: &Arc<Session>) -> TurnEndReason {
+        driver
+            .run_turn(
+                session,
+                &ModelSelection {
+                    provider: "mock".to_string(),
+                    model: "mock-1".to_string(),
+                    reasoning_effort: None,
+                },
+                "开始",
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                false,
+                CancellationToken::new(),
+                Arc::new(|_| {}),
+            )
+            .await
+    }
+
+    fn last_turn_end(session: &Session) -> TurnEndReason {
+        session.with_events(|events| {
+            events
+                .iter()
+                .rev()
+                .find_map(|envelope| match &envelope.event {
+                    SessionEvent::TurnEnd { reason, .. } => Some(reason.clone()),
+                    _ => None,
+                })
+                .expect("轮次必须闭合")
+        })
+    }
+
+    fn steps_started(session: &Session) -> usize {
+        session.with_events(|events| {
+            events
+                .iter()
+                .filter(|envelope| {
+                    matches!(envelope.event, SessionEvent::StepStart { turn: 1, .. })
+                })
+                .count()
+        })
+    }
+
+    fn budget_failure(reason: &TurnEndReason) -> &LlmFailure {
+        match reason {
+            TurnEndReason::Error { failure } => failure,
+            other => panic!("预算耗尽必须走现有错误收尾路径,得到 {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn step_budget_refuses_and_closes_the_turn() {
+        // 步数上限 2;脚本持续输出截断,驱动会一直开新 step(续写路径)。
+        let limits = ExecutionLimits {
+            max_steps: 2,
+            ..ExecutionLimits::unbounded()
+        };
+        let (driver, adapter, session) = scripted_driver(
+            vec![text_script("部分输出", FinishReason::MaxTokens)],
+            limits,
+            None,
+        );
+        let reason = run_one_turn(&driver, &session).await;
+        let failure = budget_failure(&reason);
+        assert_eq!(failure.code, codes::BUDGET_EXHAUSTED);
+        assert!(failure.message.contains("模型步骤"), "{}", failure.message);
+        assert_eq!(steps_started(&session), 2, "第 3 个 step 不该开始");
+        assert_eq!(
+            adapter.calls.load(Ordering::SeqCst),
+            2,
+            "超限之后不得再发请求"
+        );
+    }
+
+    #[tokio::test]
+    async fn request_budget_refuses_before_the_next_attempt() {
+        // 请求尝试上限 1;第一次流失败后 step 内重试,第二次尝试必须被拒。
+        let limits = ExecutionLimits {
+            max_requests: 1,
+            ..ExecutionLimits::unbounded()
+        };
+        let failing = vec![StreamChunk::Finish {
+            reason: FinishReason::Error {
+                failure: LlmFailure::new(codes::EMPTY_RESPONSE, "empty response"),
+            },
+        }];
+        let (driver, adapter, session) = scripted_driver(
+            vec![failing, text_script("恢复", FinishReason::Stop)],
+            limits,
+            None,
+        );
+        let reason = run_one_turn(&driver, &session).await;
+        let failure = budget_failure(&reason);
+        assert_eq!(failure.code, codes::BUDGET_EXHAUSTED);
+        assert!(failure.message.contains("模型请求"), "{}", failure.message);
+        assert_eq!(
+            adapter.calls.load(Ordering::SeqCst),
+            1,
+            "被拒绝的尝试不得发给提供方"
+        );
+    }
+
+    #[tokio::test]
+    async fn explicit_retries_fit_inside_the_request_budget() {
+        // 反向的另一半:额度够时,显式重试是**新身份**,不该被当成重复调用
+        // 卡住(去重不能把重试判成"重复")。
+        let limits = ExecutionLimits {
+            max_requests: 4,
+            ..ExecutionLimits::unbounded()
+        };
+        let failing = vec![StreamChunk::Finish {
+            reason: FinishReason::Error {
+                failure: LlmFailure::new(codes::EMPTY_RESPONSE, "empty response"),
+            },
+        }];
+        let (driver, adapter, session) = scripted_driver(
+            vec![failing, text_script("重试成功", FinishReason::Stop)],
+            limits,
+            None,
+        );
+        let reason = run_one_turn(&driver, &session).await;
+        assert_eq!(reason, TurnEndReason::Completed, "重试应当被容纳并正常完成");
+        assert_eq!(
+            adapter.calls.load(Ordering::SeqCst),
+            2,
+            "两次物理请求都发出"
+        );
+    }
+
+    #[tokio::test]
+    async fn active_time_budget_refuses_at_the_step_boundary() {
+        // 假时钟每次读取前进 20 分钟;主动时间上限 60 分钟 → 第 2 个 step 的
+        // 准入就已经超限。等待用户的区间由账本的 pause/resume 排除(单元测试
+        // 钉住),这里验证超限确实走收尾而不是继续发请求。
+        let ticks = Arc::new(AtomicU64::new(0));
+        let clock: Clock = {
+            let ticks = ticks.clone();
+            Arc::new(move || ticks.fetch_add(20 * 60_000, Ordering::SeqCst))
+        };
+        let limits = ExecutionLimits {
+            max_active_ms: 60 * 60_000,
+            ..ExecutionLimits::unbounded()
+        };
+        let (driver, adapter, session) = scripted_driver(
+            vec![text_script("分段输出", FinishReason::MaxTokens)],
+            limits,
+            Some(clock),
+        );
+        let reason = run_one_turn(&driver, &session).await;
+        let failure = budget_failure(&reason);
+        assert_eq!(failure.code, codes::BUDGET_EXHAUSTED);
+        assert!(
+            failure.message.contains("主动执行时间"),
+            "{}",
+            failure.message
+        );
+        assert_eq!(
+            adapter.calls.load(Ordering::SeqCst),
+            1,
+            "超时后不得再发请求"
+        );
+    }
+
+    #[test]
+    fn bypass_sources_stay_out_of_the_user_budget() {
+        // 会话标题、连通测试、git 摘要不是用户任务的执行成本:额度为 0 时
+        // 它们照样放行,用户请求照样被拒。
+        let budget = ExecutionBudget::new(ExecutionLimits {
+            max_requests: 0,
+            ..ExecutionLimits::unbounded()
+        });
+        let gate = crate::BudgetGate(budget.clone());
+        for kind in [
+            denia_llm::RequestKind::SessionTitle,
+            denia_llm::RequestKind::Connectivity,
+            denia_llm::RequestKind::Git,
+        ] {
+            let call = denia_llm::RequestCall {
+                session: "s1".to_string(),
+                turn: 1,
+                step: 1,
+                kind,
+                sequence: 0,
+                attempt: 1,
+            };
+            assert!(
+                gate.admit(&call).is_ok(),
+                "{kind:?} 是旁路,不该被用户预算拦住"
+            );
+        }
+        let user = denia_llm::RequestCall {
+            session: "s1".to_string(),
+            turn: 1,
+            step: 1,
+            kind: denia_llm::RequestKind::UserStep,
+            sequence: 1,
+            attempt: 1,
+        };
+        let refusal = gate.admit(&user).expect_err("用户请求额度为 0,必须被拒");
+        assert!(refusal.message.contains("执行预算已用尽"));
+        let counters = budget.counters();
+        assert_eq!(counters.metered_requests, 0, "旁路不吃用户预算");
+        assert_eq!(counters.bypass_requests, 3, "旁路只累计观测计数");
+    }
+
+    #[tokio::test]
+    async fn compaction_summary_usage_is_booked() {
+        // 主请求先撞上下文超限 → 强制压缩;摘要请求上报 usage。旧路径把这块
+        // 计费整个丢掉(compact.rs 不消费 Usage),于是"摘要花的钱"不在账上。
+        let overflow = vec![StreamChunk::Finish {
+            reason: FinishReason::Error {
+                failure: LlmFailure::new(codes::CONTEXT_WINDOW_EXCEEDED, "maximum context"),
+            },
+        }];
+        let mut summary = text_script("既往工作摘要", FinishReason::Stop);
+        summary.insert(3, usage_chunk(900, 120));
+        let (driver, _adapter, session) = scripted_driver(
+            vec![overflow, summary, text_script("收尾", FinishReason::Stop)],
+            ExecutionLimits::unbounded(),
+            None,
+        );
+        let driver = driver.with_compaction(crate::CompactionSettings {
+            min_keep_tokens: 1,
+            max_keep_tokens: 1,
+            min_text_messages: 1,
+            ..Default::default()
+        });
+        for index in 0..15 {
+            session
+                .append(SessionEvent::UserMessage {
+                    text: format!("old-{index}"),
+                    injected: false,
+                    channel: None,
+                    images: Vec::new(),
+                })
+                .unwrap();
+        }
+        let _ = run_one_turn(&driver, &session).await;
+
+        let booked: Vec<denia_token_meter::AccountedUsage> = session.with_events(|events| {
+            events
+                .iter()
+                .filter_map(|envelope| denia_token_meter::AccountedUsage::parse(&envelope.event))
+                .collect()
+        });
+        let exact: Vec<&denia_token_meter::AccountedUsage> =
+            booked.iter().filter(|usage| !usage.estimated).collect();
+        assert_eq!(exact.len(), 1, "摘要请求的精确用量必须落账:{booked:?}");
+        assert_eq!(exact[0].uncached_input_tokens, 900);
+        assert_eq!(exact[0].output_tokens, 120);
+        // 同一轮里主请求的脚本没有报 usage,所以还会有一条估算标注(见下一个
+        // 测试):两条账目共存,互不覆盖。
+        assert_eq!(booked.len(), 2, "精确账目与估算标注各管一段:{booked:?}");
+        assert!(
+            session.turn_token_usage().uncached_input_tokens >= 900,
+            "账本要真的把这笔算进去:{:?}",
+            session.turn_token_usage()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_usage_less_step_is_estimated_and_marked() {
+        // provider 不报 usage:不再让整轮折账(旧行为),而是保守估算 + 事件
+        // 上标注。断言标注落盘、且账本确实有非零用量。
+        let mut script = text_script("没有 usage 的回复", FinishReason::Stop);
+        script.retain(|chunk| !matches!(chunk, StreamChunk::Usage { .. }));
+        let (driver, _adapter, session) =
+            scripted_driver(vec![script], ExecutionLimits::unbounded(), None);
+        let reason = run_one_turn(&driver, &session).await;
+        assert_eq!(reason, TurnEndReason::Completed);
+        let marked: Vec<denia_token_meter::AccountedUsage> = session.with_events(|events| {
+            events
+                .iter()
+                .filter_map(|envelope| denia_token_meter::AccountedUsage::parse(&envelope.event))
+                .collect()
+        });
+        assert_eq!(marked.len(), 1, "缺 usage 必须留一条估算标注:{marked:?}");
+        assert!(marked[0].estimated, "标注必须说明是估算");
+        assert!(marked[0].total() > 0, "估算不能是 0");
+        assert!(
+            session.turn_token_usage().total() > 0,
+            "估算要计入账本:{:?}",
+            session.turn_token_usage()
         );
     }
 }

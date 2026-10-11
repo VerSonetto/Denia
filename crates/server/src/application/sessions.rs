@@ -122,7 +122,12 @@ impl<'a> SessionCommands<'a> {
                 "a turn is already running on this session",
             ));
         }
-        let admission = RunningGuard::new(live.clone(), self.services.events.clone());
+        let runtime = self.services.runtime.clone();
+        let admission = RunningGuard::with_on_idle(
+            live.clone(),
+            self.services.events.clone(),
+            Arc::new(move |id| runtime.on_idle(id)),
+        );
         // 运行状态立即推给控制台(侧栏圆点/发送按钮,无需 follow 长连接)。
         let _ = self.services.events.send(ServerEvent::RunningChanged {
             id: id.clone(),
@@ -312,7 +317,6 @@ impl<'a> SessionCommands<'a> {
         let followers_for_turn = live.followers.clone();
         let driver = self.services.driver.clone();
         let session = live.session.clone();
-        let runtime = self.services.runtime.clone();
         tokio::spawn(async move {
             // RAII:任务结束(含 panic)自动复位 running + 清 cancel + 广播结束。
             let _guard = admission;
@@ -339,7 +343,6 @@ impl<'a> SessionCommands<'a> {
                 )
                 .await;
             drop(_guard);
-            runtime.on_idle(session.id());
             // 上下文管理(投影剪枝 + LLM 压缩)已内建于 driver 的请求构造前
             // (denia_agent_loop::SessionDriver):轮次闭合后不再落盘替换,
             // 日志保持 append-only,provider 前缀缓存不被破坏。

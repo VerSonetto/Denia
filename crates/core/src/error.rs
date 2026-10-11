@@ -25,6 +25,9 @@ pub mod codes {
     pub const MALFORMED_RESPONSE: &str = "MALFORMED_RESPONSE";
     pub const STREAM_CLOSED: &str = "STREAM_CLOSED";
     pub const STEP_LIMIT: &str = "STEP_LIMIT";
+    /// 执行预算耗尽(步骤/请求/主动执行时间任一上限):请求在发出前被拒,
+    /// 不是提供方故障,重试也不会变好。
+    pub const BUDGET_EXHAUSTED: &str = "BUDGET_EXHAUSTED";
     pub const SETTINGS: &str = "SETTINGS";
     /// 会话日志存储故障(append/flush 失败等 IO 层问题)。
     pub const STORAGE: &str = "STORAGE";

@@ -145,17 +145,39 @@ pub(crate) async fn dispatch_request(
     let retry_policy = denia_llm::RetryPolicy::default();
     let mut step_retries: u32 = 0;
     let mut context_recovered = false;
+    // 本 step 里第几次建流:建立失败、上下文超限强压、replay 降级都会回到
+    // 循环头重发,那是一次**新的逻辑调用**(也真的是新的一次计费)。预算
+    // 去重键带上它,才不会把重发误判成“重复调用”。
+    let mut dispatch_sequence: u32 = 0;
     'attempts: loop {
         // 请求前检查点(对齐 dsh checkpoint-policy):请求前缀刷盘
         // 成功才派发;失败 fail-closed(不发出请求)。
         flush_before_dispatch(&state.session)?;
         // 请求建立期同样响应取消:网关/代理黑洞挂起时,点停止必须立刻能断。
         let attempt_request = request.clone();
-        let stream_setup = driver.registry.stream_with_replay(
+        dispatch_sequence = dispatch_sequence.saturating_add(1);
+        let gate = crate::BudgetGate(state.budget.clone());
+        let ticket = denia_llm::RequestTicket::new(
+            &gate,
+            denia_llm::RequestCall {
+                session: state.session.id().to_string(),
+                turn: state.turn,
+                step,
+                kind: if is_continuation_step(state) {
+                    denia_llm::RequestKind::Continuation
+                } else {
+                    denia_llm::RequestKind::UserStep
+                },
+                sequence: dispatch_sequence,
+                attempt: 0,
+            },
+        );
+        let stream_setup = driver.registry.stream_with_replay_admitted(
             &state.selection.provider,
             &attempt_request,
             retry_sink.clone(),
             &state.replay,
+            Some(&ticket),
         );
         tokio::pin!(stream_setup);
         let mut stream = tokio::select! {
@@ -416,6 +438,18 @@ pub(crate) async fn dispatch_request(
         // 成功:终稿消息落盘(source_event_seqs 只引用本次 attempt 的 chunk,
         // 失败尝试的 chunk 自动不进派生历史)。
         state.step_retries = step_retries;
+        if usage.is_none() {
+            // provider 没报 usage:保守估算并**在事件上标注**。旧行为是让
+            // token-meter 整轮拒绝折账——“没报数”于是变成了“不花钱”,目标
+            // 预算永远用不完。估算口径与面板表面同源(同 density、同 system
+            // 与工具声明),但天然不含缓存/思考明细,所以必须标明是估算。
+            let accounted = estimate_step_usage(state, framed_system, tools, &blocks);
+            append(
+                &state.session,
+                &state.emit,
+                accounted.event(state.turn, step),
+            )?;
+        }
         append(
             &state.session,
             &state.emit,
@@ -431,6 +465,57 @@ pub(crate) async fn dispatch_request(
         )?;
         return Ok(RequestOutcome::Step { blocks, finish });
     }
+}
+
+/// 本 step 是不是“输出截断续写”触发的:续写分支会把那条指令作为最后一条
+/// 事件追加后回到 step 循环头。两者都吃用户预算,分类只影响对账与观测。
+fn is_continuation_step(state: &TurnState) -> bool {
+    state.session.with_events(|events| {
+        events.last().is_some_and(|envelope| {
+            matches!(
+                &envelope.event,
+                SessionEvent::UserMessage {
+                    injected: true,
+                    channel: Some(channel),
+                    ..
+                } if channel == "output-continuation"
+            )
+        })
+    })
+}
+
+/// 缺 provider usage 时的保守估算(prompt 侧 + 输出侧)。
+///
+/// prompt 侧 = 请求**实际发出去**的那条前缀:派生消息 + system + 工具声明,
+/// 与占用面板同一份估算函数(`denia_token_meter::estimate_message` 系列)。
+/// 输出侧按回复正文 / 思考 / 工具调用同源估算。
+///
+/// “保守”的方向是**宁可高估**:高估只会让用户早一点看到预算被拦住(可见、
+/// 可调),漏账则让预算静默失效——那正是这次要修的东西。标注靠
+/// `AccountedUsage::estimated`,账本据此与精确用量分开对账。
+fn estimate_step_usage(
+    state: &TurnState,
+    framed_system: &str,
+    tools: &[ToolSchema],
+    blocks: &[ContentBlock],
+) -> denia_token_meter::AccountedUsage {
+    let messages = state
+        .session
+        .derive_messages()
+        .iter()
+        .fold(0u64, |acc, message| {
+            acc.saturating_add(denia_token_meter::estimate_message(message))
+        });
+    let tools_tokens = serde_json::to_string(tools)
+        .map(|json| denia_token_meter::estimate_tools_tokens(&json))
+        .unwrap_or(0);
+    let prompt_tokens = messages
+        .saturating_add(denia_token_meter::estimate_system_tokens(framed_system))
+        .saturating_add(tools_tokens);
+    let output_tokens = denia_core::message::assistant_from_blocks(blocks)
+        .map(|message| denia_token_meter::estimate_message(&message))
+        .unwrap_or(0);
+    denia_token_meter::AccountedUsage::estimated_only(prompt_tokens, output_tokens)
 }
 
 /// 请求头/路由元数据按需落盘:头相同的连续请求不重复写(最近快照即
@@ -798,6 +883,8 @@ async fn run_compaction_gate(
             &state.cancel,
             Some(&state.replay),
             &state.settings.compaction,
+            // 摘要请求计入本轮预算:内部压缩不是绕过预算的暗道。
+            Some(state.budget.clone()),
         )
         .await
     {
@@ -991,6 +1078,206 @@ mod tests {
             text.contains("read_tool_output"),
             "占位符要给出回读入口: {text}"
         );
+    }
+
+    /// 微压缩闸门的落盘定位在"有被折叠注入块"的会话上仍然正确。
+    ///
+    /// 闸门要用投影面的 seq 做三件事:映射回 `call_id`、从原始日志取出该结果的
+    /// 其余事实(`ClearedCarry`)、把 `replaces` 写回那个 seq。基线通道的注入块
+    /// 被投影折叠后,投影面的 seq 集合与原始日志不再一致——只要其中一环按
+    /// 日志下标而不是 seq 定位,就会写出一条指向错误节点的替换事件(或者静默
+    /// 地什么都不清)。本测试把闸门的三步照搬下来跑一遍。
+    #[test]
+    fn microcompact_replacement_targets_resolve_on_a_folded_surface() {
+        let envelope = |seq: u64, event: SessionEvent| denia_core::session::SessionEnvelope {
+            seq,
+            time: 1_700_000_000_000 + seq,
+            event,
+        };
+        let user_msg = |seq: u64, text: &str| {
+            envelope(
+                seq,
+                SessionEvent::UserMessage {
+                    text: text.into(),
+                    injected: false,
+                    images: Vec::new(),
+                    channel: None,
+                },
+            )
+        };
+        let injection = |seq: u64, text: &str| {
+            envelope(
+                seq,
+                SessionEvent::UserMessage {
+                    text: text.into(),
+                    injected: true,
+                    images: Vec::new(),
+                    channel: Some("capability".into()),
+                },
+            )
+        };
+        let call = |seq: u64, id: &str| {
+            envelope(
+                seq,
+                SessionEvent::AssistantMessage {
+                    turn: 1,
+                    step: 1,
+                    blocks: vec![denia_core::stream::ContentBlock::ToolCall {
+                        id: id.into(),
+                        name: "bash".into(),
+                        arguments: "{}".into(),
+                        incomplete: false,
+                    }],
+                    usage: None,
+                    interrupted: false,
+                    source_event_seqs: Vec::new(),
+                    first_token_time: None,
+                },
+            )
+        };
+        let result = |seq: u64, id: &str, content: String| {
+            envelope(
+                seq,
+                SessionEvent::ToolResult {
+                    turn: 1,
+                    step: 1,
+                    call_id: id.into(),
+                    content,
+                    is_error: false,
+                    error: None,
+                    error_identity: None,
+                    meta: None,
+                    replaces: None,
+                    truncation: None,
+                },
+            )
+        };
+
+        let events = vec![
+            user_msg(1, "先跑一遍"),
+            call(2, "call_old"),
+            result(3, "call_old", "旧结果".repeat(2_000)),
+            // 同一通道的能力上下文两条:旧的(seq 4)被投影折叠掉。
+            injection(4, &format!("[denia 能力上下文]{}", "x".repeat(2_000))),
+            injection(5, "[denia 能力上下文]v2"),
+            call(6, "call_new"),
+            result(7, "call_new", "新结果".into()),
+        ];
+
+        let surface = denia_core::session::derive_surface(&events);
+        assert!(
+            surface.iter().all(|item| item.seq != 4),
+            "旧基线必须离开模型面(否则本测试什么也没钉)"
+        );
+        let seqs: Vec<u64> = surface.iter().map(|item| item.seq).collect();
+        assert_eq!(seqs, vec![1, 2, 3, 5, 6, 7]);
+
+        // 保留最近 1 组 + 空闲触发:seq 3 那条旧结果进候选(5/6/7 是新组)。
+        let decision = crate::microcompact::plan(
+            &surface,
+            &crate::microcompact::MicrocompactSettings {
+                keep_recent_groups: 1,
+                min_savings: 0,
+                ..Default::default()
+            },
+            Some(120),
+            None,
+            None,
+        );
+        let crate::microcompact::MicrocompactDecision::Applied { cleared_seqs, .. } = decision
+        else {
+            panic!("空闲超时 + 保留 1 组应当清理旧结果:{decision:?}");
+        };
+        assert_eq!(cleared_seqs, vec![3], "只清模型面上真实存在的那条旧结果");
+
+        // —— 以下三步照搬 `run_microcompact_gate` ——
+        let seq_to_call: std::collections::HashMap<u64, &str> = surface
+            .iter()
+            .filter_map(|item| {
+                item.message
+                    .tool_call_id
+                    .as_deref()
+                    .map(|id| (item.seq, id))
+            })
+            .collect();
+        let wanted: std::collections::HashSet<u64> = cleared_seqs.iter().copied().collect();
+        let carry: std::collections::HashMap<u64, ClearedCarry> = events
+            .iter()
+            .filter(|envelope| wanted.contains(&envelope.seq))
+            .map(|envelope| (envelope.seq, ClearedCarry::from_event(&envelope.event)))
+            .collect();
+
+        let mut replaced = events.clone();
+        for seq in &cleared_seqs {
+            // 定位失败就是闸门的静默失败模式:清了 0 条而不报错。
+            let call_id = seq_to_call
+                .get(seq)
+                .expect("被清项必须在投影面上找得到 call_id");
+            let facts = carry.get(seq).cloned().unwrap_or_default();
+            replaced.push(envelope(
+                seq + 100,
+                SessionEvent::ToolResult {
+                    turn: 1,
+                    step: 2,
+                    call_id: (*call_id).to_string(),
+                    content: facts.placeholder(),
+                    is_error: facts.is_error,
+                    error: None,
+                    error_identity: facts.error_identity,
+                    meta: facts.meta,
+                    truncation: facts.truncation,
+                    replaces: Some(*seq),
+                },
+            ));
+        }
+
+        // 原位替换:节点数不变、原 seq 保位、被折叠的旧基线不因新事件复活。
+        let after = denia_core::session::derive_surface(&replaced);
+        assert_eq!(after.len(), surface.len(), "替换必须原位:不新增节点");
+        assert_eq!(after.iter().map(|item| item.seq).collect::<Vec<_>>(), seqs);
+        let cleared = after
+            .iter()
+            .find(|item| item.seq == 3)
+            .expect("被清节点保持原 seq");
+        assert_eq!(
+            cleared.message.content,
+            crate::microcompact::CLEARED_PLACEHOLDER
+        );
+        assert_eq!(
+            cleared.message.tool_call_id.as_deref(),
+            Some("call_old"),
+            "替换事件必须写回那条结果自己的 call_id"
+        );
+    }
+
+    /// core 的旧日志前缀表必须与注入侧的识别口径逐字一致。
+    ///
+    /// 两边分叉时,同一个通道的老块(无 `channel` 字段)与新块会被算成两个
+    /// 通道:基准按前缀认、投影不认——模型面上就是两份基线并存。前缀常量
+    /// 分居两个 crate,只能靠这条测试钉住(core 不能反向依赖 agent-loop)。
+    #[test]
+    fn legacy_injection_prefixes_match_the_injection_side() {
+        use denia_core::session::{BASELINE_INJECTION_CHANNELS, injection_channel};
+        for (prefix, channel) in [
+            (
+                crate::workspace_instructions::WORKSPACE_PREFIX,
+                "workspace-instructions",
+            ),
+            (
+                crate::workspace_instructions::SKILL_CATALOG_PREFIX,
+                "skill-catalog",
+            ),
+        ] {
+            assert_eq!(
+                injection_channel(prefix, true, None),
+                Some(channel),
+                "前缀识别必须与注入侧同口径:{prefix}"
+            );
+            assert!(
+                BASELINE_INJECTION_CHANNELS.contains(&channel),
+                "前缀认出的通道必须在折叠名单里:{channel}"
+            );
+        }
     }
 
     #[test]

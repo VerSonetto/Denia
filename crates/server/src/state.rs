@@ -585,16 +585,33 @@ impl denia_tools::AskBridge for ServerAskBridge {
 }
 
 /// RAII 运行保护:drop 时复位 running、清空 cancel token,并广播
-/// `RunningChanged { running: false }` 给控制台。即使任务 panic,
-/// 会话也不会永久锁死在 running 状态,前端圆点也不会卡死。
+/// `RunningChanged { running: false }` 给控制台,再调用可选空闲回调。
+/// 即使任务 panic,会话也不会永久锁死在 running 状态。
 pub struct RunningGuard {
     live: Arc<LiveSession>,
     events: broadcast::Sender<ServerEvent>,
+    on_idle: Option<Arc<dyn Fn(&str) + Send + Sync>>,
 }
 
 impl RunningGuard {
     pub fn new(live: Arc<LiveSession>, events: broadcast::Sender<ServerEvent>) -> Self {
-        Self { live, events }
+        Self {
+            live,
+            events,
+            on_idle: None,
+        }
+    }
+
+    pub fn with_on_idle(
+        live: Arc<LiveSession>,
+        events: broadcast::Sender<ServerEvent>,
+        on_idle: Arc<dyn Fn(&str) + Send + Sync>,
+    ) -> Self {
+        Self {
+            live,
+            events,
+            on_idle: Some(on_idle),
+        }
     }
 }
 
@@ -634,13 +651,18 @@ impl Drop for RunningGuard {
                 });
             }
         }
-        let mut cancel = self.live.cancel.lock().unwrap();
-        *cancel = None;
+        {
+            let mut cancel = self.live.cancel.lock().unwrap_or_else(|p| p.into_inner());
+            *cancel = None;
+            self.live.running.store(false, Ordering::SeqCst);
+        }
         let _ = self.events.send(ServerEvent::RunningChanged {
             id: self.live.session.id().to_string(),
             running: false,
         });
-        self.live.running.store(false, Ordering::SeqCst);
+        if let Some(on_idle) = &self.on_idle {
+            on_idle(self.live.session.id());
+        }
     }
 }
 
@@ -1152,6 +1174,141 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("denia-live-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn running_guard_notifies_idle_once_after_cleanup_and_broadcast() {
+        let (root, sessions, id) = ask_setup();
+        let live = sessions.get(&id).unwrap();
+        live.running.store(true, Ordering::SeqCst);
+        *live.cancel.lock().unwrap() = Some(CancellationToken::new());
+        let (approval_tx, mut approval_rx) = tokio::sync::oneshot::channel();
+        live.pending_approvals
+            .lock()
+            .unwrap()
+            .insert("approval".into(), approval_tx);
+        let (ask_tx, mut ask_rx) = tokio::sync::oneshot::channel();
+        live.pending_asks
+            .lock()
+            .unwrap()
+            .insert("ask".into(), ask_tx);
+        let (events, receiver) = broadcast::channel(4);
+        let receiver = Arc::new(std::sync::Mutex::new(receiver));
+        let calls = Arc::new(AtomicU64::new(0));
+        let live_for_idle = live.clone();
+        let receiver_for_idle = receiver.clone();
+        let calls_for_idle = calls.clone();
+        let guard = RunningGuard::with_on_idle(
+            live.clone(),
+            events,
+            Arc::new(move |session_id| {
+                assert_eq!(session_id, live_for_idle.session.id());
+                assert!(!live_for_idle.running.load(Ordering::SeqCst));
+                assert!(live_for_idle.cancel.try_lock().unwrap().is_none());
+                assert!(live_for_idle.pending_approvals.try_lock().unwrap().is_empty());
+                assert!(live_for_idle.pending_asks.try_lock().unwrap().is_empty());
+                assert_eq!(
+                    receiver_for_idle.lock().unwrap().try_recv().unwrap(),
+                    ServerEvent::RunningChanged {
+                        id: session_id.to_string(),
+                        running: false,
+                    }
+                );
+                calls_for_idle.fetch_add(1, Ordering::SeqCst);
+            }),
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        drop(guard);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            approval_rx.try_recv().unwrap().outcome,
+            ApprovalOutcome::Cancelled
+        );
+        assert_eq!(
+            ask_rx.try_recv().unwrap().outcome,
+            denia_core::session::AskOutcome::Cancelled
+        );
+        assert!(matches!(
+            receiver.lock().unwrap().try_recv(),
+            Err(broadcast::error::TryRecvError::Closed)
+        ));
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    fn running_guard_with_counter(live: Arc<LiveSession>) -> (RunningGuard, Arc<AtomicU64>) {
+        live.running.store(true, Ordering::SeqCst);
+        *live.cancel.lock().unwrap() = Some(CancellationToken::new());
+        let calls = Arc::new(AtomicU64::new(0));
+        let calls_for_idle = calls.clone();
+        let guard = RunningGuard::with_on_idle(
+            live,
+            broadcast::channel(4).0,
+            Arc::new(move |_| {
+                calls_for_idle.fetch_add(1, Ordering::SeqCst);
+            }),
+        );
+        (guard, calls)
+    }
+
+    #[tokio::test]
+    async fn running_guard_notifies_idle_after_task_panics() {
+        let (root, sessions, id) = ask_setup();
+        let live = sessions.get(&id).unwrap();
+        let (guard, calls) = running_guard_with_counter(live.clone());
+        let live_for_task = live.clone();
+        let task = tokio::spawn(async move {
+            let _guard = guard;
+            let _cancel = live_for_task.cancel.lock().unwrap();
+            panic!("running task panicked");
+        });
+        assert!(task.await.unwrap_err().is_panic());
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert!(!live.running.load(Ordering::SeqCst));
+        assert!(
+            live.cancel
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .is_none()
+        );
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn running_guard_notifies_idle_after_task_abort() {
+        let (root, sessions, id) = ask_setup();
+        let live = sessions.get(&id).unwrap();
+        let (guard, calls) = running_guard_with_counter(live.clone());
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(async move {
+            let _guard = guard;
+            started_tx.send(()).unwrap();
+            std::future::pending::<()>().await;
+        });
+        started_rx.await.unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert!(!live.running.load(Ordering::SeqCst));
+        assert!(live.cancel.lock().unwrap().is_none());
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn running_guard_notifies_idle_when_unpolled_future_is_dropped() {
+        let (root, sessions, id) = ask_setup();
+        let live = sessions.get(&id).unwrap();
+        let (guard, calls) = running_guard_with_counter(live.clone());
+        let future = async move {
+            let _guard = guard;
+            std::future::pending::<()>().await;
+        };
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        drop(future);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert!(!live.running.load(Ordering::SeqCst));
+        assert!(live.cancel.lock().unwrap().is_none());
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]

@@ -7,6 +7,7 @@
 
 pub mod catalog;
 mod deepseek;
+mod gate;
 mod http;
 mod openai;
 mod protocols;
@@ -33,6 +34,7 @@ pub use deepseek::{
     DEEPSEEK_PROVIDER, DEEPSEEK_SETTINGS_NS, DeepSeekAdapter, DeepSeekCatalogModel,
     DeepSeekSection, ReasoningEffort, ThinkingMode,
 };
+pub use gate::{AdmissionRefusal, RequestAdmission, RequestCall, RequestKind, RequestTicket};
 pub use openai::{
     OPENAI_SETTINGS_NS, OpenAiCatalogModel, OpenAiCompatAdapter, OpenAiProfile, OpenAiSection,
     discover_models, resolve_profile_headers,
@@ -228,11 +230,31 @@ impl LlmRegistry {
     /// One streaming attempt against one route, retried per its policy.
     /// Setup errors retry; mid-stream chunk errors do not. Every retry
     /// attempt is reported through `retry_sink` (对齐 dsh llm-retry 事件化)。
+    ///
+    /// 本入口**不接准入** —— 旁路调用(会话标题、`/api/llm` 连通测试、git
+    /// 摘要)走这里,它们不是用户任务的执行成本,也不该被用户预算拦住。
+    /// 计入预算的调用走 [`Self::stream_admitted`]。
     pub async fn stream(
         &self,
         provider: &str,
         request: &GenerateRequest,
         retry_sink: Option<RetrySink>,
+    ) -> Result<ChunkStream, LlmError> {
+        self.stream_admitted(provider, request, retry_sink, None)
+            .await
+    }
+
+    /// 带准入的请求入口:每次**物理尝试**之前先问账本(`with_retry` 闭包内、
+    /// `adapter.stream` 之前),预算不足返回 `BUDGET_EXHAUSTED` 且不发出请求。
+    ///
+    /// 票据缺失 = 未接入账本(旁路与测试);带票据时 `ticket.call.kind` 决定
+    /// 是否吃用户预算,由账本侧判据决定,本层不改写来源。
+    pub async fn stream_admitted(
+        &self,
+        provider: &str,
+        request: &GenerateRequest,
+        retry_sink: Option<RetrySink>,
+        ticket: Option<&RequestTicket<'_>>,
     ) -> Result<ChunkStream, LlmError> {
         let (adapter, policy) = {
             let state = self.state.read().unwrap();
@@ -246,6 +268,8 @@ impl LlmRegistry {
                 }
             }
         };
+        // 物理尝试计数只有这一层看得到:注册表内部重试与上层无关。
+        let physical = std::sync::atomic::AtomicU32::new(0);
         with_retry(
             &policy,
             |attempt| {
@@ -254,6 +278,10 @@ impl LlmRegistry {
                 }
             },
             || async {
+                let attempt = physical.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+                if let Some(ticket) = ticket {
+                    ticket.admit(attempt)?;
+                }
                 let result = adapter.stream(provider, request).await;
                 result.map_err(|error| {
                     if replay::explicit_reasoning_rejection(&error.failure) {
@@ -290,12 +318,27 @@ impl LlmRegistry {
             .await
     }
 
+    /// 带 replay 兼容策略的未接准入入口(旁路/测试)。见 [`Self::stream`]。
     pub async fn stream_with_replay(
         &self,
         provider: &str,
         request: &GenerateRequest,
         sink: Option<RetrySink>,
         replay: &ReplayPolicy,
+    ) -> Result<ChunkStream, LlmError> {
+        self.stream_with_replay_admitted(provider, request, sink, replay, None)
+            .await
+    }
+
+    /// 带准入的 replay 入口:一次逻辑调用可能发多次物理请求(注册表重试 +
+    /// replay 降级重发),每一次都在发出前过准入。
+    pub async fn stream_with_replay_admitted(
+        &self,
+        provider: &str,
+        request: &GenerateRequest,
+        sink: Option<RetrySink>,
+        replay: &ReplayPolicy,
+        ticket: Option<&RequestTicket<'_>>,
     ) -> Result<ChunkStream, LlmError> {
         let route = self.route_identity(provider, &request.model);
         let (adapter, policy) = {
@@ -306,6 +349,7 @@ impl LlmRegistry {
                 .ok_or_else(|| LlmError::new(codes::NO_ADAPTER, "no adapter registered"))?;
             (entry.adapter.clone(), entry.retry_policy.clone())
         };
+        let physical = std::sync::atomic::AtomicU32::new(0);
         // One ordinary retry budget surrounds the compatibility attempt.
         with_retry(
             &policy,
@@ -316,6 +360,10 @@ impl LlmRegistry {
             },
             || async {
                 loop {
+                    let attempt = physical.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+                    if let Some(ticket) = ticket {
+                        ticket.admit(attempt)?;
+                    }
                     let prepared = replay.prepare(&route, request);
                     match adapter.stream(provider, &prepared).await {
                         Err(error) if replay.downgrade(&route, &prepared, &error.failure) => {

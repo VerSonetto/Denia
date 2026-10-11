@@ -347,7 +347,11 @@ assert(
 )
 const runtimeForBrowser = read('crates/server/src/agent_runtime.rs')
 assert('停止 child 时清理其 tab', runtimeForBrowser.includes('close_owned_tabs(target)'))
-assert('结束 child 时清理其 tab', runtimeForBrowser.includes('hub.close_owned(&current)'))
+assert(
+  '结束 child 时清理其 tab',
+  runtimeForBrowser.includes('async fn close_owned_tabs')
+    && read('crates/server/src/agent_runtime_delivery.rs').includes('close_owned_tabs(&child)'),
+)
 assert('删除会话时清理其 tab', runtimeForBrowser.includes('close_owned_tabs(&child.id)'))
 assert('装配处挂载浏览器中枢', read('crates/server/src/state.rs').includes('attach_browser'))
 
@@ -363,7 +367,8 @@ assert(
 )
 assert(
   '注入基线走模型面视图',
-  read('crates/agent-loop/src/injections.rs').includes('with_model_events'),
+  // 必须读派生 surface:读日志时压缩会把注入移出模型面,基线却仍以为"已经发过了"。
+  read('crates/agent-loop/src/injections.rs').includes('session.derive_surface()'),
 )
 
 // 调度上限的唯一来源是 subagent-policy。

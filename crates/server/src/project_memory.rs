@@ -68,24 +68,247 @@ fn project_slug(workspace_path: &Path) -> String {
     format!("{cleaned}-{hash}")
 }
 
-/// 读 `MEMORY.md` 全文;缺失/空白返回 None。先按 200 行截行,再按字节
-/// 预算做 UTF-8 边界截断,两处截断都附告警(200 行 / 25KB 口径)。
-pub fn read_index(root: &Path, max_bytes: usize) -> Option<String> {
+/// 索引正文的行硬上限:选择后的正文(结构行 + 选中条目)仍超限才截断,
+/// 截断告警带总行数/总条目文件数与全文指针。
+const INDEX_MAX_LINES: usize = 200;
+/// 选择层最多列出的条目行数:命中再多也只列这么多,其余走全文指针。
+const INDEX_SELECT_MAX_ENTRIES: usize = 60;
+/// 没有任何信号(无关键词、无触碰路径)时保底列出的条目行数:给模型一个
+/// 可用起点,而不是让整块索引静默消失。
+const INDEX_SELECT_FALLBACK_ENTRIES: usize = 20;
+/// 触碰路径命中条目的加分:路径相关比词面命中更可信,超上限时优先留。
+const TOUCHED_HIT_SCORE: usize = 3;
+/// 参与匹配的 ASCII 标识符最短长度(滤掉 `id`/`ok` 一类噪声)。
+const MIN_ASCII_TOKEN: usize = 3;
+/// 参与匹配的触碰路径组件最短长度。
+const MIN_PATH_NEEDLE: usize = 3;
+
+/// 一次索引注入的选择结果。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IndexSelection {
+    /// 选中的索引正文(保持索引原顺序,标题与空行原样保留)。
+    pub body: String,
+    /// 被省略的条目行数(渲染层据此附全文指针)。
+    pub omitted: usize,
+    /// 索引里的条目行总数(不含标题与空行)。
+    pub total: usize,
+}
+
+/// 读 `MEMORY.md` 原文(BOM 与 CRLF 归一,不做任何截断);缺失或纯空白
+/// 返回 None。
+pub fn read_index_text(root: &Path) -> Option<String> {
     let raw = std::fs::read_to_string(root.join(MEMORY_INDEX_FILE)).ok()?;
     let content = raw.trim_start_matches('\u{feff}').replace("\r\n", "\n");
     if content.trim().is_empty() {
         return None;
     }
-    let mut body = truncate_lines(&content, 200);
-    if body.len() > max_bytes {
-        body = truncate_utf8(&body, max_bytes);
-        body.push_str("\n\n（项目记忆索引超出字节预算，已截断。）");
-    }
-    Some(body)
+    Some(content)
 }
 
-/// 保留前 `max_lines` 行并附告警;总行数不超限时原样返回。
-fn truncate_lines(content: &str, max_lines: usize) -> String {
+/// 注入通道入口:读索引 → 按触碰路径与最近用户消息选择条目 → 行/字节预算。
+///
+/// 选择结果**只由输入决定**:同一 `(cwd, touched, recent_user, 索引文本)`
+/// 永远给出同一正文(无时间戳、无随机序、去重与排序都走确定序),通道的
+/// 幂等比较因此不会因为无关变化抖动。索引缺失或纯空白返回 None(空桶不注入)。
+pub fn read_index_for_injection(
+    root: &Path,
+    cwd: &Path,
+    touched: &[PathBuf],
+    recent_user: Option<&str>,
+    max_bytes: usize,
+) -> Option<IndexSelection> {
+    let content = read_index_text(root)?;
+    let total_lines = content.lines().count();
+    let mut selection = select_index_lines(&content, cwd, touched, recent_user);
+    let (body, cut) = truncate_lines(&selection.body, INDEX_MAX_LINES);
+    selection.body = body;
+    if cut {
+        // 只有病态索引(结构行自己就超限)才走到这里,到这一步才扫目录取文件数。
+        let files = scan_manifest(root).files.len();
+        selection.body.push_str(&format!(
+            "\n（项目记忆索引超过 {INDEX_MAX_LINES} 行，已截断：共 {total_lines} 行、{files} 个条目文件，用 read_file 读 {}/MEMORY.md 获取全文。）",
+            root.display()
+        ));
+    }
+    if selection.body.len() > max_bytes {
+        selection.body = truncate_utf8(&selection.body, max_bytes);
+        selection.body.push_str(&format!(
+            "\n\n（项目记忆索引超出字节预算，已截断：用 read_file 读 {}/MEMORY.md 获取全文。）",
+            root.display()
+        ));
+    }
+    Some(selection)
+}
+
+/// 按触碰路径与最近用户消息选择索引行(纯函数,不碰 io)。
+///
+/// 口径:
+/// - 标题(`#` 开头)与空行是结构,恒保留,不计入条目数;
+/// - 其余每行算一个条目,得分 = 触碰路径命中 × [`TOUCHED_HIT_SCORE`] +
+///   关键词命中 × 1;
+/// - 有命中的条目按得分优先保留(同分保持索引原顺序),最多
+///   [`INDEX_SELECT_MAX_ENTRIES`] 条;
+/// - 一个都没命中时退回索引最前 [`INDEX_SELECT_FALLBACK_ENTRIES`] 条;
+/// - 被省略的条目数交给渲染层写全文指针,全文按需 `read_file`。
+pub fn select_index_lines(
+    content: &str,
+    cwd: &Path,
+    touched: &[PathBuf],
+    recent_user: Option<&str>,
+) -> IndexSelection {
+    let lines: Vec<&str> = content.lines().collect();
+    let tokens = recent_user.map(query_tokens).unwrap_or_default();
+    let needles = touched_needles(cwd, touched);
+    let mut entries: Vec<usize> = Vec::new();
+    let mut matched: Vec<(usize, usize)> = Vec::new();
+    for (index, line) in lines.iter().enumerate() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        entries.push(index);
+        let score = entry_score(&line.to_lowercase(), &tokens, &needles);
+        if score > 0 {
+            matched.push((index, score));
+        }
+    }
+    let mut keep = vec![false; lines.len()];
+    let kept = if matched.is_empty() {
+        for index in entries.iter().take(INDEX_SELECT_FALLBACK_ENTRIES) {
+            keep[*index] = true;
+        }
+        entries.len().min(INDEX_SELECT_FALLBACK_ENTRIES)
+    } else {
+        // 得分降序、同分按索引原顺序:确定性排序,与 HashMap 迭代序无关。
+        matched.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
+        matched.truncate(INDEX_SELECT_MAX_ENTRIES);
+        for (index, _) in &matched {
+            keep[*index] = true;
+        }
+        matched.len()
+    };
+    let mut body = lines
+        .iter()
+        .enumerate()
+        .filter(|(index, line)| {
+            if keep[*index] {
+                return true;
+            }
+            let trimmed = line.trim();
+            trimmed.is_empty() || trimmed.starts_with('#')
+        })
+        .map(|(_, line)| *line)
+        .collect::<Vec<_>>()
+        .join("\n");
+    if !body.is_empty() {
+        body.push('\n');
+    }
+    IndexSelection {
+        body,
+        omitted: entries.len() - kept,
+        total: entries.len(),
+    }
+}
+
+/// 条目行得分:触碰路径命中比词面命中更可信。
+fn entry_score(lower_line: &str, tokens: &[String], needles: &[String]) -> usize {
+    let mut score = 0;
+    for needle in needles {
+        if lower_line.contains(needle.as_str()) {
+            score += TOUCHED_HIT_SCORE;
+        }
+    }
+    for token in tokens {
+        if lower_line.contains(token.as_str()) {
+            score += 1;
+        }
+    }
+    score
+}
+
+/// 查询文本的匹配单元:ASCII 标识符(≥ [`MIN_ASCII_TOKEN`] 字符,小写)
+/// 与 CJK 双字组。同一文本永远给出同一序列,重复单元只留第一次。
+fn query_tokens(text: &str) -> Vec<String> {
+    let mut tokens: Vec<String> = Vec::new();
+    let mut ascii = String::new();
+    let mut cjk: Vec<char> = Vec::new();
+    for ch in text.chars() {
+        if is_cjk(ch) {
+            flush_ascii(&mut tokens, &mut ascii);
+            cjk.push(ch);
+        } else if ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.' | '/') {
+            flush_cjk(&mut tokens, &mut cjk);
+            ascii.push(ch.to_ascii_lowercase());
+        } else {
+            flush_ascii(&mut tokens, &mut ascii);
+            flush_cjk(&mut tokens, &mut cjk);
+        }
+    }
+    flush_ascii(&mut tokens, &mut ascii);
+    flush_cjk(&mut tokens, &mut cjk);
+    tokens
+}
+
+fn flush_ascii(tokens: &mut Vec<String>, ascii: &mut String) {
+    if ascii.chars().count() >= MIN_ASCII_TOKEN
+        && !tokens.iter().any(|token| token.as_str() == ascii.as_str())
+    {
+        tokens.push(ascii.clone());
+    }
+    ascii.clear();
+}
+
+fn flush_cjk(tokens: &mut Vec<String>, cjk: &mut Vec<char>) {
+    for pair in cjk.windows(2) {
+        let token: String = pair.iter().collect();
+        if !tokens.contains(&token) {
+            tokens.push(token);
+        }
+    }
+    cjk.clear();
+}
+
+/// 中日韩文字(匹配目标是记忆索引的自由文本,够用即可)。
+fn is_cjk(ch: char) -> bool {
+    matches!(ch as u32, 0x3040..=0x30ff | 0x3400..=0x9fff | 0xac00..=0xd7af | 0xf900..=0xfaff)
+}
+
+/// 触碰路径派生的匹配面:文件名、去扩展名的 stem、所在目录名、相对 cwd 的
+/// 整条路径(均 ≥ [`MIN_PATH_NEEDLE`] 字符,小写去重,相对路径按 cwd 落位)。
+fn touched_needles(cwd: &Path, touched: &[PathBuf]) -> Vec<String> {
+    let mut needles: Vec<String> = Vec::new();
+    for path in touched {
+        let absolute = if path.is_absolute() {
+            path.clone()
+        } else {
+            cwd.join(path)
+        };
+        let mut parts: Vec<String> = Vec::new();
+        if let Some(name) = absolute.file_name() {
+            parts.push(name.to_string_lossy().to_string());
+        }
+        if let Some(stem) = absolute.file_stem() {
+            parts.push(stem.to_string_lossy().to_string());
+        }
+        if let Some(dir) = absolute.parent().and_then(Path::file_name) {
+            parts.push(dir.to_string_lossy().to_string());
+        }
+        if let Ok(relative) = absolute.strip_prefix(cwd) {
+            parts.push(relative.to_string_lossy().replace('\\', "/"));
+        }
+        for part in parts {
+            let needle = part.trim().to_lowercase();
+            if needle.chars().count() >= MIN_PATH_NEEDLE && !needles.contains(&needle) {
+                needles.push(needle);
+            }
+        }
+    }
+    needles
+}
+
+/// 保留前 `max_lines` 行;返回截断后的正文与"是否发生截断"(告警文案由
+/// 调用方补,那里才有总行数与总条目文件数)。
+fn truncate_lines(content: &str, max_lines: usize) -> (String, bool) {
     let mut ends: Vec<usize> = content
         .match_indices('\n')
         .map(|(index, _)| index)
@@ -93,7 +316,7 @@ fn truncate_lines(content: &str, max_lines: usize) -> String {
         .collect();
     let total_lines = content.lines().count();
     if total_lines <= max_lines {
-        return content.to_string();
+        return (content.to_string(), false);
     }
     // 第 max_lines 行之后的第一个换行处截断。
     let cut = match ends.len() {
@@ -104,8 +327,7 @@ fn truncate_lines(content: &str, max_lines: usize) -> String {
     if !body.ends_with('\n') {
         body.push('\n');
     }
-    body.push_str("\n（项目记忆索引超过 200 行，已截断。）");
-    body
+    (body, true)
 }
 
 /// UTF-8 边界截断(与 workspace_instructions 同款算法)。
@@ -255,12 +477,22 @@ pub fn resolve_manifest_file(root: &Path, raw: &str) -> Result<PathBuf, String> 
 }
 
 /// 渲染每 step 的「项目记忆」注入块(通道幂等的正文由调用方比较)。
-/// `index` 为 [`read_index`] 的输出;None 由调用方处理(不注入)。
+/// `index` 为 [`read_index_for_injection`] 的正文;`omitted` 是被省略的
+/// 条目行数,>0 时附全文指针——被选择过的索引必须让模型知道还有东西没
+/// 看到、以及去哪里看(条目正文按需 `read_file`)。None 由调用方处理(不注入)。
 /// 注入块只负责把索引内容与目录位置交给模型,使用与验证规则在
 /// `# 项目记忆` 段,不重复纪律。
-pub fn render_index_block(root: &Path, index: &str) -> String {
+pub fn render_index_block(root: &Path, index: &str, omitted: usize) -> String {
+    let pointer = if omitted > 0 {
+        format!(
+            "\n\n（另有 {omitted} 条未列出，用 read_file 读 {}/MEMORY.md（或直接搜该目录）查看。）",
+            root.display()
+        )
+    } else {
+        String::new()
+    };
     format!(
-        "<system-reminder>\n{}/MEMORY.md 的内容(用户的自动记忆,跨会话持久):\n\n{index}\n</system-reminder>",
+        "<system-reminder>\n{}/MEMORY.md 的内容(用户的自动记忆,跨会话持久):\n\n{index}{pointer}\n</system-reminder>",
         root.display()
     )
 }
@@ -300,33 +532,164 @@ mod tests {
         let work = temp_root("index");
         let root = work.join("memory");
         std::fs::create_dir_all(&root).unwrap();
+        let cwd = Path::new("/work");
         std::fs::write(root.join(MEMORY_INDEX_FILE), "- a\n- b\n- c\n").unwrap();
         assert_eq!(
-            read_index(&root, 1024).unwrap(),
+            read_index_for_injection(&root, cwd, &[], None, 1024)
+                .unwrap()
+                .body,
             "- a\n- b\n- c\n",
             "未超限时原样返回"
         );
-        // 超 200 行:截行 + 告警。
-        let many: String = (0..300).map(|i| format!("- line{i}\n")).collect();
+        // 病态索引:结构行(标题)自己就超过 200 行,截行 + 告警带总行数/文件数。
+        let many: String = (0..300).map(|i| format!("# h{i}\n")).collect();
         std::fs::write(root.join(MEMORY_INDEX_FILE), &many).unwrap();
-        let cut = read_index(&root, 1_048_576).unwrap();
+        std::fs::write(root.join("one.md"), "1").unwrap();
+        std::fs::write(root.join("two.md"), "2").unwrap();
+        let cut = read_index_for_injection(&root, cwd, &[], None, 1_048_576)
+            .unwrap()
+            .body;
         assert!(cut.contains("已截断"));
-        assert!(cut.contains("- line199"));
-        assert!(!cut.contains("- line200"));
+        assert!(cut.contains("# h199"));
+        assert!(!cut.contains("# h200"));
+        assert!(cut.contains("共 300 行"), "{cut}");
+        assert!(cut.contains("2 个条目文件"), "{cut}");
         // 超字节预算:UTF-8 边界截断 + 告警。
         std::fs::write(root.join(MEMORY_INDEX_FILE), "好".repeat(100)).unwrap();
-        let cut = read_index(&root, 8).unwrap();
+        let cut = read_index_for_injection(&root, cwd, &[], None, 8)
+            .unwrap()
+            .body;
         assert!(
             cut.starts_with("好好"),
             "预算 8 字节只能装下 2 个汉字:{cut}"
         );
         assert!(!cut.contains("好好好"));
         assert!(cut.contains("字节预算"));
-        // 空文件与缺失都返回 None。
+        // 空文件与缺失都返回 None(空桶不注入)。
         std::fs::write(root.join(MEMORY_INDEX_FILE), "   \n").unwrap();
-        assert!(read_index(&root, 1024).is_none());
+        assert!(read_index_for_injection(&root, cwd, &[], None, 1024).is_none());
+        assert!(read_index_text(&root).is_none());
         std::fs::remove_file(root.join(MEMORY_INDEX_FILE)).unwrap();
-        assert!(read_index(&root, 1024).is_none());
+        assert!(read_index_for_injection(&root, cwd, &[], None, 1024).is_none());
+        std::fs::remove_dir_all(work).unwrap();
+    }
+
+    /// 选择口径:触碰路径命中、关键词命中、两者都不命中(退回索引开头)。
+    /// 同一输入必须给出同一输出——注入通道的幂等比较全靠这一条。
+    #[test]
+    fn select_index_lines_matches_touched_paths_and_keywords() {
+        let cwd = Path::new("/work");
+        let index = "# 项目记忆\n\n- [注入通道](injections.md) — 每步注入与幂等基准\n- [面板配色](frontend-css.md) — 设置页样式\n- [记忆选择](memory-select.md) — 索引选择层\n";
+
+        // 触碰路径命中:`.../src/injections.rs` 的 stem 与文件名命中条目。
+        let touched = [PathBuf::from("crates/agent-loop/src/injections.rs")];
+        let by_path = select_index_lines(index, cwd, &touched, None);
+        assert!(by_path.body.contains("injections.md"), "{}", by_path.body);
+        assert!(!by_path.body.contains("frontend-css.md"));
+        assert!(!by_path.body.contains("memory-select.md"));
+        assert!(by_path.body.contains("# 项目记忆"), "标题恒保留");
+        assert_eq!(by_path.total, 3);
+        assert_eq!(by_path.omitted, 2);
+        assert_eq!(
+            by_path,
+            select_index_lines(index, cwd, &touched, None),
+            "同一输入必须给出同一输出"
+        );
+
+        // 关键词命中(中文按双字组匹配,不引入分词依赖)。
+        let by_keyword = select_index_lines(index, cwd, &[], Some("把设置页的样式调一下"));
+        assert!(
+            by_keyword.body.contains("frontend-css.md"),
+            "{}",
+            by_keyword.body
+        );
+        assert_eq!(by_keyword.omitted, 2);
+
+        // 两个信号都没有:退回索引最前若干条,而不是整块消失。
+        let none = select_index_lines(index, cwd, &[], None);
+        assert_eq!(none.omitted, 0, "条目数在保底上限内应全列出");
+        assert!(none.body.contains("memory-select.md"));
+        assert_eq!(none.total, 3);
+    }
+
+    /// 命中数超上限时按得分裁剪(触碰路径优先级更高),省略数如实统计;
+    /// 无信号时退回保底条数而不是全量注入。
+    #[test]
+    fn select_index_lines_caps_entries_and_reports_omitted() {
+        let cwd = Path::new("/work");
+        let index: String = (0..30)
+            .map(|i| format!("- [条目{i}](file{i}.md) — 说明{i}\n"))
+            .collect();
+        let fallback = select_index_lines(&index, cwd, &[], None);
+        assert_eq!(fallback.total, 30);
+        assert_eq!(fallback.omitted, 30 - INDEX_SELECT_FALLBACK_ENTRIES);
+        assert!(fallback.body.contains("条目0"));
+        assert!(!fallback.body.contains("条目20"));
+
+        // 全部命中的大索引:条目行上限生效。
+        let big: String = (0..80)
+            .map(|i| format!("- [条目{i}](file{i}.md) — 说明\n"))
+            .collect();
+        let capped = select_index_lines(&big, cwd, &[], Some("说明"));
+        assert_eq!(capped.total, 80);
+        assert_eq!(capped.omitted, 80 - INDEX_SELECT_MAX_ENTRIES);
+        assert!(capped.body.contains("条目0"));
+        assert!(
+            capped
+                .body
+                .contains(&format!("条目{}", INDEX_SELECT_MAX_ENTRIES - 1))
+        );
+        assert!(
+            !capped
+                .body
+                .contains(&format!("条目{INDEX_SELECT_MAX_ENTRIES}")),
+            "超出上限的条目不得列出"
+        );
+
+        // 触碰路径命中(得分更高)的条目即便排在很后面也必须保留。
+        let with_path: String = (0..70)
+            .map(|i| {
+                if i == 65 {
+                    "- [触碰项](special.md) — 说明65\n".to_string()
+                } else {
+                    format!("- [条目{i}](file{i}.md) — 说明{i}\n")
+                }
+            })
+            .collect();
+        let picked = select_index_lines(
+            &with_path,
+            cwd,
+            &[PathBuf::from("special.md")],
+            Some("说明"),
+        );
+        assert_eq!(picked.omitted, 70 - INDEX_SELECT_MAX_ENTRIES);
+        assert!(picked.body.contains("触碰项"), "{}", picked.body);
+    }
+
+    /// 端到端(读 → 选 → 渲染):触碰路径命中的条目进正文,其余走省略指针。
+    #[test]
+    fn injection_reads_selects_and_points_to_the_full_index() {
+        let work = temp_root("inject");
+        let root = work.join("memory");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            root.join(MEMORY_INDEX_FILE),
+            "- [注入通道](injections.md) — 注入与幂等基准\n- [面板配色](frontend-css.md) — 设置页样式\n",
+        )
+        .unwrap();
+        let selection = read_index_for_injection(
+            &root,
+            Path::new("/work"),
+            &[PathBuf::from("crates/agent-loop/src/injections.rs")],
+            None,
+            1_048_576,
+        )
+        .unwrap();
+        assert_eq!(selection.omitted, 1);
+        let block = render_index_block(&root, &selection.body, selection.omitted);
+        assert!(block.contains("injections.md"));
+        assert!(!block.contains("frontend-css.md"));
+        assert!(block.contains("另有 1 条未列出"), "{block}");
         std::fs::remove_dir_all(work).unwrap();
     }
 
@@ -401,10 +764,25 @@ mod tests {
 
     #[test]
     fn index_block_frames_auto_memory_index() {
-        let block = render_index_block(Path::new("/m/memory"), "- [a](a.md) — x");
+        let root = Path::new("/m/memory");
+        let block = render_index_block(root, "- [a](a.md) — x", 0);
         assert!(block.starts_with("<system-reminder>"));
         assert!(block.ends_with("</system-reminder>"));
         assert!(block.contains("/m/memory/MEMORY.md"));
         assert!(block.contains("跨会话持久"));
+        assert!(!block.contains("另有"), "没有省略时不得出现指针:{block}");
+    }
+
+    /// 省略指针:被选择过的索引必须让模型知道还有条目没看到、去哪里看。
+    #[test]
+    fn index_block_points_to_the_full_index_when_entries_are_omitted() {
+        let root = Path::new("/m/memory");
+        let block = render_index_block(root, "- [a](a.md) — x", 7);
+        assert!(block.contains("另有 7 条未列出"), "{block}");
+        assert!(
+            block.contains("用 read_file 读 /m/memory/MEMORY.md"),
+            "{block}"
+        );
+        assert!(block.ends_with("</system-reminder>"), "{block}");
     }
 }

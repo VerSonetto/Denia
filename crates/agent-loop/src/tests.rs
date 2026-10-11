@@ -5,6 +5,7 @@ use super::*;
 use crate::errors::MAX_FEEDBACK;
 use async_trait::async_trait;
 use denia_core::error::LlmError;
+use denia_core::message::ChatMessage;
 use denia_core::session::{
     AbortCause, ApprovalOutcome, PermissionMode, PlanReviewDecision, RequestHeaderReason,
 };
@@ -21,6 +22,8 @@ use std::sync::Mutex;
 
 #[path = "harness_tests.rs"]
 mod harness_tests;
+#[path = "turn_failure_tests.rs"]
+mod turn_failure_tests;
 
 #[test]
 fn compaction_breakers_are_isolated_and_first_compaction_is_not_a_refill() {
@@ -128,6 +131,162 @@ fn subagent_sections_follow_tool_grant() {
     }
 }
 
+/// 出厂装配 + 能力纪律段 + 能力工具 schema:server 部署的真实形态。
+///
+/// `default_shipped()` 的 prompt 在 `register_shipped_prompt` 里固化了当时
+/// 注册表的 schemas;能力工具(spawn_agent/job_start/...)由装配层在之后追加
+/// (见 `turn::assemble_step`)。只读档的工具面对照必须带上它们——否则"摘段
+/// 与工具面一致"的断言会因为 schema 本来就不在而失去意义。
+fn shipped_assembly_with_capability_tools() -> denia_system_prompt::PromptAssembly {
+    let (mut prompt, _registry) = denia_tools::default_shipped();
+    denia_tools::register_capability_prompt_sections(&mut prompt).unwrap();
+    let mut assembly = prompt
+        .assemble(&denia_system_prompt::AssembleContext {
+            cwd: Some("/tmp/ws".to_string()),
+            model: Some("mock".to_string()),
+            provider: Some("mock".to_string()),
+            ..Default::default()
+        })
+        .unwrap();
+    for schema in denia_tools::capabilities::schemas() {
+        if !assembly.tools.iter().any(|item| item.name == schema.name) {
+            assembly.tools.push(schema);
+        }
+    }
+    assembly
+}
+
+/// `apply_tool_blocklist` 摘段必须与工具面一致:拿不到的工具,其纪律段不得
+/// 留在系统提示里(否则模型读到不存在的工具用法);仍拿得到的工具,纪律段
+/// 不得被误伤摘掉。
+#[test]
+fn tool_blocklist_narrows_sections_with_its_tools() {
+    let mut assembly = shipped_assembly_with_capability_tools();
+    let before: Vec<String> = assembly
+        .tools
+        .iter()
+        .map(|schema| schema.name.clone())
+        .collect();
+    for name in ["bash", "write_file", "edit", "job_start"] {
+        assert!(
+            before.contains(&name.to_string()),
+            "前置条件:{name} 在工具面"
+        );
+    }
+
+    crate::preset::apply_tool_blocklist(&mut assembly, &["bash", "write_file", "edit"]);
+
+    let tools: Vec<String> = assembly
+        .tools
+        .iter()
+        .map(|schema| schema.name.clone())
+        .collect();
+    for blocked in ["bash", "write_file", "edit"] {
+        assert!(
+            !tools.contains(&blocked.to_string()),
+            "只读档仍给出 {blocked}:{tools:?}"
+        );
+    }
+    // 只读档收窄的只有这三件:后台任务三件套仍在工具面(执行层按命令启发式
+    // 放行读类命令),它们的纪律段也必须留着。
+    for kept in ["job_start", "job_output", "job_kill"] {
+        assert!(tools.contains(&kept.to_string()), "只读档误摘 {kept}");
+    }
+    assert!(
+        assembly
+            .sections
+            .iter()
+            .any(|section| section.name == "tool:jobs"),
+        "jobs 仍在工具面,其纪律段不得被摘"
+    );
+    assert!(
+        !assembly
+            .sections
+            .iter()
+            .any(|section| section.name == "tool:bash"),
+        "bash 不在工具面,其纪律段必须一起摘掉"
+    );
+    // 全量一致性:每个还在提示词里的工具纪律段,都至少有一个工具拿得到。
+    for section in &assembly.sections {
+        let Some(section_tools) = crate::turn::section_tools(&section.name) else {
+            continue;
+        };
+        let available = section_tools
+            .iter()
+            .filter(|name| tools.iter().any(|tool| tool.as_str() == **name))
+            .count();
+        assert!(
+            available > 0,
+            "纪律段 {} 的工具全都不在工具面:{tools:?}",
+            section.name
+        );
+    }
+}
+
+/// 只读档渲染出的提示词里仍必须读到"不要用 shell 做探索"这条约束。
+///
+/// 只读档摘掉 `tool:bash`(总纲原本唯一的家),但 `job_start` 仍在工具面、
+/// 与 bash 共用同一套命令启发式——模型可以 `job_start("Get-ChildItem -Recurse …")`
+/// 做探索。这条断言走的是真实渲染路径(装配 → apply_tool_blocklist → render),
+/// 不是比对字符串常量。
+#[test]
+fn read_only_assembly_still_carries_the_shell_exploration_ban() {
+    use denia_system_prompt::render_prompt;
+
+    let mut assembly = shipped_assembly_with_capability_tools();
+    crate::preset::apply_tool_blocklist(&mut assembly, &["bash", "write_file", "edit"]);
+    let rendered = render_prompt(&assembly);
+
+    // 前置条件:没有 bash 工具时,总纲那一整段确实不在渲染结果里——
+    // 否则这条测试等于什么都没验证。
+    assert!(
+        !rendered.contains("bash 只用来跑命令"),
+        "只读档不该再渲染 tool:bash 段:{rendered}"
+    );
+    // 约束仍在,且挂在 job_start 上(只读档唯一还能碰 shell 的入口)。
+    for needle in [
+        "job_start 与 bash 是同一套 shell",
+        "四件探索类的事",
+        "ls/glob/grep/read_file",
+        "按动作界定",
+        "bash 工具不在工具面时",
+    ] {
+        assert!(
+            rendered.contains(needle),
+            "只读档丢了 shell 探索禁令({needle}):{rendered}"
+        );
+    }
+}
+
+/// `subagents` 关闭时(`tool:agents` 段随三件套摘掉),`tool:jobs` 段不得留下
+/// 指向它的悬空回指——模型会去找一段根本不在的纪律。
+#[test]
+fn jobs_section_stands_alone_without_the_agents_section() {
+    use denia_system_prompt::render_prompt;
+
+    let mut assembly = shipped_assembly_with_capability_tools();
+    crate::preset::apply_tool_blocklist(
+        &mut assembly,
+        &["spawn_agent", "fork_agent", "send_message"],
+    );
+    assert!(
+        !assembly
+            .sections
+            .iter()
+            .any(|section| section.name == "tool:agents"),
+        "前置条件:委派三件套被摘时其纪律段一起消失"
+    );
+    let rendered = render_prompt(&assembly);
+    assert!(
+        !rendered.contains("同后台委派纪律"),
+        "等待纪律不得回指不存在的后台委派段:{rendered}"
+    );
+    assert!(
+        rendered.contains("结果到达前不当作成功"),
+        "等待纪律必须自足(不依赖别段在场):{rendered}"
+    );
+}
+
 /// Scripted adapter: each `stream` call pops the next queued chunk run.
 enum MockScript {
     Chunks(Vec<StreamChunk>),
@@ -140,6 +299,8 @@ struct MockAdapter {
     scripts: Mutex<VecDeque<MockScript>>,
     /// 录制每次请求的 system 字节(冻结断言用);None = 不录制。
     capture: Option<Arc<Mutex<Vec<Option<String>>>>>,
+    /// 录制每次请求的消息序列(压缩重试"真正送进摘要模型的输入"断言用)。
+    capture_messages: Option<Arc<Mutex<Vec<Vec<ChatMessage>>>>>,
 }
 
 #[async_trait]
@@ -187,6 +348,9 @@ impl LlmAdapter for MockAdapter {
     ) -> Result<ChunkStream, LlmError> {
         if let Some(capture) = &self.capture {
             capture.lock().unwrap().push(request.system.clone());
+        }
+        if let Some(capture) = &self.capture_messages {
+            capture.lock().unwrap().push(request.messages.clone());
         }
         match self.scripts.lock().unwrap().pop_front() {
             Some(MockScript::Fail(failure)) => {
@@ -368,6 +532,7 @@ fn driver_with_tools(
             Arc::new(MockAdapter {
                 scripts: Mutex::new(VecDeque::from(scripts)),
                 capture: None,
+                capture_messages: None,
             }),
             denia_llm::RetryPolicy::default(),
         )
@@ -423,6 +588,43 @@ fn recording_driver(scripts: Vec<MockScript>) -> (SessionDriver, Arc<Mutex<Vec<O
             Arc::new(MockAdapter {
                 scripts: Mutex::new(VecDeque::from(scripts)),
                 capture: Some(capture.clone()),
+                capture_messages: None,
+            }),
+            denia_llm::RetryPolicy::default(),
+        )
+        .unwrap();
+    let tools = ToolRegistry::default();
+    let prompt = SystemPrompt::new(denia_system_prompt::SystemPromptConfig {
+        include_runtime_context: false,
+        ..Default::default()
+    });
+    (
+        SessionDriver::new(
+            registry,
+            Arc::new(tools),
+            Arc::new(ArcSwap::from_pointee(prompt)),
+        ),
+        capture,
+    )
+}
+
+/// 带请求录制的驱动器:录下每次派发的完整消息序列。
+///
+/// 压缩重试的断言要看"真正送进摘要模型的输入"——只有请求侧录制的消息能
+/// 证明被裁掉的那一段既没进摘要输入、也随折叠离开了模型面(见
+/// `compaction_retry_records_the_uncovered_head`)。
+fn message_recording_driver(
+    scripts: Vec<MockScript>,
+) -> (SessionDriver, Arc<Mutex<Vec<Vec<ChatMessage>>>>) {
+    let capture = Arc::new(Mutex::new(Vec::new()));
+    let registry = Arc::new(LlmRegistry::new());
+    registry
+        .register(
+            &["mock".to_string()],
+            Arc::new(MockAdapter {
+                scripts: Mutex::new(VecDeque::from(scripts)),
+                capture: None,
+                capture_messages: Some(capture.clone()),
             }),
             denia_llm::RetryPolicy::default(),
         )
@@ -734,6 +936,118 @@ async fn system_prompt_change_appends_in_history_and_freezes_system() {
             .iter()
             .any(|m| m.content.contains("热更新后的身份句")),
         "更新消息必须进派生历史,模型才能真正看到新提示词"
+    );
+}
+
+/// 系统提示更新被压缩挤出模型面后必须补发。
+///
+/// 回归:同源隐患——"本通道是否曾经写过"的判据曾读**日志**反向找最后一条
+/// 本通道文本,而 `CompactionSummary` 只把被压区间移出 surface、日志保持
+/// append-only。压缩把那条更新注入挤出模型面后,只要 system 字节不再变化,
+/// 判据就认为"已经发过了":模型的 system 字段冻结在旧值,更新通道那条注入
+/// 又不在模型面上,当前生效的系统提示全文就此消失。
+#[tokio::test]
+async fn system_prompt_update_is_resent_after_compaction() {
+    let (driver, capture) = recording_driver(vec![
+        MockScript::Chunks(text_script("t1")),
+        MockScript::Chunks(text_script("t2")),
+        MockScript::Chunks(text_script("t3")),
+    ]);
+    let session = temp_session();
+    async fn run(driver: &SessionDriver, session: &Arc<Session>, prompt: &str) -> TurnEndReason {
+        driver
+            .run_turn(
+                session,
+                &selection(),
+                prompt,
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                true,
+                CancellationToken::new(),
+                noop_emit(),
+            )
+            .await
+    }
+    let updates = |session: &Arc<Session>| -> Vec<(u64, String)> {
+        session.with_events(|events| {
+            events
+                .iter()
+                .filter_map(|envelope| match &envelope.event {
+                    SessionEvent::UserMessage {
+                        text,
+                        injected: true,
+                        channel: Some(name),
+                        ..
+                    } if name == crate::injections::SYSTEM_UPDATE_CHANNEL => {
+                        Some((envelope.seq, text.clone()))
+                    }
+                    _ => None,
+                })
+                .collect()
+        })
+    };
+
+    // 第一轮:出厂 persona 落盘即基准。第二轮前换 persona → 追加一条更新。
+    assert_eq!(run(&driver, &session, "u1").await, TurnEndReason::Completed);
+    let swapped = SystemPrompt::new_with_persona(
+        denia_system_prompt::SystemPromptConfig {
+            include_runtime_context: false,
+            ..Default::default()
+        },
+        "压缩后必须仍然生效的身份句。".to_string(),
+    );
+    driver.system_prompt_handle().store(Arc::new(swapped));
+    assert_eq!(run(&driver, &session, "u2").await, TurnEndReason::Completed);
+
+    let first = updates(&session);
+    assert_eq!(
+        first.len(),
+        1,
+        "前置条件:提示词变化应追加一次更新:{first:?}"
+    );
+    assert!(first[0].1.contains("压缩后必须仍然生效的身份句"));
+
+    // 真实压缩的最小等价构造:整段历史(那条更新注入在被压区间里)折叠成摘要。
+    let last_seq = session.with_events(|events| events.last().map(|item| item.seq).unwrap_or(0));
+    session
+        .append(SessionEvent::CompactionSummary {
+            turn: 2,
+            step: 1,
+            summary: "既往工作已总结。".to_string(),
+            replaces_from: 1,
+            replaces_to: last_seq,
+            keep_from: last_seq + 1,
+            pre_tokens: 0,
+            post_tokens: 0,
+        })
+        .unwrap();
+    assert!(
+        session
+            .derive_surface()
+            .iter()
+            .all(|item| item.channel.as_deref() != Some(crate::injections::SYSTEM_UPDATE_CHANNEL)),
+        "前置条件:压缩后更新注入必须已离开模型面"
+    );
+
+    // 提示词字节此后一字未改,但模型面已经失去它 → 必须重发全文。
+    assert_eq!(run(&driver, &session, "u3").await, TurnEndReason::Completed);
+    let second = updates(&session);
+    assert_eq!(
+        second.len(),
+        2,
+        "压缩后必须重发系统提示更新(模型面已失去它):{second:?}"
+    );
+    assert_eq!(second[0].1, second[1].1, "重发内容必须与首次逐字节一致");
+    assert!(second[1].0 > last_seq, "重发必须发生在压缩事件之后");
+
+    // 冻结语义不变:补发只是往历史里追一条注入,线上 system 字节不受影响。
+    let captured = capture.lock().unwrap().clone();
+    assert_eq!(captured.len(), 3);
+    assert_eq!(
+        captured[2].as_deref(),
+        captured[0].as_deref(),
+        "冻结的 system 字节不得因补发而改变"
     );
 }
 
@@ -1902,6 +2216,391 @@ async fn feedback_injection_carries_channel() {
     assert!(
         has_feedback_channel,
         "feedback injection must carry channel"
+    );
+}
+
+/// 能力上下文固定、其余通道不注入的 runtime 桩:观察"注入块被挤掉后是否
+/// 重发"时,不希望别的通道的文本混进来。
+struct FixtureRuntime;
+
+#[async_trait]
+impl denia_tools::capabilities::AgentRuntime for FixtureRuntime {
+    async fn execute_command(
+        &self,
+        _command: denia_tools::runtime_command::RuntimeCommand,
+        _ctx: &denia_tools::ToolContext,
+    ) -> Result<serde_json::Value, String> {
+        Err("fixture runtime has no commands".to_string())
+    }
+
+    async fn context(&self, _session: &str, _cwd: &std::path::Path) -> Result<Vec<String>, String> {
+        Ok(vec!["[denia 能力上下文]\n固定内容".to_string()])
+    }
+
+    async fn drain(&self, _session: &str) -> Result<Vec<String>, String> {
+        Ok(Vec::new())
+    }
+}
+
+async fn run_one_turn(
+    driver: &SessionDriver,
+    session: &Arc<Session>,
+    prompt: &str,
+) -> denia_core::session::TurnEndReason {
+    driver
+        .run_turn(
+            session,
+            &selection(),
+            prompt,
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            false,
+            CancellationToken::new(),
+            noop_emit(),
+        )
+        .await
+}
+
+/// 日志中每一条能力上下文注入(seq, 文本)。
+fn capability_injections(session: &Arc<Session>) -> Vec<(u64, String)> {
+    session.with_events(|events| {
+        events
+            .iter()
+            .filter_map(|envelope| match &envelope.event {
+                SessionEvent::UserMessage {
+                    text,
+                    injected: true,
+                    channel: Some(name),
+                    ..
+                } if name == "capability" => Some((envelope.seq, text.clone())),
+                _ => None,
+            })
+            .collect()
+    })
+}
+
+/// 压缩把注入块挤出模型面之后,同一通道内容一字未改也必须重发。
+///
+/// 回归:幂等基线曾从**日志**反向找"最后一条本通道文本",而
+/// `CompactionSummary` 只把被压区间移出 surface、日志保持 append-only。
+/// 基线于是以为"已经注入过"而不再 append,模型再也看不到工作区指令、
+/// 目标预算与记忆索引——只能指望摘要恰好带上(摘要提示词并不保证)。
+#[tokio::test]
+async fn compaction_resends_injection_channels_that_left_the_surface() {
+    let (driver, _registry) = driver(vec![
+        MockScript::Chunks(text_script("第一轮")),
+        MockScript::Chunks(text_script("第二轮")),
+    ]);
+    let driver = driver.with_runtime(Arc::new(FixtureRuntime));
+    let session = temp_session();
+
+    assert!(matches!(
+        run_one_turn(&driver, &session, "第一轮").await,
+        denia_core::session::TurnEndReason::Completed
+    ));
+    let before = capability_injections(&session);
+    assert_eq!(before.len(), 1, "第一轮应注入一次能力上下文:{before:?}");
+
+    // 真实压缩的最小等价构造:把整段历史(注入块在被压区间里)折叠成摘要。
+    let last_seq = session.with_events(|events| events.last().map(|item| item.seq).unwrap_or(0));
+    session
+        .append(SessionEvent::CompactionSummary {
+            turn: 1,
+            step: 1,
+            summary: "既往工作已总结。".to_string(),
+            replaces_from: 1,
+            replaces_to: last_seq,
+            keep_from: last_seq + 1,
+            pre_tokens: 0,
+            post_tokens: 0,
+        })
+        .unwrap();
+    assert!(
+        session
+            .derive_surface()
+            .iter()
+            .all(|item| item.channel.as_deref() != Some("capability")),
+        "前置条件:压缩后注入块必须已离开模型面"
+    );
+
+    assert!(matches!(
+        run_one_turn(&driver, &session, "第二轮").await,
+        denia_core::session::TurnEndReason::Completed
+    ));
+    let after = capability_injections(&session);
+    assert_eq!(
+        after.len(),
+        2,
+        "压缩后内容未变的通道必须重发(模型面已失去能力上下文):{after:?}"
+    );
+    assert_eq!(after[0].1, after[1].1, "重发内容必须与首次完全一致");
+    assert!(after[1].0 > last_seq, "重发必须发生在压缩事件之后");
+}
+
+/// 日志中每一条运行时上下文快照注入(seq, 文本)。
+fn runtime_context_injections(session: &Arc<Session>) -> Vec<(u64, String)> {
+    session.with_events(|events| {
+        events
+            .iter()
+            .filter_map(|envelope| match &envelope.event {
+                SessionEvent::UserMessage {
+                    text,
+                    injected: true,
+                    channel: Some(name),
+                    ..
+                } if name == crate::runtime_context::RUNTIME_CONTEXT_CHANNEL => {
+                    Some((envelope.seq, text.clone()))
+                }
+                _ => None,
+            })
+            .collect()
+    })
+}
+
+/// 运行时上下文快照被压缩挤出模型面之后,渲染输入一字未改也必须补发。
+///
+/// 回归:同源隐患——恢复判据曾读**日志**反向找最后一条本通道快照,而
+/// `CompactionSummary` 只把被压区间移出 surface、日志保持 append-only。
+/// 快照被挤出模型面后,只要模型名/cwd/平台/权限档这些渲染输入不变,`project`
+/// 就认为"没变"而不再补发:模型此后再也看不到运行时事实。判据改读派生
+/// surface 后,快照被压掉 = 本通道在模型面上没有文本 = 下一轮自然重发。
+#[tokio::test]
+async fn compaction_resends_the_runtime_context_snapshot() {
+    let (driver, _registry) = driver(vec![
+        MockScript::Chunks(text_script("t1")),
+        MockScript::Chunks(text_script("t2")),
+        MockScript::Chunks(text_script("t3")),
+    ]);
+    // 打开运行时快照注入,并注册一条**静态**上下文贡献:三次轮次之间渲染输入
+    // 逐字节不变(唯一可能变化的是"模型面上还在不在")。
+    let mut prompt = SystemPrompt::new(denia_system_prompt::SystemPromptConfig::default());
+    prompt
+        .context(denia_system_prompt::PromptContext {
+            name: "harness:runtime".to_string(),
+            order: 10,
+            text: denia_system_prompt::PromptText::Static("Mode: read-only.".to_string()),
+        })
+        .unwrap();
+    driver.system_prompt_handle().store(Arc::new(prompt));
+    let session = temp_session();
+
+    assert!(matches!(
+        run_one_turn(&driver, &session, "u1").await,
+        denia_core::session::TurnEndReason::Completed
+    ));
+    let first = runtime_context_injections(&session);
+    assert_eq!(first.len(), 1, "首轮应注入一次运行时快照:{first:?}");
+    let first_text = first[0].1.clone();
+    assert!(
+        first_text.starts_with(denia_system_prompt::RUNTIME_CONTEXT_HEADER),
+        "注入正文必须是渲染出的快照:{first_text}"
+    );
+
+    // 幂等:渲染输入未变 → 第二轮不重发。
+    assert!(matches!(
+        run_one_turn(&driver, &session, "u2").await,
+        denia_core::session::TurnEndReason::Completed
+    ));
+    assert_eq!(
+        runtime_context_injections(&session).len(),
+        1,
+        "渲染输入未变时不得重复注入"
+    );
+
+    // 真实压缩的最小等价构造:整段历史(快照在被压区间里)折叠成摘要。
+    let last_seq = session.with_events(|events| events.last().map(|item| item.seq).unwrap_or(0));
+    session
+        .append(SessionEvent::CompactionSummary {
+            turn: 2,
+            step: 1,
+            summary: "既往工作已总结。".to_string(),
+            replaces_from: 1,
+            replaces_to: last_seq,
+            keep_from: last_seq + 1,
+            pre_tokens: 0,
+            post_tokens: 0,
+        })
+        .unwrap();
+    assert!(
+        session.derive_surface().iter().all(|item| {
+            item.channel.as_deref() != Some(crate::runtime_context::RUNTIME_CONTEXT_CHANNEL)
+        }),
+        "前置条件:压缩后快照必须已离开模型面"
+    );
+
+    assert!(matches!(
+        run_one_turn(&driver, &session, "u3").await,
+        denia_core::session::TurnEndReason::Completed
+    ));
+    let second = runtime_context_injections(&session);
+    assert_eq!(
+        second.len(),
+        2,
+        "压缩后必须重发运行时快照(模型面已失去它):{second:?}"
+    );
+    assert_eq!(second[0].1, second[1].1, "重发内容必须与首次逐字节一致");
+    assert!(second[1].0 > last_seq, "重发必须发生在压缩事件之后");
+}
+
+/// 摘要重试必须记录"未覆盖范围"。
+///
+/// PTL 逼出裁剪时,被丢掉的最老那一段**没有**进摘要,却照样随折叠离开模型面。
+/// 红线:被压区间内不许有消息既不在模型面、又没人记账(那样它就凭空消失了)。
+/// 这里用请求侧录制的消息证明——折叠区间恰好等于「摘要正文里记名的未覆盖
+/// 前缀」++「真正送进摘要模型的尾部」,没有第三种消息。
+#[tokio::test]
+async fn compaction_retry_records_the_uncovered_head() {
+    use denia_core::error::codes;
+    let overflow = || {
+        MockScript::Fail(LlmFailure::new(
+            codes::CONTEXT_WINDOW_EXCEEDED,
+            "maximum context length exceeded",
+        ))
+    };
+    let (driver, requests) = message_recording_driver(vec![
+        // 主请求先撞 PTL → 强制压缩。
+        overflow(),
+        // 摘要首次请求也必须裁一刀才发得出去。
+        overflow(),
+        // 裁完的重试成功。
+        MockScript::Chunks(text_script("kept head summary")),
+        // 压缩后的主请求重试(仍 PTL;断言只关心压缩事件)。
+        overflow(),
+    ]);
+    let driver = driver.with_compaction(CompactionSettings {
+        min_keep_tokens: 1,
+        max_keep_tokens: 1,
+        min_text_messages: 1,
+        ..Default::default()
+    });
+    let session = temp_session();
+    for index in 0..15 {
+        session
+            .append(SessionEvent::UserMessage {
+                text: format!("old-{index}"),
+                injected: false,
+                channel: None,
+                images: Vec::new(),
+            })
+            .unwrap();
+    }
+    assert!(matches!(
+        run_one_turn(&driver, &session, "继续").await,
+        denia_core::session::TurnEndReason::Error { .. }
+    ));
+
+    // 落盘的压缩事件:折叠区间 + 摘要正文。
+    let (summary, replaces_from, replaces_to) = session.with_events(|events| {
+        let envelope = events
+            .iter()
+            .find(|envelope| matches!(envelope.event, SessionEvent::CompactionSummary { .. }))
+            .expect("必须落盘一次压缩");
+        match &envelope.event {
+            SessionEvent::CompactionSummary {
+                summary,
+                replaces_from,
+                replaces_to,
+                ..
+            } => (summary.clone(), *replaces_from, *replaces_to),
+            _ => unreachable!(),
+        }
+    });
+
+    // 两次摘要请求:第一次送完整区间,第二次(HISTORY 被裁后)成功。
+    let requests = requests.lock().unwrap().clone();
+    let summary_requests: Vec<&Vec<ChatMessage>> = requests
+        .iter()
+        .filter(|messages| {
+            messages
+                .last()
+                .is_some_and(|message| message.content.contains("Primary Request and Intent"))
+        })
+        .collect();
+    assert_eq!(
+        summary_requests.len(),
+        2,
+        "首次摘要超限 → 必须走一次裁剪重试"
+    );
+    let full = &summary_requests[0][..summary_requests[0].len() - 1];
+    let sent = &summary_requests[1][..summary_requests[1].len() - 1];
+    assert!(
+        sent.len() < full.len(),
+        "重试必须真的裁掉了消息(否则这条测试什么也没钉住):full={} sent={}",
+        full.len(),
+        sent.len()
+    );
+    let contents = |items: &[ChatMessage]| -> Vec<String> {
+        items.iter().map(|item| item.content.clone()).collect()
+    };
+    // 裁剪只动头部:重试输入是首次输入的尾部。
+    let dropped = contents(&full[..full.len() - sent.len()]);
+    assert_eq!(
+        contents(&full[full.len() - sent.len()..]),
+        contents(sent),
+        "裁剪只能丢最老的消息"
+    );
+
+    // 折叠区间(压缩前的模型面,按本次压缩事件切日志)必须恰好等于
+    // 「未覆盖前缀 ++ 摘要实际覆盖的尾部」。
+    let pre = session.with_events(|events| {
+        let cut = events
+            .iter()
+            .position(|envelope| matches!(envelope.event, SessionEvent::CompactionSummary { .. }))
+            .expect("压缩事件在日志里");
+        denia_core::session::derive_surface(&events[..cut])
+    });
+    let folded: Vec<&denia_core::session::SurfaceMessage> = pre
+        .iter()
+        .filter(|item| item.seq >= replaces_from && item.seq <= replaces_to)
+        .collect();
+    assert_eq!(folded.first().map(|item| item.seq), Some(replaces_from));
+    assert_eq!(folded.last().map(|item| item.seq), Some(replaces_to));
+    let mut accounted = dropped.clone();
+    accounted.extend(contents(sent));
+    assert_eq!(
+        folded
+            .iter()
+            .map(|item| item.message.content.clone())
+            .collect::<Vec<_>>(),
+        accounted,
+        "折叠区间必须被完整记账:未覆盖前缀 + 摘要覆盖的尾部,不许多出无主消息"
+    );
+
+    // 摘要正文点名未覆盖区间(条数 + 事件序号区间),而不是冒充完整摘要。
+    let uncovered_to = folded[dropped.len() - 1].seq;
+    let note = format!(
+        "最早的 {} 条消息(事件序号 {replaces_from}..={uncovered_to})",
+        dropped.len()
+    );
+    assert!(
+        summary.contains("未覆盖") && summary.contains(&note),
+        "摘要正文必须记录未覆盖范围:{summary}"
+    );
+
+    // 红线两侧:区间内消息整段退出模型面(折叠语义不破),摘要在面上。
+    // 摘要项自己带一个合成 seq(keep_from-1,落在折叠区间内),按内容排除它。
+    let after = session.derive_surface();
+    let folded_contents: Vec<String> = folded
+        .iter()
+        .map(|item| item.message.content.clone())
+        .collect();
+    let survivors: Vec<&String> = after
+        .iter()
+        .map(|item| &item.message.content)
+        .filter(|content| {
+            folded_contents.contains(content) && !content.contains("kept head summary")
+        })
+        .collect();
+    assert!(
+        survivors.is_empty(),
+        "被压区间的消息必须整段退出模型面,不能留在面上:{survivors:?}"
+    );
+    assert!(
+        after
+            .iter()
+            .any(|item| item.message.content.contains("kept head summary")),
+        "摘要必须留在模型面"
     );
 }
 

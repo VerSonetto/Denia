@@ -161,6 +161,27 @@ pub fn select_keep_start(
     Some(start)
 }
 
+/// 压缩规划的输入面与切点:**与主请求同一份投影面**
+/// ([`Session::derive_surface`],含旧子代理的历史投影),不是原始日志。
+///
+/// 单独成函数是为了让"压缩吃的是投影、不是日志"可测:拿原始日志作输入
+/// (`denia_core::session::derive_surface(&session.events())`)会让"模型面上
+/// 根本不存在的历史"继续决定压缩区间——区间边界落在模型看不见的 seq 上,
+/// 压缩后的保留窗口与主请求的下一次请求错位。
+///
+/// 顺带的好处:投影面是带版本缓存的热路径(`derive_surface` 命中缓存时是
+/// 一次 Arc 克隆),比 `session.events()` 克隆整条日志 + 重派一遍便宜。
+///
+/// 返回 `None` 表示没有可压缩区间(没什么可折的)。
+pub(crate) fn plan_compaction(
+    session: &Session,
+    settings: &CompactionSettings,
+) -> Option<(std::sync::Arc<[SurfaceMessage]>, usize)> {
+    let surface = session.derive_surface();
+    let keep_start = select_keep_start(&surface, settings)?;
+    Some((surface, keep_start))
+}
+
 /// 一次成功压缩的落盘载荷:摘要文本 + 被压缩事件区间 + 保留窗口起点。
 #[derive(Debug, Clone)]
 pub struct CompactOutcome {
@@ -282,11 +303,15 @@ Please provide your summary based on the conversation so far, following this str
 REMINDER: Do NOT call any tools. Respond with plain text only — an <analysis> block followed by a <summary> block."#;
 
 /// 摘要请求 PTL/失败时的截断重试(学 Claude Code `truncateHeadForPTLRetry`):
-/// 丢最老约 20% 的消息(至少一条),保留尾部给摘要;返回截断后的消息序列。
-pub fn truncate_head(messages: &[ChatMessage], attempt: u32) -> Vec<ChatMessage> {
+/// 丢最老约 20% 的消息(至少一条),保留尾部给摘要;返回截断后的消息序列,
+/// 以及**实际丢掉**的条数(0 表示没丢)。
+///
+/// 条数必须回传:被丢掉的这一段既不在摘要输入里、也会随本次折叠离开模型面,
+/// 调用方要据此在摘要正文里记账(见 [`uncovered_note`])。
+pub fn truncate_head(messages: &[ChatMessage], attempt: u32) -> (Vec<ChatMessage>, usize) {
     let drop = (messages.len() as u32 / 5).max(1) as usize;
     if messages.len().saturating_sub(drop) < 1 {
-        messages.to_vec()
+        (messages.to_vec(), 0)
     } else {
         tracing::warn!(
             attempt,
@@ -294,8 +319,28 @@ pub fn truncate_head(messages: &[ChatMessage], attempt: u32) -> Vec<ChatMessage>
             remaining = messages.len() - drop,
             "compaction retry: truncating oldest messages"
         );
-        messages[drop..].to_vec()
+        (messages[drop..].to_vec(), drop)
     }
+}
+
+/// 摘要未覆盖区间的显式标注。
+///
+/// PTL 重试丢掉的是压缩区间里**最老**的那一段:它们仍随折叠离开模型面
+/// (折叠语义不变,`replaces_from..=replaces_to` 照旧整段退出),但没有进
+/// 摘要。不点名这件事,一份缺了头部的摘要看起来与完整摘要一模一样,模型
+/// 会以为整段历史都读过了,正是"把没被总结的区间伪装成完整摘要"。
+///
+/// 返回空串表示摘要覆盖了整个被压区间(没有未覆盖部分)。
+pub fn uncovered_note(uncovered: &[SurfaceMessage]) -> String {
+    let (Some(first), Some(last)) = (uncovered.first(), uncovered.last()) else {
+        return String::new();
+    };
+    format!(
+        "\n\n---\n注意:本摘要**未覆盖**最早的 {} 条消息(事件序号 {}..={})。摘要请求超限重试时它们被丢弃:内容既不在本摘要里,也已随本次压缩离开模型面。不要把它们当作已被总结;需要这段历史时查原始日志或让用户补充。",
+        uncovered.len(),
+        first.seq,
+        last.seq
+    )
 }
 
 /// 剥掉 `<analysis>` 草稿块,提取 `<summary>` 正文(学 Claude Code
@@ -331,6 +376,23 @@ pub fn format_summary(summary: &str) -> String {
     out.trim().to_string()
 }
 
+/// 摘要输入裁剪 + 记账:一次调用完成"截断输入"与"未覆盖区间前移"。
+///
+/// `summarized_from` 是压缩区间里**第一条真正送进摘要模型**的消息下标;每次
+/// 重试裁剪都把被丢掉的那一段并入未覆盖前缀。丢掉的条数可能越过压缩区间
+/// (区间已被裁空时,末端的摘要指令消息也会被吃掉),落在区间内的那部分
+/// 才算"未被总结"。
+fn truncate_head_accounted(
+    messages: &[ChatMessage],
+    attempt: u32,
+    summarized_from: &mut usize,
+    compressed_len: usize,
+) -> Vec<ChatMessage> {
+    let (next, dropped) = truncate_head(messages, attempt);
+    *summarized_from = summarized_from.saturating_add(dropped).min(compressed_len);
+    next
+}
+
 /// —— SessionDriver 的压缩实现(自动路径,由 request 模块的闸门调用)——
 impl crate::SessionDriver {
     /// LLM 总结压缩(学 Claude Code compact):把 surface 中旧事件区间
@@ -340,6 +402,11 @@ impl crate::SessionDriver {
     ///
     /// 失败(PTL 等)时按 Claude Code `truncateHeadForPTLRetry` 丢最老约
     /// 20% 消息重试,最多 `max_attempts` 次;仍失败返回 `Err`(调用方熔断)。
+    ///
+    /// 重试裁剪只影响**送进摘要模型的输入**,不影响折叠区间:被压区间照旧
+    /// 整段退出模型面(`replaces_from..=replaces_to` 不缩水),代价是丢掉的
+    /// 那一段没进摘要——它会在摘要正文里被显式标注(见 [`uncovered_note`]),
+    /// 不允许出现"看起来像完整摘要"的缺头摘要。
     pub(crate) async fn compact_context(
         &self,
         session: &std::sync::Arc<Session>,
@@ -351,13 +418,13 @@ impl crate::SessionDriver {
         cancel: &CancellationToken,
         replay: Option<&denia_llm::ReplayPolicy>,
         settings: &CompactionSettings,
+        // 本轮账本(手动压缩没有在途轮次,传 None):摘要请求也是真实开销,
+        // 每次物理尝试都要过同一道准入。
+        budget: Option<denia_token_meter::ExecutionBudget>,
     ) -> Result<Option<CompactOutcome>, LlmFailure> {
         let fallback_replay = denia_llm::ReplayPolicy::default();
         let replay = replay.unwrap_or(&fallback_replay);
-        let events = session.events();
-        // 压缩输入即当前模型可见 surface(与主请求同视角,原文直出)。
-        let surface = denia_core::session::derive_surface(&events);
-        let Some(keep_start) = select_keep_start(&surface, settings) else {
+        let Some((surface, keep_start)) = plan_compaction(session, settings) else {
             return Ok(None);
         };
         let (compressed, kept) = surface.split_at(keep_start);
@@ -369,7 +436,13 @@ impl crate::SessionDriver {
         });
 
         let mut attempt = 0u32;
+        // 本 step 里第几次建摘要请求:与 attempt 分开计 —— replay 降级会把
+        // attempt 退回去重试,而每次真的发出去的请求都必须是新身份。
+        let mut sequence = 0u32;
         let mut messages = build_summary_messages(compressed, "");
+        // 压缩区间里第一条真正送进摘要模型的消息下标;PTL 重试每裁一刀就前移,
+        // 收尾时 `compressed[..summarized_from]` 就是"没被总结"的那一段。
+        let mut summarized_from = 0usize;
         let mut summary: Option<String> = None;
         while attempt < settings.max_attempts {
             attempt += 1;
@@ -402,9 +475,30 @@ impl crate::SessionDriver {
                     });
                 }
             });
+            sequence = sequence.saturating_add(1);
+            let gate = budget.clone().map(crate::BudgetGate);
+            let ticket = gate.as_ref().map(|gate| {
+                denia_llm::RequestTicket::new(
+                    gate,
+                    denia_llm::RequestCall {
+                        session: session.id().to_string(),
+                        turn,
+                        step,
+                        kind: denia_llm::RequestKind::Compaction,
+                        sequence,
+                        attempt: 0,
+                    },
+                )
+            });
             let stream = match self
                 .registry
-                .stream_with_replay(&selection.provider, &request, Some(retry_sink), replay)
+                .stream_with_replay_admitted(
+                    &selection.provider,
+                    &request,
+                    Some(retry_sink),
+                    replay,
+                    ticket.as_ref(),
+                )
                 .await
             {
                 Ok(stream) => stream,
@@ -418,12 +512,18 @@ impl crate::SessionDriver {
                     if attempt >= settings.max_attempts {
                         return Err(error.failure);
                     }
-                    messages = truncate_head(&messages, attempt);
+                    messages = truncate_head_accounted(
+                        &messages,
+                        attempt,
+                        &mut summarized_from,
+                        compressed.len(),
+                    );
                     continue;
                 }
             };
             let mut stream = stream;
             let mut text = String::new();
+            let mut request_usage: Option<denia_core::stream::TokenUsage> = None;
             let mut stream_error: Option<LlmFailure> = None;
             loop {
                 let next = tokio::select! {
@@ -436,6 +536,11 @@ impl crate::SessionDriver {
                 match next {
                     Some(Ok(StreamChunk::TextDelta { text: delta, .. })) => {
                         text.push_str(&delta);
+                    }
+                    // 摘要请求的用量:它不产生 `AssistantMessage`(摘要走
+                    // CompactionSummary 事件),丢掉就等于这次计费不存在。
+                    Some(Ok(StreamChunk::Usage { usage })) => {
+                        request_usage = Some(usage);
                     }
                     Some(Ok(StreamChunk::Finish {
                         reason:
@@ -452,6 +557,13 @@ impl crate::SessionDriver {
                     }
                     None => break,
                 }
+            }
+            if let Some(usage) = request_usage {
+                // 落账:账本事件只记用量,不进模型面(压缩摘要是最后一次
+                // 请求之前的独立调用,它的 prompt 与主请求的前缀不同,不该
+                // 拿去改主请求的占用锚点)。落盘失败不阻断压缩。
+                let accounted = denia_token_meter::AccountedUsage::from_usage(&usage);
+                let _ = session.append(accounted.event(turn, step));
             }
             if let Some(failure) = stream_error {
                 let route = self
@@ -482,7 +594,12 @@ impl crate::SessionDriver {
                 if attempt >= settings.max_attempts || cancel.is_cancelled() {
                     return Err(failure);
                 }
-                messages = truncate_head(&messages, attempt);
+                messages = truncate_head_accounted(
+                    &messages,
+                    attempt,
+                    &mut summarized_from,
+                    compressed.len(),
+                );
                 continue;
             }
             let formatted = format_summary(&text);
@@ -498,19 +615,38 @@ impl crate::SessionDriver {
                         "compaction summary produced no text".to_string(),
                     ));
                 }
-                messages = truncate_head(&messages, attempt);
+                messages = truncate_head_accounted(
+                    &messages,
+                    attempt,
+                    &mut summarized_from,
+                    compressed.len(),
+                );
                 continue;
             }
             summary = Some(formatted);
             break;
         }
 
-        let Some(summary) = summary else {
+        let Some(mut summary) = summary else {
             return Err(LlmFailure::new(
                 codes::UNKNOWN,
                 "compaction exhausted retries without a summary".to_string(),
             ));
         };
+        // 未覆盖区间记账:裁掉的最老那一段没有被总结,必须在摘要正文里点名。
+        // 折叠语义不动(它们照样随 `replaces_from..=replaces_to` 离开模型面),
+        // 但模型必须知道这段历史不在摘要里,否则会把缺头摘要当完整摘要用。
+        let uncovered = &compressed[..summarized_from];
+        if let (Some(first), Some(last)) = (uncovered.first(), uncovered.last()) {
+            tracing::warn!(
+                session_id = session.id(),
+                uncovered = uncovered.len(),
+                uncovered_from_seq = first.seq,
+                uncovered_to_seq = last.seq,
+                "compaction summary does not cover the oldest messages dropped by the PTL retry"
+            );
+            summary.push_str(&uncovered_note(uncovered));
+        }
         Ok(Some(CompactOutcome {
             summary: summary.clone(),
             replaces_from: compressed[0].seq,
@@ -728,5 +864,373 @@ mod tests {
         assert!(messages[0].images.is_empty());
         assert!(messages[0].content.contains("[image]"));
         assert!(messages[1].content.contains("Primary Request and Intent"));
+    }
+
+    /// 压缩规划吃的是与主请求**同一份投影面**(`Session::derive_surface`),
+    /// 不是原始日志:旧子代理历史投影排除掉的自动注入不在 surface 上,压缩
+    /// 区间的边界也必须落在投影面里 —— 否则折掉的是模型看不见的历史,而
+    /// 模型面上真正该压的区间被切错地方。
+    #[test]
+    fn compaction_plan_consumes_the_same_projection_as_the_main_request() {
+        use denia_core::session::SessionEvent;
+        use denia_core::stream::ContentBlock;
+
+        let root =
+            std::env::temp_dir().join(format!("denia-compact-plan-{}", uuid::Uuid::new_v4()));
+        let work = root.join("work");
+        std::fs::create_dir_all(&work).unwrap();
+        let store = denia_session::SessionStore::open(&root).unwrap();
+        let session = store.create(&work, true).unwrap();
+
+        let injected = format!("GLOBAL-SENTINEL {}", "x".repeat(8_000));
+        let events = vec![
+            SessionEvent::UserMessage {
+                text: "老历史".into(),
+                injected: false,
+                images: Vec::new(),
+                channel: None,
+            },
+            SessionEvent::UserMessage {
+                text: injected.clone(),
+                injected: true,
+                images: Vec::new(),
+                channel: Some("runtime-context".into()),
+            },
+            SessionEvent::UserMessage {
+                text: "真实任务".into(),
+                injected: false,
+                images: Vec::new(),
+                channel: None,
+            },
+            SessionEvent::AssistantMessage {
+                turn: 1,
+                step: 1,
+                blocks: vec![ContentBlock::ToolCall {
+                    id: "call_z".into(),
+                    name: "bash".into(),
+                    arguments: "{\"command\":\"ls\"}".into(),
+                    incomplete: false,
+                }],
+                usage: None,
+                interrupted: false,
+                source_event_seqs: Vec::new(),
+                first_token_time: None,
+            },
+            SessionEvent::ToolResult {
+                turn: 1,
+                step: 1,
+                call_id: "call_z".into(),
+                content: "ok".repeat(800),
+                is_error: false,
+                error: None,
+                error_identity: None,
+                meta: None,
+                replaces: None,
+                truncation: None,
+            },
+            SessionEvent::UserMessage {
+                text: "继续".into(),
+                injected: false,
+                images: Vec::new(),
+                channel: None,
+            },
+        ];
+        let injected_seq = 2u64;
+        for event in events {
+            session.append(event).unwrap();
+        }
+        assert!(session.apply_history_projection().unwrap());
+
+        // 保留窗口的走法由 max 决定:从尾部走到工具结果就停 —— 正好把"窗口
+        // 边界落在工具结果上"的场景逼出来,验证工具对完整性修正仍成立。
+        let settings = CompactionSettings {
+            compact_enabled: true,
+            compact_ratio: 0.9,
+            min_keep_tokens: 1_000_000,
+            max_keep_tokens: 210,
+            min_text_messages: 99,
+            summary_max_tokens: 1_000,
+            max_attempts: 3,
+        };
+        // 改前的口径:直接对原始日志派生(注入块也在里面)。
+        let raw = denia_core::session::derive_surface(&session.events());
+        let raw_start = select_keep_start(&raw, &settings).expect("原始日志口径也有可压区间");
+        let (surface, keep_start) = plan_compaction(&session, &settings).expect("投影面有可压区间");
+
+        // 1) 注入块不在规划面上,但确实在原始日志里(否则这条测试什么也没钉)。
+        assert!(raw.iter().any(|item| item.seq == injected_seq));
+        assert!(surface.iter().all(|item| item.seq != injected_seq));
+        assert_eq!(surface.len(), raw.len() - 1, "投影面只少掉被排除的那条");
+
+        // 2) `replaces_from / replaces_to / keep_from` 全部取自 surface 的 seq:
+        //    压缩区间严格在保留窗口之前,`replaces_to < keep_from` 天然成立。
+        let (compressed, kept) = surface.split_at(keep_start);
+        assert!(!compressed.is_empty(), "有可压区间");
+        assert!(!kept.is_empty(), "保留窗口非空");
+        assert!(compressed.iter().all(|item| item.seq < kept[0].seq));
+
+        // 3) 工具对完整性修正仍成立:窗口边界原本正好落在工具结果上(尾部的
+        //    工具结果一加就超 max),修正把它的 tool_call 一起拉进窗口 ——
+        //    没有这道修正时 `kept[0]` 会是那条 tool-result,tool_call 与
+        //    tool-result 被切开,请求会被 provider 拒。
+        assert_eq!(
+            kept[1].message.tool_call_id.as_deref(),
+            Some("call_z"),
+            "工具结果应当留在窗口里"
+        );
+        assert!(
+            kept[0]
+                .message
+                .tool_calls
+                .iter()
+                .any(|call| call.id == "call_z"),
+            "保留窗口第一条必须是被拉进来的 tool_call(工具对不被切开)"
+        );
+        assert!(
+            raw[raw_start..].iter().any(|item| item
+                .message
+                .tool_calls
+                .iter()
+                .any(|call| call.id == "call_z")),
+            "原始日志口径下修正同样生效(对照组)"
+        );
+
+        // 4) 压缩量只算模型面:注入块的 8k 字符不再进 pre_tokens,差额恰好
+        //    是那一条消息的估算(口径断言,不是实现细节)。
+        let pre = |items: &[SurfaceMessage]| {
+            items.iter().fold(0u64, |acc, item| {
+                acc.saturating_add(rough_tokens(&item.message))
+            })
+        };
+        let planned_pre = pre(compressed);
+        let raw_pre = pre(&raw[..raw_start]);
+        assert!(
+            planned_pre < raw_pre,
+            "投影口径的压缩量必须小于原始日志口径: planned={planned_pre} raw={raw_pre}"
+        );
+        assert_eq!(
+            raw_pre - planned_pre,
+            rough_tokens(&ChatMessage::user(&injected))
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// 压缩规划在有"被折叠的注入块"的会话上仍然正确。
+    ///
+    /// 基线通道的旧版本已经从模型面退出(只留在日志里):压缩区间与保留窗口
+    /// 的边界都不能认领这个不在模型面上的 seq,压缩量也不能把它算进去。
+    /// 压缩落盘后重新派生 = 摘要 + 保留窗口,旧基线不得复活。
+    #[test]
+    fn compaction_plan_is_consistent_when_injections_were_folded() {
+        use denia_core::session::SessionEvent;
+
+        let user_msg = |seq: u64, text: &str| {
+            envelope(
+                seq,
+                SessionEvent::UserMessage {
+                    text: text.into(),
+                    injected: false,
+                    images: Vec::new(),
+                    channel: None,
+                },
+            )
+        };
+        let injection = |seq: u64, channel: Option<&str>, text: &str| {
+            envelope(
+                seq,
+                SessionEvent::UserMessage {
+                    text: text.into(),
+                    injected: true,
+                    images: Vec::new(),
+                    channel: channel.map(str::to_owned),
+                },
+            )
+        };
+        let call = |seq: u64, id: &str| {
+            envelope(
+                seq,
+                SessionEvent::AssistantMessage {
+                    turn: 1,
+                    step: 1,
+                    blocks: vec![denia_core::stream::ContentBlock::ToolCall {
+                        id: id.into(),
+                        name: "bash".into(),
+                        arguments: "{}".into(),
+                        incomplete: false,
+                    }],
+                    usage: None,
+                    interrupted: false,
+                    source_event_seqs: Vec::new(),
+                    first_token_time: None,
+                },
+            )
+        };
+        let result = |seq: u64, id: &str| {
+            envelope(
+                seq,
+                SessionEvent::ToolResult {
+                    turn: 1,
+                    step: 1,
+                    call_id: id.into(),
+                    content: "ok".repeat(800),
+                    is_error: false,
+                    error: None,
+                    error_identity: None,
+                    meta: None,
+                    replaces: None,
+                    truncation: None,
+                },
+            )
+        };
+
+        let big_v1 = format!("[denia 能力上下文]{}", "x".repeat(4_000));
+        let events = vec![
+            user_msg(1, "老任务"),
+            // 旧日志(无通道字段)的能力上下文 v1:被同通道的 v2 折叠掉。
+            injection(2, None, &big_v1),
+            injection(3, Some("capability"), "能力 v2"),
+            call(4, "call_c"),
+            result(5, "call_c"),
+            injection(6, Some("workspace-instructions"), "工作区 v1"),
+            user_msg(7, "继续"),
+        ];
+        let surface = surface_of(&events);
+        assert_eq!(
+            surface.iter().map(|item| item.seq).collect::<Vec<_>>(),
+            vec![1, 3, 4, 5, 6, 7],
+            "被折叠的旧基线不在模型面上"
+        );
+
+        let settings = tiny();
+        let start = select_keep_start(&surface, &settings).expect("有可压区间");
+        let (compressed, kept) = surface.split_at(start);
+        let compressed = compressed.to_vec();
+        let kept = kept.to_vec();
+        // 压缩区间只认模型面上的 seq:被折叠的 seq 2 不在区间里(它本来就不在
+        // 模型面上,压缩没理由认领它)。
+        assert!(compressed.iter().all(|item| item.seq != 2));
+        assert!(compressed.iter().all(|item| item.seq < kept[0].seq));
+        assert!(
+            kept[0]
+                .message
+                .tool_calls
+                .iter()
+                .any(|call| call.id == "call_c"),
+            "工具对完整性修正照旧:保留窗口第一条是被拉进来的 tool_call"
+        );
+
+        // 对照组:同一批消息但在折叠关闭的口径下(seq 2 不是注入,不参与
+        // 折叠)。压缩量必须只差被折叠的那一条——证明预算没有花在模型看不
+        // 见的块上。
+        let unfolded: Vec<SessionEnvelope> = events
+            .iter()
+            .map(|item| {
+                let mut copy = item.clone();
+                if item.seq == 2 {
+                    copy.event = SessionEvent::UserMessage {
+                        text: big_v1.clone(),
+                        injected: false,
+                        images: Vec::new(),
+                        channel: None,
+                    };
+                }
+                copy
+            })
+            .collect();
+        let raw = surface_of(&unfolded);
+        let raw_start = select_keep_start(&raw, &settings).expect("对照组同样有可压区间");
+        assert!(
+            raw.iter().any(|item| item.seq == 2),
+            "对照组必须真的包含那条大块(否则这条对比是空转)"
+        );
+        let pre = |items: &[SurfaceMessage]| {
+            items.iter().fold(0u64, |acc, item| {
+                acc.saturating_add(rough_tokens(&item.message))
+            })
+        };
+        assert_eq!(
+            pre(&raw[..raw_start]) - pre(&compressed),
+            rough_tokens(&ChatMessage::user(&big_v1)),
+            "压缩量差恰好是被折叠的那一条(口径断言)"
+        );
+
+        // 落一次真实压缩事件后重新派生:摘要 + 保留窗口,旧基线不复活。
+        let mut compacted = events.clone();
+        compacted.push(envelope(
+            8,
+            SessionEvent::CompactionSummary {
+                turn: 1,
+                step: 2,
+                summary: "摘要".into(),
+                replaces_from: compressed[0].seq,
+                replaces_to: compressed.last().unwrap().seq,
+                keep_from: kept[0].seq,
+                pre_tokens: 1,
+                post_tokens: 1,
+            },
+        ));
+        let after = surface_of(&compacted);
+        assert_eq!(after.len(), 1 + kept.len(), "摘要 + 保留窗口");
+        assert_eq!(after[0].seq, kept[0].seq - 1, "摘要定位在保留窗口之前");
+        assert_eq!(after[0].message.content, "摘要");
+        assert!(
+            after.iter().all(|item| item.seq != 2),
+            "旧基线不得随压缩复活:{after:?}"
+        );
+        assert_eq!(
+            after
+                .iter()
+                .skip(1)
+                .map(|item| item.seq)
+                .collect::<Vec<_>>(),
+            kept.iter().map(|item| item.seq).collect::<Vec<_>>()
+        );
+    }
+
+    /// 裁剪必须回传"丢了什么":调用方要靠这个条数给未覆盖区间记账。
+    #[test]
+    fn truncate_head_reports_how_many_messages_it_dropped() {
+        let messages: Vec<ChatMessage> = (0..10)
+            .map(|index| ChatMessage::user(format!("m{index}")))
+            .collect();
+        let (kept, dropped) = truncate_head(&messages, 1);
+        assert_eq!(dropped, 2, "10 条丢 1/5");
+        assert_eq!(kept.len(), 8);
+        assert_eq!(kept[0].content, "m2", "丢的是最老的,保留尾部");
+        // 只剩一条时没有可丢的:条数为 0,内容原样。
+        let single = vec![ChatMessage::user("only")];
+        let (kept, dropped) = truncate_head(&single, 1);
+        assert_eq!(dropped, 0);
+        assert_eq!(kept.len(), 1);
+    }
+
+    /// 未覆盖区间必须在摘要正文里被点名(条数 + 事件序号区间);空区间不产生标注。
+    #[test]
+    fn uncovered_note_names_the_dropped_range() {
+        use denia_core::session::{SessionEvent, derive_surface};
+        let events: Vec<SessionEnvelope> = (1..=3)
+            .map(|seq| {
+                envelope(
+                    seq,
+                    SessionEvent::UserMessage {
+                        text: format!("old-{seq}"),
+                        injected: false,
+                        images: Vec::new(),
+                        channel: None,
+                    },
+                )
+            })
+            .collect();
+        let surface = derive_surface(&events);
+        let note = uncovered_note(&surface);
+        assert!(
+            note.contains("最早的 3 条消息(事件序号 1..=3)"),
+            "标注必须给出条数与序号区间:{note}"
+        );
+        assert!(
+            note.contains("未覆盖") && note.contains("不要把它们当作已被总结"),
+            "{note}"
+        );
+        assert_eq!(uncovered_note(&[]), "", "没有未覆盖区间时不加噪音");
     }
 }

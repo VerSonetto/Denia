@@ -2,6 +2,22 @@
 use super::*;
 
 impl Session {
+    /// 使用与在线累计相同的计费口径，投影某个终态之前的用量。
+    pub fn project_turn_token_usage(events: &[SessionEnvelope]) -> TurnTokenUsage {
+        let mut meter = ContextMeter::new();
+        let mut start = 0;
+        for (index, envelope) in events.iter().enumerate() {
+            if matches!(envelope.event, SessionEvent::TurnStart { .. }) {
+                start = index;
+            }
+            if matches!(envelope.event, SessionEvent::TurnEnd { .. }) {
+                meter.fold_turn(&events[start..=index]);
+                start = index + 1;
+            }
+        }
+        meter.turn_usage()
+    }
+
     /// O(1):下一个 turn 号(维护的计数器,不再遍历日志)。
     pub fn next_turn_number(&self) -> u32 {
         self.inner
@@ -22,6 +38,16 @@ impl Session {
 
     /// 从内存事件重建 token-meter(load 后调用一次;之后由 `append`
     /// 增量维护)。
+    ///
+    /// **与模型面同一份投影**:历史投影排除的事件(旧子代理的父运行态与
+    /// 自动注入)不进表面计量。这里不自己判可见性,走
+    /// `crate::append::meter_visible` 这一个判据。
+    ///
+    /// 顺序依赖(别调换):`Session::load` 先 `parse_file`(它在里面带了
+    /// 一次 meter 折叠)再 `load_history_projection` 再走到这里。parse_file
+    /// 那一次折叠看不到投影文件(还没读)——它靠本函数覆盖掉;若将来把本
+    /// 函数提到 `load_history_projection` 之前,旧 child 的 meter 会把被
+    /// 投影排除的注入重新折回表面,而且只在重载后发作。
     pub(super) fn refresh_meter_from_log(&self) -> Result<(), SessionError> {
         let mut inner = self
             .inner
@@ -34,6 +60,7 @@ impl Session {
             events,
             meter,
             pending_turn,
+            history_projection,
             ..
         } = &mut *inner;
         *meter = ContextMeter::new();
@@ -49,9 +76,18 @@ impl Session {
                 meter.fold_turn(pending_turn);
                 pending_turn.clear();
             }
-            meter.apply_one(envelope);
+            let model_visible =
+                crate::append::meter_visible(history_projection.as_ref(), envelope.seq);
+            meter.apply_one_projected(envelope, model_visible);
         }
         pending_turn.clear();
+        // 记下“表面是按哪一份投影折的”:下一次 append 靠这个指纹判断投影是否
+        // 晚于本表建立(旧子代理首次继续)而需要重建。
+        meter.set_folded_projection(
+            history_projection
+                .as_ref()
+                .map(crate::append::projection_stamp),
+        );
         Ok(())
     }
 

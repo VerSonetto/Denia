@@ -4,8 +4,8 @@
 //! stepping while the assistant message carries tool-call blocks and closes
 //! on a tool-call-free message. Every event is appended to the session log
 //! first and only then mirrored to `emit` — the log is the ordering
-//! authority. A turn whose appends fail mid-flight is left open; session
-//! load closes it with a synthetic aborted `turn-end`.
+//! authority. Execution failures close any open step/turn when the log is
+//! writable; session load repairs terminal events that could not be appended.
 //!
 //! 模块划分(按职责,`impl SessionDriver` 分散在各文件):
 //! - [`turn`] — turn/step 主编排(终止判定、死循环检测接线);
@@ -45,6 +45,10 @@ use denia_llm::LlmRegistry;
 use denia_session::Session;
 use denia_system_prompt::SystemPrompt;
 use denia_tools::{FileHistoryBackend, ToolRegistry};
+pub use denia_token_meter::{
+    BudgetRefusal, Clock, ExecutionBudget, ExecutionCounters, ExecutionLimits,
+};
+use denia_token_meter::{RequestCall as LedgerRequestCall, RequestSource};
 use tokio_util::sync::CancellationToken;
 
 pub use compact::{CompactOutcome, CompactionSettings};
@@ -105,6 +109,147 @@ pub trait ApprovalBridge: Send + Sync {
     ) -> denia_core::session::PlanReviewDecision;
 }
 
+/// 执行预算策略:上限来源(按 turn 读取一致快照)+ 账本时钟。
+///
+/// 上限来源由宿主装配(`server` 从运行时配置读),未装即用
+/// [`ExecutionLimits::default`](128 步 / 256 次请求 / 60 分钟)。
+#[derive(Default)]
+struct BudgetPolicy {
+    limits: Option<Arc<dyn Fn() -> ExecutionLimits + Send + Sync>>,
+    clock: Option<Clock>,
+}
+
+impl BudgetPolicy {
+    fn limits(&self) -> ExecutionLimits {
+        match &self.limits {
+            Some(source) => source(),
+            None => ExecutionLimits::default(),
+        }
+    }
+}
+
+/// 按会话定位**当前 turn** 的账本登记表。
+///
+/// 账本按 turn 建、按 turn 撤;桥(审批/提问)只能拿到会话 id,所以用 id
+/// 路由——它要的不是账本本身,而是“现在在等用户”这个事实。
+type TurnBudgets = Arc<std::sync::Mutex<std::collections::HashMap<String, ExecutionBudget>>>;
+
+/// 把执行预算账本接进 registry 的准入点(`denia_llm::RequestAdmission`)。
+///
+/// 两个枚举的翻译只做分类映射;**哪些来源吃用户预算**由账本判据
+/// (`RequestKind::metered`)决定,这里不另写一份策略。
+pub(crate) struct BudgetGate(pub(crate) ExecutionBudget);
+
+impl denia_llm::RequestAdmission for BudgetGate {
+    fn admit(&self, call: &denia_llm::RequestCall) -> Result<(), denia_llm::AdmissionRefusal> {
+        use denia_llm::RequestKind as Llm;
+        use denia_token_meter::RequestKind as Ledger;
+        let kind = match call.kind {
+            Llm::UserStep => Ledger::Step,
+            Llm::Continuation => Ledger::Continuation,
+            Llm::Compaction => Ledger::Compaction,
+            Llm::Wake => Ledger::Wake,
+            Llm::Subagent => Ledger::Subagent,
+            Llm::SessionTitle => Ledger::SessionTitle,
+            Llm::Connectivity => Ledger::Connectivity,
+            Llm::Git => Ledger::Git,
+            Llm::Other => Ledger::Other,
+        };
+        let source = if kind.metered() {
+            RequestSource::Metered {
+                session: call.session.clone(),
+                turn: call.turn,
+                step: call.step,
+                kind,
+            }
+        } else {
+            RequestSource::Bypass { kind }
+        };
+        self.0
+            .admit_request(&LedgerRequestCall {
+                source,
+                sequence: call.sequence,
+                attempt: call.attempt,
+            })
+            .map(|_| ())
+            .map_err(|refusal| denia_llm::AdmissionRefusal {
+                boundary: refusal.boundary.label().to_string(),
+                limit: refusal.limit,
+                used: refusal.used,
+                message: refusal.message,
+            })
+    }
+}
+
+/// 审批等待区间的墙钟守卫:进桥前 `pause`,出桥后 `resume`。
+///
+/// 这是 turn 内**唯一**的“等用户”区间。子代理与后台任务的等待不在此列:
+/// 子任务还在跑,父轮次并没有空闲(计划:仍运行的子任务不能伪装为空闲)。
+struct PauseGuard(Option<ExecutionBudget>);
+
+impl Drop for PauseGuard {
+    fn drop(&mut self) {
+        if let Some(budget) = &self.0 {
+            budget.resume();
+        }
+    }
+}
+
+/// 审批桥包装:等待用户决策的墙钟不计入主动执行时间。
+struct PausingApprovalBridge {
+    inner: Arc<dyn ApprovalBridge>,
+    budgets: TurnBudgets,
+}
+
+#[async_trait]
+impl ApprovalBridge for PausingApprovalBridge {
+    async fn request(
+        &self,
+        session_id: &str,
+        request_id: &str,
+        cancel: CancellationToken,
+    ) -> denia_core::session::PlanReviewDecision {
+        let _guard = pause_guard(&self.budgets, session_id);
+        self.inner.request(session_id, request_id, cancel).await
+    }
+}
+
+/// 提问桥包装:与审批同理。
+struct PausingAskBridge {
+    inner: Arc<dyn denia_tools::AskBridge>,
+    budgets: TurnBudgets,
+}
+
+#[async_trait]
+impl denia_tools::AskBridge for PausingAskBridge {
+    async fn ask(
+        &self,
+        session_id: &str,
+        request_id: &str,
+        call_id: &str,
+        questions: &[denia_core::session::AskQuestion],
+        timeout_ms: u64,
+        cancel: CancellationToken,
+    ) -> denia_core::session::AskResolution {
+        let _guard = pause_guard(&self.budgets, session_id);
+        self.inner
+            .ask(session_id, request_id, call_id, questions, timeout_ms, cancel)
+            .await
+    }
+}
+
+fn pause_guard(budgets: &TurnBudgets, session_id: &str) -> PauseGuard {
+    let budget = budgets
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .get(session_id)
+        .cloned();
+    if let Some(budget) = &budget {
+        budget.pause();
+    }
+    PauseGuard(budget)
+}
+
 /// Drives user turns on one session at a time.
 pub struct SessionDriver {
     runtime: Option<Arc<dyn denia_tools::capabilities::AgentRuntime>>,
@@ -149,6 +294,10 @@ pub struct SessionDriver {
     /// 运行时内存态:进程重启或会话淘汰后回到轻量态,重新装载即可。
     mcp_loads:
         std::sync::Mutex<std::collections::HashMap<String, std::collections::HashSet<String>>>,
+    /// 执行预算:上限来源与时钟(默认 128 步 / 256 次请求 / 60 分钟)。
+    budget_policy: std::sync::RwLock<BudgetPolicy>,
+    /// 按会话登记的当前 turn 账本(审批/提问等待期间暂停计时)。
+    turn_budgets: TurnBudgets,
 }
 
 impl SessionDriver {
@@ -172,6 +321,8 @@ impl SessionDriver {
             read_states: std::sync::Mutex::new(std::collections::HashMap::new()),
             ask_grants: std::sync::Mutex::new(std::collections::HashMap::new()),
             mcp_loads: std::sync::Mutex::new(std::collections::HashMap::new()),
+            budget_policy: std::sync::RwLock::new(BudgetPolicy::default()),
+            turn_budgets: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
         }
     }
 
@@ -262,16 +413,92 @@ impl SessionDriver {
     }
 
     /// 启用审批通道(抄 dsh ctx.approval);无通道时升权请求 fail-closed。
+    ///
+    /// 桥外面包一层等待守卫:审批期间用户在思考,那段时间不算主动执行时间。
     pub fn with_approval(mut self, bridge: Arc<dyn ApprovalBridge>) -> Self {
-        self.approval = Some(bridge);
+        self.approval = Some(Arc::new(PausingApprovalBridge {
+            inner: bridge,
+            budgets: self.turn_budgets.clone(),
+        }));
         self
     }
 
     /// 启用提问通道(`ask` 工具);无通道时该工具按 `unavailable` 结算,
     /// 模型仍能自行决策继续(不像 dsh 那样把整次调用变成硬错误)。
     pub fn with_ask(mut self, bridge: Arc<dyn denia_tools::AskBridge>) -> Self {
-        self.ask = Some(bridge);
+        self.ask = Some(Arc::new(PausingAskBridge {
+            inner: bridge,
+            budgets: self.turn_budgets.clone(),
+        }));
         self
+    }
+
+    /// 安装执行预算上限来源:宿主按 turn 读取配置快照(在途轮次不受
+    /// 中途改配置影响)。未装即用默认边界。
+    pub fn set_execution_limits_source(
+        &self,
+        source: Arc<dyn Fn() -> ExecutionLimits + Send + Sync>,
+    ) {
+        self.budget_policy
+            .write()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .limits = Some(source);
+    }
+
+    /// 注入账本时钟(测试用假时钟推进主动执行时间)。
+    pub fn with_budget_clock(mut self, clock: Clock) -> Self {
+        self.budget_policy
+            .get_mut()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .clock = Some(clock);
+        self
+    }
+
+    /// 当前生效的执行预算上限快照。
+    pub fn execution_limits(&self) -> ExecutionLimits {
+        self.budget_policy
+            .read()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .limits()
+    }
+
+    /// 开始一轮:按当前策略建账本快照并登记到会话名下。
+    pub(crate) fn begin_turn_budget(&self, session_id: &str) -> ExecutionBudget {
+        let policy = self
+            .budget_policy
+            .read()
+            .unwrap_or_else(|poison| poison.into_inner());
+        let limits = policy.limits();
+        let budget = match &policy.clock {
+            Some(clock) => ExecutionBudget::with_clock(limits, clock.clone()),
+            None => ExecutionBudget::new(limits),
+        };
+        drop(policy);
+        self.turn_budgets
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .insert(session_id.to_string(), budget.clone());
+        budget
+    }
+
+    /// 该会话当前在途轮次的账本(`None` = 没有正在跑的轮次)。
+    ///
+    /// 手动压缩这类轮次外的请求拿不到账本:它们不由轮次预算管(一次用户
+    /// 主动发起的压缩不该撞上“本轮请求已用完”),但它们的用量照样入账。
+    pub fn active_budget(&self, session_id: &str) -> Option<ExecutionBudget> {
+        self.turn_budgets
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .get(session_id)
+            .cloned()
+    }
+
+    /// 一轮结束:撤下登记。下一轮重新建账本(预算按轮重新获得)。
+    pub(crate) fn end_turn_budget(&self, session_id: &str) {
+        self.turn_budgets
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .remove(session_id);
     }
 
     /// 启用 agent preset 名册:会话按自己日志里的 preset 组装工具面与 persona。
@@ -470,6 +697,9 @@ impl SessionDriver {
             &cancel,
             None,
             &settings.compaction,
+            // 手动压缩是用户主动发起的一次请求,不属于任何在途轮次:没有账本
+            // 就不过准入(也不该撞上"本轮请求已用完"),但用量照样入账。
+            None,
         )
         .await
     }
@@ -515,12 +745,16 @@ impl SessionDriver {
             denia_tools::output::OutputStore::open(session.directory().join("tool-output"))
                 .await
                 .ok();
+        let started_after = session.with_events(injections::last_seq);
         let result = turn::run_turn_inner(self, &mut state, prompt, images, files, quoted).await;
+        // 轮的账本随轮撤下:下一轮重新建(预算按轮重新获得;轮与轮之间的
+        // 等待——goal paused、等用户下一条消息——根本不在任何账本区间内)。
+        self.end_turn_budget(session.id());
         match result {
             Ok(reason) => reason,
-            // Append or dispatch failure: the turn stays open in the log and
-            // session load closes it with a synthetic aborted turn-end.
-            Err(failure) => TurnEndReason::Error { failure },
+            Err(failure) => close_failed_turn(&state, started_after, failure).unwrap_or_else(
+                |failure| TurnEndReason::Error { failure },
+            ),
         }
     }
 
@@ -618,6 +852,56 @@ impl SessionDriver {
     }
 }
 
+fn close_failed_turn(
+    state: &TurnState,
+    started_after: u64,
+    failure: LlmFailure,
+) -> Result<TurnEndReason, LlmFailure> {
+    let reason = TurnEndReason::Error { failure };
+    let open_steps = state.session.with_events(|events| {
+        // 输入或 turn-start 写入失败时，不能替本轮之前的裸开日志补终态。
+        let current = &events[events.partition_point(|event| event.seq <= started_after)..];
+        let start = current.iter().position(|event| {
+            matches!(event.event, SessionEvent::TurnStart { turn } if turn == state.turn)
+        })?;
+        let mut open_steps = std::collections::BTreeSet::new();
+        for event in &current[start + 1..] {
+            match event.event {
+                SessionEvent::StepStart { turn, step } if turn == state.turn => {
+                    open_steps.insert(step);
+                }
+                SessionEvent::StepEnd { turn, step } if turn == state.turn => {
+                    open_steps.remove(&step);
+                }
+                SessionEvent::TurnEnd { turn, .. } if turn == state.turn => return None,
+                _ => {}
+            }
+        }
+        Some(open_steps)
+    });
+    if let Some(open_steps) = open_steps {
+        for step in open_steps {
+            append(
+                &state.session,
+                &state.emit,
+                SessionEvent::StepEnd {
+                    turn: state.turn,
+                    step,
+                },
+            )?;
+        }
+        append(
+            &state.session,
+            &state.emit,
+            SessionEvent::TurnEnd {
+                turn: state.turn,
+                reason: reason.clone(),
+            },
+        )?;
+    }
+    Ok(reason)
+}
+
 /// Append one event to the log, then mirror it to the live subscribers.
 /// The log is the ordering authority; emit failures are ignored (subscribers
 /// re-sync from the log snapshot on reconnect).
@@ -709,6 +993,9 @@ pub(crate) struct TurnState {
     pub step_retries: u32,
     pub settings: Arc<DriverSettings>,
     pub compaction_state: Arc<compaction_state::CompactionState>,
+    /// 本轮的执行预算账本(步数 / 请求次数 / 主动执行时间;上限取本轮
+    /// 开始时的快照)。turn 内所有请求路径共享同一份句柄。
+    pub budget: ExecutionBudget,
 }
 
 impl TurnState {
@@ -725,9 +1012,11 @@ impl TurnState {
     ) -> Self {
         let settings = driver.driver_settings();
         let compaction_state = driver.compaction_state_for(session.id());
+        let budget = driver.begin_turn_budget(session.id());
         Self {
             settings,
             compaction_state,
+            budget,
             session,
             emit,
             selection,

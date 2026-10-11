@@ -1,7 +1,9 @@
-//! 注入通道的驱动器侧辅助：通道识别（restore 反向扫描）、技能目录渲染、
+//! 注入通道的驱动器侧辅助：通道文本前缀常量、技能目录渲染、
 //! 用户 `/技能名` 手势解析、工具触碰路径提取。对齐 dsh agent-instructions /
 //! tool-skill 的交互语义，文案中文化。
-use denia_core::session::{SessionEnvelope, SessionEvent};
+//!
+//! 注入幂等基准的恢复不在这里：[`crate::injections::InjectionBaselines`]
+//! 按通道从派生 surface 扫描。
 use std::path::{Path, PathBuf};
 
 /// 工作区指令注入文本的完整前缀（第一行标签 + 第二行通道名）。
@@ -10,21 +12,6 @@ pub const WORKSPACE_PREFIX: &str = "<system-reminder>\n工作区指令:";
 pub const SKILL_CATALOG_PREFIX: &str = "<system-reminder>\n技能目录:";
 
 const REMINDER_CLOSE: &str = "</system-reminder>";
-
-/// 从日志反向扫描最后一条匹配通道的注入消息全文；返回值就是幂等比较基准。
-pub fn restore_injected_text(events: &[SessionEnvelope], prefix: &str) -> Option<String> {
-    events
-        .iter()
-        .rev()
-        .find_map(|envelope| match &envelope.event {
-            SessionEvent::UserMessage {
-                text,
-                injected: true,
-                ..
-            } if text.starts_with(prefix) => Some(text.clone()),
-            _ => None,
-        })
-}
 
 /// 提取一条本通道注入文本的正文（去掉框架与引导语行）；供新旧内容比较。
 fn extract_body(message: &str) -> &str {
@@ -128,40 +115,6 @@ pub fn touched_path(cwd: &Path, raw_arguments: &str) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn envelope(text: &str, injected: bool) -> SessionEnvelope {
-        SessionEnvelope {
-            seq: 1,
-            time: 1,
-            event: SessionEvent::UserMessage {
-                text: text.into(),
-                injected,
-                images: Vec::new(),
-                channel: None,
-            },
-        }
-    }
-
-    #[test]
-    fn restore_finds_last_channel_message_only() {
-        let events = vec![
-            envelope("<system-reminder>\n工作区指令:旧\nx", true),
-            envelope("普通用户消息", false),
-            envelope("<system-reminder>\n工作区指令:新\nx", true),
-            envelope("<system-reminder>\n技能目录:目录\nx", true),
-        ];
-        let restored = restore_injected_text(&events, WORKSPACE_PREFIX).unwrap();
-        assert!(restored.contains("新"));
-        assert!(
-            restore_injected_text(&events, SKILL_CATALOG_PREFIX)
-                .unwrap()
-                .contains("目录")
-        );
-        assert_eq!(
-            restore_injected_text(&events, "<system-reminder>\n无此通道:"),
-            None
-        );
-    }
 
     #[test]
     fn catalog_rendering_switches_on_content_change_not_visibility() {

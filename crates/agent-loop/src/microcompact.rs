@@ -313,12 +313,14 @@ mod tests {
                         arguments: format!(r#"{{"path":"f{round}.rs"}}"#),
                     }],
                 ),
+                channel: None,
             });
             seq += 1;
             surface.push(SurfaceMessage {
                 seq,
                 message: ChatMessage::tool_result(call_id, payload),
                 is_error: false,
+                channel: None,
             });
             seq += 1;
         }
@@ -487,11 +489,13 @@ mod tests {
                 }],
             ),
             is_error: false,
+            channel: None,
         });
         surface.push(SurfaceMessage {
             seq: 2,
             message: ChatMessage::tool_result("c1", "x".repeat(5000)),
             is_error: false,
+            channel: None,
         });
         let cfg = MicrocompactSettings {
             keep_recent_groups: 1,

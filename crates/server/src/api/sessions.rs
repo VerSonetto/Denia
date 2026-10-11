@@ -956,13 +956,16 @@ async fn compact_session(
             "会话正在运行中,无法手动压缩",
         ));
     }
-    // 守卫只能活到 spawn 之前:下面的校验失败要走同步错误返回(前端立刻
-    // 看到原因),否则 running 位会一直亮着。
+    let runtime = state.runtime.clone();
+    let admission = RunningGuard::with_on_idle(
+        live.clone(),
+        state.events.clone(),
+        Arc::new(move |id| runtime.on_idle(id)),
+    );
     if !crate::state::console_settings(&state.settings)
         .compaction
         .compact_enabled
     {
-        live.running.store(false, Ordering::SeqCst);
         return Err(ApiError::bad_request(
             "compaction/disabled",
             "上下文压缩已在设置中关闭",
@@ -974,7 +977,6 @@ async fn compact_session(
         .iter()
         .any(|item| matches!(item.event, SessionEvent::RequestHeader { .. }))
     {
-        live.running.store(false, Ordering::SeqCst);
         return Err(ApiError::bad_request(
             "session/no-request",
             "该会话还没有发起过模型请求,暂无可压缩内容",
@@ -986,13 +988,11 @@ async fn compact_session(
 
     let driver = state.driver.clone();
     let session = live.session.clone();
-    let live_for_task = live.clone();
-    let events_for_guard = state.events.clone();
     let events_for_result = state.events.clone();
     let followers = live.followers.clone();
     tokio::spawn(async move {
         // RAII:任务结束(含 panic)自动复位 running + 清 cancel + 广播结束。
-        let _guard = RunningGuard::new(live_for_task.clone(), events_for_guard);
+        let _guard = admission;
         match driver.compact_manually(&session, token).await {
             Ok(Some(outcome)) => {
                 // 成功:落 append-only 摘要事件并广播 —— 前端据此把"正在
