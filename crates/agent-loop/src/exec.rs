@@ -32,7 +32,7 @@ pub(crate) async fn execute_calls(
 ) -> Result<(), denia_core::error::LlmFailure> {
     let cwd = state.cwd();
     // 项目记忆目录一次解析(未启用为 None):写类分类与子代理写收敛共用。
-    // 组装关闭记忆功能时同样视为 None:没有 MEMORY.md 上下文的模型不该
+    // 预设关闭记忆功能时同样视为 None:没有 MEMORY.md 上下文的模型不该
     // 享受记忆写放行,写类回到普通 WriteInside/WriteOutside 判定。
     let memory_root = driver
         .runtime
@@ -300,7 +300,7 @@ fn reject_before_dispatch(
             )
         } else {
             format!(
-                "该工具不在当前会话组装允许的工具面内（{}）。当前 preset 的 features/工具白名单没有开放它；需要时请用户调整组装。",
+                "该工具不在当前会话预设允许的工具面内（{}）。当前 preset 的 features/工具白名单没有开放它；需要时请用户调整预设。",
                 denia_core::subagent::codes::TOOL_NOT_GRANTED
             )
         }));
@@ -449,7 +449,7 @@ fn classify_call(
 ) -> ActionClass {
     match call.name.as_str() {
         "exit_plan" => ActionClass::PlanSubmit,
-        // 组装创作:落盘路径服务端固定,按独立类别判定(不走工作区内外)。
+        // 预设创作:落盘路径服务端固定,按独立类别判定(不走工作区内外)。
         "create_preset" => ActionClass::PresetCreate,
         "write_file" | "edit" => {
             match crate::workspace_instructions::touched_path(cwd, &call.arguments) {
@@ -540,7 +540,7 @@ fn dispatch_tool_call(
     // 层早已放行,纪律段成为空头支票)。豁免口径与权限放行口径一致:
     // 写边界仍由 MemoryWrite 分类(敏感段拒绝、子代理仅限记忆目录)收敛。
     // 在 Box::pin 之前计算:闭包是 'static,不能借用 driver。记忆豁免与
-    // 权限放行共用同一开关:组装关闭记忆时记忆目录视为不存在,不豁免。
+    // 权限放行共用同一开关:预设关闭记忆时记忆目录视为不存在,不豁免。
     // 沙箱只在只读/计划档生效(见 permission::sandbox_applies):自动编辑
     // 档的区外写要走审批而不是在路径解析处被硬拦。
     let confined = denia_tools::permission::sandbox_applies(state.permission_mode())

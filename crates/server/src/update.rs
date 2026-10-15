@@ -12,6 +12,12 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::io::AsyncWriteExt;
 
+#[path = "update_mirrors.rs"]
+mod mirrors;
+
+use mirrors::Mirror;
+pub use mirrors::DownloadSource;
+
 const REPOSITORY_URL: &str = "https://github.com/VerSonetto/Denia";
 const RELEASES_API: &str = "https://api.github.com/repos/VerSonetto/Denia/releases";
 const CACHE_TTL: Duration = Duration::from_secs(30 * 60);
@@ -20,6 +26,8 @@ const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(20 * 60);
 const MAX_INSTALLER_BYTES: u64 = 1024 * 1024 * 1024;
 const MAX_METADATA_BYTES: usize = 8 * 1024 * 1024;
 const MAX_CHECKSUM_BYTES: usize = 1024 * 1024;
+/// 换源前给每个源的首包等待上限：公益源经常不回响应，不能让它吃掉整个下载预算。
+const SOURCE_START_TIMEOUT: Duration = Duration::from_secs(15);
 
 pub type InstallerWaiter = Box<dyn FnOnce() + Send>;
 type InstallerLauncher = Arc<dyn Fn(&Path) -> Result<InstallerWaiter, String> + Send + Sync>;
@@ -29,16 +37,20 @@ static UPDATER: OnceLock<Result<Arc<Updater>, String>> = OnceLock::new();
 pub(crate) fn manager() -> Result<Arc<Updater>, String> {
     UPDATER
         .get_or_init(|| {
+            let mirrors = mirrors::default_mirrors();
+            let trusted = mirrors.clone();
             let client = Client::builder()
                 .user_agent(concat!("Denia/", env!("CARGO_PKG_VERSION")))
                 .https_only(true)
                 .connect_timeout(Duration::from_secs(10))
                 .read_timeout(Duration::from_secs(30))
-                .redirect(reqwest::redirect::Policy::custom(|attempt| {
+                .redirect(reqwest::redirect::Policy::custom(move |attempt| {
                     if attempt.previous().len() >= 8 {
                         return attempt.error("更新下载重定向次数过多");
                     }
-                    if github_transport_url(attempt.url()) {
+                    if github_transport_url(attempt.url())
+                        || mirrors::trusted_redirect(attempt.url(), &trusted)
+                    {
                         attempt.follow()
                     } else {
                         attempt.error("更新下载重定向到了不受信任的地址")
@@ -46,7 +58,7 @@ pub(crate) fn manager() -> Result<Arc<Updater>, String> {
                 }))
                 .build()
                 .map_err(|error| format!("无法初始化更新连接: {error}"))?;
-            Ok(Arc::new(Updater::new(client, Source::Github)))
+            Ok(Arc::new(Updater::new(client, Source::Github, mirrors)))
         })
         .clone()
 }
@@ -100,6 +112,7 @@ pub struct CheckResponse {
 #[serde(rename_all = "lowercase")]
 pub enum Phase {
     Idle,
+    Selecting,
     Downloading,
     Verifying,
     Launching,
@@ -115,6 +128,8 @@ pub struct InstallStatus {
     pub downloaded_bytes: u64,
     pub total_bytes: Option<u64>,
     pub error: Option<String>,
+    /// 本次实际使用的下载源；选源完成前为 None。
+    pub source: Option<DownloadSource>,
 }
 
 impl Default for InstallStatus {
@@ -125,6 +140,7 @@ impl Default for InstallStatus {
             downloaded_bytes: 0,
             total_bytes: None,
             error: None,
+            source: None,
         }
     }
 }
@@ -205,20 +221,32 @@ struct Checked {
 pub(crate) struct Updater {
     client: Client,
     source: Source,
+    mirrors: Arc<Vec<Mirror>>,
+    /// 安装包 URL 的官方前缀，镜像候选地址由它拼接而来。
+    origin: String,
     checked: tokio::sync::Mutex<Option<Checked>>,
     status: Mutex<InstallStatus>,
     launcher: OnceLock<InstallerLauncher>,
 }
 
 impl Updater {
-    fn new(client: Client, source: Source) -> Self {
+    fn new(client: Client, source: Source, mirrors: Arc<Vec<Mirror>>) -> Self {
         Self {
             client,
             source,
+            mirrors,
+            origin: mirrors::GITHUB_ORIGIN.to_string(),
             checked: tokio::sync::Mutex::new(None),
             status: Mutex::new(InstallStatus::default()),
             launcher: OnceLock::new(),
         }
+    }
+
+    /// 测试用：镜像指向本机 mock 服务时，官方前缀也跟着换成本机地址。
+    #[cfg(test)]
+    fn with_origin(mut self, origin: String) -> Self {
+        self.origin = origin;
+        self
     }
 
     pub(crate) fn can_install(&self) -> bool {
@@ -331,7 +359,11 @@ impl Updater {
             let mut status = self.status.lock().unwrap_or_else(|p| p.into_inner());
             if matches!(
                 status.phase,
-                Phase::Downloading | Phase::Verifying | Phase::Launching | Phase::Launched
+                Phase::Selecting
+                    | Phase::Downloading
+                    | Phase::Verifying
+                    | Phase::Launching
+                    | Phase::Launched
             ) {
                 return if status.version.as_deref() == Some(version) {
                     Ok(status.clone())
@@ -340,11 +372,12 @@ impl Updater {
                 };
             }
             *status = InstallStatus {
-                phase: Phase::Downloading,
+                phase: Phase::Selecting,
                 version: Some(version.to_string()),
                 downloaded_bytes: 0,
                 total_bytes: Some(installer.size),
                 error: None,
+                source: None,
             };
             status.clone()
         };
@@ -401,46 +434,102 @@ impl Updater {
         release: &SelectedRelease,
         installer: &GithubAsset,
     ) -> Result<(tempfile::TempDir, PathBuf), String> {
+        // 校验值只认 GitHub 记录：镜像能同时提供安装包与校验文件，配出匹配的摘要就能绕过校验。
         let expected_digest = match installer.digest.as_deref().and_then(parse_digest) {
             Some(digest) => digest,
-            None => {
-                let checksum = release
-                    .checksums
-                    .as_ref()
-                    .ok_or("该版本缺少 SHA256 校验值")?;
-                let response = self
-                    .client
-                    .get(&checksum.browser_download_url)
-                    .timeout(Duration::from_secs(30))
-                    .send()
-                    .await
-                    .map_err(|error| network_error("下载 SHA256 校验文件", error))?;
-                let bytes =
-                    bounded_body(response, MAX_CHECKSUM_BYTES, "下载 SHA256 校验文件").await?;
-                let text =
-                    std::str::from_utf8(&bytes).map_err(|_| "SHA256 校验文件不是有效文本")?;
-                checksum_for(text, &installer.name)?
-            }
+            None => self.fetch_checksum(release, installer).await?,
         };
+        let mut candidates = mirrors::rank_candidates(
+            &self.client,
+            &installer.browser_download_url,
+            &self.origin,
+            &self.mirrors,
+        )
+        .await;
+        if candidates.is_empty() {
+            candidates.push(mirrors::official_candidate(&installer.browser_download_url));
+        }
+        let plan = mirrors::attempt_plan(&candidates);
+        let attempts = plan.len();
         let directory = tempfile::Builder::new()
             .prefix("denia-update-")
             .tempdir()
             .map_err(|error| format!("无法创建私有更新目录: {error}"))?;
         let path = directory.path().join("Denia-setup.exe");
-        let mut file = tokio::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&path)
-            .await
-            .map_err(|error| format!("无法创建临时安装文件: {error}"))?;
+        let mut failures = Vec::new();
+        for candidate in plan {
+            // 换源必须从零开始：上一源写坏的文件不能与新源的字节拼在一起算摘要。
+            self.edit_status(|status| {
+                status.source = Some(candidate.source());
+                status.downloaded_bytes = 0;
+            });
+            match self.fetch_asset(candidate, installer, &path).await {
+                Ok(actual) => {
+                    self.edit_status(|status| status.phase = Phase::Verifying);
+                    if actual == expected_digest {
+                        return Ok((directory, path));
+                    }
+                    failures.push(format!("{}：SHA256 校验失败", candidate.label));
+                }
+                Err(error) => failures.push(format!("{}：{error}", candidate.label)),
+            }
+            self.edit_status(|status| status.phase = Phase::Downloading);
+            let _ = tokio::fs::remove_file(&path).await;
+        }
+        if failures.len() == attempts && failures.iter().all(|failure| failure.contains("SHA256")) {
+            return Err("所有下载源返回的安装包都未通过 GitHub 记录的 SHA256 校验，已拒绝执行，请稍后重试".to_string());
+        }
+        Err(format!(
+            "已尝试 {attempts} 个下载源均失败（{}）",
+            failures.join("；")
+        ))
+    }
+
+    /// 安装包只从 GitHub 取，不经过任何镜像。
+    async fn fetch_checksum(
+        &self,
+        release: &SelectedRelease,
+        installer: &GithubAsset,
+    ) -> Result<[u8; 32], String> {
+        let checksum = release
+            .checksums
+            .as_ref()
+            .ok_or("该版本缺少 SHA256 校验值")?;
         let response = self
             .client
-            .get(&installer.browser_download_url)
-            .header(reqwest::header::ACCEPT_ENCODING, "identity")
-            .timeout(DOWNLOAD_TIMEOUT)
+            .get(&checksum.browser_download_url)
+            .timeout(Duration::from_secs(30))
             .send()
             .await
-            .map_err(|error| network_error("下载安装包", error))?;
+            .map_err(|error| network_error("下载 SHA256 校验文件", error))?;
+        let bytes = bounded_body(response, MAX_CHECKSUM_BYTES, "下载 SHA256 校验文件").await?;
+        let text = std::str::from_utf8(&bytes).map_err(|_| "SHA256 校验文件不是有效文本")?;
+        checksum_for(text, &installer.name)
+    }
+
+    async fn fetch_asset(
+        &self,
+        candidate: &mirrors::Candidate,
+        installer: &GithubAsset,
+        path: &Path,
+    ) -> Result<[u8; 32], String> {
+        let mut file = tokio::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(path)
+            .await
+            .map_err(|error| format!("无法创建临时安装文件: {error}"))?;
+        let response = tokio::time::timeout(
+            SOURCE_START_TIMEOUT,
+            self.client
+                .get(&candidate.url)
+                .header(reqwest::header::ACCEPT_ENCODING, "identity")
+                .send(),
+        )
+        .await
+        .map_err(|_| "下载源迟迟没有响应".to_string())?
+        .map_err(|error| network_error("下载安装包", error))?;
         let response = successful(response, "下载安装包")?;
         if let Some(size) = response.content_length() {
             if size > MAX_INSTALLER_BYTES || size != installer.size {
@@ -473,13 +562,7 @@ impl Updater {
         file.sync_all()
             .await
             .map_err(|error| format!("保存安装包失败: {error}"))?;
-        drop(file);
-        self.edit_status(|status| status.phase = Phase::Verifying);
-        let actual: [u8; 32] = digest.finalize().into();
-        if actual != expected_digest {
-            return Err("安装包 SHA256 校验失败，已拒绝执行，请重试".to_string());
-        }
-        Ok((directory, path))
+        Ok(digest.finalize().into())
     }
 }
 
@@ -608,7 +691,7 @@ fn successful(response: reqwest::Response, operation: &str) -> Result<reqwest::R
         Ok(response)
     } else if response.status().as_u16() == 403 || response.status().as_u16() == 429 {
         Err(format!(
-            "{operation}失败: GitHub 限流或拒绝访问（HTTP {}），请稍后重试",
+            "{operation}失败: 下载源限流或拒绝访问（HTTP {}），请稍后重试",
             response.status().as_u16()
         ))
     } else {
@@ -648,7 +731,7 @@ fn network_error(operation: &str, error: reqwest::Error) -> String {
     if error.is_timeout() {
         format!("{operation}超时，请检查网络后重试")
     } else if error.is_connect() {
-        format!("{operation}失败，无法连接 GitHub，请检查网络")
+        format!("{operation}失败，无法连接更新源，请检查网络")
     } else {
         format!("{operation}失败，网络连接中断或响应不被安全策略允许")
     }

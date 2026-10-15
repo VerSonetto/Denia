@@ -1,4 +1,4 @@
-/* Agent 组装(preset)设置面板。只用语义 token,暗/亮主题自动生效。 */
+/* Agent 预设(preset)设置面板。只用语义 token,暗/亮主题自动生效。 */
 
 .wrap {
   display: flex;
@@ -310,4 +310,147 @@
   line-height: 1.6;
   white-space: pre-wrap;
   word-break: break-word;
+}
+
+.listHead {
+  display: flex;
+  justify-content: flex-end;
+}
+
+/* ---- 内联编辑器(骨架用全局 setm-card,这里只补本页版式) ---- */
+
+.editorHead {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 13px 14px 0;
+}
+
+.editorTitle {
+  font-size: 13px;
+  font-weight: 650;
+  color: var(--label-primary);
+}
+
+.editorNote {
+  margin: 0;
+  font-size: 11.5px;
+  line-height: 1.55;
+  color: var(--label-tertiary);
+}
+
+.textarea {
+  width: 100%;
+  min-height: 120px;
+  resize: vertical;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.6;
+  padding: 8px 9px;
+  border-radius: 8px;
+  border: 1px solid var(--border-l2);
+  background: var(--bg-layer-1);
+  color: var(--label-primary);
+}
+
+.checkbox {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  cursor: pointer;
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--label-secondary);
+}
+
+.checkbox input[type='checkbox'] {
+  width: 14px;
+  height: 14px;
+  flex: none;
+  accent-color: var(--accent, #4f7cff);
+}
+
+.checkGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
+  gap: 8px 14px;
+}
+
+.toolPanel {
+  max-height: 220px;
+  overflow: auto;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid var(--border-l1);
+  background: var(--bg-layer-1);
+}
+
+.toolGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(170px, 1fr));
+  gap: 6px 14px;
+}
+
+.toolName {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  word-break: break-all;
+}
+
+.addRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.toolInput {
+  flex: 1;
+  min-width: 0;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  padding: 7px 9px;
+  border-radius: 8px;
+  border: 1px solid var(--border-l2);
+  background: var(--bg-layer-1);
+  color: var(--label-primary);
+}
+
+.chipRow {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 6px 3px 9px;
+  border-radius: 999px;
+  border: 1px dashed var(--border-l2);
+  background: var(--bg-layer-3);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--label-secondary);
+}
+
+.chipRemove {
+  display: inline-flex;
+  align-items: center;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--label-tertiary);
+  cursor: pointer;
+}
+
+.chipRemove:hover {
+  color: var(--danger);
+}
+
+.error {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--danger);
 }

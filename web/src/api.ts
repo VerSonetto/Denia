@@ -7,6 +7,7 @@ import type {
   ModelCatalog,
   ModelSelection,
   PermissionMode,
+  PresetSpec,
   ProfileWriteScope,
   ProviderInfo,
   SessionEnvelope,
@@ -618,8 +619,27 @@ export function listAgentPresets(): Promise<AgentPresetsView> {
 
 export function getAgentPreset(
   id: string,
-): Promise<{ preset: AgentPresetRow; text: string }> {
+): Promise<{ preset: AgentPresetRow; text: string; spec: PresetSpec | null }> {
   return http(`/api/agent-presets/${encodeURIComponent(id)}`)
+}
+
+/** 手工创建一个自定义 preset;校验失败时服务端错误 message 可直接展示。 */
+export function createAgentPreset(spec: PresetSpec): Promise<{ preset: AgentPresetRow }> {
+  return http('/api/agent-presets/new', {
+    method: 'POST',
+    body: JSON.stringify(spec),
+  })
+}
+
+/** 覆盖编辑一个用户自定义 preset(id 以路径为准;随附 preset → 409)。 */
+export function updateAgentPreset(
+  id: string,
+  spec: PresetSpec,
+): Promise<{ preset: AgentPresetRow }> {
+  return http(`/api/agent-presets/${encodeURIComponent(id)}`, {
+    method: 'PUT',
+    body: JSON.stringify(spec),
+  })
 }
 
 export function copyAgentPreset(body: {

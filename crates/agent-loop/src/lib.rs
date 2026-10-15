@@ -267,7 +267,7 @@ pub struct SessionDriver {
     /// 提问通道(`ask` 工具用);`None` 时该工具按 unavailable 结算。
     ask: Option<Arc<dyn denia_tools::AskBridge>>,
     /// agent preset 名册:按会话记录中的 preset 收窄工具面与 persona。
-    /// `None` 时所有会话都运行出厂全量组装(无 preset 的部署)。
+    /// `None` 时所有会话都运行出厂全量预设(无 preset 的部署)。
     presets: Option<Arc<dyn AgentPresetSource>>,
     /// 层叠上下文管理:LLM 总结压缩(学 dsh 压力驱动 + Claude Code compact)。
     settings: DriverSettings,
@@ -507,10 +507,10 @@ impl SessionDriver {
         self
     }
 
-    /// 解析某会话应当运行的组装。
+    /// 解析某会话应当运行的预设。
     ///
     /// 会话未指定 preset 时用部署默认;日志里的 id 已从名册消失(用户删掉
-    /// 它、或文件损坏)时同样回退到默认组装——运行中的会话不该因为一个坏
+    /// 它、或文件损坏)时同样回退到默认预设——运行中的会话不该因为一个坏
     /// 文件就连请求都发不出去,名册会把这个事实以 broken 行呈现给用户。
     pub fn preset_for(
         &self,
@@ -639,7 +639,7 @@ impl SessionDriver {
     /// 手动压缩(上下文面板按钮):从日志最近一次请求头部恢复请求形态
     /// (模型 / 系统提示 / 工具集),执行与自动路径完全相同的总结压缩。
     /// 绕过压力闸门 —— 用户主动触发,不要求压力 ≥ `compact_ratio`。
-    /// 会话组装关闭了压缩功能时拒绝(与自动闸门同一开关)。
+    /// 会话预设关闭了压缩功能时拒绝(与自动闸门同一开关)。
     ///
     /// 调用方负责:运行位占用与 cancel 生命周期、提前拒绝无请求历史的
     /// 会话、以及 `CompactionSummary` 事件落盘与广播。
@@ -651,7 +651,7 @@ impl SessionDriver {
         if !self.features_for(session).compaction {
             return Err(LlmFailure::new(
                 codes::UNKNOWN,
-                "本会话的 agent 组装未启用上下文压缩".to_string(),
+                "本会话的 agent 预设未启用上下文压缩".to_string(),
             ));
         }
         let (header, turn) = session.with_events(|events| {

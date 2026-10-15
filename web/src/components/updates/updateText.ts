@@ -1,5 +1,6 @@
 import { getLocale } from '../../i18n'
 import packageInfo from '../../../package.json'
+import type { UpdateSource } from '../../updateApi'
 
 export const installedVersion = packageInfo.version
 
@@ -28,6 +29,9 @@ const zh = {
   remoteDetail: '此连接不允许启动安装器。请在运行 Denia 的主机上打开本地界面完成更新。',
   checkFailedTitle: '暂时无法检查更新',
   checkFailedDetail: '现有版本仍可正常使用，请检查网络后重试。',
+  selectingTitle: '正在选择下载源',
+  selectingDetail: '正在测速各个 GitHub 加速源，选出最快的一个开始下载。',
+  sourceProbing: '正在测速可用的下载源…',
   downloadingTitle: '正在下载安装包',
   downloadingDetail: '你可以关闭此窗口，下载会继续进行。',
   verifyingTitle: '正在校验安装包',
@@ -95,6 +99,9 @@ const en: Record<keyof typeof zh, string> = {
   remoteDetail: 'This connection cannot start the installer. Open Denia locally on the host to update.',
   checkFailedTitle: 'Couldn’t check for updates',
   checkFailedDetail: 'Your installed version is unaffected. Check your connection and try again.',
+  selectingTitle: 'Choosing a download source',
+  selectingDetail: 'Benchmarking the GitHub mirrors, then downloading from the fastest one.',
+  sourceProbing: 'Benchmarking available sources…',
   downloadingTitle: 'Downloading the installer',
   downloadingDetail: 'You can close this window. The download will continue in the background.',
   verifyingTitle: 'Verifying the installer',
@@ -152,6 +159,15 @@ export function formatUpdateBytes(bytes: number): string {
     index += 1
   }
   return `${new Intl.NumberFormat(getLocale() === 'en' ? 'en-US' : 'zh-CN', { maximumFractionDigits: 1 }).format(value)} ${units[index]}`
+}
+
+export function formatUpdateSource(source: UpdateSource): string {
+  const en = getLocale() === 'en'
+  const name = source.direct
+    ? (en ? 'GitHub direct' : 'GitHub 官方直连')
+    : (en ? `Mirror ${source.label}` : `加速源 ${source.label}`)
+  if (source.latencyMs === null || !Number.isFinite(source.latencyMs)) return name
+  return `${name} · ${Math.max(0, Math.round(source.latencyMs))} ms`
 }
 
 export function formatUpdateDate(value: number | string): string | null {

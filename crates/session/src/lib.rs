@@ -144,7 +144,7 @@ struct SessionInner {
     /// 当前权限模式(由 permission-mode 事件 fold;新会话默认 auto-edit)。
     permission_mode: PermissionMode,
     /// 当前会话的 agent preset(由 agent-preset 事件 fold,latest-wins;
-    /// None = 未指定,按部署默认值组装)。
+    /// None = 未指定,落到部署默认预设)。
     agent_preset: Option<String>,
     /// 当前会话目标(goal 事件折叠;None = 无目标)。
     goal: Option<GoalState>,
@@ -481,7 +481,7 @@ pub struct SessionSummary {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subagent: Option<denia_core::session::SubagentDescriptor>,
     /// 会话运行的 agent preset(创建时写入日志);`None` = 旧会话或未指定。
-    /// 新会话页与侧栏据此显示组装,不必为一行摘要加载整个会话。
+    /// 新会话页与侧栏据此显示预设,不必为一行摘要加载整个会话。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub agent_preset: Option<String>,
 }
@@ -779,7 +779,7 @@ fn read_summary(file: &Path) -> Option<(SessionMeta, FileStamp)> {
                     break;
                 }
             }
-            // 组装事件落在会话创建处(远在摘要扫描目标之前);latest-wins,
+            // 预设事件落在会话创建处(远在摘要扫描目标之前);latest-wins,
             // 但这里只做"是否已扫到"的短路,继续扫其余目标。
             SessionEvent::AgentPreset { preset } => {
                 agent_preset = Some(preset);
@@ -875,7 +875,7 @@ mod tests {
     #[test]
     fn agent_preset_folds_across_reload_and_rewind() {
         // preset 是会话事实:latest-wins,并且必须跨越"落盘 → 重新加载"
-        // 存活——否则恢复的会话会悄悄换回默认组装。
+        // 存活——否则恢复的会话会悄悄换回默认预设。
         let root = temp_root();
         let store = SessionStore::open(&root).unwrap();
         let cwd = root.join("work");
@@ -883,7 +883,7 @@ mod tests {
 
         let session = store.create(&cwd, true).unwrap();
         let id = session.id().to_string();
-        assert_eq!(session.agent_preset(), None, "新会话未指定组装");
+        assert_eq!(session.agent_preset(), None, "新会话未指定预设");
         session.set_agent_preset("minimal").unwrap();
         assert_eq!(session.agent_preset().as_deref(), Some("minimal"));
         session.set_agent_preset("explore").unwrap();
@@ -893,14 +893,14 @@ mod tests {
         assert_eq!(
             loaded.agent_preset().as_deref(),
             Some("explore"),
-            "latest-wins 的组装必须从日志恢复"
+            "latest-wins 的预设必须从日志恢复"
         );
         let folded = loaded.derive_messages();
-        assert!(folded.is_empty(), "组装事件不进模型历史");
+        assert!(folded.is_empty(), "预设事件不进模型历史");
         std::fs::remove_dir_all(&root).unwrap();
     }
 
-    /// 会话列表摘要必须带上组装:新会话页要在不加载会话的前提下显示它
+    /// 会话列表摘要必须带上预设:新会话页要在不加载会话的前提下显示它
     /// (活跃会话走内存折叠,冷启动走磁盘头部扫描,两条路径都要对)。
     #[test]
     fn session_list_carries_agent_preset() {
@@ -927,10 +927,10 @@ mod tests {
         assert_eq!(
             summaries[0].agent_preset.as_deref(),
             Some("minimal"),
-            "冷启动后仍能从会话日志读出组装"
+            "冷启动后仍能从会话日志读出预设"
         );
 
-        // 没记过组装的老会话:字段缺省,由前端落到部署默认值。
+        // 没记过预设的老会话:字段缺省,由前端落到部署默认值。
         let plain = reopened.create(&cwd, true).unwrap();
         let plain_id = plain.id().to_string();
         drop(plain);

@@ -760,7 +760,7 @@ pub(crate) fn section_tools(section: &str) -> Option<&'static [&'static str]> {
 ///
 /// 单独成函数是为了可测:装配管线其余部分依赖完整 `TurnState`,而这一步
 /// 只依赖 driver 的 preset 名册。名册缺失(无 preset 的部署)时装配维持
-/// 出厂全量组装。
+// 出厂全量预设。
 pub(crate) fn apply_session_preset(
     driver: &SessionDriver,
     session_preset: Option<&str>,
@@ -1023,7 +1023,7 @@ mod subagent_section_tests {
         let (prompt, _registry) = denia_tools::default_shipped();
         prompt
             .assemble(&AssembleContext::default())
-            .expect("出厂组装可装配")
+            .expect("出厂预设可装配")
     }
 
     fn child(instructions: &str, tools: Vec<&str>, ceiling: &str) -> SubagentPrompt {
@@ -1045,7 +1045,7 @@ mod subagent_section_tests {
             .iter()
             .find(|section| section.name == "deployment:persona")
             .map(|section| section.text.clone())
-            .expect("出厂组装必须有 deployment:persona");
+            .expect("出厂预设必须有 deployment:persona");
         apply_subagent_context(
             &mut a,
             &child(
@@ -1164,7 +1164,7 @@ mod subagent_section_tests {
     /// 参数必须从 schema 里消失（"只禁 job_start"不是收口）。
     #[test]
     fn bash_background_param_follows_the_jobs_grant() {
-        // 出厂 shipped 组装里的 bash schema 不带 run_in_background（它由 server
+        // 出厂 shipped 预设里的 bash schema 不带 run_in_background（它由 server
         // 侧带 runtime 的 BashTool 注入），这里补上以模拟真实部署的工具面。
         let with_background_bash = || {
             let mut a = assembly();
@@ -1172,7 +1172,7 @@ mod subagent_section_tests {
                 bash.parameters["properties"]["run_in_background"] =
                     serde_json::json!({"type": "boolean"});
             } else {
-                panic!("出厂组装必须含 bash");
+                panic!("出厂预设必须含 bash");
             }
             a
         };

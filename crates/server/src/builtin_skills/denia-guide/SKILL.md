@@ -20,17 +20,18 @@ metadata:
 ## 读写入口
 
 - 服务地址用**运行时上下文快照里的「本实例 API」行**（每轮注入，就是当前进程的真实地址）。绝不凭默认端口猜：多实例共享数据目录，猜错会把配置写进另一个实例——你这边 HTTP 200 看似成功，用户的面板毫无变化。快照里找不到时才问用户。
-- 读：`GET /api/settings`（全部命名空间快照，含各 `revision`）、`GET /api/llm/catalog`（ live 路由与模型）、`GET /api/mcp`（服务器与工具数）、`GET /api/agent-presets`（名册与健康状态）、`GET /api/subagent-profiles?sessionId=`（子代理定义目录）、`GET /api/subagent-tools?sessionId=`（真实工具目录与可授予性）、`GET /api/system-prompt`。
+- 读：`GET /api/settings`（全部命名空间快照，含各 `revision`）、`GET /api/llm/catalog`（ live 路由与模型）、`GET /api/mcp`（服务器与工具数）、`GET /api/agent-presets`（名册、健康状态与部署工具名册 `tools`）、`GET /api/subagent-profiles?sessionId=`（子代理定义目录）、`GET /api/subagent-tools?sessionId=`（真实工具目录与可授予性）、`GET /api/system-prompt`。
 - 写设置：`PATCH /api/settings/{ns}`（merge patch）或 `PUT`（整段替换，空对象=重置），body `{"value":{...},"expectedRevision":N}`，N 取自刚 GET 到的 revision。未知命名空间 404，revision 对不上 409。
 - 数据目录默认 `~/.denia`（`settings.yaml`、`SYSTEM.md`、`agent-presets/` 等都在这），但走 API 就不用管路径。
 
 ## 自定义提供商与模型（命名空间 `llm-openai`）
 
-结构：`{"providers": {"<路由id>": {baseURL, displayName?, apiKeyEnv?, protocol?, models[], defaultContextWindow?, defaultMaxTokens?, headers?}}}`。
+结构：`{"providers": {"<路由id>": {baseURL, displayName?, apiKeyEnv?, protocol?, models[], defaultContextWindow?, defaultMaxTokens?, headers?, inlineThinkTags?}}}`。
 
 - 路由 id：非空唯一即可，不限字符（常含点/下划线）；`baseURL` 必须是 `http(s)://` 开头。
 - `protocol` 三选一，缺省 `openai-completions`：`openai-completions`（`POST {base}/chat/completions`）、`openai-responses`（`POST {base}/responses`）、`anthropic-messages`（`POST {root}/v1/messages`，base 以 `/v1` 结尾则保留否则补上）。未知值探测/对话直接 400。
 - `apiKeyEnv`：凭据引用名（见下"密钥"），不填则无鉴权裸调。`headers` 附加请求头，值是整段 `${引用名}` 才走凭据解析，其余原样发送；空名/非法名请求前直接拒绝。
+- `inlineThinkTags`（布尔，缺省 false，控制台里是"内联推理拆分"开关）：定向兼容——有的 chat-completions 网关把推理内联进 `content`（以 `</think>` 收尾、开头的 `<think>` 被上游模板吃掉），而不是标准 `reasoning_content`；开启后翻译层把首个收尾标记之前的文本拆成推理块。只对确有该行为的网关开启，否则正常流式首字会被缓冲。
 - `models` 是建议目录，空数组=每次走端点探测（`{base}/models`，anthropic 系走 `{root}/v1/models?limit=1000`）。目录只管展示与默认值：未知模型 id 照样能调（按路由默认值放行），所以"列表里没有"不是"调不通"的原因。
 - 模型行字段：`id`（必填，同路由内唯一，允许 `/` `:` 等网关风格）、`name`、`description`、`contextWindow`、`inputModalities`（缺省 `["text"]`，识图加 `"image"`）、`thinkingSupported`、`reasoningEfforts`（仅思考开启时有效，取 `off/low/medium/high/xhigh/max` 子集）。回退链：行缺省→路由 `defaultContextWindow/defaultMaxTokens`→出厂默认（262144 / 32768）。
 - 服务端无默认模型：每次 prompt 都带 provider/model，前端靠 localStorage（`denia.last-model`）记住上次选择。`POST /api/llm/discover`（`{baseURL, apiKey?（一次性，不落盘）|apiKeyEnv?, protocol?, headers?}`）先探测再导入；`POST /api/llm/chat`（`{provider, model, ...}`，两者为空直接 400）做连通冒烟。
@@ -43,12 +44,12 @@ metadata:
 - 新路由的引用名按控制台惯例派生：路由 id 大写、非 `[A-Z0-9]` 变下划线、末尾加 `_API_KEY`、数字开头补 `_` 前缀（如 `my-gateway`→`MY_GATEWAY_API_KEY`）。`.env` 行格式：`KEY=value`，支持 `#` 注释、`export` 前缀、单/双引号。
 - 查状态：`GET /api/credentials?refs=A,B`（单次≤64，只回 `{configured, source, writable}`）。
 
-## Preset（Agent 组装）
+## Preset（Agent 预设）
 
 - 落盘：`<home>/agent-presets/<id>/preset.yml`，id 必须 `^[a-z0-9][a-z0-9-]*$`（同时是目录名）。随附三个：`standard`（全量）、`creator`（引导创作的多轮 ask 流程）、`minimal`（仅 shell、一句话 persona 独占、功能全关）。随附的不可删不可改。
-- 文件字段：`name`、`description`、`tools`（省略=全量，空列表直接拒绝）、`persona`（省略=沿用部署 persona）、`personaComplete`（true=persona 独占系统提示，工具 schema 保留）、`features`（省略的键=开启，未知键直接拒绝；可用键：`agentsMd, memory, compaction, goal, skills, subagents, jobs, browser, ask, planMode`）。收窄只交不并：features 先摘、tools 白名单继续摘，`mcp__` 开头免校验。
+- 文件字段：`name`、`description`、`tools`（省略=全量，空列表直接拒绝）、`persona`（省略=沿用部署 persona）、`personaComplete`（true=persona 独占系统提示，工具 schema 保留）、`features`（省略的键=开启，未知键直接拒绝；可用键：`agentsMd, memory, compaction, goal, taskLedger, skills, subagents, jobs, browser, ask, planMode`）。收窄只交不并：features 先摘、tools 白名单继续摘，`mcp__` 开头免校验。
 - 损坏的 preset 会以 broken 行留在名册里并写明原因：先读原因再修，不要删了重建（id 占着）。
-- 创建只走两条路：调 `create_preset` 工具（先用 ask 分轮收集 persona/工具面/功能开关→再用 ask 展示摘要拿到确认→一次会话只建一个），或 `POST /api/agent-presets` 从既有 preset 复制（`{from, id, name?}`，同名 id/已存在目录都拒绝，绝不覆盖）。改既有 preset 让用户亲手改 `preset.yml`（有 watcher，200ms 防抖热刷新，下一步即生效）；查单个文本走 `GET /api/agent-presets/{id}`，删走 `DELETE`。
+- 创建与编辑有三条路：① 用户在「设置 → 预设」页直接新建/编辑/删除（`POST /api/agent-presets/new`、`PUT /api/agent-presets/{id}`，体是完整规范 `{id, name, description?, persona?, personaComplete?, tools?, features?}`；随附预设拒绝编辑，409）；② 调 `create_preset` 工具（先用 ask 分轮收集 persona/工具面/功能开关→再用 ask 展示摘要拿到确认→一次会话只建一个）；③ `POST /api/agent-presets` 从既有预设复制（`{from, id, name?}`，同名 id/已存在目录都拒绝，绝不覆盖）。查单个的声明文本与结构化规范走 `GET /api/agent-presets/{id}`（`spec` 对损坏行是 null），删走 `DELETE`；也可以让用户直接改 `preset.yml`（有 watcher，200ms 防抖热刷新，下一步即生效）。
 - 默认 preset 在 `agent-presets` 命名空间（`{default, modeSelectionEnabled}`）：写不存在的 id 不报错但读取时回退 `standard`，所以改完默认要 `GET` 名册确认 id 真存在。
 
 ## 子代理定义（人类配置面）

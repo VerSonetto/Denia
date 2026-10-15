@@ -1,18 +1,19 @@
-//! Agent preset 名册:随部署提供的组装 + 用户目录里的自定义组装。
+//! Agent preset 名册:随部署提供的预设 + 用户目录里的自定义预设。
 //!
 //! 与 dsh 的 `agent-presets` 同构,但 denia 的 preset 是**声明式**的:一份
-//! `preset.yml` 说明该组装给会话哪些工具、用什么 persona(denia 没有 Cordis
+//! `preset.yml` 说明该预设给会话哪些工具、用什么 persona(denia 没有 Cordis
 //! 插件子树可挂)。名册合并两个根:
 //!
 //! - 随附集合(内置代码,`trust: shipped`,不可写、不可删);
-//! - 用户根 `<denia home>/agent-presets/<id>/preset.yml`(可复制创作、可删)。
+//! - 用户根 `<denia home>/agent-presets/<id>/preset.yml`(可创建、可编辑、可删)。
 //!
-//! 创作即复制:调用方从不提交组装文本,复制某个既有 preset 的整个目录,
-//! 于是"一次复制不会授予名册尚未携带的任何能力"。文件就是编辑器——用户
-//! 用自己的编辑器改 `preset.yml`,名册监听文件变化后热刷新。
+//! 三条创作路径落到同一个目录格式:复制(`copy`)搬运既有目录,设置页手工
+//! 新建/编辑(`author`/`update`)与 `create_preset` 工具接受完整规范。文件
+//! 始终是事实源——用户也可以直接用自己的编辑器改 `preset.yml`,名册监听
+//! 文件变化后热刷新。
 //!
 //! 损坏的 preset 不会被隐藏:它以带原因的 broken 行出现,让人看得见该修
-//! 什么;会话端解析不到时回退到部署默认组装,不会因为一个坏文件发不出请求。
+//! 什么;会话端解析不到时回退到部署默认预设,不会因为一个坏文件发不出请求。
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -32,7 +33,7 @@ use crate::state::ServerEvent;
 
 /// 用户 preset 根目录名(位于 denia 数据目录下)。
 pub const DIR_NAME: &str = "agent-presets";
-/// 每个 preset 目录里的组装文件名。
+/// 每个 preset 目录里的声明文件名。
 pub const FILE_NAME: &str = "preset.yml";
 /// 承载"默认 preset"的用户设置命名空间。
 pub const SETTINGS_NS: &str = "agent-presets";
@@ -59,7 +60,7 @@ pub struct PresetRow {
     pub features: PresetFeatures,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub path: Option<String>,
-    /// 损坏原因;有值时该行无法组装,也不会被会话选中。
+    /// 损坏原因;有值时该行不可用,也不会被会话选中。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub broken: Option<String>,
 }
@@ -81,7 +82,7 @@ impl PresetRow {
         }
     }
 
-    /// 一条无法组装的记录:保留 id 与原因,让人看得见该修什么。
+    /// 一条不可用的记录:保留 id 与原因,让人看得见该修什么。
     fn broken(
         id: &str,
         trust: PresetTrust,
@@ -291,7 +292,7 @@ impl PresetStore {
         if let Err(error) = std::fs::create_dir_all(&target) {
             return Err(format!("创建 preset 目录失败:{error}"));
         }
-        // 来源目录存在时复制其内容(随附 preset 没有目录,只写一份组装文件)。
+        // 来源目录存在时复制其内容(随附 preset 没有目录,只写一份声明文件)。
         if let Some(source_path) = source.path.as_deref().map(PathBuf::from)
             && source_path.is_dir()
             && let Err(error) = copy_tree(&source_path, &target)
@@ -317,20 +318,11 @@ impl PresetStore {
             .ok_or_else(|| "复制后名册里找不到新 preset".to_string())
     }
 
-    /// 创作落盘:按 `create_preset` 工具提交的规范直接写一份新 preset。
-    ///
-    /// 与复制创作的两道拒绝同构:id 非法或已被占用都拒绝;写盘失败清理
-    /// 半成品目录。features/tools 的校验口径与解析手写文件一致(工具名
-    /// 对照部署名册,`mcp__` 前缀豁免)。
-    pub fn author(&self, spec: &PresetSpec) -> Result<PresetRow, String> {
-        let id = spec.id.trim();
-        if !is_valid_preset_id(id) {
-            return Err(format!(
-                "非法的 preset id:{id}(只允许小写字母、数字与连字符,且以字母数字开头)"
-            ));
-        }
-        let name = spec.name.trim();
-        if name.is_empty() {
+    /// 创建/编辑共用的规范校验:显示名非空;tools 白名单逐名对照部署名册
+    /// (空列表与空工具名都拒绝——白名单语义是"只留这些",不是"全不留";
+    /// 要全量工具集就省略字段)。
+    fn validate_spec(&self, spec: &PresetSpec) -> Result<(), String> {
+        if spec.name.trim().is_empty() {
             return Err("缺少显示名 name".to_string());
         }
         if let Some(tools) = &spec.tools {
@@ -342,6 +334,22 @@ impl PresetStore {
             }
             validate_tool_names(tools, self.known_tools.load_full().as_deref())?;
         }
+        Ok(())
+    }
+
+    /// 创作落盘:按规范(设置页编辑器或 `create_preset` 工具提交)写一份新 preset。
+    ///
+    /// 与复制创作的两道拒绝同构:id 非法或已被占用都拒绝;写盘失败清理
+    /// 半成品目录。features/tools 的校验口径与解析手写文件一致(工具名
+    /// 对照部署名册,`mcp__` 前缀豁免)。
+    pub fn author(&self, spec: &PresetSpec) -> Result<PresetRow, String> {
+        let id = spec.id.trim();
+        if !is_valid_preset_id(id) {
+            return Err(format!(
+                "非法的 preset id:{id}(只允许小写字母、数字与连字符,且以字母数字开头)"
+            ));
+        }
+        self.validate_spec(spec)?;
         if self.rows().iter().any(|row| row.id == id) {
             return Err(format!("preset id 已被占用:{id}"));
         }
@@ -357,16 +365,11 @@ impl PresetStore {
         }
         let preset = AgentPreset {
             id: id.to_string(),
-            name: name.to_string(),
+            name: spec.name.trim().to_string(),
             description: spec.description.trim().to_string(),
             trust: PresetTrust::User,
             tools: spec.tools.clone(),
-            persona: spec
-                .persona
-                .as_deref()
-                .map(str::trim_end)
-                .filter(|text| !text.trim().is_empty())
-                .map(str::to_string),
+            persona: normalize_persona(spec.persona.as_deref()),
             persona_complete: spec.persona_complete,
             features: spec.features,
             path: Some(target.display().to_string()),
@@ -381,6 +384,81 @@ impl PresetStore {
             .find(|row| row.id == id)
             .cloned()
             .ok_or_else(|| "创建后名册里找不到新 preset".to_string())
+    }
+
+    /// 覆盖编辑用户 preset:把规范写回 `preset.yml`,目录里的附带文件原样
+    /// 保留(只有声明文件是 denia 的写入目标,资产属于用户)。
+    ///
+    /// 拒绝面与 `author` 相反:这里要求目标已存在且可写——随附 preset 是
+    /// 对照基线,编辑它会让"哪些行为来自部署、哪些来自用户"失去锚点。
+    /// `spec.id` 被忽略:id 即目录名,以调用方给出的路径为准。
+    pub fn update(&self, id: &str, spec: &PresetSpec) -> Result<PresetRow, String> {
+        let id = id.trim();
+        if !is_valid_preset_id(id) {
+            return Err(format!(
+                "非法的 preset id:{id}(只允许小写字母、数字与连字符,且以字母数字开头)"
+            ));
+        }
+        let Some(row) = self.rows().iter().find(|row| row.id == id).cloned() else {
+            return Err(format!("preset 不存在:{id}"));
+        };
+        if !row.writable {
+            return Err(format!("随附 preset 不可编辑:{id}"));
+        }
+        self.validate_spec(spec)?;
+        let dir = self.root.join(id);
+        if !dir.is_dir() {
+            return Err(format!("preset 目录不存在:{}", dir.display()));
+        }
+        let preset = AgentPreset {
+            id: id.to_string(),
+            name: spec.name.trim().to_string(),
+            description: spec.description.trim().to_string(),
+            trust: PresetTrust::User,
+            tools: spec.tools.clone(),
+            persona: normalize_persona(spec.persona.as_deref()),
+            persona_complete: spec.persona_complete,
+            features: spec.features,
+            path: Some(dir.display().to_string()),
+        };
+        std::fs::write(dir.join(FILE_NAME), render_preset_file(&preset))
+            .map_err(|error| format!("写入 preset.yml 失败:{error}"))?;
+        self.refresh();
+        self.rows()
+            .iter()
+            .find(|row| row.id == id)
+            .cloned()
+            .ok_or_else(|| format!("保存后名册里找不到该 preset:{id}"))
+    }
+
+    /// 编辑器读取:把 preset 还原成程序化规范(随附与用户预设同形,复制
+    /// 与对照都靠它)。解析不出定义的 broken 行返回 Err,调用方按"不可
+    /// 编辑"处理。
+    pub fn spec(&self, id: &str) -> Result<PresetSpec, String> {
+        let preset = self
+            .resolve(id)
+            .ok_or_else(|| format!("preset 不存在或无法加载:{id}"))?;
+        Ok(PresetSpec {
+            id: preset.id,
+            name: preset.name,
+            description: preset.description,
+            persona: preset.persona,
+            persona_complete: preset.persona_complete,
+            tools: preset.tools,
+            features: preset.features,
+        })
+    }
+
+    /// 部署已注册的工具名(设置页编辑器的工具多选数据源),按名排序;
+    /// 尚未注入时为空——空列表不代表"没有工具",因此编辑器仍要允许手输
+    /// 未列出的名字(如 `mcp__` 前缀的动态工具)。
+    pub fn known_tool_names(&self) -> Vec<String> {
+        self.known_tools
+            .load()
+            .as_ref()
+            .as_ref()
+            .map(|names| names.iter().cloned().collect())
+            .unwrap_or_default()
     }
 
     /// 删除本地创作的 preset;随附 preset 拒绝删除。
@@ -542,17 +620,23 @@ fn parse_preset(
             .unwrap_or_default(),
         trust: PresetTrust::User,
         tools: file.tools,
-        persona: file
-            .persona
-            .map(|text| text.trim_end().to_string())
-            .filter(|text| !text.trim().is_empty()),
+        persona: normalize_persona(file.persona.as_deref()),
         persona_complete: file.persona_complete,
         features: file.features,
         path: None,
     })
 }
 
-/// 随附 preset 的等价组装文本(只读查看器渲染用)。
+/// persona 正文的规范化:去尾部空白;全空白视为"沿用部署 persona"
+/// (写回文件时整个省略该字段,而不是留一个空串)。
+fn normalize_persona(persona: Option<&str>) -> Option<String> {
+    persona
+        .map(str::trim_end)
+        .filter(|text| !text.trim().is_empty())
+        .map(str::to_string)
+}
+
+/// 随附 preset 的等价声明文本(只读查看器渲染用)。
 ///
 /// features 只渲染关闭的键:省略的键 = 开启,与解析语义一致,文件保持最小。
 fn render_preset_file(preset: &AgentPreset) -> String {
@@ -589,7 +673,7 @@ fn render_preset_file(preset: &AgentPreset) -> String {
             ("goal", features.goal),
             // 任务账本开关:与 `PresetFeatures` 的字段表一一对应 —— 少一行
             // 会让写回的 preset.yml 丢掉这个键,回读后默认开启(复制/创作的
-            // 组装会静默变形)。
+            // 预设会静默变形)。
             ("taskLedger", features.task_ledger),
             ("skills", features.skills),
             ("subagents", features.subagents),
@@ -996,6 +1080,153 @@ mod tests {
             std::fs::read_to_string(home.join(DIR_NAME).join("rich-copy").join("notes.md"))
                 .unwrap();
         assert_eq!(copied, "附带资料");
+        std::fs::remove_dir_all(&home).unwrap();
+    }
+
+    #[test]
+    fn update_rewrites_only_the_preset_file() {
+        let home = temp_home();
+        write_user_preset(&home, "rich", "name: 丰富\ndescription: 原始\n");
+        std::fs::write(
+            home.join(DIR_NAME).join("rich").join("notes.md"),
+            "附带资料",
+        )
+        .unwrap();
+        let store = open_store(&home);
+        store.set_known_tools(["bash".to_string(), "read_file".to_string()]);
+        let spec = PresetSpec {
+            // 路径 id 是身份:规范里的 id 必须被忽略,而不是悄悄搬家。
+            id: "ignored-on-purpose".to_string(),
+            name: "丰富 v2".to_string(),
+            description: "改过".to_string(),
+            persona: Some("你是新的。".to_string()),
+            persona_complete: false,
+            tools: Some(vec!["bash".to_string()]),
+            features: PresetFeatures {
+                goal: false,
+                ..PresetFeatures::default()
+            },
+        };
+        let row = store.update("rich", &spec).unwrap();
+        assert_eq!(row.name, "丰富 v2");
+        let preset = store.resolve("rich").unwrap();
+        assert_eq!(preset.tools.as_deref(), Some(&["bash".to_string()][..]));
+        assert!(!preset.features.goal);
+        assert_eq!(preset.persona.as_deref(), Some("你是新的。"));
+        assert!(store.resolve("ignored-on-purpose").is_none());
+        // 附带文件原样保留:编辑只重写 preset.yml。
+        let kept =
+            std::fs::read_to_string(home.join(DIR_NAME).join("rich").join("notes.md")).unwrap();
+        assert_eq!(kept, "附带资料");
+        std::fs::remove_dir_all(&home).unwrap();
+    }
+
+    #[test]
+    fn update_rejects_shipped_unknown_and_bad_specs() {
+        let home = temp_home();
+        write_user_preset(&home, "rich", "name: 丰富\n");
+        let store = open_store(&home);
+        let blank = PresetSpec {
+            name: " ".to_string(),
+            ..PresetSpec::default()
+        };
+        assert!(store.update("rich", &blank).is_err(), "空显示名要拒绝");
+        let rename = PresetSpec {
+            name: "改".to_string(),
+            ..PresetSpec::default()
+        };
+        assert!(
+            store.update(DEFAULT_PRESET_ID, &rename).is_err(),
+            "随附 preset 不可编辑"
+        );
+        assert!(store.update("nope", &rename).is_err(), "不存在的目标要报错");
+        assert!(
+            store.update("../escape", &rename).is_err(),
+            "非法 id 在拼路径前拒绝"
+        );
+        store.set_known_tools(["bash".to_string()]);
+        let ghost = PresetSpec {
+            name: "改".to_string(),
+            tools: Some(vec!["ghost_tool".to_string()]),
+            ..PresetSpec::default()
+        };
+        assert!(store.update("rich", &ghost).is_err(), "未知工具名要拒绝");
+        // 失败不落地:名册仍是原来的名字与工具面。
+        let preset = store.resolve("rich").unwrap();
+        assert_eq!(preset.name, "丰富");
+        assert!(preset.tools.is_none());
+        std::fs::remove_dir_all(&home).unwrap();
+    }
+
+    #[test]
+    fn update_allows_persona_to_fall_back_to_deployment() {
+        let home = temp_home();
+        write_user_preset(
+            &home,
+            "with-persona",
+            "name: 有提示词\npersona: |\n  你是甲。\n",
+        );
+        let store = open_store(&home);
+        // 全空白 persona = 沿用部署 persona:写回文件时整个省略该字段,
+        // 而不是留一个空串(空串会解析回 None,但文件会多一行噪音)。
+        let spec = PresetSpec {
+            name: "有提示词".to_string(),
+            persona: Some("   \n".to_string()),
+            ..PresetSpec::default()
+        };
+        store.update("with-persona", &spec).unwrap();
+        assert!(store.resolve("with-persona").unwrap().persona.is_none());
+        let text = store.describe_text("with-persona").unwrap();
+        assert!(
+            !text.contains("persona:"),
+            "沿用部署 persona 时不写字段:{text}"
+        );
+        std::fs::remove_dir_all(&home).unwrap();
+    }
+
+    #[test]
+    fn spec_round_trips_and_reports_unavailable_rows() {
+        let home = temp_home();
+        write_user_preset(
+            &home,
+            "round",
+            "name: 往返\ndescription: 说明\ntools:\n  - bash\nfeatures:\n  goal: false\npersona: |\n  你是往返者。\n",
+        );
+        let store = open_store(&home);
+        store.set_known_tools(["bash".to_string()]);
+        let spec = store.spec("round").unwrap();
+        assert_eq!(spec.id, "round");
+        assert_eq!(spec.name, "往返");
+        assert_eq!(spec.description, "说明");
+        assert_eq!(spec.tools.as_deref(), Some(&["bash".to_string()][..]));
+        assert!(!spec.features.goal);
+        assert!(spec.features.memory);
+        assert_eq!(spec.persona.as_deref(), Some("你是往返者。"));
+        // 随附 preset 也能读出规范(对照与"复制后编辑"都用它)。
+        let shipped = store.spec(DEFAULT_PRESET_ID).unwrap();
+        assert!(shipped.tools.is_none());
+        assert!(!shipped.persona_complete);
+        // 未知 id 与 broken 行解析不出规范:返回 Err,而不是半份数据。
+        assert!(store.spec("nope").is_err());
+        write_user_preset(&home, "broken", "features:\n  agentMd: false\n");
+        let store = open_store(&home);
+        assert!(store.spec("broken").is_err());
+        std::fs::remove_dir_all(&home).unwrap();
+    }
+
+    #[test]
+    fn known_tool_names_are_sorted_and_start_empty() {
+        let home = temp_home();
+        let store = open_store(&home);
+        assert!(
+            store.known_tool_names().is_empty(),
+            "未注入时不能给编辑器一份假名册"
+        );
+        store.set_known_tools(["read_file".to_string(), "bash".to_string()]);
+        assert_eq!(
+            store.known_tool_names(),
+            vec!["bash".to_string(), "read_file".to_string()]
+        );
         std::fs::remove_dir_all(&home).unwrap();
     }
 }

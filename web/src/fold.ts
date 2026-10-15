@@ -490,7 +490,7 @@ export function foldEvents(events: SessionEnvelope[], parentSessionId?: string):
       case 'step-end':
         break
       case 'agent-preset':
-        // 会话事实(会话运行哪份组装),不产生转录节点:当前值由会话流的
+        // 会话事实(会话运行哪份预设),不产生转录节点:当前值由会话流的
         // 订阅方单独取用,这里只保证 fold 不把它当未知事件截断后续。
         break
       case 'assistant-chunk': {

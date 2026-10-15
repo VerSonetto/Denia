@@ -62,7 +62,7 @@ pub enum SectionOrder {
     ToolBrowser,
     /// 提问工具(ask)的使用纪律段;仅在注册了 ask 工具时注入。
     ToolAsk,
-    /// 组装创作工具(create_preset)的纪律段;仅在注册了该工具的部署
+    /// 预设创作工具(create_preset)的纪律段;仅在注册了该工具的部署
     /// (控制台)注入,配合创造模式 preset 使用。
     ToolPreset,
     /// 会话目标工具(get_goal/update_goal)的纪律段;随 default_registry

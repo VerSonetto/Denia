@@ -1,6 +1,6 @@
 //! `create_preset` 工具:创造模式的落盘入口。
 //!
-//! 专用于在用户 preset 目录创建一份新组装(区别于 `copy` 复制创作:复制
+//! 专用于在用户 preset 目录创建一份新预设(区别于 `copy` 复制创作:复制
 //! 只搬运既有目录,本工具接受模型按 ask 收集结果组装的规范)。写入路径由
 //! 服务端固定(preset 根 + 合法 id),不受模型操纵;权限上按独立类别
 //! `PresetCreate` 判定。工具纪律(何时创建、与 ask 的配合、收尾义务)在
@@ -14,7 +14,7 @@ use denia_tools::{Tool, ToolContext, ToolOutput};
 
 use crate::agent_presets::PresetStore;
 
-const DESCRIPTION: &str = "在用户的 agent preset 目录创建一份新的组装(组装决定会话可用哪些工具、以什么角色工作)。创建成功后立即进入名册:设置里的 Agent 预设页与新会话的选择器都能看到它,新会话即可选用。参数:id 是目录名(小写字母、数字与连字符,字母或数字开头);tools 省略 = 全量工具集;features 里省略的键 = 开启,只写要关闭的键(可用键:agentsMd, memory, compaction, goal, skills, subagents, jobs, browser, ask, planMode);persona 省略 = 沿用部署 persona。已有同名 id 会被拒绝,不会覆盖。调用前先与用户确认组装摘要。";
+const DESCRIPTION: &str = "在用户的 agent preset 目录创建一份新的预设(预设决定会话可用哪些工具、以什么角色工作)。创建成功后立即进入名册:设置里的 Agent 预设页与新会话的选择器都能看到它,新会话即可选用。参数:id 是目录名(小写字母、数字与连字符,字母或数字开头);tools 省略 = 全量工具集;features 里省略的键 = 开启,只写要关闭的键(可用键:agentsMd, memory, compaction, goal, taskLedger, skills, subagents, jobs, browser, ask, planMode);persona 省略 = 沿用部署 persona。已有同名 id 会被拒绝,不会覆盖。调用前先与用户确认预设摘要。";
 
 /// 工具 schema(静态):注册进注册表(可执行)与系统提示词的 tools
 /// provider(模型可见)必须用同一份,两处同步是 server 部署路径的义务。
@@ -29,7 +29,7 @@ pub fn schema() -> denia_core::tool::ToolSchema {
             "properties": {
                 "id": {
                     "type": "string",
-                    "description": "新组装的 id,同时是目录名;小写字母/数字开头,只能含小写字母、数字与连字符。"
+                    "description": "新预设的 id,同时是目录名;小写字母/数字开头,只能含小写字母、数字与连字符。"
                 },
                 "name": {
                     "type": "string",
@@ -37,11 +37,11 @@ pub fn schema() -> denia_core::tool::ToolSchema {
                 },
                 "description": {
                     "type": "string",
-                    "description": "一句话说明该组装的用途(名册描述),用中文。"
+                    "description": "一句话说明该预设的用途(名册描述),用中文。"
                 },
                 "persona": {
                     "type": "string",
-                    "description": "该组装的 persona 正文;省略 = 沿用部署 persona。"
+                    "description": "该预设的 persona 正文;省略 = 沿用部署 persona。"
                 },
                 "personaComplete": {
                     "type": "boolean",
@@ -60,6 +60,7 @@ pub fn schema() -> denia_core::tool::ToolSchema {
                         "memory": {"type": "boolean", "description": "项目记忆(缺省开启)。"},
                         "compaction": {"type": "boolean", "description": "上下文压缩(缺省开启)。"},
                         "goal": {"type": "boolean", "description": "目标模式(缺省开启)。"},
+                        "taskLedger": {"type": "boolean", "description": "任务验证账本(缺省开启)。"},
                         "skills": {"type": "boolean", "description": "技能(缺省开启)。"},
                         "subagents": {"type": "boolean", "description": "子代理(缺省开启)。"},
                         "jobs": {"type": "boolean", "description": "后台任务(缺省开启)。"},
@@ -74,7 +75,7 @@ pub fn schema() -> denia_core::tool::ToolSchema {
     }
 }
 
-/// 组装创作工具:持有名册存储,执行即落盘 + 热刷新名册。
+/// 预设创作工具:持有名册存储,执行即落盘 + 热刷新名册。
 pub struct CreatePresetTool {
     schema: denia_core::tool::ToolSchema,
     store: Arc<PresetStore>,
@@ -112,7 +113,7 @@ impl Tool for CreatePresetTool {
             .map_err(|error| format!("create_preset 执行失败:{error}"));
         match result {
             Ok(Ok(row)) => ToolOutput::text(format!(
-                "已创建组装「{}」(id: {}),目录:{}。\n它已进入名册:设置 → Agent 预设,或新会话的组装选择器里即可选用;微调可直接编辑该目录下的 preset.yml,改动对后续步骤与新会话即时生效。",
+                "已创建预设「{}」(id: {}),目录:{}。\n它已进入名册:设置 → Agent 预设,或新会话的预设选择器里即可选用;微调可直接编辑该目录下的 preset.yml,改动对后续步骤与新会话即时生效。",
                 row.name,
                 row.id,
                 row.path.as_deref().unwrap_or("<未知目录>")

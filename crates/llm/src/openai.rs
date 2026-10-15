@@ -67,6 +67,12 @@ pub struct OpenAiProfile {
     /// 附加请求头;值支持 `${REF}` 引用凭据/环境变量(整段占位),每次请求前解析。
     #[serde(default)]
     pub headers: BTreeMap<String, String>,
+    /// 定向兼容:有的 chat-completions 网关把推理内联进 `content`(以 `</think>`
+    /// 收尾,开头的 `<think>` 被上游模板吃掉)而不是标准 `reasoning_content`。
+    /// 开启后翻译层会把首个 think 收尾标记之前的部分拆成推理块。默认关闭——
+    /// 只有确实内联推理的网关才需要,否则会给正常流式首字带来缓冲延迟。
+    #[serde(default)]
+    pub inline_think_tags: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -476,7 +482,10 @@ impl LlmAdapter for OpenAiCompatAdapter {
             )));
         }
         let translator: Box<dyn EventTranslator> = match protocol {
-            WireProtocol::ChatCompletions => Box::new(CompletionsStream::new(UsageStyle::OpenAi)),
+            WireProtocol::ChatCompletions => Box::new(CompletionsStream::with_inline_think_tags(
+                UsageStyle::OpenAi,
+                profile.inline_think_tags,
+            )),
             WireProtocol::Responses => Box::new(ResponsesStream::default()),
             WireProtocol::AnthropicMessages => Box::new(AnthropicStream::default()),
         };

@@ -1,6 +1,6 @@
 //! Agent preset 的组装应用:按会话选中的 preset 收窄工具面、persona 与功能开关。
 //!
-//! denia 的 agent 组装由三件事决定——工具面、persona、功能开关,preset 就是
+//! denia 的 agent 预设由三件事决定——工具面、persona、功能开关,preset 就是
 //! 这三者的声明(见 `denia_core::preset`)。本模块负责把它落到某个 step 的装
 //! 配上:
 //!
@@ -12,7 +12,7 @@
 //!   因此渲染期的变量插值(`{{cwd}}`/`{{model}}`)对 preset 同样有效;
 //!   `persona_complete` 让 persona 独占整个系统提示。
 //!
-//! preset 缺失(文件被删或损坏)不中断会话:回退到部署默认组装,由 server
+//! preset 缺失(文件被删或损坏)不中断会话:回退到部署默认预设,由 server
 //! 侧在名册里把该行标成 broken,让人看得见该修什么。
 
 use denia_core::preset::{AgentPreset, DEFAULT_PRESET_ID};
@@ -21,7 +21,7 @@ use denia_tools::prompt::LANGUAGE_RULE;
 
 use crate::turn::section_tools;
 
-/// preset 名册来源:server 按 id 提供组装声明,driver 在每个 step 装配时查。
+/// preset 名册来源:server 按 id 提供预设声明,driver 在每个 step 装配时查。
 pub trait AgentPresetSource: Send + Sync {
     /// 解析一个 preset id;未知名(已被删除或文件损坏)返回 `None`。
     fn resolve(&self, id: &str) -> Option<AgentPreset>;
@@ -61,7 +61,7 @@ pub(crate) fn apply_tool_blocklist(assembly: &mut PromptAssembly, blocked: &[&st
 /// 后台命令的入口是 `job_start`，因此"有没有 jobs 授权"必须决定这个参数
 /// 存不存在：只禁 `job_start` 工具、留下参数，等于给模型一条绕过通道
 /// （bash 工具会把 `run_in_background: true` 转成 `job_start` 调用）。
-/// 关闭 jobs 的组装与**未授予 `job_start` 的子代理**共用这一个函数，
+/// 关闭 jobs 的预设与**未授予 `job_start` 的子代理**共用这一个函数，
 /// 保证 schema 与执行器（`exec::reject_before_dispatch`）口径一致。
 pub(crate) fn strip_background_param(assembly: &mut PromptAssembly) {
     let Some(bash) = assembly

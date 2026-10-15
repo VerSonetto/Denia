@@ -645,7 +645,7 @@ fn message_recording_driver(
 }
 
 /// 会话日志里的 preset 落到本 step 的装配上:工具面与 persona 一起收窄,
-/// 而日志里的 id 从名册消失时回退到部署默认组装(不中断会话)。
+/// 而日志里的 id 从名册消失时回退到部署默认预设(不中断会话)。
 #[test]
 fn session_preset_narrows_the_step_assembly() {
     struct FakeSource(Vec<denia_core::preset::AgentPreset>);
@@ -734,7 +734,7 @@ fn session_preset_narrows_the_step_assembly() {
     let (tools, _) = assemble(&preset_driver, None);
     assert!(tools.iter().any(|schema| schema.name == "write_file"));
 
-    // 日志里的 id 已被删掉:回退默认组装,而不是让会话发不出请求。
+    // 日志里的 id 已被删掉:回退默认预设,而不是让会话发不出请求。
     let (tools, _) = assemble(&preset_driver, Some("gone"));
     assert!(tools.iter().any(|schema| schema.name == "write_file"));
 }

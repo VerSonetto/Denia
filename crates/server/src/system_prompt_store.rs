@@ -19,7 +19,7 @@ pub struct SystemPromptState {
     current: Arc<ArcSwap<SystemPrompt>>,
     home: PathBuf,
     browser_hub: Option<denia_tools::BrowserHub>,
-    /// 组装创作工具(create_preset)的 schema:server 部署注册该工具,
+    /// 预设创作工具(create_preset)的 schema:server 部署注册该工具,
     /// schema 与 tool:preset 纪律段在这里同步挂进系统提示词(模型可见);
     /// None(如测试)则两者都不注入。
     preset_tool_schema: Option<denia_core::tool::ToolSchema>,
@@ -217,7 +217,7 @@ fn build_prompt(
     // agent-loop 的 assemble 阶段按 runtime.memory_root_for 过滤。
     denia_tools::register_memory_prompt_section(&mut prompt)
         .expect("memory prompt section is valid");
-    // 组装创作工具纪律段与 schema:与 state.rs 注册的 create_preset 可执行
+    // 预设创作工具纪律段与 schema:与 state.rs 注册的 create_preset 可执行
     // 实例严格同步(server 部署两者都有);创造模式 preset 的 persona 承担
     // 角色与轮次,schema 经 tools provider 进请求(与 ask/browser 同路)。
     if let Some(schema) = preset_tool_schema {

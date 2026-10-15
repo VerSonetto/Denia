@@ -230,20 +230,20 @@ impl AgentPreset {
 /// 它是内置 creator preset 的部署 persona;具体工具纪律(`create_preset`
 /// 与 `ask` 的分工)在 `tool:preset` 纪律段,这里只写角色与轮次结构。
 pub const CREATOR_PERSONA: &str = "\
-你是 denia 的组装（preset）创作助手：引导用户创建一个新的 agent preset，并把可直接使用的 preset.yml 落盘。
+你是 denia 的预设（preset）创作助手：引导用户创建一个新的 agent preset，并把可直接使用的 preset.yml 落盘。
 
 工作方式：
 - 全程用 ask 工具与用户交互，每个问题都给出可点选的选项，能不让人打字就不让人打字。
 - 第一轮只问系统提示词形态：选项覆盖「常规通用 persona」与「按用途定制 persona」。用户选定制时，再用一次 ask 请用户用一两句话描述用途——这是唯一必须打字的地方，persona 由你据此起草。
-- 之后的轮次依次确认：工具面（给「全量工具 / 精简读写 / 仅 shell / 逐项挑选」等选项，逐项挑选时用多选列出常用工具）与功能开关（AGENTS.md 注入、项目记忆、压缩、目标、技能、子代理、后台任务、浏览器、提问、计划模式；给「全部开启 / 常用精简 / 极简全关 / 逐项挑选」等选项，逐项挑选时用多选）。
-- 收集齐后，把将要写入的组装摘要（名称、id、persona 要点、开启的工具与关闭的功能）用 ask 向用户确认，确认后调用 create_preset 落盘。
-- 创建成功后告诉用户：在设置的 Agent 预设页或新会话的选择器里即可选用；想进一步微调，直接编辑它的 preset.yml（把目录路径告诉用户）。
+- 之后的轮次依次确认：工具面（给「全量工具 / 精简读写 / 仅 shell / 逐项挑选」等选项，逐项挑选时用多选列出常用工具）与功能开关（AGENTS.md 注入、项目记忆、压缩、目标、任务验证账本、技能、子代理、后台任务、浏览器、提问、计划模式；给「全部开启 / 常用精简 / 极简全关 / 逐项挑选」等选项，逐项挑选时用多选）。
+- 收集齐后，把将要写入的预设摘要（名称、id、persona 要点、开启的工具与关闭的功能）用 ask 向用户确认，确认后调用 create_preset 落盘。
+- 创建成功后告诉用户：在设置的预设页或新会话的选择器里即可选用；想进一步微调，既可以在设置的预设页里点「编辑」改，也可以直接编辑它的 preset.yml（把目录路径告诉用户）。
 
 只做 preset 创作：不要在该会话里替用户执行其他编码任务。";
 
 /// 随部署提供的 preset 集合(按展示顺序)。
 ///
-/// 与 dsh 的随附集合同构:`standard` 是全量组装,`minimal` 是极简组装——
+/// 与 dsh 的随附集合同构:`standard` 是全量预设,`minimal` 是极简预设——
 /// persona 一句话独占、功能全关、只留 shell(对齐 dsh minimal 的
 /// `complete: true` + 持久 shell 形态);`creator` 让 Agent 引导用户创作
 /// 新 preset(ask 收集 + create_preset 落盘)。
@@ -264,7 +264,7 @@ pub fn builtin_presets() -> Vec<AgentPreset> {
         AgentPreset {
             id: "creator".to_string(),
             name: "创造模式".to_string(),
-            description: "让 Agent 帮你创建新组装:通过提问收集 persona、工具面与功能开关,直接落盘可用的 preset.yml。"
+            description: "让 Agent 帮你创建新预设:通过提问收集 persona、工具面与功能开关,直接落盘可用的 preset.yml。"
                 .to_string(),
             trust: PresetTrust::Shipped,
             tools: None,
@@ -300,7 +300,7 @@ pub struct PresetSpec {
     pub id: String,
     /// 显示名(名册与选择器展示)。
     pub name: String,
-    /// 一句话说明该组装的用途(名册描述)。
+    /// 一句话说明该预设的用途(名册描述)。
     #[serde(default)]
     pub description: String,
     /// persona 正文;`None` = 沿用部署 persona。

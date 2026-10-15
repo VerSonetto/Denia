@@ -927,7 +927,7 @@ impl Runtime {
         if live.session.header().subagent.is_some() {
             return Ok(());
         }
-        // 组装关闭 goal 功能时续跑一并关闭:装配层已摘 goal 工具与纪律段,
+        // 预设关闭 goal 功能时续跑一并关闭:装配层已摘 goal 工具与纪律段,
         // 注入管线已关状态通道,这里关掉续跑状态机,三个层面读同一份声明。
         if let Some(driver) = self.inner.driver.get().and_then(|weak| weak.upgrade())
             && !driver.features_for(&live.session).goal

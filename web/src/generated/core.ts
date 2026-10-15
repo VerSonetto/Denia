@@ -129,7 +129,7 @@ id: string,
  */
 name: string, 
 /**
- * 一句话说明该组装的用途(名册描述)。
+ * 一句话说明该预设的用途(名册描述)。
  */
 description: string, 
 /**

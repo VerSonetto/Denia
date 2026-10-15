@@ -1,6 +1,6 @@
 // Shared wire types are generated from Rust/serde; UI-only types stay here.
-import type { ModelSelection, LlmFailure, TokenUsage, StreamChunk, FinishReason, ContentBlock, TurnEndReason, TodoItem, AskOption, AskQuestion, AskAnswer, AskOutcome, AskResolution, PermissionMode, GoalStatus, GoalOp, SessionEnvelope, PresetFeatures, SessionHeader as WireSessionHeader, ImageData as UserMessageImage, SubagentProfile, SubagentProfileView, SubagentInlineSpec, ToolSelection, ModelChoice, PermissionCeiling, ProfileSource, ProfileWriteScope, ProfileColor, ProfileDiagnostic, SubagentCatalogEntry, SubagentDescriptor } from './generated/core'
-export type { ModelSelection, LlmFailure, TokenUsage, StreamChunk, FinishReason, ContentBlock, TurnEndReason, TodoItem, AskOption, AskQuestion, AskAnswer, AskOutcome, AskResolution, PermissionMode, GoalStatus, GoalOp, SessionEnvelope, PresetFeatures, UserMessageImage, SubagentProfile, SubagentProfileView, SubagentInlineSpec, ToolSelection, ModelChoice, PermissionCeiling, ProfileSource, ProfileWriteScope, ProfileColor, ProfileDiagnostic, SubagentCatalogEntry, SubagentDescriptor }
+import type { ModelSelection, LlmFailure, TokenUsage, StreamChunk, FinishReason, ContentBlock, TurnEndReason, TodoItem, AskOption, AskQuestion, AskAnswer, AskOutcome, AskResolution, PermissionMode, GoalStatus, GoalOp, SessionEnvelope, PresetFeatures, PresetSpec, SessionHeader as WireSessionHeader, ImageData as UserMessageImage, SubagentProfile, SubagentProfileView, SubagentInlineSpec, ToolSelection, ModelChoice, PermissionCeiling, ProfileSource, ProfileWriteScope, ProfileColor, ProfileDiagnostic, SubagentCatalogEntry, SubagentDescriptor } from './generated/core'
+export type { ModelSelection, LlmFailure, TokenUsage, StreamChunk, FinishReason, ContentBlock, TurnEndReason, TodoItem, AskOption, AskQuestion, AskAnswer, AskOutcome, AskResolution, PermissionMode, GoalStatus, GoalOp, SessionEnvelope, PresetFeatures, PresetSpec, UserMessageImage, SubagentProfile, SubagentProfileView, SubagentInlineSpec, ToolSelection, ModelChoice, PermissionCeiling, ProfileSource, ProfileWriteScope, ProfileColor, ProfileDiagnostic, SubagentCatalogEntry, SubagentDescriptor }
 export type SessionHeader = WireSessionHeader & { agent_preset?: string }
 
 /** 定义目录响应：有效项 + 被覆盖项 + 诊断（来源元数据由服务端生成）。 */
@@ -163,6 +163,8 @@ export interface OpenAiProfile {
   defaultMaxTokens?: number
   /** 附加请求头;值支持 `${REF}` 引用凭据/环境变量(整段占位)。 */
   headers?: Record<string, string>
+  /** 定向兼容:网关把推理内联进 content(以 `</think>` 收尾)时,开启后拆成推理块。默认关闭。 */
+  inlineThinkTags?: boolean
 }
 
 /** 输入框中的一张粘贴图片:预览 data URL 供缩略图,data 是发给模型的原始 base64。 */
@@ -263,10 +265,12 @@ export interface AgentPresetRow {
 export interface AgentPresetsView {
   /** 新建会话未显式指定时使用的默认 preset id。 */
   default: string
-  /** 是否显示模式选择器;关闭时空白会话固定用部署默认组装。 */
+  /** 是否显示模式选择器;关闭时空白会话固定用部署默认预设。 */
   modeSelection: boolean
   /** 用户 preset 根目录(展示与"用编辑器打开"用)。 */
   root: string
+  /** 部署已注册的工具名(排序后):编辑器工具多选的数据源。 */
+  tools: string[]
   presets: AgentPresetRow[]
 }
 

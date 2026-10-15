@@ -3,7 +3,8 @@ use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 
 use axum::body::{Body, Bytes};
 use axum::extract::Path as AxumPath;
-use axum::http::{Response, StatusCode, header};
+use axum::http::{HeaderMap, StatusCode, header};
+use axum::response::Response;
 use axum::routing::get;
 use axum::{Json, Router};
 use serde_json::{Value, json};
@@ -27,6 +28,15 @@ fn hash() -> String {
     format!("{:x}", Sha256::digest(PAYLOAD))
 }
 
+fn ranged(headers: &HeaderMap) -> bool {
+    headers.contains_key(header::RANGE)
+}
+
+/// 镜像路由把完整资产路径原样转发过来，末段文件名才是路由依据。
+fn tail(path: &str) -> &str {
+    path.rsplit('/').next().unwrap_or(path)
+}
+
 struct MockServer {
     updater: Arc<Updater>,
     releases: Arc<Mutex<Value>>,
@@ -34,7 +44,125 @@ struct MockServer {
     downloads: Arc<AtomicUsize>,
     mode: Arc<AtomicUsize>,
     check_error: Arc<AtomicUsize>,
+    assets: Assets,
     task: tokio::task::JoinHandle<()>,
+}
+
+/// 实际下载请求经过的路由（探测带 Range，不计入）。
+#[derive(Default)]
+struct Hits {
+    installers: Mutex<Vec<&'static str>>,
+    checksums: Mutex<Vec<&'static str>>,
+}
+
+/// 资产路由共用的状态：`kind` 决定该路由扮演官方直连还是某个镜像。
+#[derive(Clone)]
+struct Assets {
+    downloads: Arc<AtomicUsize>,
+    mode: Arc<AtomicUsize>,
+    hits: Arc<Hits>,
+    /// 官方直连的额外延迟，用来在测试里稳定地控制选源顺序。
+    direct_delay_ms: Arc<AtomicUsize>,
+}
+
+impl Assets {
+    fn record(&self, kind: usize, ranged: bool, name: &str) {
+        if name == "SHA256SUMS.txt" {
+            self.hits
+                .checksums
+                .lock()
+                .unwrap()
+                .push(source_label(kind));
+            return;
+        }
+        if ranged {
+            return;
+        }
+        self.downloads
+            .fetch_add(1, AtomicOrdering::SeqCst);
+        self.hits
+            .installers
+            .lock()
+            .unwrap()
+            .push(source_label(kind));
+    }
+
+    async fn respond(&self, kind: usize, ranged: bool, name: &str) -> Response {
+        self.record(kind, ranged, name);
+        if name == "SHA256SUMS.txt" {
+            return Response::new(Body::from(format!("{}  {TEST_NAME}\r\n", hash())));
+        }
+        if kind == MIRROR_BROKEN {
+            return Response::builder()
+                .status(StatusCode::SERVICE_UNAVAILABLE)
+                .body(Body::from("unavailable"))
+                .unwrap();
+        }
+        if kind == DIRECT && self.direct_delay_ms.load(AtomicOrdering::SeqCst) > 0 {
+            tokio::time::sleep(Duration::from_millis(
+                self.direct_delay_ms.load(AtomicOrdering::SeqCst) as u64,
+            ))
+            .await;
+        }
+        let mode = if kind == MIRROR_CORRUPT { 1 } else { self.mode.load(AtomicOrdering::SeqCst) };
+        match mode {
+            1 => {
+                let mut bad = PAYLOAD.to_vec();
+                bad[0] ^= 1;
+                Response::new(Body::from(bad))
+            }
+            2 => Response::new(Body::from(PAYLOAD[..2].to_vec())),
+            3 => Response::builder()
+                .status(StatusCode::SERVICE_UNAVAILABLE)
+                .body(Body::from("unavailable"))
+                .unwrap(),
+            4 => {
+                let chunks = futures::stream::iter([
+                    Ok::<_, std::io::Error>(Bytes::copy_from_slice(PAYLOAD)),
+                    Ok(Bytes::from_static(b"extra")),
+                ]);
+                Response::new(Body::from_stream(chunks))
+            }
+            5 => {
+                let chunks = futures::stream::iter([
+                    Ok(Bytes::copy_from_slice(&PAYLOAD[..2])),
+                    Err(std::io::Error::other("connection interrupted")),
+                ]);
+                Response::builder()
+                    .header(header::CONTENT_LENGTH, PAYLOAD.len())
+                    .body(Body::from_stream(chunks))
+                    .unwrap()
+            }
+            _ => Response::new(Body::from(PAYLOAD)),
+        }
+    }
+}
+
+const DIRECT: usize = 0;
+const MIRROR_OK: usize = 1;
+const MIRROR_BROKEN: usize = 2;
+const MIRROR_CORRUPT: usize = 3;
+
+fn source_label(kind: usize) -> &'static str {
+    match kind {
+        MIRROR_OK => "mock-ok",
+        MIRROR_BROKEN => "mock-broken",
+        MIRROR_CORRUPT => "mock-corrupt",
+        _ => "direct",
+    }
+}
+
+fn asset_route(assets: Assets, kind: usize) -> axum::routing::MethodRouter {
+    get(
+        move |AxumPath((_tag, name)): AxumPath<(String, String)>, headers: HeaderMap| {
+            let assets = assets.clone();
+            async move {
+                assets
+                    .respond(kind, headers.contains_key(header::RANGE), &name)
+                    .await
+            }
+        },
+    )
 }
 
 impl Drop for MockServer {
@@ -45,10 +173,24 @@ impl Drop for MockServer {
 
 impl MockServer {
     async fn start() -> Self {
+        Self::start_with(&[]).await
+    }
+
+    /// 把指定 mock 路由包装成镜像源启动；空列表就是官方直连的普通用例。
+    async fn start_with(kinds: &[usize]) -> Self {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let base: Url = format!("http://{}/", listener.local_addr().unwrap())
-            .parse()
-            .unwrap();
+        let local = format!("http://{}", listener.local_addr().unwrap());
+        let base: Url = format!("{local}/").parse().unwrap();
+        let mirrors = Arc::new(
+            kinds
+                .iter()
+                .map(|kind| Mirror {
+                    label: source_label(*kind).to_string(),
+                    prefix: format!("{local}{}", route_prefix(*kind)),
+                    redirect_hosts: Vec::new(),
+                })
+                .collect(),
+        );
         let source = Source::Mock(base);
         let releases = Arc::new(Mutex::new(json!([{
             "tag_name": TEST_TAG,
@@ -69,6 +211,12 @@ impl MockServer {
         let downloads = Arc::new(AtomicUsize::new(0));
         let mode = Arc::new(AtomicUsize::new(0));
         let check_error = Arc::new(AtomicUsize::new(0));
+        let assets = Assets {
+            downloads: downloads.clone(),
+            mode: mode.clone(),
+            hits: Arc::new(Hits::default()),
+            direct_delay_ms: Arc::new(AtomicUsize::new(0)),
+        };
         let app = Router::new()
             .route(
                 "/releases",
@@ -95,52 +243,37 @@ impl MockServer {
                     }
                 }),
             )
+            .route("/download/{tag}/{name}", asset_route(assets.clone(), DIRECT))
             .route(
-                "/download/{tag}/{name}",
+                "/mock-ok/{*path}",
                 get({
-                    let downloads = downloads.clone();
-                    let mode = mode.clone();
-                    move |AxumPath((_tag, name)): AxumPath<(String, String)>| {
-                        let downloads = downloads.clone();
-                        let mode = mode.clone();
+                    let assets = assets.clone();
+                    move |AxumPath(path): AxumPath<String>, headers: HeaderMap| {
+                        let assets = assets.clone();
+                        async move { assets.respond(MIRROR_OK, ranged(&headers), &tail(&path)).await }
+                    }
+                }),
+            )
+            .route(
+                "/mock-broken/{*path}",
+                get({
+                    let assets = assets.clone();
+                    move |AxumPath(path): AxumPath<String>, headers: HeaderMap| {
+                        let assets = assets.clone();
                         async move {
-                            if name == "SHA256SUMS.txt" {
-                                return Response::new(Body::from(format!(
-                                    "{}  {TEST_NAME}\r\n",
-                                    hash()
-                                )));
-                            }
-                            downloads.fetch_add(1, AtomicOrdering::SeqCst);
-                            match mode.load(AtomicOrdering::SeqCst) {
-                                1 => {
-                                    let mut bad = PAYLOAD.to_vec();
-                                    bad[0] ^= 1;
-                                    Response::new(Body::from(bad))
-                                }
-                                2 => Response::new(Body::from(PAYLOAD[..2].to_vec())),
-                                3 => Response::builder()
-                                    .status(StatusCode::SERVICE_UNAVAILABLE)
-                                    .body(Body::from("unavailable"))
-                                    .unwrap(),
-                                4 => {
-                                    let chunks = futures::stream::iter([
-                                        Ok::<_, std::io::Error>(Bytes::copy_from_slice(PAYLOAD)),
-                                        Ok(Bytes::from_static(b"extra")),
-                                    ]);
-                                    Response::new(Body::from_stream(chunks))
-                                }
-                                5 => {
-                                    let chunks = futures::stream::iter([
-                                        Ok(Bytes::copy_from_slice(&PAYLOAD[..2])),
-                                        Err(std::io::Error::other("connection interrupted")),
-                                    ]);
-                                    Response::builder()
-                                        .header(header::CONTENT_LENGTH, PAYLOAD.len())
-                                        .body(Body::from_stream(chunks))
-                                        .unwrap()
-                                }
-                                _ => Response::new(Body::from(PAYLOAD)),
-                            }
+                            assets.respond(MIRROR_BROKEN, ranged(&headers), &tail(&path)).await
+                        }
+                    }
+                }),
+            )
+            .route(
+                "/mock-corrupt/{*path}",
+                get({
+                    let assets = assets.clone();
+                    move |AxumPath(path): AxumPath<String>, headers: HeaderMap| {
+                        let assets = assets.clone();
+                        async move {
+                            assets.respond(MIRROR_CORRUPT, ranged(&headers), &tail(&path)).await
                         }
                     }
                 }),
@@ -155,12 +288,15 @@ impl MockServer {
             .build()
             .unwrap();
         Self {
-            updater: Arc::new(Updater::new(client, source)),
+            updater: Arc::new(
+                Updater::new(client, source, mirrors).with_origin(local.clone()),
+            ),
             releases,
             checks,
             downloads,
             mode,
             check_error,
+            assets,
             task,
         }
     }
@@ -180,6 +316,136 @@ impl MockServer {
             .unwrap()
             .clone()
     }
+
+    fn delay_direct(&self, millis: usize) {
+        self.assets
+            .direct_delay_ms
+            .store(millis, AtomicOrdering::SeqCst);
+    }
+
+    fn installers(&self) -> Vec<&'static str> {
+        self.assets.hits.installers.lock().unwrap().clone()
+    }
+
+    fn checksums(&self) -> Vec<&'static str> {
+        self.assets.hits.checksums.lock().unwrap().clone()
+    }
+
+    /// 走完“检查 → 选源 → 下载 → 校验 → 启动安装器”全流程。
+/// 安装器句柄保持到返回值析构，状态才会停在 Launched 而不是立刻回到 Idle。
+    #[cfg(windows)]
+    async fn install(&self) -> Installed {
+        let paths: Arc<Mutex<Vec<PathBuf>>> = Arc::new(Mutex::new(Vec::new()));
+        let seen = paths.clone();
+        let gate = WaiterGate::new();
+        let hold = gate.0.clone();
+        self.updater
+            .launcher
+            .set(Arc::new(move |path: &Path| {
+                seen.lock().unwrap().push(path.to_owned());
+                Ok(held_waiter(hold.clone()))
+            }))
+            .ok()
+            .unwrap();
+        let selected = self.selected().await;
+        assert!(selected.installer.is_some());
+        self.updater.install(TEST_VERSION).await.unwrap();
+        let status = terminal_status(&self.updater).await;
+        Installed {
+            paths: paths.lock().unwrap().clone(),
+            gate,
+            status,
+        }
+    }
+}
+
+/// 持有安装器句柄，让临时文件与已安装路径在整个用例里保持可用。
+struct Installed {
+    paths: Vec<PathBuf>,
+    #[allow(dead_code)]
+    gate: WaiterGate,
+    status: InstallStatus,
+}
+
+fn route_prefix(kind: usize) -> &'static str {
+    match kind {
+        MIRROR_OK => "/mock-ok",
+        MIRROR_BROKEN => "/mock-broken",
+        MIRROR_CORRUPT => "/mock-corrupt",
+        _ => "/download",
+    }
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn the_fastest_reachable_source_downloads_the_installer() {
+    let server = MockServer::start_with(&[MIRROR_OK]).await;
+    // 让官方直连的测速落后，排序才能稳定地先试镜像。
+    server.delay_direct(120);
+    let installed = server.install().await;
+    let status = installed.status.clone();
+    assert_eq!(status.phase, Phase::Launched, "{:?}", status.error);
+    assert_eq!(server.installers(), vec!["mock-ok"], "最快的源应当先被用上");
+    let source = status.source.unwrap();
+    assert_eq!(source.label, "mock-ok");
+    assert!(!source.direct);
+    assert!(source.latency_ms.is_some());
+    assert_eq!(std::fs::read(&installed.paths[0]).unwrap(), PAYLOAD);
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn a_source_returning_wrong_bytes_falls_back_to_the_next_one() {
+    let server = MockServer::start_with(&[MIRROR_CORRUPT]).await;
+    // 让官方直连的测速落后于坏镜像，否则排序根本不会先试它。
+    server.delay_direct(120);
+    let installed = server.install().await;
+    let status = installed.status.clone();
+    assert_eq!(status.phase, Phase::Launched, "{:?}", status.error);
+    assert_eq!(
+        server.installers(),
+        vec!["mock-corrupt", "direct"],
+        "坏源必须换下一个，而不是直接失败"
+    );
+    let source = status.source.unwrap();
+    assert!(source.direct, "最终应回落到 GitHub 官方直连");
+    assert_eq!(
+        std::fs::read(&installed.paths[0]).unwrap(),
+        PAYLOAD,
+        "换源后不得留下上一个源的字节"
+    );
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn sources_that_cannot_answer_are_left_for_last() {
+    let server = MockServer::start_with(&[MIRROR_BROKEN]).await;
+    let installed = server.install().await;
+    assert_eq!(installed.status.phase, Phase::Launched, "{:?}", installed.status.error);
+    assert_eq!(
+        server.installers(),
+        vec!["direct"],
+        "探测失败的源不该浪费一次真实下载"
+    );
+}
+
+#[tokio::test]
+async fn the_checksum_file_is_never_taken_from_a_mirror() {
+    let server = MockServer::start_with(&[MIRROR_OK]).await;
+    server.releases.lock().unwrap()[0]["assets"][0]["digest"] = Value::Null;
+    let selected = server.selected().await;
+    let (directory, path) = server
+        .updater
+        .download_and_verify(&selected, selected.installer.as_ref().unwrap())
+        .await
+        .unwrap();
+    assert_eq!(tokio::fs::read(path).await.unwrap(), PAYLOAD);
+    assert_eq!(
+        server.checksums(),
+        vec!["direct"],
+        "镜像能同时提供安装包与校验文件，校验值必须只认 GitHub"
+    );
+    drop(directory);
 }
 
 #[test]
@@ -368,7 +634,7 @@ async fn request_timeout_is_explained_without_leaking_urls() {
         .read_timeout(Duration::from_millis(5))
         .build()
         .unwrap();
-    let updater = Updater::new(client, server.updater.source.clone());
+    let updater = Updater::new(client, server.updater.source.clone(), Arc::new(Vec::new()));
     let error = updater.check(true, false).await.unwrap_err();
     assert!(error.contains("超时"), "{error}");
     assert!(!error.contains("http"));
@@ -532,7 +798,7 @@ async fn install_requires_checked_new_version_is_deduplicated_and_retries_after_
     let first_path = paths.lock().unwrap()[0].clone();
     assert!(tokio::fs::metadata(first_path).await.is_err());
     let retry = server.updater.install(TEST_VERSION).await.unwrap();
-    assert_eq!(retry.phase, Phase::Downloading);
+    assert_eq!(retry.phase, Phase::Selecting);
     assert!(retry.error.is_none());
     assert_eq!(
         terminal_status(&server.updater).await.phase,
@@ -623,7 +889,7 @@ async fn closing_installer_returns_to_idle_cleans_download_and_allows_reopening(
     assert!(tokio::fs::metadata(path).await.is_err());
     assert_eq!(
         server.updater.install(TEST_VERSION).await.unwrap().phase,
-        Phase::Downloading
+        Phase::Selecting
     );
     tokio::time::timeout(Duration::from_secs(3), async {
         while server.updater.status().phase != Phase::Idle {

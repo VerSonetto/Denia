@@ -4,7 +4,7 @@ import {
   type UpdateCheck, type UpdateStatus,
 } from './updateApi'
 
-export type { UpdateCheck, UpdateRelease, UpdateStatus } from './updateApi'
+export type { UpdateCheck, UpdateRelease, UpdateSource, UpdateStatus } from './updateApi'
 
 export interface UpdateState {
   check: UpdateCheck | null
@@ -15,7 +15,7 @@ export interface UpdateState {
 }
 
 const idleStatus: UpdateStatus = {
-  phase: 'idle', version: null, downloadedBytes: 0, totalBytes: null, error: null,
+  phase: 'idle', version: null, downloadedBytes: 0, totalBytes: null, error: null, source: null,
 }
 let state: UpdateState = {
   check: null, checking: false, checkError: null, status: idleStatus, dialogOpen: false,
@@ -53,7 +53,8 @@ export function useUpdateDialogOpen(): boolean {
 }
 
 export function isUpdateBusy(status: UpdateStatus): boolean {
-  return status.phase === 'downloading' || status.phase === 'verifying' || status.phase === 'launching'
+  return status.phase === 'selecting' || status.phase === 'downloading'
+    || status.phase === 'verifying' || status.phase === 'launching'
 }
 
 function clearPoll(): void {
@@ -154,7 +155,7 @@ export function installUpdate(): Promise<void> {
   const version = check.latest.version
   statusGeneration += 1
   update({
-    status: { phase: 'downloading', version, downloadedBytes: 0, totalBytes: check.latest.installer.size || null, error: null },
+    status: { phase: 'selecting', version, downloadedBytes: 0, totalBytes: check.latest.installer.size || null, error: null, source: null },
   })
   installFlight = (async () => {
     try {

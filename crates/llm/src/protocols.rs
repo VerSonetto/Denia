@@ -449,6 +449,16 @@ impl CompletionsStream {
             saw_done: false,
         }
     }
+
+    /// chat-completions 网关把推理内联进 `content` 时(见
+    /// [`StreamTranslator::with_inline_think_tags`]),开启前缀拆分。
+    pub fn with_inline_think_tags(style: UsageStyle, inline_think_tags: bool) -> Self {
+        Self {
+            inner: StreamTranslator::with_inline_think_tags(inline_think_tags),
+            style,
+            saw_done: false,
+        }
+    }
 }
 
 impl EventTranslator for CompletionsStream {

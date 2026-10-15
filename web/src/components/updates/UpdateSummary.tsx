@@ -1,6 +1,6 @@
 import { IconCheck, IconUpdate } from '../icons'
 import { isUpdateBusy, type UpdateState } from '../../updateStore'
-import { formatUpdateBytes, updateText } from './updateText'
+import { formatUpdateBytes, formatUpdateSource, updateText } from './updateText'
 
 export function UpdateSummary({ state }: { state: UpdateState }) {
   const text = updateText()
@@ -12,6 +12,7 @@ export function UpdateSummary({ state }: { state: UpdateState }) {
   if (busy || status.phase === 'launched' || status.phase === 'failed') {
     const phase = status.phase
     const messages = {
+      selecting: [text.selectingTitle, text.selectingDetail],
       downloading: [text.downloadingTitle, text.downloadingDetail],
       verifying: [text.verifyingTitle, text.verifyingDetail],
       launching: [text.launchingTitle, text.launchingDetail],
@@ -86,7 +87,13 @@ export function UpdateSummary({ state }: { state: UpdateState }) {
         </div>
       )}
       {(status.phase === 'verifying' || status.phase === 'launching') && (
-        <p className="update-stage-caption">{status.phase === 'verifying' ? text.verifying : text.launchPending}</p>
+        <p className="update-stage-caption">
+          {status.phase === 'verifying' ? text.verifying : text.launchPending}
+          {status.source && ` · ${formatUpdateSource(status.source)}`}
+        </p>
+      )}
+      {(status.phase === 'selecting' || status.phase === 'downloading') && (
+        <p className="update-stage-caption">{status.source ? formatUpdateSource(status.source) : text.sourceProbing}</p>
       )}
       {error && (
         <div className="update-error" role={busy ? 'status' : 'alert'}>

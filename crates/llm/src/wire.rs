@@ -349,9 +349,32 @@ pub struct StreamTranslator {
     usage: Option<TokenUsage>,
     finish: Option<FinishReason>,
     saw_block: bool,
+    /// 未决的 content 前缀。`Some` = 内联 think 兼容开启且还在攒(等 think 收尾标记
+    /// 或封顶);`None` = 未开启或已定性。见 [`Self::with_inline_think_tags`]。
+    lead: Option<String>,
 }
 
+/// 上游把推理内联进 content 时,答案前遗留的 think 收尾标记(opencode2api/zen 免费档
+/// 实测:开头的 `<think>` 缺失,只剩 `</think>`)。JSON 里该串会被转义成 `\u003c/think\u003e`,
+/// 但 SSE 帧解码后就是普通文本。
+const INLINE_THINK_CLOSE: &str = "</think>";
+
+/// 未决前缀的封顶。超过仍未见收尾标记,就认定「没有内联推理」,原样按正文放行——
+/// 避免给正常 provider 的流式首字带来无上限的缓冲延迟。
+const INLINE_THINK_LEAD_CAP: usize = 32 * 1024;
+
 impl StreamTranslator {
+    /// 开启内联 think 兼容:有的 chat-completions 网关把推理内联进 `content`
+    /// (以 `</think>` 收尾、开头的 `<think>` 被上游模板吃掉),而不是走标准
+    /// `reasoning_content`。开启后先把 content 前缀攒进 `lead`,遇到首个收尾标记
+    /// 再拆成推理块 + 正文块。定向兼容,默认关闭。
+    pub fn with_inline_think_tags(inline_think_tags: bool) -> Self {
+        Self {
+            lead: inline_think_tags.then(String::new),
+            ..Self::default()
+        }
+    }
+
     fn take_index(&mut self) -> u32 {
         let index = self.next_index;
         self.next_index += 1;
@@ -403,52 +426,20 @@ impl StreamTranslator {
 
     fn feed_delta(&mut self, delta: &WireDelta, out: &mut Vec<StreamChunk>) {
         if let Some(text) = delta.reasoning_content.as_deref().filter(|t| !t.is_empty()) {
-            let index = match &mut self.reasoning {
-                Some(block) => block.index,
-                None => {
-                    let index = self.take_index();
-                    self.saw_block = true;
-                    out.push(StreamChunk::BlockStart {
-                        index,
-                        block_type: BlockType::Reasoning,
-                    });
-                    self.reasoning = Some(OpenBlock {
-                        index,
-                        text: String::new(),
-                    });
-                    index
-                }
-            };
-            self.reasoning.as_mut().unwrap().text.push_str(text);
-            out.push(StreamChunk::ReasoningDelta {
-                index,
-                text: text.to_string(),
-            });
+            // 推理走了规范通道:此前若在攒内联前缀,那说明这个网关并不内联推理,
+            // 把它原样当正文放行并退出内联模式(避免误把正文当推理)。
+            self.flush_pending_lead_as_text(out);
+            self.push_reasoning(text, out);
         }
         if let Some(text) = delta.content.as_deref().filter(|t| !t.is_empty()) {
-            let index = match &mut self.text {
-                Some(block) => block.index,
-                None => {
-                    let index = self.take_index();
-                    self.saw_block = true;
-                    out.push(StreamChunk::BlockStart {
-                        index,
-                        block_type: BlockType::Text,
-                    });
-                    self.text = Some(OpenBlock {
-                        index,
-                        text: String::new(),
-                    });
-                    index
-                }
-            };
-            self.text.as_mut().unwrap().text.push_str(text);
-            out.push(StreamChunk::TextDelta {
-                index,
-                text: text.to_string(),
-            });
+            if self.lead.is_some() {
+                self.push_lead(text, out);
+            } else {
+                self.push_text(text, out);
+            }
         }
         if let Some(tool_calls) = &delta.tool_calls {
+            self.flush_pending_lead_as_text(out);
             for wire_call in tool_calls {
                 let wire_index = self.resolve_wire_index(wire_call);
                 if !self.tool_calls.contains_key(&wire_index) {
@@ -496,10 +487,98 @@ impl StreamTranslator {
         }
     }
 
+    /// 打开(或复用)推理块并追加一段推理文本。
+    fn push_reasoning(&mut self, text: &str, out: &mut Vec<StreamChunk>) {
+        let index = match &mut self.reasoning {
+            Some(block) => block.index,
+            None => {
+                let index = self.take_index();
+                self.saw_block = true;
+                out.push(StreamChunk::BlockStart {
+                    index,
+                    block_type: BlockType::Reasoning,
+                });
+                self.reasoning = Some(OpenBlock {
+                    index,
+                    text: String::new(),
+                });
+                index
+            }
+        };
+        self.reasoning.as_mut().unwrap().text.push_str(text);
+        out.push(StreamChunk::ReasoningDelta {
+            index,
+            text: text.to_string(),
+        });
+    }
+
+    /// 打开(或复用)正文块并追加一段文本。
+    fn push_text(&mut self, text: &str, out: &mut Vec<StreamChunk>) {
+        let index = match &mut self.text {
+            Some(block) => block.index,
+            None => {
+                let index = self.take_index();
+                self.saw_block = true;
+                out.push(StreamChunk::BlockStart {
+                    index,
+                    block_type: BlockType::Text,
+                });
+                self.text = Some(OpenBlock {
+                    index,
+                    text: String::new(),
+                });
+                index
+            }
+        };
+        self.text.as_mut().unwrap().text.push_str(text);
+        out.push(StreamChunk::TextDelta {
+            index,
+            text: text.to_string(),
+        });
+    }
+
+    /// 内联 think 兼容:把 content 先攒进 `lead`,直到看见 think 收尾标记
+    /// (标记前是推理、标记后是正文),或超过封顶/始终没有标记(整段就是正文)。
+    /// 标记可能被切在两帧之间,所以是按累计缓冲查找,而非逐帧匹配。
+    fn push_lead(&mut self, text: &str, out: &mut Vec<StreamChunk>) {
+        let buffer = match self.lead.as_mut() {
+            Some(buffer) => buffer,
+            None => return,
+        };
+        buffer.push_str(text);
+        let outcome = match buffer.find(INLINE_THINK_CLOSE) {
+            Some(pos) => Some((
+                buffer[..pos].to_string(),
+                buffer[pos + INLINE_THINK_CLOSE.len()..].to_string(),
+            )),
+            None if buffer.len() > INLINE_THINK_LEAD_CAP => {
+                Some((String::new(), std::mem::take(buffer)))
+            }
+            None => None,
+        };
+        if let Some((head, rest)) = outcome {
+            self.lead = None;
+            if !head.is_empty() {
+                self.push_reasoning(&head, out);
+            }
+            if !rest.is_empty() {
+                self.push_text(&rest, out);
+            }
+        }
+    }
+
+    /// 结束内联判定:把还没定性的前缀原样当正文放行。
+    fn flush_pending_lead_as_text(&mut self, out: &mut Vec<StreamChunk>) {
+        if let Some(pending) = self.lead.take().filter(|pending| !pending.is_empty()) {
+            self.push_text(&pending, out);
+        }
+    }
+
     /// Closes every open block, then emits usage and finish. A `stop` finish
     /// with zero blocks is the `EMPTY_RESPONSE` error.
     pub fn finalize(&mut self) -> Vec<StreamChunk> {
         let mut out = Vec::new();
+        self.flush_pending_lead_as_text(&mut out);
         if let Some(block) = self.reasoning.take() {
             out.push(StreamChunk::BlockEnd {
                 index: block.index,
@@ -551,6 +630,140 @@ mod tests {
 
     fn chunk(json: &str) -> WireChunk {
         serde_json::from_str(json).unwrap()
+    }
+
+    fn collect_reasoning(all: &[denia_core::stream::StreamChunk]) -> String {
+        all.iter()
+            .filter_map(|c| match c {
+                denia_core::stream::StreamChunk::ReasoningDelta { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn collect_text(all: &[denia_core::stream::StreamChunk]) -> String {
+        all.iter()
+            .filter_map(|c| match c {
+                denia_core::stream::StreamChunk::TextDelta { text, .. } => Some(text.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// 内联 think 兼容:网关把推理内联进 content(`</think>` 收尾、开头 `<think>` 缺失)
+    /// 时,首个收尾标记之前归推理块、之后归正文块;标记可能被切在两帧之间。
+    #[test]
+    fn inline_think_tags_split_reasoning_from_text() {
+        let mut translator = StreamTranslator::with_inline_think_tags(true);
+        let mut all = Vec::new();
+        all.extend(translator.feed(
+            &chunk(r#"{"choices":[{"delta":{"content":"The user just said hi.</"}}]}"#),
+            UsageStyle::OpenAi,
+        ));
+        all.extend(translator.feed(
+            &chunk(r#"{"choices":[{"delta":{"content":"think>Hi! How can I help?"}}]}"#),
+            UsageStyle::OpenAi,
+        ));
+        all.extend(translator.finalize());
+
+        assert_eq!(collect_reasoning(&all), "The user just said hi.");
+        assert_eq!(collect_text(&all), "Hi! How can I help?");
+        // 收尾标记是上游噪音,绝不能泄漏进任何块。
+        let leaked = format!("{}{}", collect_reasoning(&all), collect_text(&all));
+        assert!(!leaked.contains("</think>"), "{leaked}");
+    }
+
+    /// 默认关闭:同一个内联 content 原样作为正文(不认识该约定的 provider 行为不变)。
+    #[test]
+    fn inline_think_tags_off_keeps_content_verbatim() {
+        let mut translator = StreamTranslator::default();
+        let mut all = translator.feed(
+            &chunk(r#"{"choices":[{"delta":{"content":"reasoning</think>answer"}}]}"#),
+            UsageStyle::OpenAi,
+        );
+        all.extend(translator.finalize());
+
+        assert!(collect_reasoning(&all).is_empty());
+        assert_eq!(collect_text(&all), "reasoning</think>answer");
+    }
+
+    /// 开启兼容但没有收尾标记:整段就是正文(短流由 finalize 兜底放行)。
+    #[test]
+    fn inline_think_tags_without_marker_flush_as_text() {
+        let mut translator = StreamTranslator::with_inline_think_tags(true);
+        let mut all = translator.feed(
+            &chunk(r#"{"choices":[{"delta":{"content":"just a normal answer"}}]}"#),
+            UsageStyle::OpenAi,
+        );
+        all.extend(translator.finalize());
+
+        assert!(collect_reasoning(&all).is_empty());
+        assert_eq!(collect_text(&all), "just a normal answer");
+    }
+
+    /// 网关若走规范 reasoning_content 通道,内联缓冲必须让位,不得把正文误判为推理。
+    #[test]
+    fn inline_think_tags_yield_to_real_reasoning_channel() {
+        let mut translator = StreamTranslator::with_inline_think_tags(true);
+        let mut all = translator.feed(
+            &chunk(r#"{"choices":[{"delta":{"reasoning_content":"proper reasoning"}}]}"#),
+            UsageStyle::OpenAi,
+        );
+        all.extend(translator.feed(
+            &chunk(r#"{"choices":[{"delta":{"content":"answer"}}]}"#),
+            UsageStyle::OpenAi,
+        ));
+        all.extend(translator.finalize());
+
+        assert_eq!(collect_reasoning(&all), "proper reasoning");
+        assert_eq!(collect_text(&all), "answer");
+    }
+
+    /// 封顶兜底:未决前缀超过 32KB 仍未见到收尾标记时,整段按正文放行——
+    /// 不能为了等标记把正常流式的首字无限缓冲下去。
+    #[test]
+    fn inline_think_tags_lead_cap_flushes_as_text() {
+        let mut translator = StreamTranslator::with_inline_think_tags(true);
+        let first = "a".repeat(20 * 1024);
+        let second = "b".repeat(20 * 1024);
+        let frame = serde_json::json!({"choices":[{"delta":{"content":&first}}]}).to_string();
+        let mut all = translator.feed(&chunk(&frame), UsageStyle::OpenAi);
+        // 未超封顶:还在内联判定,什么都不发。
+        assert!(all.is_empty());
+        let frame = serde_json::json!({"choices":[{"delta":{"content":&second}}]}).to_string();
+        all.extend(translator.feed(&chunk(&frame), UsageStyle::OpenAi));
+        all.extend(translator.finalize());
+
+        assert!(collect_reasoning(&all).is_empty());
+        assert_eq!(collect_text(&all), format!("{first}{second}"));
+    }
+
+    /// 内联判定期间出现 tool_calls:未决前缀按正文放行,不阻塞工具调用。
+    #[test]
+    fn inline_think_tags_flush_on_tool_calls() {
+        let mut translator = StreamTranslator::with_inline_think_tags(true);
+        let mut all = translator.feed(
+            &chunk(r#"{"choices":[{"delta":{"content":"leftover prose"}}]}"#),
+            UsageStyle::OpenAi,
+        );
+        assert!(all.is_empty());
+        all.extend(translator.feed(
+            &chunk(
+                r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"edit","arguments":"{}"}}]}}]}"#,
+            ),
+            UsageStyle::OpenAi,
+        ));
+        all.extend(translator.finalize());
+
+        assert!(collect_reasoning(&all).is_empty());
+        assert_eq!(collect_text(&all), "leftover prose");
+        assert!(all.iter().any(|c| matches!(
+            c,
+            denia_core::stream::StreamChunk::BlockEnd {
+                block: denia_core::stream::ContentBlock::ToolCall { name, .. },
+                ..
+            } if name == "edit"
+        )));
     }
 
     #[test]

@@ -207,14 +207,14 @@ pub(crate) async fn refresh_background_injections(
     // 上一步之间压缩把注入块挤出模型面的话,先把基准对齐到当前表面:
     // 否则本轮剩下的 step 会拿模型已经看不到的文本判定"内容没变"。
     baselines.realign_if_compacted(session);
-    // 会话组装的功能开关:装配层按它摘工具与纪律段,这里按它关掉纯通道。
+    // 会话预设的功能开关:装配层按它摘工具与纪律段,这里按它关掉纯通道。
     // 两处读的是同一份声明,features 关闭的功能不会以任何形态泄漏给模型。
     let preset_features = driver.features_for(session);
 
     // ① 工作区指令(AGENTS.md):发现/预算/替换语义在 runtime 侧;
     // restore 的旧文本作为 previous 传入,由正文比较决定幂等与"取代"引导语。
-    // 组装关闭 AGENTS.md 注入时整条通道跳过(对齐 dsh:不带 agent-instructions
-    // 行的组装完全不注入)。
+    // 预设关闭 AGENTS.md 注入时整条通道跳过(对齐 dsh:不带 agent-instructions
+    // 行的预设完全不注入)。
     if preset_features.agents_md {
         match runtime
             .workspace_instructions(
@@ -268,7 +268,7 @@ pub(crate) async fn refresh_background_injections(
         baselines.capability_context = Some(context);
     }
 
-    // ③ 技能目录:仅当组装开启技能且 skill 工具对该会话可见(子代理按
+    // ③ 技能目录:仅当预设开启技能且 skill 工具对该会话可见(子代理按
     // 冻结授权同装配过滤);从未发布且为空则不发消息,整块替换语义同工作区指令。
     let skill_tool_visible = preset_features.skills && child_allows(session, "skill");
     if skill_tool_visible {
@@ -299,7 +299,7 @@ pub(crate) async fn refresh_background_injections(
         }
     }
 
-    // ④ 项目记忆索引:仅组装开启记忆的主代理会话注入(子代理不烧这份
+    // ④ 项目记忆索引:仅预设开启记忆的主代理会话注入(子代理不烧这份
     // token,提取子代理的素材由任务提示词自带);内容不变不重发,后台提取
     // 更新索引后下一个 step 自动带出最新版。
     // 选择层按本轮已触碰的路径与最新一条用户消息挑相关条目——同一输入
@@ -368,7 +368,7 @@ pub(crate) async fn refresh_background_injections(
         }
     }
 
-    // ⑥ 子代理派遣目录：只对能派遣的父会话注入（组装关闭 subagents 或本身是
+    // ⑥ 子代理派遣目录：只对能派遣的父会话注入（预设关闭 subagents 或本身是
     // 子代理时整条通道不出现——目录与派遣纪律同进退）。目录内容跟随 profile
     // revision 变化，整块替换语义同工作区指令。
     if preset_features.subagents && session.header().subagent.is_none() {

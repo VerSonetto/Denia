@@ -39,7 +39,7 @@ pub struct AppState {
     pub driver: Arc<SessionDriver>,
     pub workspaces: Arc<crate::workspace::WorkspaceRegistry>,
     pub system_prompt: Arc<crate::system_prompt_store::SystemPromptState>,
-    /// agent preset 名册:随附组装 + 用户自定义组装(会话按它组装工具面)。
+    /// agent preset 名册:随附预设 + 用户自定义预设(会话按它组装工具面)。
     pub agent_presets: Arc<crate::agent_presets::PresetStore>,
     /// 子代理定义仓库:文件、覆盖层、revision 与诊断的唯一所有者。
     pub subagent_profiles: Arc<crate::subagents::ProfileStore>,

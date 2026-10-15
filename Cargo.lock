@@ -1074,7 +1074,7 @@ dependencies = [
 
 [[package]]
 name = "denia-agent-loop"
-version = "0.4.6"
+version = "0.4.7"
 dependencies = [
  "arc-swap",
  "async-trait",
@@ -1096,7 +1096,7 @@ dependencies = [
 
 [[package]]
 name = "denia-browser"
-version = "0.4.6"
+version = "0.4.7"
 dependencies = [
  "base64 0.22.1",
  "chromiumoxide",
@@ -1112,7 +1112,7 @@ dependencies = [
 
 [[package]]
 name = "denia-core"
-version = "0.4.6"
+version = "0.4.7"
 dependencies = [
  "serde",
  "serde_json",
@@ -1123,7 +1123,7 @@ dependencies = [
 
 [[package]]
 name = "denia-credentials"
-version = "0.4.6"
+version = "0.4.7"
 dependencies = [
  "serde",
  "serde_json",
@@ -1135,7 +1135,7 @@ dependencies = [
 
 [[package]]
 name = "denia-desktop"
-version = "0.4.6"
+version = "0.4.7"
 dependencies = [
  "denia-server",
  "rfd",
@@ -1151,7 +1151,7 @@ dependencies = [
 
 [[package]]
 name = "denia-llm"
-version = "0.4.6"
+version = "0.4.7"
 dependencies = [
  "async-trait",
  "denia-core",
@@ -1171,7 +1171,7 @@ dependencies = [
 
 [[package]]
 name = "denia-mcp"
-version = "0.4.6"
+version = "0.4.7"
 dependencies = [
  "arc-swap",
  "async-trait",
@@ -1188,7 +1188,7 @@ dependencies = [
 
 [[package]]
 name = "denia-server"
-version = "0.4.6"
+version = "0.4.7"
 dependencies = [
  "arc-swap",
  "async-trait",
@@ -1236,7 +1236,7 @@ dependencies = [
 
 [[package]]
 name = "denia-session"
-version = "0.4.6"
+version = "0.4.7"
 dependencies = [
  "denia-core",
  "denia-token-meter",
@@ -1248,7 +1248,7 @@ dependencies = [
 
 [[package]]
 name = "denia-settings"
-version = "0.4.6"
+version = "0.4.7"
 dependencies = [
  "serde",
  "serde_json",
@@ -1260,7 +1260,7 @@ dependencies = [
 
 [[package]]
 name = "denia-system-prompt"
-version = "0.4.6"
+version = "0.4.7"
 dependencies = [
  "denia-core",
  "serde_json",
@@ -1268,7 +1268,7 @@ dependencies = [
 
 [[package]]
 name = "denia-terminal"
-version = "0.4.6"
+version = "0.4.7"
 dependencies = [
  "base64 0.22.1",
  "denia-core",
@@ -1286,7 +1286,7 @@ dependencies = [
 
 [[package]]
 name = "denia-token-meter"
-version = "0.4.6"
+version = "0.4.7"
 dependencies = [
  "denia-core",
  "serde",
@@ -1295,7 +1295,7 @@ dependencies = [
 
 [[package]]
 name = "denia-tools"
-version = "0.4.6"
+version = "0.4.7"
 dependencies = [
  "async-trait",
  "base64 0.22.1",

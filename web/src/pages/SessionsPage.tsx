@@ -494,8 +494,8 @@ export default function SessionsPage({
   )
   const [permissionBusy, setPermissionBusy] = useState(false)
   const [fullAccessConfirm, setFullAccessConfirm] = useState(false)
-  // agent preset(组装):名册来自服务端;当前值优先取用户在新会话页的选择,
-  // 其次取会话摘要里记的组装(列表接口携带),最后落到部署默认值。
+  // agent preset(预设):名册来自服务端;当前值优先取用户在新会话页的选择,
+  // 其次取会话摘要里记的预设(列表接口携带),最后落到部署默认值。
   // 会话一旦产出内容就没有改选入口——选择器只长在新会话页那一行。
   const [agentPresetCatalog, setAgentPresetCatalog] = useState<api.AgentPresetsView | null>(null)
   const [agentPresetChoice, setAgentPresetChoice] = useState<string | null>(null)
@@ -586,17 +586,17 @@ export default function SessionsPage({
     refreshAgentPresets()
     return api.subscribeEvents((type) => {
       if (type === 'agent-presets-updated') refreshAgentPresets()
-      // 默认组装写在设置里:设置一变,名册里的"默认"徽标与兜底值同步。
+      // 默认预设写在设置里:设置一变,名册里的"默认"徽标与兜底值同步。
       if (type === 'settings-updated') refreshAgentPresets()
     })
   }, [refreshAgentPresets])
 
-  /** 新会话页显示与提交用的组装 id:本地选择 > 会话摘要 > 部署默认值。 */
+  /** 新会话页显示与提交用的预设 id:本地选择 > 会话摘要 > 部署默认值。 */
   const agentPresetId =
     agentPresetChoice ?? activeSession?.agent_preset ?? agentPresetCatalog?.default ?? null
 
   /**
-   * 切换当前会话的组装(只有还没产出内容的会话可切;服务端拒绝时原样报错)。
+   * 切换当前会话的预设(只有还没产出内容的会话可切;服务端拒绝时原样报错)。
    * 与权限同一套路数:会话已存在就直接写进它的日志(刷新后仍在),还没建会话
    * 就先记本地,首条消息发出时随会话创建一起应用。
    */
@@ -616,7 +616,7 @@ export default function SessionsPage({
     [activeId, notify],
   )
 
-  // 换会话时本地选择归零:重新跟随那个会话自己记录的组装。
+  // 换会话时本地选择归零:重新跟随那个会话自己记录的预设。
   useEffect(() => {
     setAgentPresetChoice(null)
   }, [activeId])
@@ -1457,7 +1457,7 @@ export default function SessionsPage({
       if (wasHero && permission !== 'auto-edit') {
         await api.setSessionPermission(id, permission)
       }
-      // 欢迎页选过组装而那时还没有会话:现在补上,与权限同一处应用。
+      // 欢迎页选过预设而那时还没有会话:现在补上,与权限同一处应用。
       if (wasHero && agentPresetChoice) {
         await api.setSessionAgentPreset(id, agentPresetChoice)
       }
@@ -1829,7 +1829,7 @@ export default function SessionsPage({
         </span>
         <IconChevron size={11} />
       </button>
-      {/* 模式选择关闭时新会话固定用部署默认组装,选择器整个不渲染。 */}
+      {/* 模式选择关闭时新会话固定用部署默认预设,选择器整个不渲染。 */}
       {agentPresetCatalog && agentPresetCatalog.modeSelection && agentPresetId && (
         <AgentPresetSelector
           value={agentPresetId}
@@ -2254,7 +2254,7 @@ export default function SessionsPage({
     >
       {phase === 'active' && (
         <header className="session-header">
-          {/* 标题块:标题与组装标签同处一块,标签紧贴标题文字。
+          {/* 标题块:标题与预设标签同处一块,标签紧贴标题文字。
               这样头部动作区一个元素都不新增,标签也不会飘到最右。 */}
           <div className="session-title-block">
             <h1 className="session-title">

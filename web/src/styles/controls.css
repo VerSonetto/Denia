@@ -1526,7 +1526,7 @@ button.btn.form-action {
   gap: 6px;
 }
 
-/* 组装选择器:新会话页工作区行里的第二个 chip(与工作区 chip 同视觉)。
+/* 预设选择器:新会话页工作区行里的第二个 chip(与工作区 chip 同视觉)。
    菜单沿用权限选择器的列表视觉(带描述 + 勾选),定位改为向下弹。 */
 .preset-selector {
   position: relative;
@@ -1556,7 +1556,7 @@ button.btn.form-action {
   bottom: auto;
 }
 
-/* 组装选择器里的"默认"小徽标(与权限选择器共用菜单视觉)。 */
+/* 预设选择器里的"默认"小徽标(与权限选择器共用菜单视觉)。 */
 .preset-badge {
   font-size: 10px;
   line-height: 1;

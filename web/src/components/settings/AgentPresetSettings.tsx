@@ -1,22 +1,28 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import * as api from '../../api'
 import { t } from '../../i18n'
 import type { TranslationKey } from '../../i18n'
-import { IconCheck, IconPlus, IconTrash } from '../icons'
-import type { PresetFeatures } from '../../types'
+import { IconCheck, IconClose, IconPencil, IconPlus, IconTrash } from '../icons'
+import type { PresetFeatures, PresetSpec } from '../../types'
+import { ChipRadio, Field, TextInput } from '../llm/atoms/form'
+import { SetmActions, SetmBtn } from './setm'
 import styles from './AgentPresetSettings.module.css'
 
 /** 默认 preset 所在的设置命名空间(与服务端 `agent_presets::SETTINGS_NS` 同名)。 */
 const NS = 'agent-presets'
 
+/** 预设 id 的合法形状(与服务端校验一致):小写字母/数字开头,其后同类字符加连字符。 */
+const PRESET_ID_RE = /^[a-z0-9][a-z0-9-]*$/
+
 type Notify = (kind: 'ok' | 'err', text: string) => void
 
-/** 功能开关的展示顺序与短名(只列出关闭项)。 */
+/** 功能开关的展示顺序与短名(关闭项会在卡片上列出)。 */
 const FEATURE_KEYS: { key: keyof PresetFeatures; labelKey: TranslationKey }[] = [
   { key: 'agentsMd', labelKey: 'agentPresetFeatureAgentsMd' },
   { key: 'memory', labelKey: 'agentPresetFeatureMemory' },
   { key: 'compaction', labelKey: 'agentPresetFeatureCompaction' },
   { key: 'goal', labelKey: 'agentPresetFeatureGoal' },
+  { key: 'taskLedger', labelKey: 'agentPresetFeatureTaskLedger' },
   { key: 'skills', labelKey: 'agentPresetFeatureSkills' },
   { key: 'subagents', labelKey: 'agentPresetFeatureSubagents' },
   { key: 'jobs', labelKey: 'agentPresetFeatureJobs' },
@@ -24,6 +30,27 @@ const FEATURE_KEYS: { key: keyof PresetFeatures; labelKey: TranslationKey }[] = 
   { key: 'ask', labelKey: 'agentPresetFeatureAsk' },
   { key: 'planMode', labelKey: 'agentPresetFeaturePlanMode' },
 ]
+
+/** 全部开启的功能集合(服务端语义:省略的键 = 开启)。 */
+function allFeatures(): PresetFeatures {
+  return {
+    agentsMd: true,
+    memory: true,
+    compaction: true,
+    goal: true,
+    taskLedger: true,
+    skills: true,
+    subagents: true,
+    jobs: true,
+    browser: true,
+    ask: true,
+    planMode: true,
+  }
+}
+
+function withFeature(features: PresetFeatures, key: keyof PresetFeatures, on: boolean): PresetFeatures {
+  return { ...features, [key]: on }
+}
 
 /** 一个 preset 关闭的功能短名列表(服务端快照缺键时按开启处理)。 */
 function disabledFeatureLabels(features: PresetFeatures | undefined): string[] {
@@ -33,12 +60,60 @@ function disabledFeatureLabels(features: PresetFeatures | undefined): string[] {
   )
 }
 
+/** 编辑器草稿:白名单模式下 `tools` 就是完整名单(勾选项与追加项共用一份,天然去重)。 */
+interface PresetDraft {
+  id: string
+  name: string
+  description: string
+  persona: string
+  personaComplete: boolean
+  toolsMode: 'all' | 'allowlist'
+  tools: string[]
+  features: PresetFeatures
+}
+
+function blankDraft(): PresetDraft {
+  return {
+    id: '',
+    name: '',
+    description: '',
+    persona: '',
+    personaComplete: false,
+    toolsMode: 'all',
+    tools: [],
+    features: allFeatures(),
+  }
+}
+
+/** 服务端 spec → 草稿(`tools` 缺省 = 全量工具,空数组 = 空白名单)。 */
+function draftFromSpec(spec: PresetSpec): PresetDraft {
+  return {
+    id: spec.id,
+    name: spec.name ?? '',
+    description: spec.description ?? '',
+    persona: spec.persona ?? '',
+    personaComplete: spec.personaComplete === true,
+    toolsMode: spec.tools ? 'allowlist' : 'all',
+    tools: spec.tools ?? [],
+    features: { ...allFeatures(), ...spec.features },
+  }
+}
+
+interface EditorState {
+  mode: 'create' | 'edit'
+  /** 编辑目标 id(新建时为空)。 */
+  target: string
+  draft: PresetDraft
+  /** 每次打开自增:驱动"打开即滚入视野",也用来重建编辑器的本地状态。 */
+  seq: number
+}
+
 /**
- * Agent 组装(preset)设置分区:名册、默认值、复制创作、删除与只读查看。
+ * Agent 预设(preset)设置分区:名册、默认值、新建/编辑/删除与只读查看。
  *
- * 创作路径只有复制(抄 dsh):调用方从不提交组装文本,因此一次复制不会
- * 授予名册尚未携带的能力;改组装用用户自己的编辑器改 `preset.yml`。
- * 文件变化由服务端监听并广播,这里收到 `agent-presets-updated` 后重拉。
+ * 自定义预设除了直接改 `preset.yml`,也可以在这里由内置编辑器新建与覆盖
+ * 编辑(服务端按 `PresetSpec` 校验);随附预设只读。文件变化由服务端监听并
+ * 广播,这里收到 `agent-presets-updated` 后重拉。
  */
 export function AgentPresetSettings({ notify }: { notify: Notify }) {
   const [roster, setRoster] = useState<api.AgentPresetsView | null>(null)
@@ -46,11 +121,17 @@ export function AgentPresetSettings({ notify }: { notify: Notify }) {
   const [defaultId, setDefaultId] = useState('')
   const [modeSelection, setModeSelection] = useState<boolean | null>(null)
   const [busy, setBusy] = useState(false)
+  const [saving, setSaving] = useState(false)
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null)
   const [copyFrom, setCopyFrom] = useState<api.AgentPresetRow | null>(null)
   const [copyId, setCopyId] = useState('')
   const [copyName, setCopyName] = useState('')
   const [viewer, setViewer] = useState<{ id: string; text: string } | null>(null)
+  const [editor, setEditor] = useState<EditorState | null>(null)
+  const [editorError, setEditorError] = useState('')
+  const editorHost = useRef<HTMLDivElement | null>(null)
+  /** 编辑器打开次数:既是渲染 key,也是"打开即滚入视野"的触发值,单调递增。 */
+  const editorSeq = useRef(0)
 
   const load = useCallback(async () => {
     try {
@@ -80,6 +161,11 @@ export function AgentPresetSettings({ notify }: { notify: Notify }) {
       if (type === 'agent-presets-updated') void load()
     })
   }, [load])
+
+  // 编辑器在列表上方:打开时滚进视野,避免"点了编辑却没反应"的错觉。
+  useEffect(() => {
+    if (editor) editorHost.current?.scrollIntoView({ block: 'nearest', behavior: 'smooth' })
+  }, [editor?.seq])
 
   const setDefault = async (id: string) => {
     setBusy(true)
@@ -118,7 +204,87 @@ export function AgentPresetSettings({ notify }: { notify: Notify }) {
     }
   }
 
+  /** 编辑器、复制表单与只读查看器三者互斥:同一时刻只开一个。 */
+  const openEditor = (next: Omit<EditorState, 'seq'>) => {
+    setCopyFrom(null)
+    setViewer(null)
+    setEditorError('')
+    editorSeq.current += 1
+    setEditor({ ...next, seq: editorSeq.current })
+  }
+
+  const startCreate = () => {
+    openEditor({ mode: 'create', target: '', draft: blankDraft() })
+  }
+
+  const startEdit = async (preset: api.AgentPresetRow) => {
+    setBusy(true)
+    try {
+      const { spec } = await api.getAgentPreset(preset.id)
+      if (!spec) {
+        notify('err', t('agentPresetsSpecMissing'))
+        return
+      }
+      openEditor({ mode: 'edit', target: preset.id, draft: draftFromSpec(spec) })
+    } catch (error) {
+      notify('err', error instanceof Error ? error.message : String(error))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const closeEditor = () => {
+    setEditor(null)
+    setEditorError('')
+  }
+
+  const patchDraft = (patch: Partial<PresetDraft>) => {
+    setEditor((current) =>
+      current ? { ...current, draft: { ...current.draft, ...patch } } : current,
+    )
+  }
+
+  const submitEditor = async () => {
+    if (!editor) return
+    const { draft } = editor
+    const id = draft.id.trim()
+    const name = draft.name.trim()
+    if (!name || (editor.mode === 'create' && !PRESET_ID_RE.test(id))) return
+    // 空白名单服务端直接拒绝(它不表达"全量",那是切回全量模式的事):
+    // 在提交前拦住,不让用户吃一次无意义的 400。
+    if (draft.toolsMode === 'allowlist' && draft.tools.length === 0) return
+    const spec: PresetSpec = {
+      id,
+      name,
+      description: draft.description.trim(),
+      persona: draft.persona.trim() ? draft.persona : undefined,
+      personaComplete: draft.personaComplete,
+      tools: draft.toolsMode === 'allowlist' ? draft.tools : undefined,
+      features: draft.features,
+    }
+    setSaving(true)
+    setEditorError('')
+    try {
+      if (editor.mode === 'create') {
+        await api.createAgentPreset(spec)
+        notify('ok', t('agentPresetsCreated', { id }))
+      } else {
+        await api.updateAgentPreset(editor.target, spec)
+        notify('ok', t('agentPresetsSaved', { id: editor.target }))
+      }
+      setEditor(null)
+      await load()
+    } catch (error) {
+      // 服务端错误 message 可直接展示(非法 id / 未知工具名 / id 被占用)。
+      setEditorError(error instanceof Error ? error.message : String(error))
+    } finally {
+      setSaving(false)
+    }
+  }
+
   const startCopy = (preset: api.AgentPresetRow) => {
+    setEditor(null)
+    setEditorError('')
     setViewer(null)
     setCopyFrom(preset)
     setCopyId('')
@@ -162,6 +328,8 @@ export function AgentPresetSettings({ notify }: { notify: Notify }) {
   const openViewer = async (id: string) => {
     try {
       const { text } = await api.getAgentPreset(id)
+      setEditor(null)
+      setEditorError('')
       setCopyFrom(null)
       setViewer({ id, text })
     } catch (error) {
@@ -170,6 +338,7 @@ export function AgentPresetSettings({ notify }: { notify: Notify }) {
   }
 
   const presets = roster?.presets ?? []
+  const knownTools = roster?.tools ?? []
 
   return (
     <div className={styles.wrap}>
@@ -190,6 +359,34 @@ export function AgentPresetSettings({ notify }: { notify: Notify }) {
         <div className={styles.root}>
           <span className={styles.rootLabel}>{t('agentPresetsRoot')}</span>
           <code>{roster.root}</code>
+        </div>
+      )}
+
+      <div className={styles.listHead}>
+        <button
+          type="button"
+          className={styles.primary}
+          disabled={busy || editor != null}
+          onClick={startCreate}
+        >
+          <IconPlus size={13} />
+          {t('agentPresetsNew')}
+        </button>
+      </div>
+
+      {editor && (
+        <div ref={editorHost}>
+          <PresetEditor
+            key={editor.seq}
+            mode={editor.mode}
+            draft={editor.draft}
+            knownTools={knownTools}
+            saving={saving}
+            error={editorError}
+            onChange={patchDraft}
+            onSave={() => void submitEditor()}
+            onClose={closeEditor}
+          />
         </div>
       )}
 
@@ -261,6 +458,17 @@ export function AgentPresetSettings({ notify }: { notify: Notify }) {
                   >
                     <IconCheck size={13} />
                     {t('agentPresetsSetDefault')}
+                  </button>
+                )}
+                {!preset.broken && preset.writable && (
+                  <button
+                    type="button"
+                    className={styles.btn}
+                    disabled={busy || editor != null}
+                    onClick={() => void startEdit(preset)}
+                  >
+                    <IconPencil size={13} />
+                    {t('agentPresetsEdit')}
                   </button>
                 )}
                 <button
@@ -370,5 +578,230 @@ export function AgentPresetSettings({ notify }: { notify: Notify }) {
         </div>
       )}
     </div>
+  )
+}
+
+/**
+ * 内联预设编辑器:骨架与设置弹窗其它页同源(`setm-card` + `setm-card-body`),
+ * 字段用共享原子(Field/TextInput/ChipRadio),列表行仍走本页 module 样式。
+ */
+function PresetEditor({
+  mode,
+  draft,
+  knownTools,
+  saving,
+  error,
+  onChange,
+  onSave,
+  onClose,
+}: {
+  mode: 'create' | 'edit'
+  draft: PresetDraft
+  knownTools: string[]
+  saving: boolean
+  error: string
+  onChange: (patch: Partial<PresetDraft>) => void
+  onSave: () => void
+  onClose: () => void
+}) {
+  const [toolDraft, setToolDraft] = useState('')
+  const id = draft.id.trim()
+  const name = draft.name.trim()
+  const idInvalid = mode === 'create' && id.length > 0 && !PRESET_ID_RE.test(id)
+  const tools = draft.tools
+  // 空白名单不可保存:服务端把它当非法输入(全量工具集要切回"全量"模式)。
+  const emptyAllowlist = draft.toolsMode === 'allowlist' && tools.length === 0
+  const canSave =
+    name.length > 0 && (mode === 'edit' || PRESET_ID_RE.test(id)) && !emptyAllowlist
+  // 追加过的、或服务端带来的未知工具名单独成 chip;已知工具在复选框里表达。
+  const customTools = tools.filter((tool) => !knownTools.includes(tool))
+
+  const addTool = () => {
+    const next = toolDraft.trim()
+    if (!next) return
+    setToolDraft('')
+    if (tools.includes(next)) return
+    onChange({ tools: [...tools, next] })
+  }
+
+  const toggleTool = (name: string, on: boolean) => {
+    onChange({ tools: on ? [...tools, name] : tools.filter((tool) => tool !== name) })
+  }
+
+  return (
+    <section className="setm-card open" data-testid="agent-preset-editor">
+      <header className={styles.editorHead}>
+        <div className={styles.editorTitle}>
+          {mode === 'edit' ? t('agentPresetsEdit') : t('agentPresetsNew')}
+        </div>
+        <p className={styles.editorNote}>{t('agentPresetsEditorHint')}</p>
+      </header>
+      <div className="setm-card-body">
+        <div className="setm-form-grid two">
+          <Field
+            label={t('agentPresetsNameLabel')}
+            error={name.length > 0 ? null : t('agentPresetsNameRequired')}
+          >
+            <TextInput
+              value={draft.name}
+              onChange={(value) => onChange({ name: value })}
+              placeholder="My preset"
+            />
+          </Field>
+          {mode === 'create' ? (
+            <Field
+              label={t('agentPresetsIdLabel')}
+              hint={t('agentPresetsIdHint')}
+              error={idInvalid ? t('agentPresetsIdInvalid') : null}
+            >
+              <TextInput
+                value={draft.id}
+                mono
+                onChange={(value) => onChange({ id: value })}
+                placeholder="my-preset"
+              />
+            </Field>
+          ) : (
+            <Field label={t('agentPresetsIdLabel')} hint={t('agentPresetsIdImmutable')} error={null}>
+              <TextInput value={draft.id} mono disabled onChange={() => {}} />
+            </Field>
+          )}
+        </div>
+
+        <Field label={t('agentPresetsDescriptionLabel')} error={null}>
+          <TextInput
+            value={draft.description}
+            onChange={(value) => onChange({ description: value })}
+          />
+        </Field>
+
+        <Field label={t('agentPresetsPersonaLabel')} hint={t('agentPresetsPersonaHint')} error={null}>
+          <textarea
+            className={styles.textarea}
+            rows={6}
+            spellCheck={false}
+            value={draft.persona}
+            onChange={(event) => onChange({ persona: event.target.value })}
+          />
+        </Field>
+        <label className={styles.checkbox}>
+          <input
+            type="checkbox"
+            checked={draft.personaComplete}
+            onChange={(event) => onChange({ personaComplete: event.target.checked })}
+          />
+          <span>{t('agentPresetsPersonaComplete')}</span>
+        </label>
+
+        <div className="setm-field-label">{t('agentPresetsToolsTitle')}</div>
+        <ChipRadio
+          value={draft.toolsMode}
+          options={[
+            { id: 'all', label: t('agentPresetsToolsAll') },
+            { id: 'allowlist', label: t('agentPresetsToolsAllowlist') },
+          ]}
+          onChange={(value) => onChange({ toolsMode: value })}
+        />
+        {draft.toolsMode === 'allowlist' && (
+          <>
+            <p className={styles.hint}>
+              {t('agentPresetsToolsAllowlistHint')} ·{' '}
+              {t('agentPresetsToolsCount', { n: tools.length })}
+            </p>
+            {knownTools.length > 0 && (
+              <div className={styles.toolPanel}>
+                <div className={styles.toolGrid}>
+                  {knownTools.map((tool) => (
+                    <label key={tool} className={styles.checkbox}>
+                      <input
+                        type="checkbox"
+                        checked={tools.includes(tool)}
+                        onChange={(event) => toggleTool(tool, event.target.checked)}
+                      />
+                      <span className={styles.toolName}>{tool}</span>
+                    </label>
+                  ))}
+                </div>
+              </div>
+            )}
+            <div className={styles.addRow}>
+              <input
+                className={styles.toolInput}
+                value={toolDraft}
+                spellCheck={false}
+                aria-label={t('agentPresetsToolsPlaceholder')}
+                placeholder={t('agentPresetsToolsPlaceholder')}
+                onChange={(event) => setToolDraft(event.target.value)}
+                onKeyDown={(event) => {
+                  // IME 组合期间的回车是上屏,不是提交。
+                  if (event.nativeEvent.isComposing) return
+                  if (event.key === 'Enter') {
+                    event.preventDefault()
+                    addTool()
+                  }
+                }}
+              />
+              <SetmBtn small variant="ghost" disabled={!toolDraft.trim()} onClick={addTool}>
+                {t('agentPresetsToolsAdd')}
+              </SetmBtn>
+            </div>
+            {customTools.length > 0 && (
+              <div className={styles.chipRow}>
+                {customTools.map((tool) => (
+                  <span key={tool} className={styles.chip} title={t('agentPresetsToolsUnknown')}>
+                    {tool}
+                    <button
+                      type="button"
+                      className={styles.chipRemove}
+                      aria-label={t('agentPresetsToolsRemove')}
+                      title={t('agentPresetsToolsRemove')}
+                      onClick={() => onChange({ tools: tools.filter((item) => item !== tool) })}
+                    >
+                      <IconClose size={10} />
+                    </button>
+                  </span>
+                ))}
+              </div>
+            )}
+            {emptyAllowlist && (
+              <p className={styles.error} role="alert">
+                {t('agentPresetsToolsEmpty')}
+              </p>
+            )}
+          </>
+        )}
+
+        <div className="setm-field-label">{t('agentPresetsFeaturesTitle')}</div>
+        <p className={styles.hint}>{t('agentPresetsFeaturesHint')}</p>
+        <div className={styles.checkGrid}>
+          {FEATURE_KEYS.map(({ key, labelKey }) => (
+            <label key={key} className={styles.checkbox}>
+              <input
+                type="checkbox"
+                checked={draft.features[key]}
+                onChange={(event) =>
+                  onChange({ features: withFeature(draft.features, key, event.target.checked) })
+                }
+              />
+              <span>{t(labelKey)}</span>
+            </label>
+          ))}
+        </div>
+
+        {error && (
+          <p className={styles.error} role="alert">
+            {error}
+          </p>
+        )}
+        <SetmActions>
+          <SetmBtn disabled={saving || !canSave} onClick={onSave}>
+            {t('agentPresetsSave')}
+          </SetmBtn>
+          <SetmBtn variant="ghost" disabled={saving} onClick={onClose}>
+            {t('agentPresetsCancel')}
+          </SetmBtn>
+        </SetmActions>
+      </div>
+    </section>
   )
 }

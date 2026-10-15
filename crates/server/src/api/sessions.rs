@@ -120,8 +120,8 @@ async fn create_session(
             "workspaceId and cwd are mutually exclusive",
         ));
     }
-    // 会话运行的组装必须在创建时就定下来并写进日志:preset 决定模型看到的
-    // 工具 schema 与 persona,恢复会话时必须还原同一份组装。未指定则取
+    // 会话运行的预设必须在创建时就定下来并写进日志:preset 决定模型看到的
+    // 工具 schema 与 persona,恢复会话时必须还原同一份预设。未指定则取
     // 设置里的部署默认值(与 dsh 一致:header 记录生效值,不记"未指定")。
     let preset_id = match body
         .agent_preset
@@ -463,7 +463,7 @@ struct AgentPresetBody {
 
 /// 切换当前会话的 agent preset。
 ///
-/// 只有尚未产出内容的会话可以换组装:换掉工具面会让此前记录的、在该组装
+/// 只有尚未产出内容的会话可以换预设:换掉工具面会让此前记录的、在该预设
 /// 下产生的工具调用无工具可执行,因此一旦有过用户消息就一律拒绝
 /// (`agent-preset/locked`)。切换本身记入日志,恢复/分支照它重建。
 async fn set_session_agent_preset(
@@ -746,8 +746,8 @@ async fn fork_session(
             "workspace not found",
         ));
     }
-    // 分支继承源会话运行的组装:种子回放本已带上 agent-preset 事件,
-    // 但锚点在它之前(极端情况)时补写一条,保证子会话不会悄悄换组装。
+    // 分支继承源会话运行的预设:种子回放本已带上 agent-preset 事件,
+    // 但锚点在它之前(极端情况)时补写一条,保证子会话不会悄悄换预设。
     let parent_preset = live.session.agent_preset();
     if let Some(preset) = parent_preset
         && child.agent_preset().as_deref() != Some(preset.as_str())
@@ -1164,7 +1164,7 @@ mod tests {
         (denia_session::SessionStore::open(&root).unwrap(), root)
     }
 
-    /// 组装锁定口径:注入消息只发生在轮次之内,因此"有用户消息"既是
+    /// 预设锁定口径:注入消息只发生在轮次之内,因此"有用户消息"既是
     /// 充分条件也是必要条件;新会话在发出第一条消息前一直可以改选。
     #[test]
     fn blank_session_switches_until_it_produces_output() {
@@ -1172,7 +1172,7 @@ mod tests {
         let session = store.create(&root, true).unwrap();
 
         session.set_agent_preset("minimal").unwrap();
-        assert!(!session_has_output(&session), "改选组装本身不算产出内容");
+        assert!(!session_has_output(&session), "改选预设本身不算产出内容");
 
         session
             .append(denia_core::session::SessionEvent::UserMessage {

@@ -122,6 +122,7 @@ export function ProviderModal({
   const [headers, setHeaders] = useState<HeaderRow[]>(() =>
     Object.entries(initial?.headers ?? {}).map(([name, value]) => ({ name, value })),
   )
+  const [inlineThink, setInlineThink] = useState(initial?.inlineThinkTags ?? false)
   const [errors, setErrors] = useState<FormErrors>({})
   /** 新增时:路由 ID 失焦过 = 允许建网关。 */
   const [routeIdTouched, setRouteIdTouched] = useState(route !== null)
@@ -160,6 +161,8 @@ export function ProviderModal({
       .map((row) => [row.name.trim(), row.value] as const)
       .filter(([name]) => name !== '')
     if (headerEntries.length > 0) profile.headers = Object.fromEntries(headerEntries)
+    // 关闭时省略该字段(等同后端默认 false),开启时显式写入;关闭一次即回写清除。
+    if (inlineThink) profile.inlineThinkTags = true
     return { id, profile, modelsRaw: JSON.stringify(profile.models) }
   }, [
     createdId,
@@ -172,6 +175,7 @@ export function ProviderModal({
     ctxWindow,
     maxTokens,
     headers,
+    inlineThink,
   ])
 
   const fingerprint = payload ? `${payload.id}\u0000${JSON.stringify(payload.profile)}` : null
@@ -492,6 +496,17 @@ export function ProviderModal({
                     + {t('llm.field.headersAdd')}
                   </button>
                 </div>
+              </Field>
+              <Field label={t('llm.field.inlineThinkLabel')} hint={t('llm.field.inlineThinkHint')}>
+                <ChipRadio
+                  value={inlineThink ? 'on' : 'off'}
+                  ariaLabel={t('llm.field.inlineThinkLabel')}
+                  options={[
+                    { id: 'off', label: t('llm.field.inlineThinkOff') },
+                    { id: 'on', label: t('llm.field.inlineThinkOn') },
+                  ]}
+                  onChange={(value) => setInlineThink(value === 'on')}
+                />
               </Field>
               <div className={styles.gridTwo}>
                 <Field label={t('defaultContextWindowLabel')} error={errors.ctx}>

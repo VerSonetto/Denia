@@ -638,7 +638,7 @@ async fn run_microcompact_gate(driver: &SessionDriver, state: &TurnState, step: 
     if !settings.enabled {
         return;
     }
-    // 组装关闭压缩功能时,微压缩作为压缩的前置清理一并跳过。
+    // 预设关闭压缩功能时,微压缩作为压缩的前置清理一并跳过。
     if !driver.features_for(&state.session).compaction {
         return;
     }
@@ -829,7 +829,7 @@ async fn run_compaction_gate(
     tools: &[ToolSchema],
     forced: bool,
 ) -> bool {
-    // 组装关闭压缩功能时整个自动闸门跳过(手动 /compact 由 compact_manually
+    // 预设关闭压缩功能时整个自动闸门跳过(手动 /compact 由 compact_manually
     // 按同一开关拒绝)。
     if !driver.features_for(&state.session).compaction {
         return false;

@@ -20,12 +20,20 @@ export interface UpdateCheck {
   repositoryUrl: string
 }
 
+export interface UpdateSource {
+  label: string
+  host: string
+  direct: boolean
+  latencyMs: number | null
+}
+
 export interface UpdateStatus {
-  phase: 'idle' | 'downloading' | 'verifying' | 'launching' | 'launched' | 'failed'
+  phase: 'idle' | 'selecting' | 'downloading' | 'verifying' | 'launching' | 'launched' | 'failed'
   version: string | null
   downloadedBytes: number
   totalBytes: number | null
   error: string | null
+  source: UpdateSource | null
 }
 
 export class UpdateApiError extends Error {

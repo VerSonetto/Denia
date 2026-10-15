@@ -145,7 +145,7 @@ impl Session {
     }
 
     /// 当前会话的 agent preset(由事件 fold,O(1));`None` = 未指定,
-    /// 按部署默认值组装。
+    /// 落到部署默认预设。
     pub fn agent_preset(&self) -> Option<String> {
         self.inner
             .lock()
