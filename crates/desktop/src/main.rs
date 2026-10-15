@@ -202,6 +202,9 @@ fn open_window(handle: &tauri::AppHandle, size: (f64, f64)) -> tauri::Result<()>
     // Windows 默认只解码 ICO 首帧(16px)，任务栏缩放需使用高分辨率源图。
     #[cfg(windows)]
     let builder = builder.icon(tauri::include_image!("icons/128x128@2x.png"))?;
+    // Windows 的原生拖放处理会拦截 WebView 内的 HTML5 拖放（会话分屏、文件引用等）。
+    #[cfg(windows)]
+    let builder = builder.disable_drag_drop_handler();
     builder
         .title(WINDOW_TITLE)
         // 使用前端自绘标题栏，避免原生装饰与应用视觉体系割裂。
