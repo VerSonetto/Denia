@@ -13,6 +13,7 @@ import {
   IconArrowLeft,
   IconChevron,
   IconClose,
+  IconUpdate,
 } from './icons'
 import { IconSettingsGeneral, IconSettingsAgents, IconSettingsPresets, IconSettingsPrompt, IconSettingsModels, IconSettingsMemory, IconSettingsRemote, IconSettingsRuntime, IconSettingsAppearance } from './SettingsIcons'
 import { LlmPanel } from './llm/LlmPanel'
@@ -177,7 +178,7 @@ function paneDesc(tab: SettingsTab): string {
 }
 
 
-export function SettingsModal({ notify, onClose }: { notify: Notify; onClose: () => void }) {
+export function SettingsModal({ notify, onClose, onOpenVersion }: { notify: Notify; onClose: () => void; onOpenVersion: () => void }) {
   const [tab, setTab] = useState<SettingsTab>('general')
   const [loading, setLoading] = useState(true)
   /** 是否已完成过首拉:决定重拉时要不要重新亮骨架屏。 */
@@ -436,6 +437,14 @@ export function SettingsModal({ notify, onClose }: { notify: Notify; onClose: ()
                 )}
               </button>
             ))}
+            <button type="button" className="setm-nav-item" onClick={onOpenVersion}>
+              <span className="setm-nav-icon"><IconUpdate size={16} /></span>
+              <span className="setm-nav-copy">
+                <span className="setm-nav-label">{t('versionPageTitle')}</span>
+                <span className="setm-nav-desc">{t('versionPageDesc')}</span>
+              </span>
+              {isMobile && <span className="setm-nav-chev" aria-hidden="true"><IconChevron size={14} /></span>}
+            </button>
           </nav>
 
         </aside>

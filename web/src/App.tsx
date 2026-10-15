@@ -5,6 +5,8 @@ import { relativeTime } from './relativeTime'
 import { subscribeServerEvents, subscribeServerStatus } from './serverEvents'
 import SessionsPage from './pages/SessionsPage'
 import { DeniaWordmark } from './components/DeniaWordmark'
+import { UpdateBadge } from './components/updates/UpdateBadge'
+import { ensureStartupUpdateCheck, useUpdateDialogOpen } from './updateStore'
 import { loadComposer } from './composerMemory'
 import { readCollapsedChildren, writeCollapsedChildren, restoredSidebarSession } from './sidebarMemory'
 import { extensionTabFromHash, type ExtensionTab } from './extensionsRoute'
@@ -93,6 +95,8 @@ const LazySettingsModal = lazy(() =>
 )
 const LazyBrowserPanel = lazy(() => import('./components/BrowserPanel'))
 const LazyExtensionsPage = lazy(() => import('./pages/ExtensionsPage'))
+const LazyVersionPage = lazy(() => import('./pages/VersionPage'))
+const LazyUpdateDialog = lazy(() => import('./components/updates/UpdateDialog').then((module) => ({ default: module.UpdateDialog })))
 import { sessionDisplayTitle } from './sessionDisplay'
 import type { SessionSummary, WorkspaceRecord } from './types'
 
@@ -120,12 +124,23 @@ export default function App() {
   const runningIds = useRunningIds()
 
   const [settingsOpen, setSettingsOpen] = useState(false)
+  const [versionOpen, setVersionOpen] = useState(() => window.location.hash === '#version')
   const [extensionTab, setExtensionTab] = useState<ExtensionTab | null>(() => extensionTabFromHash(window.location.hash))
+  const updateDialogOpen = useUpdateDialogOpen()
+  const openVersion = useCallback(() => {
+    setSettingsOpen(false)
+    setExtensionTab(null)
+    setVersionOpen(true)
+    window.location.hash = 'version'
+  }, [])
+  const closeVersion = useCallback(() => setVersionOpen(false), [])
   const openExtensions = useCallback((tab: ExtensionTab = 'skills') => {
+    setVersionOpen(false)
     setExtensionTab(tab)
     window.location.hash = `extensions/${tab}`
   }, [])
   const leaveExtensions = useCallback(() => {
+    setVersionOpen(false)
     setExtensionTab(null)
   }, [])
   // 浏览器侧栏编排(会话绑定 / 收尾自动销毁 / 刷新恢复)全部在 hook 内。
@@ -391,6 +406,10 @@ export default function App() {
   // 来源给),不靠前端猜。
   const [localClient, setLocalClient] = useState(true)
 
+  useEffect(() => {
+    if (!gateActive) ensureStartupUpdateCheck()
+  }, [gateActive])
+
   const applyConsoleSettings = useCallback(() => {
     api
       .getSettings()
@@ -498,14 +517,20 @@ export default function App() {
       firstRenderRef.current = false
       return
     }
-    const target = extensionTab ? `#extensions/${extensionTab}` : activeId === null ? '' : `#s=${encodeURIComponent(activeId)}`
+    const target = versionOpen ? '#version' : extensionTab ? `#extensions/${extensionTab}` : activeId === null ? '' : `#s=${encodeURIComponent(activeId)}`
     if (window.location.hash !== target) {
       window.history.replaceState(null, '', target || window.location.pathname)
     }
-  }, [activeId, extensionTab])
+  }, [activeId, extensionTab, versionOpen])
 
   useEffect(() => {
     const onHashChange = () => {
+      const version = window.location.hash === '#version'
+      setVersionOpen(version)
+      if (version) {
+        setExtensionTab(null)
+        return
+      }
       const tab = extensionTabFromHash(window.location.hash)
       setExtensionTab(tab)
       if (tab) return
@@ -934,6 +959,7 @@ export default function App() {
 
   const openSession = useCallback(
     (id: string, wsId?: string) => {
+      setVersionOpen(false)
       setExtensionTab(null)
       // 手机上选中会话后自动收起抽屉 —— 否则用户点完还得再点一次遮罩
       // 才能看到刚打开的对话。
@@ -1058,6 +1084,7 @@ export default function App() {
             {/* 品牌区保留窗口拖动能力；折叠按钮由 drag.js 排除。 */}
             <div className="sidebar-logo" data-tauri-drag-region="deep">
               <DeniaWordmark />
+              <UpdateBadge />
               <button
                 type="button"
                 className="icon-btn sidebar-toggle"
@@ -1119,8 +1146,8 @@ export default function App() {
               <SidebarWorkspaces
                 sessions={sessions}
                 workspaces={workspaces}
-                activeId={extensionTab ? null : activeId}
-                secondaryId={extensionTab ? null : split?.secondaryId ?? null}
+                activeId={extensionTab || versionOpen ? null : activeId}
+                secondaryId={extensionTab || versionOpen ? null : split?.secondaryId ?? null}
                 runningIds={runningIds}
                 searchOpen={sidebarSearchOpen}
                 onSearchOpenChange={setSidebarSearchOpen}
@@ -1192,6 +1219,7 @@ export default function App() {
             >
               <IconSessionSearch size={16} />
             </button>
+            <UpdateBadge collapsed />
             <div className="rail-spacer" />
             <div className="rail-foot">
               <button
@@ -1236,7 +1264,11 @@ export default function App() {
             onDragLeave={onPaneDragLeave}
             onDrop={onPaneDrop}
           >
-            {extensionTab ? (
+            {versionOpen ? (
+              <Suspense fallback={<div className="extensions-loading" role="status">{t('loading')}</div>}>
+                <LazyVersionPage onBack={closeVersion} />
+              </Suspense>
+            ) : extensionTab ? (
               <Suspense fallback={<div className="extensions-loading" role="status">{t('loading')}</div>}>
                 <LazyExtensionsPage tab={extensionTab} cwd={paneWorkspacePath ?? undefined} onTabChange={openExtensions} notify={notify} />
               </Suspense>
@@ -1285,7 +1317,7 @@ export default function App() {
           {/* 侧边面板在手机上不渲染:390px 宽放不下「对话 + 面板」两列,
               面板会把自己挤成一条缝,还会把主列的输入区顶出屏幕。
               手机用户要终端/文件,用抽屉里的入口或直接开新会话更实际。 */}
-          {!isMobile && !extensionTab && (
+          {!isMobile && !extensionTab && !versionOpen && (
           <SidePane
             sessionId={activeId}
             state={pane.state}
@@ -1336,11 +1368,17 @@ export default function App() {
         <Suspense fallback={<div className="empty-hint">{t('loading')}</div>}>
           <LazySettingsModal
             notify={notify}
+            onOpenVersion={openVersion}
             onClose={() => {
               setSettingsOpen(false)
               applyConsoleSettings()
             }}
           />
+        </Suspense>
+      )}
+      {updateDialogOpen && (
+        <Suspense fallback={null}>
+          <LazyUpdateDialog onOpenVersion={openVersion} />
         </Suspense>
       )}
       {pickerOpen && (

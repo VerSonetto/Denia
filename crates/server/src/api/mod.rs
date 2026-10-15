@@ -21,6 +21,7 @@ mod skills;
 mod subagents;
 mod system_prompt;
 mod terminals;
+mod update;
 mod uploads;
 mod workspaces;
 
@@ -97,6 +98,7 @@ pub fn router() -> Router<Arc<AppState>> {
         .merge(remote::router())
         .merge(terminals::router())
         .merge(git::router())
+        .merge(update::router())
         // 放在最后:layer 只包裹此前已注册的路由,正好覆盖全部 API。
         .layer(compression_layer())
 }

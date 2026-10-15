@@ -46,6 +46,8 @@ rand = { workspace = true }
 qrcode = { workspace = true }
 if-addrs = { workspace = true }
 sha2 = "0.10"
+semver = "1"
+tempfile = "3"
 async-trait = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }

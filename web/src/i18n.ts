@@ -329,6 +329,8 @@ const zh = {
   notSet: '未设置',
   settingsModalTitle: '设置',
   settingsModalSubtitle: '管理 Denia 的全局偏好、模型与系统提示词',
+  versionPageTitle: '版本与更新',
+  versionPageDesc: '当前版本与 GitHub 发布',
   settingsBackToTabs: '返回设置分类',
   settingsTabGeneral: '通用',
   settingsTabPresets: '组装模式',
@@ -1581,6 +1583,8 @@ const en: typeof zh = {
   notSet: 'Not set',
   settingsModalTitle: 'Settings',
   settingsModalSubtitle: 'Manage global preferences, models, and the system prompt',
+  versionPageTitle: 'Version & updates',
+  versionPageDesc: 'Installed version and GitHub releases',
   settingsBackToTabs: 'Back to settings categories',
   settingsTabGeneral: 'General',
   settingsTabPresets: 'Agent modes',
@@ -2503,6 +2507,10 @@ let revision = 0
 /** 当前活跃语言版本:locale 变化时自增,供依赖 t() 的缓存(如 markdown chrome)失效。 */
 export function localeRevision(): number {
   return revision
+}
+
+export function getLocale(): LocaleId {
+  return active
 }
 
 /** Applies the console locale; called when settings load or change. */

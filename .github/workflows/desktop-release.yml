@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: '新 Release 标签（例如 v0.1.0）；留空则按运行编号生成'
+        description: '新 Release 标签（例如 v0.4.3-beta）；必须与本地版本一致，留空使用本地版本'
         required: false
         type: string
       prerelease:
@@ -42,9 +42,9 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: |
-          $tag = $env:RELEASE_TAG_INPUT.Trim()
-          if (-not $tag) { $tag = "desktop-$env:GITHUB_RUN_NUMBER-$env:GITHUB_RUN_ATTEMPT" }
-          if ($tag -notmatch '^[a-zA-Z0-9][a-zA-Z0-9._-]{0,100}$') { throw 'Tag must contain only letters, digits, dot, underscore or hyphen.' }
+          $tag = node .github/scripts/release-version.mjs
+          if ($LASTEXITCODE -ne 0) { throw 'Release versions are inconsistent. Synchronize Cargo.toml, desktop config, frontend package and Cargo.lock first.' }
+          $tag = $tag.Trim()
           $existing = gh api "repos/$env:GITHUB_REPOSITORY/git/matching-refs/tags/$tag"
           if ($LASTEXITCODE -ne 0) { throw 'Cannot check existing tags.' }
           if (($existing | ConvertFrom-Json) | Where-Object { $_.ref -eq "refs/tags/$tag" }) { throw "Tag already exists: $tag. Choose a new tag." }

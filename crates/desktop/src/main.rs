@@ -101,6 +101,11 @@ fn main() {
     tauri::Builder::default()
         .manage(gate.clone())
         .setup(move |app| {
+            #[cfg(windows)]
+            denia_server::update::register_installer_launcher(
+                denia_server::update::launch_windows_installer,
+            )
+            .map_err(std::io::Error::other)?;
             let handle = app.handle().clone();
             let options = HostOptions {
                 home: home.clone(),
@@ -192,7 +197,8 @@ fn main() {
 /// 先建窗口再等服务的顺序很重要:启动的几百毫秒里用户应当看到东西,
 /// 而不是"双击了没反应";失败时也才有窗口可以承载错误信息。
 fn open_window(handle: &tauri::AppHandle, size: (f64, f64)) -> tauri::Result<()> {
-    let builder = WebviewWindowBuilder::new(handle, MAIN_WINDOW, WebviewUrl::App("index.html".into()));
+    let builder =
+        WebviewWindowBuilder::new(handle, MAIN_WINDOW, WebviewUrl::App("index.html".into()));
     // Windows 默认只解码 ICO 首帧(16px)，任务栏缩放需使用高分辨率源图。
     #[cfg(windows)]
     let builder = builder.icon(tauri::include_image!("icons/128x128@2x.png"))?;
@@ -208,8 +214,93 @@ fn open_window(handle: &tauri::AppHandle, size: (f64, f64)) -> tauri::Result<()>
         .on_page_load(|_webview, payload| {
             tracing::info!(url = %payload.url(), "desktop window loaded page");
         })
+        .on_new_window(|url, _features| {
+            if is_external_web_url(&url) {
+                tauri::async_runtime::spawn_blocking(move || {
+                    if let Err(error) = open_external_web_url(&url) {
+                        tracing::warn!(%error, "could not open external link");
+                    }
+                });
+            }
+            tauri::webview::NewWindowResponse::Deny
+        })
         .build()?;
     Ok(())
+}
+
+fn is_external_web_url(url: &tauri::Url) -> bool {
+    matches!(url.scheme(), "http" | "https")
+        && url.host_str().is_some()
+        && url.username().is_empty()
+        && url.password().is_none()
+}
+
+#[cfg(windows)]
+fn open_external_web_url(url: &tauri::Url) -> Result<(), String> {
+    use windows_sys::Win32::UI::Shell::ShellExecuteW;
+    use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+
+    if !is_external_web_url(url) {
+        return Err("仅支持打开 HTTP/HTTPS 链接".to_string());
+    }
+    let file: Vec<u16> = url.as_str().encode_utf16().chain(Some(0)).collect();
+    let verb: Vec<u16> = "open\0".encode_utf16().collect();
+    let result = unsafe {
+        ShellExecuteW(
+            std::ptr::null_mut(),
+            verb.as_ptr(),
+            file.as_ptr(),
+            std::ptr::null(),
+            std::ptr::null(),
+            SW_SHOWNORMAL,
+        )
+    } as isize;
+    if result > 32 {
+        Ok(())
+    } else {
+        Err(format!("系统浏览器启动失败（错误 {result}）"))
+    }
+}
+
+#[cfg(not(windows))]
+fn open_external_web_url(url: &tauri::Url) -> Result<(), String> {
+    if !is_external_web_url(url) {
+        return Err("仅支持打开 HTTP/HTTPS 链接".to_string());
+    }
+    let command = if cfg!(target_os = "macos") {
+        "/usr/bin/open"
+    } else {
+        "xdg-open"
+    };
+    std::process::Command::new(command)
+        .arg(url.as_str())
+        .spawn()
+        .map(|_| ())
+        .map_err(|error| format!("系统浏览器启动失败: {error}"))
+}
+
+#[cfg(test)]
+mod external_link_tests {
+    use super::is_external_web_url;
+
+    #[test]
+    fn external_links_only_allow_web_protocols_without_credentials() {
+        for url in [
+            "https://github.com/VerSonetto/Denia",
+            "http://example.com/path?q=1",
+        ] {
+            assert!(is_external_web_url(&url.parse().unwrap()));
+        }
+        for url in [
+            "file:///C:/Windows/notepad.exe",
+            "javascript:alert(1)",
+            "data:text/plain,hi",
+            "mailto:test@example.com",
+            "https://user:password@example.com",
+        ] {
+            assert!(!is_external_web_url(&url.parse().unwrap()));
+        }
+    }
 }
 
 /// 服务就绪:把主窗口导航到真实控制台地址。
