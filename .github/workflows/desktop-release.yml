@@ -7,6 +7,10 @@ on:
         description: '新 Release 标签（例如 v0.4.3-beta）；必须与本地版本一致，留空使用本地版本'
         required: false
         type: string
+      release_notes:
+        description: '本次更新日志（Markdown，必填；gh 可用 -F release_notes=@文件路径 传入多行正文）'
+        required: true
+        type: string
       prerelease:
         description: '标记为预发布'
         required: true
@@ -36,12 +40,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Validate release tag
+      - name: Validate release inputs
         id: release
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
+          RELEASE_NOTES_INPUT: ${{ inputs.release_notes }}
         run: |
+          if ([string]::IsNullOrWhiteSpace($env:RELEASE_NOTES_INPUT)) { throw 'Release notes are required. Provide the actual changelog for this version.' }
           $tag = node .github/scripts/release-version.mjs
           if ($LASTEXITCODE -ne 0) { throw 'Release versions are inconsistent. Synchronize Cargo.toml, desktop config, frontend package and Cargo.lock first.' }
           $tag = $tag.Trim()
@@ -132,10 +138,14 @@ jobs:
           GH_REPO: ${{ github.repository }}
           RELEASE_TAG: ${{ needs.windows.outputs.tag }}
           RELEASE_PRERELEASE: ${{ inputs.prerelease }}
+          RELEASE_NOTES_INPUT: ${{ inputs.release_notes }}
         run: |
+          if ([string]::IsNullOrWhiteSpace($env:RELEASE_NOTES_INPUT)) { throw 'Release notes are required. Refusing to publish an empty changelog.' }
+          $notesPath = Join-Path $env:RUNNER_TEMP 'denia-release-notes.md'
+          [System.IO.File]::WriteAllText($notesPath, $env:RELEASE_NOTES_INPUT, [System.Text.UTF8Encoding]::new($false))
           $files = @(Get-ChildItem release -File | ForEach-Object { $_.FullName })
           if ($files.Count -ne 3) { throw 'Expected standalone EXE, NSIS setup EXE and SHA256SUMS.txt.' }
-          $arguments = @('release', 'create', $env:RELEASE_TAG, '--target', $env:GITHUB_SHA, '--title', "Denia $env:RELEASE_TAG", '--generate-notes', '--notes', 'Windows x64: download the standalone .exe to run directly, or the -setup.exe installer to install. The installer downloads WebView2 if needed (internet required); standalone users must install WebView2 separately. Both executables are unsigned; Windows may show a SmartScreen warning.')
+          $arguments = @('release', 'create', $env:RELEASE_TAG, '--target', $env:GITHUB_SHA, '--title', "Denia $env:RELEASE_TAG", '--notes-file', $notesPath)
           if ($env:RELEASE_PRERELEASE -eq 'true') { $arguments += '--prerelease' }
           & gh @arguments @files
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
