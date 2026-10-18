@@ -121,6 +121,9 @@ fn main() {
                 ),
             };
             let service_gate = gate.clone();
+            // 占位页是否真的画出来了。服务通常比 WebView2 初始化更快,
+            // 没有这个信号就会在页面还没加载时导航,用户看到的是白屏。
+            let page_loaded = Arc::new(AtomicBool::new(false));
 
             // 服务跑在 Tauri 的异步运行时上:与壳同进程同 runtime,服务一挂
             // 窗口就没有意义了,不需要独立 runtime 的生命周期管理。
@@ -129,7 +132,7 @@ fn main() {
                 // 反过来做(先等服务再建窗口)会让启动的几百毫秒里什么都不
                 // 显示,用户看到的是"双击了没反应";而失败时也没有窗口可以
                 // 承载错误信息 —— 那正是最需要看见原因的时候。
-                if let Err(error) = open_window(&handle, size) {
+                if let Err(error) = open_window(&handle, size, page_loaded.clone()) {
                     tracing::error!(%error, "failed to create window");
                     service_gate.mark_cleaned();
                     handle.exit(1);
@@ -140,6 +143,25 @@ fn main() {
                     Ok(host) => {
                         let addr = host.addr;
                         tracing::info!(%addr, home = %home.display(), "denia desktop serving");
+                        // 服务就绪 ≠ 启动页已画出来。等占位页加载完成(最多
+                        // 600ms,WebView2 初始化通常更快),再让页面收笔,
+                        // 最后才导航 —— 顺序反了,落款动画只会被截成一帧白屏。
+                        let deadline =
+                            std::time::Instant::now() + std::time::Duration::from_millis(600);
+                        while !page_loaded.load(Ordering::SeqCst)
+                            && std::time::Instant::now() < deadline
+                        {
+                            tokio::time::sleep(std::time::Duration::from_millis(16)).await;
+                        }
+                        if page_loaded.load(Ordering::SeqCst) {
+                            if let Some(window) = handle.get_webview_window(MAIN_WINDOW) {
+                                let _ = window.eval(
+                                    "window.__DENIA_FINISH__ && window.__DENIA_FINISH__()",
+                                );
+                            }
+                            // 等收笔:页面把剩余笔画压到 ~160ms,再留一点余量。
+                            tokio::time::sleep(std::time::Duration::from_millis(320)).await;
+                        }
                         if let Err(error) = navigate(&handle, addr.port()) {
                             tracing::error!(%error, "failed to load console");
                             fail(&handle, &format!("无法加载控制台:{error}"));
@@ -196,7 +218,11 @@ fn main() {
 ///
 /// 先建窗口再等服务的顺序很重要:启动的几百毫秒里用户应当看到东西,
 /// 而不是"双击了没反应";失败时也才有窗口可以承载错误信息。
-fn open_window(handle: &tauri::AppHandle, size: (f64, f64)) -> tauri::Result<()> {
+fn open_window(
+    handle: &tauri::AppHandle,
+    size: (f64, f64),
+    page_loaded: Arc<AtomicBool>,
+) -> tauri::Result<()> {
     let builder =
         WebviewWindowBuilder::new(handle, MAIN_WINDOW, WebviewUrl::App("index.html".into()));
     // Windows 默认只解码 ICO 首帧(16px)，任务栏缩放需使用高分辨率源图。
@@ -214,8 +240,18 @@ fn open_window(handle: &tauri::AppHandle, size: (f64, f64)) -> tauri::Result<()>
         .center()
         // 窗口最终停在哪一页是排查"白屏"时唯一有用的线索:占位页与真实控制台
         // 都叫 Denia,不看 URL 分不出是导航没发生还是控制台自己挂了。
-        .on_page_load(|_webview, payload| {
-            tracing::info!(url = %payload.url(), "desktop window loaded page");
+        .on_page_load(move |_webview, payload| {
+            let url = payload.url();
+            tracing::info!(url = %url, "desktop window loaded page");
+            // 只认内嵌占位页:about:blank 是 WebView2 的初始页,导航后的
+            // 控制台地址不该再被当成"启动页已就绪"。Windows 下 Tauri 的
+            // App URL 是 http://tauri.localhost/,不是 tauri:// scheme。
+            if url.scheme() == "tauri"
+                || url.host_str() == Some("tauri.localhost")
+                || url.as_str().contains("index.html")
+            {
+                page_loaded.store(true, Ordering::SeqCst);
+            }
         })
         .on_new_window(|url, _features| {
             if is_external_web_url(&url) {

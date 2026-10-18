@@ -1,60 +1,358 @@
 <!doctype html>
 <html lang="zh-CN">
-  <head>
-    <meta charset="UTF-8" />
-    <title>Denia</title>
-    <style>
-      /* 启动过渡页:服务绑定成功后窗口会导航到真实控制台,这一页只在启动的
-         几百毫秒里可见。刻意做得极简,避免用户把它当成"卡住了"。
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="color-scheme" content="dark light">
+<title>Denia</title>
+<style>
+  /* 启动过渡页:服务就绪前窗口停在这里。
+     设计=「墨迹」:纸感底 + 笔尖跟随的手写描边 + 落款式收笔。
+     同一个页面兼作启动失败兜底:壳注入 body[data-fatal] 后切到错误态。
+     走内嵌资源而不是 data: URL —— WebView2 不渲染 data: 顶层导航。 */
+  :root{
+    --paper:#f6f2ea; --ink:#17140f; --soft:#6b6357;
+    --error:#a3231b; --rule:rgba(23,20,15,.18);
+    --blot:rgba(23,20,15,.11);
+    --fiber:rgba(23,20,15,.02);
+    --vignette:rgba(23,20,15,.055);
+    --mono:"Cascadia Code",Consolas,"SF Mono",monospace;
+  }
+  @media (prefers-color-scheme: dark){
+    :root{
+      --paper:#121110; --ink:#ece7dc; --soft:#938b7e;
+      --error:#ff8f86; --rule:rgba(236,231,220,.18);
+      --blot:rgba(236,231,220,.075);
+      --fiber:rgba(236,231,220,.022);
+      --vignette:rgba(0,0,0,.28);
+    }
+  }
+  *{box-sizing:border-box}
+  html,body{height:100%}
+  body{
+    margin:0; background:var(--paper); color:var(--ink); overflow:hidden;
+    font-family:"Segoe UI","PingFang SC","Microsoft YaHei",system-ui,sans-serif;
+    display:grid; place-items:center; -webkit-font-smoothing:antialiased;
+  }
 
-         同一个页面兼作启动失败的兜底页:壳在页面加载前注入
-         `window.__DENIA_FATAL__`,有值就渲染错误而不是"正在启动"。
-         走内嵌资源而不是 data: URL —— 实测 WebView2 不渲染 data: 顶层导航,
-         那会让用户对着一片空白窗口猜发生了什么。 */
-      :root { color-scheme: dark light; }
-      body {
-        margin: 0;
-        height: 100vh;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        background: #0d0d0d;
-        color: #e8e8e8;
-        font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
-      }
-      .box { text-align: center; max-width: 42rem; padding: 2rem; }
-      .brand { font-size: 1.5rem; letter-spacing: 0.08em; opacity: 0.9; }
-      .hint { margin-top: 0.75rem; font-size: 0.85rem; opacity: 0.45; }
-      .fatal { display: none; text-align: left; }
-      .fatal h2 { margin: 0 0 1rem; font-size: 1.15rem; }
-      .fatal pre {
-        white-space: pre-wrap;
-        word-break: break-word;
-        color: #ff9a9a;
-        font-size: 0.85rem;
-        margin: 0;
-      }
-      body[data-fatal] .starting { display: none; }
-      body[data-fatal] .fatal { display: block; }
-    </style>
-  </head>
-  <body>
-    <div class="box">
-      <div class="starting">
-        <div class="brand">Denia</div>
-        <div class="hint">正在启动…</div>
-      </div>
-      <div class="fatal">
-        <h2>denia 启动失败</h2>
-        <pre id="fatal-message"></pre>
-      </div>
+  /* 纸面:颗粒 + 纤维 + 暗角,三层都很淡,只负责"像纸" */
+  .grain{position:fixed;inset:0;width:100%;height:100%;opacity:.05;pointer-events:none;mix-blend-mode:multiply}
+  .fiber{
+    position:fixed;inset:0;pointer-events:none;opacity:.55;mix-blend-mode:multiply;
+    background-image:repeating-linear-gradient(112deg,var(--fiber) 0 1px,transparent 1px 3px);
+  }
+  .vignette{position:fixed;inset:0;pointer-events:none;background:radial-gradient(ellipse 82% 72% at 50% 44%,transparent 52%,var(--vignette) 100%)}
+  @media (prefers-color-scheme: dark){
+    .grain{mix-blend-mode:screen;opacity:.035}
+    .fiber{mix-blend-mode:screen}
+  }
+
+  .stage{position:relative;display:flex;flex-direction:column;align-items:center;padding:32px 32px 64px;max-width:min(92vw,760px)}
+
+  .mark{position:relative;display:flex;align-items:center;justify-content:center}
+  /* 墨晕:写完那一瞬在字标背后化开的一团湿墨 */
+  .blot{
+    position:absolute;left:50%;top:50%;width:min(78vw,560px);height:240px;
+    transform:translate(-50%,-50%) scale(.6);opacity:0;pointer-events:none;
+    background:radial-gradient(closest-side,var(--blot),transparent 70%);
+    filter:blur(26px);
+  }
+  .written .blot{animation:blot 1.6s cubic-bezier(.2,.7,.2,1) .06s forwards}
+  @keyframes blot{
+    0%{opacity:0;transform:translate(-50%,-50%) scale(.55)}
+    30%{opacity:1}
+    100%{opacity:0;transform:translate(-50%,-50%) scale(1.28)}
+  }
+
+  .brand{position:relative;width:clamp(200px,26vw,292px);height:auto;display:block;color:var(--ink);opacity:0}
+  .brand .ink path{
+    fill:transparent; stroke:currentColor; stroke-width:8;
+    stroke-linecap:round; stroke-linejoin:round;
+    transition:fill .6s cubic-bezier(.2,.7,.2,1) .08s, stroke-width .45s ease .34s;
+  }
+  .brand.done .ink path{fill:currentColor; stroke-width:0}
+  /* 服务提前就绪时壳会调 __DENIA_FINISH__:收笔过渡压缩到能赶在导航前完成 */
+  .brand.hurry .ink path{transition:fill .2s ease, stroke-width .18s ease .1s}
+
+  /* 笔尖:一个墨点 + 一圈极淡的湿边,跟着笔画走 */
+  .nib{opacity:0;transition:opacity .2s ease;pointer-events:none}
+  .nib.off{opacity:0 !important}
+  .nib-halo{fill:currentColor;opacity:.1}
+  .nib-dot{fill:currentColor;opacity:.85}
+  body[data-fatal] .nib{opacity:0 !important}
+
+  .splat-dot{fill:currentColor;opacity:0;transform-box:fill-box;transform-origin:center;animation:splat .72s cubic-bezier(.2,.7,.2,1) forwards}
+  @keyframes splat{
+    0%{opacity:.65;transform:scale(.35)}
+    60%{opacity:.3}
+    100%{opacity:0;transform:scale(2.2)}
+  }
+
+  .starting{display:flex;flex-direction:column;align-items:center}
+  .rule{
+    position:relative;margin-top:38px;width:132px;height:1px;background:var(--rule);
+    transform:scaleX(0);transform-origin:left center;
+    transition:transform .85s cubic-bezier(.2,.8,.2,1) .18s;
+  }
+  .written .rule{transform:scaleX(1)}
+  .rule::after{
+    content:"";position:absolute;right:-2.5px;top:-2.5px;width:6px;height:6px;
+    border-radius:52% 48% 55% 45%;background:var(--ink);
+    opacity:0;transform:scale(.4);
+  }
+  .written .rule::after{animation:dot 2.6s ease-in-out 1.1s infinite}
+  @keyframes dot{
+    0%{opacity:0;transform:scale(.4)}
+    18%{opacity:.9;transform:scale(1)}
+    100%{opacity:.22;transform:scale(.72)}
+  }
+
+  .hint{
+    margin:22px 0 0;font-size:10.5px;letter-spacing:.42em;color:var(--soft);
+    display:flex;align-items:center;gap:.42em;
+  }
+  .hint span{opacity:0;transform:translateY(4px);transition:opacity .5s ease,transform .5s ease}
+  .written .hint span{opacity:1;transform:none}
+  .written .hint span:nth-child(1){transition-delay:.46s}
+  .written .hint span:nth-child(2){transition-delay:.52s}
+  .written .hint span:nth-child(3){transition-delay:.58s}
+  .written .hint span:nth-child(4){transition-delay:.64s}
+  .dots{display:inline-flex;align-items:center;gap:4px;margin-left:3px}
+  .dots i{width:2px;height:2px;border-radius:50%;background:var(--soft);opacity:.2}
+  .written .dots i{animation:blink 1.4s ease-in-out infinite}
+  .written .dots i:nth-child(2){animation-delay:.22s}
+  .written .dots i:nth-child(3){animation-delay:.44s}
+  @keyframes blink{0%,100%{opacity:.15}50%{opacity:.85}}
+
+  /* 失败态:字标停在红色描边,不再填墨 */
+  body[data-fatal] .starting{display:none}
+  body[data-fatal] .brand{color:var(--error)}
+  body[data-fatal] .brand.done .ink path{fill:transparent;stroke-width:8}
+  body[data-fatal] .blot{display:none}
+  .fatal{display:none;width:min(88vw,520px);text-align:left;margin-top:34px}
+  body[data-fatal] .fatal{display:block}
+  .fatal h2{margin:0 0 18px;font-size:12px;letter-spacing:.34em;font-weight:500;color:var(--error)}
+  .fatal pre{
+    margin:0 0 22px;font:12px/1.75 var(--mono);color:var(--ink);
+    white-space:pre-wrap;word-break:break-word;max-height:170px;overflow:auto;
+  }
+  .fatal-note{margin:14px 0 0;font:10.5px/1.6 var(--mono);letter-spacing:.06em;color:var(--soft)}
+  .actions{display:flex;gap:10px}
+  .btn{
+    font:12px/1 inherit;font-family:inherit;letter-spacing:.06em;padding:9px 16px;cursor:pointer;
+    border:1px solid var(--ink);background:var(--ink);color:var(--paper);
+    transition:transform .15s ease,opacity .15s ease;
+  }
+  .btn:hover{transform:translateY(-1px)}
+  .btn:active{transform:translateY(0);opacity:.78}
+  .btn.ghost{background:transparent;color:var(--ink);border-color:var(--rule)}
+  .btn:focus-visible{outline:2px solid var(--ink);outline-offset:2px}
+
+  @media (prefers-reduced-motion: reduce){
+    *{animation-duration:.01ms !important;animation-delay:0ms !important;transition-duration:.01ms !important}
+  }
+</style>
+</head>
+<body>
+<svg class="grain" aria-hidden="true">
+  <filter id="paper"><feTurbulence type="fractalNoise" baseFrequency=".82" numOctaves="2" stitchTiles="stitch"/><feColorMatrix type="saturate" values="0"/></filter>
+  <rect width="100%" height="100%" filter="url(#paper)"/>
+</svg>
+<div class="fiber" aria-hidden="true"></div>
+<div class="vignette" aria-hidden="true"></div>
+
+<div class="stage">
+  <div class="mark">
+    <div class="blot" aria-hidden="true"></div>
+    <svg class="brand" viewBox="0 0 1100 280" role="img" aria-label="Denia">
+      <defs>
+        <mask id="cuts-ink" maskUnits="userSpaceOnUse" x="-4" y="-4" width="808" height="288">
+          <rect x="-4" y="-4" width="808" height="288" fill="white"/>
+          <path d="M-8 211L64 181V205L-8 235Z M223 203L290 175V201L223 229Z M443 203L511 175V201L443 229Z M679 203L751 173V199L679 229Z" fill="black"/>
+        </mask>
+      </defs>
+      <g class="ink" transform="translate(-112 -118)">
+        <path d="M218 128H257C340 128 387 178 387 256C387 334 340 384 257 384H204L226 330H255C307 330 333 304 333 256C333 208 307 182 255 182H196Z"/>
+        <path d="M139 128H178V307L124 329V143Q124 128 139 128Z"/>
+        <path d="M124 352L178 330V372Q178 384 166 384H136Q124 384 124 372Z"/>
+      </g>
+      <g class="ink" transform="translate(312)" mask="url(#cuts-ink)">
+        <path d="M194 174H52C58 211 84 229 118 229C143 229 163 222 181 209L201 246C178 265 150 274 115 274C44 274 0 230 0 160C0 94 42 49 104 49C168 49 199 94 199 151ZM52 133H147C144 107 129 93 103 93C78 93 60 107 52 133Z"/>
+        <path d="M232 57H278V79C294 59 314 49 341 49C391 49 417 80 417 137V270H367V145C367 112 353 96 330 96C301 96 282 118 282 150V249L232 270Z"/>
+        <path d="M452 12H502V48H452ZM452 82L502 61V270H452Z"/>
+        <path d="M638 49C703 49 742 94 742 160V270H694V246C678 265 657 274 630 274C573 274 536 230 536 162C536 94 575 49 638 49ZM639 96C607 96 586 120 586 161C586 202 607 226 639 226C672 226 692 202 692 161C692 120 672 96 639 96Z"/>
+      </g>
+      <g class="splat" aria-hidden="true"></g>
+      <g class="nib" aria-hidden="true">
+        <circle class="nib-halo" r="22"/>
+        <circle class="nib-dot" r="7"/>
+      </g>
+    </svg>
+  </div>
+
+  <div class="starting">
+    <div class="rule" aria-hidden="true"></div>
+    <p class="hint" role="status" aria-live="polite">
+      <span>正</span><span>在</span><span>启</span><span>动</span>
+      <em class="dots" aria-hidden="true"><i></i><i></i><i></i></em>
+    </p>
+  </div>
+
+  <div class="fatal" role="alert">
+    <h2>启动失败</h2>
+    <pre id="fatal-message"></pre>
+    <div class="actions">
+      <button class="btn ghost" type="button" id="copy">复制错误</button>
     </div>
-    <script>
-      var fatal = window.__DENIA_FATAL__
-      if (typeof fatal === 'string' && fatal.length > 0) {
-        document.body.dataset.fatal = '1'
-        document.getElementById('fatal-message').textContent = fatal
+    <p class="fatal-note">按 Alt+F4 关闭窗口,修复后重新启动。</p>
+  </div>
+</div>
+
+<script>
+(function () {
+  var reduce = matchMedia('(prefers-reduced-motion: reduce)').matches
+  var stage = document.querySelector('.stage')
+  var svg = document.querySelector('.brand')
+  var paths = [].slice.call(svg.querySelectorAll('.ink path'))
+  var nib = svg.querySelector('.nib')
+  var splat = svg.querySelector('.splat')
+  var rafId = 0
+  var finished = false
+
+  // 每笔按长度分配时长:长笔画慢、短笔画快,中间留 26ms 换笔间隙
+  var lens = paths.map(function (p) { return p.getTotalLength() })
+  var total = lens.reduce(function (a, b) { return a + b }, 0)
+  var WRITE = 900, GAP = 26
+  var schedule = [], acc = 0
+
+  function offsetOf(p) {
+    var tr = p.parentNode.getAttribute('transform') || ''
+    var m = tr.match(/translate\(\s*(-?[\d.]+)[\s,]*(-?[\d.]+)?\s*\)/)
+    return { x: m ? parseFloat(m[1]) : 0, y: m && m[2] ? parseFloat(m[2]) : 0 }
+  }
+
+  paths.forEach(function (p, i) {
+    p.style.strokeDasharray = lens[i] + ' ' + lens[i]
+    p.style.strokeDashoffset = lens[i]
+    var dur = Math.max(80, lens[i] / total * WRITE)
+    schedule.push({ p: p, len: lens[i], start: acc, dur: dur, tr: offsetOf(p) })
+    acc += dur + GAP
+  })
+  var writeEnd = acc - GAP
+
+  function splatter(pt) {
+    if (reduce) return
+    var NS = 'http://www.w3.org/2000/svg'
+    ;[[8, -6, 2.4, 0], [14, 3, 1.6, 90], [-7, 7, 1.3, 150]].forEach(function (d) {
+      var c = document.createElementNS(NS, 'circle')
+      c.setAttribute('cx', pt.x + d[0])
+      c.setAttribute('cy', pt.y + d[1])
+      c.setAttribute('r', d[2])
+      c.setAttribute('class', 'splat-dot')
+      c.style.animationDelay = d[3] + 'ms'
+      splat.appendChild(c)
+    })
+  }
+
+  function finish() {
+    if (finished) return
+    finished = true
+    var last = schedule[schedule.length - 1]
+    var pt = last.p.getPointAtLength(last.len)
+    pt.x += last.tr.x; pt.y += last.tr.y
+    nib.setAttribute('transform', 'translate(' + pt.x + ' ' + pt.y + ')')
+    nib.classList.add('off')
+    stage.classList.add('written')
+    svg.classList.add('done')
+    splatter(pt)
+  }
+
+  function animate() {
+    if (reduce) {
+      paths.forEach(function (p) { p.style.strokeDashoffset = 0 })
+      svg.style.opacity = 1
+      finish()
+      return
+    }
+    var start = null
+    function frame(now) {
+      if (start === null) start = now
+      var el = now - start
+      var active = null
+      for (var i = 0; i < schedule.length; i++) {
+        var s = schedule[i]
+        var k = (el - s.start) / s.dur
+        if (k <= 0) continue
+        if (k > 1) k = 1
+        var e = k * k * (3 - 2 * k)
+        s.p.style.strokeDashoffset = s.len * (1 - e)
+        if (k < 1) { active = { s: s, e: e }; break }
+        if (i === schedule.length - 1) active = { s: s, e: 1 }
       }
-    </script>
-  </body>
+      if (active) {
+        var pt = active.s.p.getPointAtLength(active.s.len * active.e)
+        pt.x += active.s.tr.x; pt.y += active.s.tr.y
+        nib.setAttribute('transform', 'translate(' + pt.x + ' ' + pt.y + ')')
+        nib.style.opacity = 1
+      }
+      if (el < writeEnd + 40) rafId = requestAnimationFrame(frame)
+      else finish()
+    }
+    svg.style.opacity = 1
+    rafId = requestAnimationFrame(frame)
+  }
+
+  /* 壳在服务就绪后调用:把剩下的笔画快速收掉,让快启动也能看到完整落款。
+     自然播完的情况下这里是无操作。 */
+  window.__DENIA_FINISH__ = function () {
+    if (finished || document.body.hasAttribute('data-fatal')) return
+    cancelAnimationFrame(rafId)
+    svg.classList.add('hurry')
+    paths.forEach(function (p) {
+      p.style.transition = 'stroke-dashoffset .16s cubic-bezier(.4,0,.2,1)'
+      p.style.strokeDashoffset = 0
+    })
+    setTimeout(finish, 150)
+  }
+
+  /* 壳注入失败态:停止书写,字标停在红色描边 */
+  function showFatal() {
+    cancelAnimationFrame(rafId)
+    paths.forEach(function (p) { p.style.strokeDashoffset = 0 })
+    svg.style.opacity = 1
+    nib.classList.add('off')
+    finished = true
+  }
+
+  if (typeof window.__DENIA_FATAL__ === 'string' && window.__DENIA_FATAL__.length) {
+    document.getElementById('fatal-message').textContent = window.__DENIA_FATAL__
+    document.body.setAttribute('data-fatal', '1')
+    showFatal()
+  } else {
+    animate()
+  }
+
+  new MutationObserver(function () {
+    if (document.body.hasAttribute('data-fatal')) showFatal()
+  }).observe(document.body, { attributes: true, attributeFilter: ['data-fatal'] })
+
+  document.getElementById('copy').addEventListener('click', function () {
+    var el = document.getElementById('fatal-message')
+    var text = el.textContent || ''
+    function select() {
+      var range = document.createRange()
+      range.selectNodeContents(el)
+      var sel = getSelection()
+      sel.removeAllRanges()
+      sel.addRange(range)
+    }
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).catch(select)
+    } else {
+      select()
+    }
+  })
+})()
+</script>
+</body>
 </html>
