@@ -65,7 +65,7 @@ const ModelRow = memo(function ModelRow({
         </span>
         {thinking && (
           <span className={styles.capIcon} title={t('thinkingColumn')}>
-            <IconThink size={13} />
+            <IconThink size={15} className={styles.thinkIcon} />
           </span>
         )}
         {thinking && effortLabels && <span className={styles.rowEfforts}>{effortLabels}</span>}
@@ -276,7 +276,7 @@ export function ModelsPanel({
             aria-pressed={thinkingOnly}
             onClick={() => setThinkingOnly((v) => !v)}
           >
-            <IconThink size={12} />
+            <IconThink size={15} className={styles.thinkIcon} />
             {t('llm.models.filterThinking')}
           </button>
         </div>

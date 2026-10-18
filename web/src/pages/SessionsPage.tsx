@@ -32,7 +32,7 @@ import { PlanReviewPanel } from '../components/PlanReviewPanel';
 import { ApprovalDialog, type ApprovalDecision, type ApprovalRequest } from '../components/ApprovalDialog';
 import { ConfirmDialog } from '../components/ConfirmDialog';
 import { ContextRing } from '../components/ContextRing';
-import { IconWorkspace, IconCheck, IconBranch, IconArrowDown, IconChevron, IconClose, IconDownload, IconFile, IconFolder, IconImage, IconPanelOpen, IconPlus, IconSend, IconSparkles, IconUndo, IconSpinner, IconStop, IconSlashCommand, IconAgentSpawn } from '../components/icons';
+import { IconWorkspace, IconCheck, IconBranch, IconArrowDown, IconChevron, IconClose, IconDownload, IconFile, IconFolder, IconImage, IconPanelOpen, IconPlus, IconPromptOptimize, IconSend, IconSparkles, IconUndo, IconSpinner, IconStop, IconSlashCommand, IconAgentSpawn } from '../components/icons';
 import { resolveSessionReasoningEffort } from '../modelCatalog';
 import { useStickToBottom } from '../hooks/useStickToBottom';
 import { useContainedWheel } from '../hooks/useContainedWheel';
@@ -2233,7 +2233,7 @@ export default function SessionsPage({
             ) : optimizedPrompt ? (
               <IconUndo size={16} />
             ) : (
-              <IconSparkles size={16} />
+              <IconPromptOptimize size={16} />
             )}
           </button>
           <ContextRing

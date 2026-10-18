@@ -433,7 +433,7 @@ export function ComposerModelMenu({
                             <span className="meta">
                               {row.model.thinkingSupported && (
                                 <span className="think" title={t('thinkingLabel')}>
-                                  <IconThink size={12} />
+                                  <IconThink size={15} className="think-glyph" />
                                 </span>
                               )}
                               {row.model.contextWindow ? (

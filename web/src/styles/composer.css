@@ -906,6 +906,11 @@
   display: inline-flex;
 }
 
+/* 思考标记是能力提示,不该用 caption 级灰度:小图标在浅灰上会糊成一块。 */
+.model-menu-item .think-glyph {
+  color: var(--label-secondary);
+}
+
 .model-menu-item .ctx {
   font-family: var(--font-mono);
   font-size: 10.5px;

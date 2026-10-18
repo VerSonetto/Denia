@@ -136,14 +136,16 @@ export function IconWrite(props: IconProps) {
   )
 }
 
-/** 思考：对称脑形，简化脑回以保持小尺寸留白。 */
+/** 思考：三条椭圆轨道环绕中心核，替代原先的脑形。小尺寸下靠 1.4 描边与放大中心核保持可辨。 */
 export function IconThink(props: IconProps) {
   return (
     <StrokeSvg {...props}>
-      <g transform="scale(.8)" strokeWidth="1.4">
-        <path d="M10 5a2.5 2.5 0 0 0-5 0v.5a3 3 0 0 0-2 5.2V12a3 3 0 0 0 3 3 2 2 0 0 0 4 0V5Zm0 0a2.5 2.5 0 0 1 5 0v.5a3 3 0 0 1 2 5.2V12a3 3 0 0 1-3 3 2 2 0 0 1-4 0" />
-        <path d="M5 8a2 2 0 0 1 2 2m8-2a2 2 0 0 0-2 2" />
+      <g strokeWidth="1.4">
+        <ellipse cx="8" cy="8" rx="5.7" ry="2.5" />
+        <ellipse cx="8" cy="8" rx="5.7" ry="2.5" transform="rotate(60 8 8)" />
+        <ellipse cx="8" cy="8" rx="5.7" ry="2.5" transform="rotate(120 8 8)" />
       </g>
+      <circle cx="8" cy="8" r="1.1" fill="currentColor" stroke="none" />
     </StrokeSvg>
   )
 }
@@ -605,6 +607,19 @@ export function IconSparkles(props: IconProps) {
       <g transform="scale(.8)" strokeWidth="1.4">
         <path d="M7 2.5 8.6 6.4 12.5 8 8.6 9.6 7 13.5 5.4 9.6 1.5 8 5.4 6.4 7 2.5Z" />
         <path d="m14.5 11 1 2.5 2.5 1-2.5 1-1 2.5-1-2.5-2.5-1 2.5-1 1-2.5Z" />
+      </g>
+    </StrokeSvg>
+  )
+}
+
+/** 优化提示词:文档轮廓配右上星芒,区别于技能/生成共用的四角星。 */
+export function IconPromptOptimize(props: IconProps) {
+  return (
+    <StrokeSvg {...props}>
+      <g strokeWidth="1.4">
+        <rect x="1.8" y="3.4" width="8.1" height="9.8" rx="1.4" />
+        <path d="M3.8 6.4h3.8M3.8 9.6h3.8" />
+        <path d="M12.15 2.3c.24 1.2.79 1.75 1.99 1.99-1.2.24-1.75.79-1.99 1.99-.24-1.2-.79-1.75-1.99-1.99 1.2-.24 1.75-.79 1.99-1.99z" />
       </g>
     </StrokeSvg>
   )

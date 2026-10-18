@@ -884,7 +884,7 @@
 }
 
 .disc-head .glyph {
-  color: var(--label-tertiary);
+  color: var(--label-secondary);
   display: flex;
   flex: none;
   width: 16px;

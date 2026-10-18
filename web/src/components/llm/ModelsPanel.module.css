@@ -336,6 +336,11 @@
   flex: none;
 }
 
+/* 思考图标线条密,单独提一档灰度,否则 15px 下看不清轨道。 */
+.thinkIcon {
+  color: var(--label-secondary);
+}
+
 .rowEfforts {
   font-size: 10.5px;
   color: var(--label-caption);

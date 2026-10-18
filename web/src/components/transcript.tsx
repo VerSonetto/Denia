@@ -643,7 +643,7 @@ function ThinkRow({
         onClick={() => setOpen(!open)}
       >
         <span className="glyph">
-          <IconThink size={14} />
+          <IconThink size={16} />
         </span>
         <span className="title">{t('thinkTitle')}</span>
         {!open && (
