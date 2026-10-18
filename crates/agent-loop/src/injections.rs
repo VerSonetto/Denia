@@ -169,28 +169,6 @@ fn injected_text(surface: &[SurfaceMessage], channel: &str, legacy_prefix: &str)
     })
 }
 
-/// 日志里最后一条**真实**用户消息文本(注入块不算):项目记忆选择层的
-/// 关键词来源。
-///
-/// 走 append-only 日志而不是派生 surface:压缩把旧消息移出模型面时用户的
-/// 诉求没有变,选择结果也不该跟着变——否则每次压缩都会换一次注入正文,
-/// 白白多一次重发。
-fn last_user_text(session: &Session) -> Option<String> {
-    session.with_events(|events| {
-        events
-            .iter()
-            .rev()
-            .find_map(|envelope| match &envelope.event {
-                SessionEvent::UserMessage {
-                    text,
-                    injected: false,
-                    ..
-                } => Some(text.clone()),
-                _ => None,
-            })
-    })
-}
-
 /// 每 step 刷新背景注入。任何一条通道刷新失败只记日志;`runtime.drain`
 /// 失败(通知领取不可用)返回错误终止本轮。
 pub(crate) async fn refresh_background_injections(
@@ -302,15 +280,11 @@ pub(crate) async fn refresh_background_injections(
     // ④ 项目记忆索引:仅预设开启记忆的主代理会话注入(子代理不烧这份
     // token,提取子代理的素材由任务提示词自带);内容不变不重发,后台提取
     // 更新索引后下一个 step 自动带出最新版。
-    // 选择层按本轮已触碰的路径与最新一条用户消息挑相关条目——同一输入
-    // 给出同一正文(见 read_index_for_injection 的确定性口径)。
+    // 正文只由索引文本决定,不读本轮触碰路径与最近用户消息:注入块靠正文
+    // 比较判幂等,正文随会话状态变化就会每个新输入都重发整块索引。
     let memory_visible = preset_features.memory && session.header().subagent.is_none();
     if memory_visible {
-        let recent_user = last_user_text(session);
-        match runtime
-            .project_memory_index(&cwd, touched, recent_user.as_deref())
-            .await
-        {
+        match runtime.project_memory_index(&cwd).await {
             Ok(Some(text)) => {
                 if baselines.project_memory.as_deref() != Some(&text) {
                     append(
@@ -570,26 +544,29 @@ mod tests {
         assert_eq!(baselines.skill_catalog.as_deref(), Some(text));
     }
 
-    // —— 项目记忆通道:选择依据的传递与"内容未变不重发" ——
+    // —— 项目记忆通道:正文只由索引文本决定,"内容未变不重发" ——
 
-    /// 记忆通道的桩:记录每次调用收到的 (touched, recent_user),正文由触碰
-    /// 路径数派生——于是"输入未变 → 正文未变 → 不重发"可以在通道层被观察,
-    /// 而"输入变了"必然换一次正文(最坏情况的注入频率)。
+    /// 记忆通道的桩:正文由 `index` 派生(与索引文本一一对应),调用次数可观察。
+    /// 通道不得把会话状态传给实现方——正文一旦随每步变化就会反复重发。
     struct MemoryRuntime {
-        index: String,
-        calls: Mutex<Vec<(Vec<PathBuf>, Option<String>)>>,
+        index: Mutex<String>,
+        calls: Mutex<usize>,
     }
 
     impl MemoryRuntime {
         fn new(index: &str) -> Self {
             Self {
-                index: index.to_string(),
-                calls: Mutex::new(Vec::new()),
+                index: Mutex::new(index.to_string()),
+                calls: Mutex::new(0),
             }
         }
 
-        fn calls(&self) -> Vec<(Vec<PathBuf>, Option<String>)> {
-            self.calls.lock().unwrap().clone()
+        fn set_index(&self, index: &str) {
+            *self.index.lock().unwrap() = index.to_string();
+        }
+
+        fn calls(&self) -> usize {
+            *self.calls.lock().unwrap()
         }
     }
 
@@ -618,17 +595,11 @@ mod tests {
         async fn project_memory_index(
             &self,
             _cwd: &std::path::Path,
-            touched: &[PathBuf],
-            recent_user: Option<&str>,
         ) -> Result<Option<String>, String> {
-            self.calls
-                .lock()
-                .unwrap()
-                .push((touched.to_vec(), recent_user.map(str::to_string)));
+            *self.calls.lock().unwrap() += 1;
             Ok(Some(format!(
-                "<system-reminder>\n{}\n(本轮已触碰 {} 个路径)\n</system-reminder>",
-                self.index,
-                touched.len()
+                "<system-reminder>\n{}\n</system-reminder>",
+                self.index.lock().unwrap()
             )))
         }
     }
@@ -683,12 +654,11 @@ mod tests {
         })
     }
 
-    /// 稳定性:选择依据(cwd/touched/最近用户消息/索引文本)一字未变时,
-    /// 注入通道不得产生新的注入文本;依据变了才发一次,而且只发一次。
-    /// 顺带覆盖传递链路:通道把本轮 `touched` 与最新一条真实用户消息交给了
-    /// 实现方(压缩不影响它——它读 append-only 日志)。
+    /// 稳定性:索引文本一字未变时,注入通道不得产生新的注入文本;正文变了
+    /// 才发一次,而且只发一次。触碰路径每步增长也不得引起重发——记忆正文
+    /// 不读会话状态(历史教训:按触碰路径选条目导致每轮重发整块索引)。
     #[tokio::test]
-    async fn memory_channel_republishes_only_when_selection_inputs_change() {
+    async fn memory_channel_republishes_only_when_index_text_changes() {
         let runtime = Arc::new(MemoryRuntime::new("固定索引正文"));
         let driver = stub_driver(runtime.clone());
         let session = Arc::new(temp_session());
@@ -710,35 +680,40 @@ mod tests {
         assert_eq!(memory_injections(&session).len(), 1, "首个 step 注入一次");
         assert!(memory_injections(&session)[0].contains("固定索引正文"));
 
-        // 同一输入连续两步:正文一字未变 → 不重发。
+        // 触碰路径每步增长(真实 turn 的样子):正文不变,不得重发。
+        let touched = vec![
+            PathBuf::from("src/injections.rs"),
+            PathBuf::from("src/exec.rs"),
+        ];
         refresh_background_injections(&driver, &mut state, &mut baselines, &empty)
             .await
             .unwrap();
-        refresh_background_injections(&driver, &mut state, &mut baselines, &empty)
+        refresh_background_injections(&driver, &mut state, &mut baselines, &touched)
             .await
             .unwrap();
-        assert_eq!(memory_injections(&session).len(), 1, "输入未变不得重发");
+        assert_eq!(
+            memory_injections(&session).len(),
+            1,
+            "触碰路径变化不得引起重发"
+        );
 
-        // 触碰路径变了(选择依据变了)→ 发一次,此后同一输入再刷也不重发。
-        let touched = vec![PathBuf::from("src/injections.rs")];
+        // 索引文本变了(记忆被写入)→ 发一次,此后同一文本再刷也不重发。
+        runtime.set_index("更新后的索引");
         refresh_background_injections(&driver, &mut state, &mut baselines, &touched)
             .await
             .unwrap();
         assert_eq!(memory_injections(&session).len(), 2);
+        assert!(memory_injections(&session)[1].contains("更新后的索引"));
         refresh_background_injections(&driver, &mut state, &mut baselines, &touched)
             .await
             .unwrap();
         assert_eq!(
             memory_injections(&session).len(),
             2,
-            "最坏情况也只是每个新输入一次"
+            "最坏情况也只是每次改索引一次"
         );
 
-        // 传递链路:实现方收到的 touched 与最近用户消息就是通道收到的。
-        let calls = runtime.calls();
-        assert_eq!(calls.len(), 5, "每个 step 都问一次实现方");
-        assert_eq!(calls[0].0, Vec::<PathBuf>::new());
-        assert_eq!(calls[0].1.as_deref(), Some("看一下 injections.rs"));
-        assert_eq!(calls[4].0, touched);
+        // 每个 step 都问一次实现方(实现方自己按索引文本判幂等)。
+        assert_eq!(runtime.calls(), 5, "每个 step 都问一次实现方");
     }
 }

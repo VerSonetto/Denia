@@ -2506,42 +2506,27 @@ impl AgentRuntime for Runtime {
         }
         Some(crate::project_memory::memory_root(&self.inner.home, cwd))
     }
-    /// 项目记忆索引(MEMORY.md)注入文本;None = 未启用。选择层按触碰路径
-    /// 与最近用户消息挑相关条目,被省略的条目在渲染层留全文指针。
-    async fn project_memory_index(
-        &self,
-        cwd: &Path,
-        touched: &[PathBuf],
-        recent_user: Option<&str>,
-    ) -> Result<Option<String>, String> {
+    /// 项目记忆索引(MEMORY.md)注入文本;None = 未启用。注入整份索引
+    /// (只受行/字节预算约束),不按会话状态挑选条目:选择层曾按本轮累积的
+    /// 触碰路径挑相关条目,结果每个新输入都换一次正文、整块重发,旧块还留在
+    /// 模型面上。索引一行一条、体量很小,一次注入比反复增量便宜。
+    async fn project_memory_index(&self, cwd: &Path) -> Result<Option<String>, String> {
         let config = self.config();
         if !config.memory_enabled {
             return Ok(None);
         }
         let home = self.inner.home.clone();
         let cwd = cwd.to_path_buf();
-        let touched = touched.to_vec();
-        let recent_user = recent_user.map(str::to_string);
         let max_bytes = config.project_memory_max_bytes as usize;
         // 索引非空才注入;空桶不注入——记忆目录路径已由 assemble 阶段
         // 内联进「# 项目记忆」段,模型任何 step 都可见。
 
         tokio::task::spawn_blocking(move || {
             let root = crate::project_memory::memory_root(&home, &cwd);
-            match crate::project_memory::read_index_for_injection(
-                &root,
-                &cwd,
-                &touched,
-                recent_user.as_deref(),
-                max_bytes,
-            ) {
-                Some(selection) if !selection.body.trim().is_empty() => {
-                    Ok(Some(crate::project_memory::render_index_block(
-                        &root,
-                        &selection.body,
-                        selection.omitted,
-                    )))
-                }
+            match crate::project_memory::read_index_for_injection(&root, max_bytes) {
+                Some(index) if !index.trim().is_empty() => Ok(Some(
+                    crate::project_memory::render_index_block(&root, &index),
+                )),
                 _ => Ok(None),
             }
         })
@@ -5378,7 +5363,7 @@ mod tests {
     /// 项目记忆索引注入(运行时接线):选择层按触碰路径与最近用户消息裁到
     /// 相关条目,被省略的条目在渲染层留全文指针;空桶不注入。
     #[tokio::test]
-    async fn memory_index_injection_selects_by_touched_path_and_prompt() {
+    async fn memory_index_injection_carries_the_whole_index() {
         let home =
             std::env::temp_dir().join(format!("denia-memory-inject-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&home).unwrap();
@@ -5389,41 +5374,44 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
 
         // 空桶不注入——目录路径已由装配阶段内联进「# 项目记忆」段。
-        assert!(
-            state
-                .runtime
-                .project_memory_index(&cwd, &[], None)
-                .await
-                .unwrap()
-                .is_none()
-        );
+        assert!(state
+            .runtime
+            .project_memory_index(&cwd)
+            .await
+            .unwrap()
+            .is_none());
 
         std::fs::write(
             root.join(crate::project_memory::MEMORY_INDEX_FILE),
             "# 项目记忆\n- [注入通道](injections.md) — 每步注入与幂等基准\n- [面板配色](frontend-css.md) — 设置页样式\n",
         )
         .unwrap();
-        // 触碰路径命中一条:另一条省略,并附全文指针。
+        // 整份索引都在正文里:不再按触碰路径或用户消息筛条目。
         let block = state
             .runtime
-            .project_memory_index(&cwd, &[cwd.join("src/injections.rs")], None)
+            .project_memory_index(&cwd)
             .await
             .unwrap()
             .expect("有索引时必须注入");
         assert!(block.contains("injections.md"), "{block}");
-        assert!(!block.contains("frontend-css.md"), "{block}");
-        assert!(block.contains("另有 1 条未列出"), "{block}");
+        assert!(block.contains("frontend-css.md"), "{block}");
+        assert!(!block.contains("另有"), "整份注入不留省略指针:{block}");
         assert!(block.contains("/MEMORY.md"), "{block}");
 
-        // 最近用户消息同样是选择依据(关键词命中另一条)。
-        let block = state
-            .runtime
-            .project_memory_index(&cwd, &[], Some("设置页样式调一下"))
-            .await
-            .unwrap()
-            .unwrap();
-        assert!(block.contains("frontend-css.md"), "{block}");
-        assert!(!block.contains("injections.md"), "{block}");
+        // 正文只由索引文本决定:同一索引反复调用必须逐字相同,否则通道的
+        // 幂等比较会在每个 step 都判成“变了”而重发。
+        let again = state.runtime.project_memory_index(&cwd).await.unwrap().unwrap();
+        assert_eq!(block, again);
+
+        // 索引本身变了,正文才变。
+        std::fs::write(
+            root.join(crate::project_memory::MEMORY_INDEX_FILE),
+            "- [只留一条](only.md) — 新索引\n",
+        )
+        .unwrap();
+        let changed = state.runtime.project_memory_index(&cwd).await.unwrap().unwrap();
+        assert!(changed.contains("only.md"), "{changed}");
+        assert_ne!(block, changed);
 
         std::fs::remove_dir_all(home).unwrap();
     }
