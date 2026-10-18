@@ -74,23 +74,24 @@ jobs:
       - name: Install frontend dependencies
         run: pnpm --dir web install --frozen-lockfile
 
-      - name: Test and build frontend
+      - name: Build frontend
+        working-directory: web
         run: |
-          pnpm --dir web build
+          pnpm exec vite build
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          if (-not (Test-Path 'web/dist/index.html')) { throw 'Frontend build produced no index.html.' }
-
-      - name: Build desktop with embedded frontend
-        run: |
-          cargo build --locked --release -p denia-desktop --target x86_64-pc-windows-msvc
+          node scripts/precompress.mjs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          if (-not (Test-Path 'target/x86_64-pc-windows-msvc/release/denia-desktop.exe')) { throw 'Desktop executable is missing.' }
+          if (-not (Test-Path 'dist/index.html')) { throw 'Frontend build produced no index.html.' }
 
-      - name: Build Windows installer
+      # 编译与打包一步完成：tauri build 内部会自己跑 cargo(带上它自己的
+      # features 与 build script)。此前先手写一次 `cargo build -p denia-desktop`
+      # 再调 tauri build，等于把最贵的编译做了两遍。
+      - name: Build desktop and Windows installer
         working-directory: crates/desktop
         run: |
           pnpm dlx @tauri-apps/cli@2 build --target x86_64-pc-windows-msvc --bundles nsis --config tauri.release.conf.json -- --locked
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if (-not (Test-Path '../../target/x86_64-pc-windows-msvc/release/denia-desktop.exe')) { throw 'Desktop executable is missing.' }
 
       - name: Prepare release executables
         env:

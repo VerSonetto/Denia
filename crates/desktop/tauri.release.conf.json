@@ -10,7 +10,8 @@
         "silent": true
       },
       "nsis": {
-        "installMode": "currentUser"
+        "installMode": "currentUser",
+        "compression": "zlib"
       }
     }
   }
