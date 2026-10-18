@@ -113,7 +113,59 @@ pub fn parse_tool_args<T: serde::de::DeserializeOwned>(raw: &str) -> Result<T, S
     let mut value = first_json_value(raw)?;
     coerce_numeric_fields(&mut value);
     promote_path_alias(&mut value);
-    serde_json::from_value(value).map_err(|error| error.to_string())
+    serde_json::from_value(value).map_err(|error| humanize_serde_error(&error.to_string()))
+}
+
+/// 参数解析失败的中文化:把 serde 的英文错误归成模型可直接自纠的中文三句型。
+///
+/// 覆盖三类,其余原样返回英文(至少保留 serde 的原始定位信息):
+/// - 缺参:`missing field \`x\`` → `缺少参数 \`x\``;
+/// - 多参:`unknown field \`y\`, expected ...` → `不支持参数 \`y\``;
+/// - 类型错:`invalid type: string "5", expected u64` →
+///   `参数类型不正确:应为 number,实际为 string`。
+///
+/// 类型错的英文原文不带字段名(字段定位需要 serde_path_to_error,不为此
+/// 引依赖),所以类型错只报"期望/实际"的类型对,模型对照工具参数定义
+/// 即可定位。
+pub fn humanize_serde_error(error: &str) -> String {
+    if let Some(field) = backticked_field(error, "missing field `") {
+        return format!("缺少参数 `{field}`");
+    }
+    if let Some(field) = backticked_field(error, "unknown field `") {
+        return format!("不支持参数 `{field}`");
+    }
+    if let Some(rest) = error.strip_prefix("invalid type: ")
+        // 用 rsplit:值本身可能自带 ", expected " 子串(字符串内容),
+        // 真正的分隔符是最后一个。
+        && let Some((actual, expected)) = rest.rsplit_once(", expected ")
+    {
+        return format!(
+            "参数类型不正确:应为 {},实际为 {}",
+            json_type_name(expected),
+            json_type_name(actual)
+        );
+    }
+    error.to_string()
+}
+
+/// 取前缀之后、下一个反引号之前的字段名(`missing/unknown field` 的固定形态)。
+fn backticked_field<'a>(error: &'a str, prefix: &str) -> Option<&'a str> {
+    error.strip_prefix(prefix)?.split('`').next()
+}
+
+/// 把 serde 的类型描述归一成 JSON 侧类型名(string/number/array/object…)。
+fn json_type_name(raw: &str) -> &str {
+    let text = raw.strip_prefix("a ").unwrap_or(raw);
+    match text.split([' ', '`']).next().unwrap_or(text) {
+        "string" => "string",
+        "bool" | "boolean" => "boolean",
+        "u8" | "u16" | "u32" | "u64" | "u128" | "usize" | "i8" | "i16" | "i32" | "i64"
+        | "i128" | "isize" | "f32" | "f64" | "integer" | "number" | "floating" => "number",
+        "unit" => "null",
+        "sequence" | "array" => "array",
+        "map" | "object" => "object",
+        other => other,
+    }
 }
 
 /// 统一工具错误输出:`[工具错误] {原因}\n建议:{hint}`。
@@ -194,5 +246,69 @@ mod tests {
         let out = tool_error("文件不存在", "先确认路径;相对路径锚定会话工作区");
         assert!(out.is_error);
         assert!(out.content.starts_with("[工具错误] 文件不存在\n建议:"));
+    }
+
+    #[test]
+    fn serde_errors_are_humanized() {
+        // 三类英文原文与中文三句型的逐一对应(原文取自 serde_json 实测输出)。
+        assert_eq!(
+            humanize_serde_error("missing field `pattern`"),
+            "缺少参数 `pattern`"
+        );
+        assert_eq!(
+            humanize_serde_error("unknown field `pathh`, expected `path`"),
+            "不支持参数 `pathh`"
+        );
+        assert_eq!(
+            humanize_serde_error("invalid type: string \"xyz\", expected u64"),
+            "参数类型不正确:应为 number,实际为 string"
+        );
+        assert_eq!(
+            humanize_serde_error("invalid type: integer `123`, expected a string"),
+            "参数类型不正确:应为 string,实际为 number"
+        );
+        assert_eq!(
+            humanize_serde_error("invalid type: null, expected a string"),
+            "参数类型不正确:应为 string,实际为 null"
+        );
+        assert_eq!(
+            humanize_serde_error("invalid type: sequence, expected a string"),
+            "参数类型不正确:应为 string,实际为 array"
+        );
+        // 归不了类的原样保留(JSON 语法错等),不吞掉 serde 的定位信息。
+        assert_eq!(
+            humanize_serde_error("expected ident at line 1 column 2"),
+            "expected ident at line 1 column 2"
+        );
+    }
+
+    #[test]
+    fn parse_tool_args_surfaces_humanized_errors() {
+        // 字段只经 serde 反序列化构造,测试只走错误路径,不需要读取。
+        #[derive(serde::Deserialize, Debug)]
+        #[allow(dead_code)]
+        struct Args {
+            path: String,
+        }
+        // 缺参端到端:错误路径不再吐英文。
+        let error = parse_tool_args::<Args>("{}").unwrap_err();
+        assert_eq!(error, "缺少参数 `path`");
+        // 数字字段给成非数字字符串(宽容转换失败后的兜底)。
+        #[derive(serde::Deserialize, Debug)]
+        #[allow(dead_code)]
+        struct NumArgs {
+            offset: u64,
+        }
+        let error = parse_tool_args::<NumArgs>(r#"{"offset": "abc"}"#).unwrap_err();
+        assert_eq!(error, "参数类型不正确:应为 number,实际为 string");
+        // 多参(deny_unknown_fields 的 struct)。
+        #[derive(serde::Deserialize, Debug)]
+        #[allow(dead_code)]
+        #[serde(deny_unknown_fields)]
+        struct StrictArgs {
+            path: String,
+        }
+        let error = parse_tool_args::<StrictArgs>(r#"{"path": "a", "extra": 1}"#).unwrap_err();
+        assert_eq!(error, "不支持参数 `extra`");
     }
 }

@@ -82,7 +82,7 @@ impl GrepTool {
         Self {
             schema: ToolSchema {
                 name: "grep".to_string(),
-                description: "用正则表达式(ripgrep 语法)搜索文件内容,结果按 path:line:content 逐行返回(路径以会话工作区为基准,按路径与行号排序)。path 可传文件或目录(默认会话工作区),绝对路径与相对路径都可用。默认尊重 .gitignore 与隐藏文件,大树上搜索也很快;命中多时用 offset/max_matches 分页。找到目标文件后用 read_file 读取上下文。".to_string(),
+                description: "用正则表达式(ripgrep 语法)搜索文件内容,结果按 path:line:content 逐行返回(路径以会话工作区为基准,按路径与行号排序)。path 可传文件或目录(默认会话工作区),绝对路径与相对路径都可用。默认尊重 .gitignore 与隐藏文件,大树上搜索也很快;命中多时用 offset/max_matches 分页。找到目标文件后用 read_file 读取上下文;不要绕到 bash 用 grep/rg 重复搜索。".to_string(),
                 parameters: serde_json::json!({
                     "type": "object",
                     "properties": {

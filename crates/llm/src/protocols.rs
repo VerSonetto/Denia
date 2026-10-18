@@ -276,7 +276,7 @@ fn thinking_budget(effort: &str) -> Option<u64> {
 /// merged (Anthropic requires alternating roles).
 pub(crate) fn build_anthropic_body(
     request: &GenerateRequest,
-    max_tokens: u64,
+    max_tokens: Option<u64>,
 ) -> serde_json::Value {
     let mut messages: Vec<(ChatRole, Vec<serde_json::Value>)> = Vec::new();
     let push_block = |role: ChatRole,
@@ -370,7 +370,7 @@ pub(crate) fn build_anthropic_body(
             }
         }
     }
-    let wire_messages: Vec<serde_json::Value> = messages
+    let mut wire_messages: Vec<serde_json::Value> = messages
         .into_iter()
         .map(|(role, content)| {
             let role = if role == ChatRole::User {
@@ -382,24 +382,55 @@ pub(crate) fn build_anthropic_body(
         })
         .collect();
 
+    // 显式缓存断点(对话尾部):给最后一条消息的最后一个块打 ephemeral 标记,
+    // 配合 system 上的断点,让 provider 的前缀缓存跨请求命中。总断点数保持
+    // 在 2 个(provider 上限为 4),不与工具声明侧争额度。OpenAI 兼容协议
+    // 靠自动前缀缓存,不需要这类标记。
+    if let Some(last) = wire_messages.last_mut()
+        && let Some(blocks) = last
+            .get_mut("content")
+            .and_then(|value| value.as_array_mut())
+        && let Some(block) = blocks.last_mut()
+        && let Some(object) = block.as_object_mut()
+    {
+        object.insert(
+            "cache_control".to_string(),
+            serde_json::json!({ "type": "ephemeral" }),
+        );
+    }
+
     // thinking 开启时 Anthropic 要求 temperature = 1,干脆不带 temperature。
     let effort = request
         .reasoning_effort
         .as_deref()
         .filter(|effort| *effort != "off")
         .and_then(thinking_budget);
-    let max_tokens = max_tokens.max(1);
+    // Anthropic 的 max_tokens 是必填字段：用户没配就不写，让 API 报错，
+    // 而不是替他编一个上限。
+    let max_tokens = max_tokens.map(|value| value.max(1));
     let mut body = serde_json::json!({
         "model": request.model,
         "messages": wire_messages,
-        "max_tokens": max_tokens,
         "stream": true,
     });
+    if let Some(max_tokens) = max_tokens {
+        body["max_tokens"] = serde_json::json!(max_tokens);
+    }
     if let Some(system) = request.system.as_deref().filter(|s| !s.is_empty()) {
-        body["system"] = serde_json::json!(system);
+        // 数组块形态才能携带 cache_control:system 是跨请求不变的前缀,
+        // 一个断点即缓存 tools + system 全部内容。
+        body["system"] = serde_json::json!([{
+            "type": "text",
+            "text": system,
+            "cache_control": { "type": "ephemeral" },
+        }]);
     }
     if let Some(budget) = effort {
-        body["thinking"] = serde_json::json!({ "type": "enabled", "budget_tokens": budget.min(max_tokens.saturating_sub(1)) });
+        let budget_tokens = match max_tokens {
+            Some(max_tokens) => budget.min(max_tokens.saturating_sub(1)),
+            None => budget,
+        };
+        body["thinking"] = serde_json::json!({ "type": "enabled", "budget_tokens": budget_tokens });
     }
     if let Some(temperature) = request.temperature {
         body["temperature"] = serde_json::json!(temperature);
@@ -1288,8 +1319,9 @@ mod tests {
 
     #[test]
     fn anthropic_body_merges_roles_and_uses_tool_result_blocks() {
-        let body = build_anthropic_body(&request(), 8_192);
-        assert_eq!(body["system"], "系统提示");
+        let body = build_anthropic_body(&request(), Some(8_192));
+        assert_eq!(body["system"][0]["text"], "系统提示");
+        assert_eq!(body["system"][0]["cache_control"]["type"], "ephemeral");
         assert_eq!(body["max_tokens"], 8_192);
         let messages = body["messages"].as_array().unwrap();
         // user / assistant(text+tool_use) / user(tool_result + "继续" 合并)
@@ -1315,7 +1347,7 @@ mod tests {
         let mut request = request();
         request.reasoning_effort = Some("high".to_string());
         request.temperature = Some(0.7);
-        let body = build_anthropic_body(&request, 8_192);
+        let body = build_anthropic_body(&request, Some(8_192));
         assert_eq!(body["thinking"]["type"], "enabled");
         assert_eq!(body["thinking"]["budget_tokens"], 8_191);
         // 思考预算必须在已解析输出上限以内，不擅自抬高输出预算。
@@ -1799,15 +1831,18 @@ mod tests {
             responses["include"],
             serde_json::json!(["reasoning.encrypted_content"])
         );
-        let anthropic = build_anthropic_body(&req, 4096);
+        let anthropic = build_anthropic_body(&req, Some(4096));
+        // 对话尾部的缓存断点落在最后一个块上(这里恰是 redacted)。
+        let mut redacted_with_marker = redacted.clone();
+        redacted_with_marker["cache_control"] = serde_json::json!({ "type": "ephemeral" });
         assert_eq!(
             anthropic["messages"][0]["content"],
-            serde_json::json!([thinking, redacted])
+            serde_json::json!([thinking, redacted_with_marker])
         );
         req.messages[0].reasoning_replay.clear();
         assert_eq!(build_responses_body(&req)["input"], serde_json::json!([]));
         assert_eq!(
-            build_anthropic_body(&req, 4096)["messages"],
+            build_anthropic_body(&req, Some(4096))["messages"],
             serde_json::json!([])
         );
     }

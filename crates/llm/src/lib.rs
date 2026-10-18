@@ -74,18 +74,17 @@ pub trait LlmAdapter: Send + Sync {
         provider.to_string()
     }
 
+    /// 输出预算：显式值优先，其次是 provider / 模型目录里配的值；两者都没有就是
+    /// `None`——由各协议自己决定怎么办（OpenAI 系不传该字段，Anthropic 必填则交给
+    /// API 报错）。不给用户没要求过的限制填默认值。
     async fn output_budget(
         &self,
         provider: &str,
         model: &str,
         explicit: Option<u64>,
-    ) -> Result<u64, LlmError> {
+    ) -> Result<Option<u64>, LlmError> {
         let resolved = self.resolve_model(provider, model).await?;
-        Ok(explicit
-            .or(resolved.default_max_tokens)
-            .unwrap_or(32_768)
-            .min(resolved.default_max_tokens.unwrap_or(u64::MAX))
-            .max(1))
+        Ok(explicit.or(resolved.default_max_tokens))
     }
 
     /// One streaming model attempt.
@@ -311,7 +310,7 @@ impl LlmRegistry {
         provider: &str,
         model: &str,
         explicit: Option<u64>,
-    ) -> Result<u64, LlmError> {
+    ) -> Result<Option<u64>, LlmError> {
         self.adapter_for(provider)
             .ok_or_else(|| LlmError::new(codes::NO_ADAPTER, "no adapter registered"))?
             .output_budget(provider, model, explicit)

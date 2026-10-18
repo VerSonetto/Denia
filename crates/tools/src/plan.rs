@@ -44,7 +44,7 @@ impl ExitPlanTool {
     fn build_schema() -> ToolSchema {
         ToolSchema {
             name: "exit_plan".to_string(),
-            description: "计划模式专用:把完整执行计划呈交给用户审批。仅当当前处于计划模式且调研完成后调用;提交后阻塞等待用户决策,不要在等待期间继续其他操作。".to_string(),
+            description: "计划模式专用:把完整执行计划呈交给用户审批。适用:改动会跨多个文件或模块;存在多个可行方案需要用户拍板;需求含糊,需先调研再设计;涉及架构或接口层面的选择。不适用:单行修复、错别字等小改动;需求明确且只有一种显然做法;纯问答或检索类请求(那属于研究,不属于计划)。仅当当前处于计划模式且调研完成后调用;提交后阻塞等待用户决策,等待期间不要继续其他操作;计划被拒绝且附带建议时,按建议修订后重新提交。".to_string(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {

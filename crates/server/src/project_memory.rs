@@ -497,6 +497,161 @@ pub fn render_index_block(root: &Path, index: &str, omitted: usize) -> String {
     )
 }
 
+/// 记忆体检报告:确定性检查,不做任何模型调用、不修改任何文件。
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MemoryHealthReport {
+    /// 索引条目指向但目录里不存在的文件(相对记忆目录的路径)。
+    pub broken_links: Vec<String>,
+    /// 目录里存在、但索引里没有登记的文件。
+    pub orphans: Vec<String>,
+    /// 描述完全相同的文件组(每组 ≥2 个文件)。
+    pub duplicate_groups: Vec<Vec<String>>,
+    /// 索引行数;无索引时为 None。
+    pub index_lines: Option<usize>,
+    /// 索引里的条目行数(不含标题与空行)。
+    pub index_entries: Option<usize>,
+    /// 索引字节数。
+    pub index_bytes: Option<usize>,
+    /// 索引是否越过注入预算口径(行或字节)。
+    pub index_over_limit: bool,
+}
+
+/// 索引字节的参考上限与注入默认预算同量级;仅用于体检提示,不参与裁剪。
+const HEALTH_INDEX_BYTES_HINT: usize = 25 * 1024;
+
+/// 记忆体检:断链 / 孤儿 / 重复描述 / 索引规模。
+///
+/// 只做机械检查(文件名与 frontmatter `description` 的字面比较),为设置页
+/// 的"整理"提供确定性依据;语义层面的合并与改写由主代理在会话里完成——
+/// 这里不发起模型调用,也不写任何文件。
+pub fn memory_health(root: &Path) -> MemoryHealthReport {
+    let index = read_index_text(root);
+    let (index_lines, index_entries, index_bytes, broken_links, linked) =
+        match index.as_deref() {
+            Some(content) => {
+                let mut broken = Vec::new();
+                let mut linked: Vec<String> = Vec::new();
+                let mut entries = 0usize;
+                for line in content.lines() {
+                    let trimmed = line.trim();
+                    if trimmed.is_empty() || trimmed.starts_with('#') {
+                        continue;
+                    }
+                    entries += 1;
+                    let Some(target) = entry_target(trimmed) else {
+                        continue;
+                    };
+                    if linked.iter().any(|name| name == &target) {
+                        continue;
+                    }
+                    if !root.join(&target).is_file() {
+                        broken.push(target.clone());
+                    }
+                    linked.push(target);
+                }
+                (
+                    Some(content.lines().count()),
+                    Some(entries),
+                    Some(content.len()),
+                    broken,
+                    linked,
+                )
+            }
+            None => (None, None, None, Vec::new(), Vec::new()),
+        };
+
+    let manifest = scan_manifest(root);
+    let mut orphans: Vec<String> = manifest
+        .files
+        .iter()
+        .filter(|file| !linked.iter().any(|name| name == &file.name))
+        .map(|file| file.name.clone())
+        .collect();
+    orphans.sort();
+
+    // 重复描述:description 字面相同的文件成组。只读每个文件头部 8 KiB
+    // (frontmatter 在文件头,大文件不必全读)。
+    let mut by_description: Vec<(String, String)> = Vec::new();
+    for file in &manifest.files {
+        let Some(description) = frontmatter_description(&root.join(&file.name)) else {
+            continue;
+        };
+        by_description.push((description, file.name.clone()));
+    }
+    let mut duplicate_groups: Vec<Vec<String>> = Vec::new();
+    let mut seen: Vec<String> = Vec::new();
+    for (description, _) in &by_description {
+        if seen.iter().any(|item| item == description) {
+            continue;
+        }
+        seen.push(description.clone());
+        let mut group: Vec<String> = by_description
+            .iter()
+            .filter(|(other, _)| other == description)
+            .map(|(_, name)| name.clone())
+            .collect();
+        if group.len() > 1 {
+            group.sort();
+            duplicate_groups.push(group);
+        }
+    }
+    duplicate_groups.sort();
+
+    let index_over_limit = index_lines.is_some_and(|lines| lines > INDEX_MAX_LINES)
+        || index_bytes.is_some_and(|bytes| bytes > HEALTH_INDEX_BYTES_HINT);
+
+    MemoryHealthReport {
+        broken_links,
+        orphans,
+        duplicate_groups,
+        index_lines,
+        index_entries,
+        index_bytes,
+        index_over_limit,
+    }
+}
+
+/// 从索引条目行里取目标文件名:Markdown 链接 `](…)` 的内容;取不到
+/// (手写的自由行)按"未登记目标"处理,不参与断链检查。
+fn entry_target(line: &str) -> Option<String> {
+    let start = line.find("](")? + 2;
+    let rest = &line[start..];
+    let end = rest.find(')')?;
+    let target = rest[..end].trim();
+    if target.is_empty() || target.contains("://") {
+        return None;
+    }
+    Some(target.trim_start_matches("./").to_string())
+}
+
+/// 读文件头部(最多 8 KiB,UTF-8 边界不完整时 lossy)并提取 frontmatter
+/// 的 `description` 值。
+fn frontmatter_description(path: &Path) -> Option<String> {
+    use std::io::Read;
+    let file = std::fs::File::open(path).ok()?;
+    let mut bytes = Vec::new();
+    let _ = file.take(8 * 1024).read_to_end(&mut bytes);
+    let buffer = String::from_utf8_lossy(&bytes);
+    let mut lines = buffer.lines();
+    if lines.next()?.trim() != "---" {
+        return None;
+    }
+    for line in lines.take(40) {
+        let trimmed = line.trim();
+        if trimmed == "---" {
+            break;
+        }
+        if let Some(value) = trimmed.strip_prefix("description:") {
+            let value = value.trim().trim_matches('"').trim_matches('\'').trim();
+            if !value.is_empty() {
+                return Some(value.to_string());
+            }
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -506,6 +661,53 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("denia-mem-{name}-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    /// 体检能报出断链 / 孤儿 / 重复描述,且不改动任何文件。
+    #[test]
+    fn health_reports_broken_orphans_and_duplicates() {
+        let work = temp_root("health");
+        let root = work.join("memory");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            root.join(MEMORY_INDEX_FILE),
+            "# 索引\n- [A](a.md) — 钩子\n- [缺失](missing.md) — 钩子\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("a.md"),
+            "---\nname: a\ndescription: 同一个描述\n---\n\n正文\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("b.md"),
+            "---\nname: b\ndescription: 同一个描述\n---\n\n正文\n",
+        )
+        .unwrap();
+        let report = memory_health(&root);
+        assert_eq!(report.broken_links, vec!["missing.md".to_string()]);
+        assert_eq!(report.orphans, vec!["b.md".to_string()], "b.md 未登记进索引");
+        assert_eq!(
+            report.duplicate_groups,
+            vec![vec!["a.md".to_string(), "b.md".to_string()]]
+        );
+        assert_eq!(report.index_entries, Some(2));
+        assert!(report.index_lines.is_some());
+        assert!(!report.index_over_limit);
+        std::fs::remove_dir_all(work).unwrap();
+    }
+
+    /// 目录为空(未启用过记忆的工作区)时体检不报错,返回空报告。
+    #[test]
+    fn health_is_empty_for_missing_root() {
+        let work = temp_root("health-empty");
+        let report = memory_health(&work.join("missing"));
+        assert!(report.broken_links.is_empty());
+        assert!(report.orphans.is_empty());
+        assert!(report.duplicate_groups.is_empty());
+        assert_eq!(report.index_lines, None);
+        assert!(!report.index_over_limit);
+        std::fs::remove_dir_all(work).unwrap();
     }
 
     #[test]

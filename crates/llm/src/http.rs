@@ -168,6 +168,12 @@ pub fn transport_error(error: reqwest::Error) -> denia_core::error::LlmError {
     denia_core::error::LlmError::from_failure(transport_failure(error))
 }
 
+/// 「请求发出 → 响应头返回」的上限。
+///
+/// 超时归为 `TIMEOUT`,落在 `RetryPolicy` 的 `retryable_codes` 与
+/// `connection_codes` 里,因此会自动重发(连接类退避 5s 起)。
+pub const TTFB_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// 发出 SSE 请求,只对「发出请求 → 响应头返回」设 TTFB 超时。
 ///
 /// 这个预算绝不能交给 `RequestBuilder::timeout` 承载:那是覆盖到响应体

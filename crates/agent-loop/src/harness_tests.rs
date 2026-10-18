@@ -211,21 +211,21 @@ async fn mock_gateway_replay_tool_and_recovery_round_trip() {
             .output_budget("mock", "mock-1", Some(2000))
             .await
             .unwrap(),
-        2000
+        Some(2000)
     );
     assert_eq!(
         adapter
             .output_budget("mock", "mock-1", Some(9000))
             .await
             .unwrap(),
-        4096
+        Some(4096)
     );
     assert_eq!(
         adapter
             .output_budget("mock", "uncatalogued", None)
             .await
             .unwrap(),
-        8192
+        Some(8192)
     );
     registry.unregister("mock");
     registry

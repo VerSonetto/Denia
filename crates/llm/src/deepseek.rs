@@ -27,7 +27,6 @@ pub const DEEPSEEK_SETTINGS_NS: &str = "llm-deepseek";
 
 const DEFAULT_BASE_URL: &str = "https://api.deepseek.com";
 const DEFAULT_CONTEXT_WINDOW: u64 = 1_000_000;
-const DEFAULT_MAX_TOKENS: u64 = 256_000;
 const USER_AGENT: &str = concat!("denia/", env!("CARGO_PKG_VERSION"));
 
 /// The `llm-deepseek` settings section shape.
@@ -404,7 +403,7 @@ impl LlmAdapter for DeepSeekAdapter {
         let context_window_default = section
             .default_context_window
             .unwrap_or(DEFAULT_CONTEXT_WINDOW);
-        let max_tokens_default = section.max_tokens.unwrap_or(DEFAULT_MAX_TOKENS);
+        let max_tokens_default = section.max_tokens;
         let found = Self::catalog(&section).into_iter().find(|m| m.id == model);
         let (name, description, modalities, context_window, max_tokens, reasoning) = match &found {
             Some(model) => (
@@ -415,7 +414,7 @@ impl LlmAdapter for DeepSeekAdapter {
                     .clone()
                     .unwrap_or_else(|| vec!["text".to_string()]),
                 model.context_window.unwrap_or(context_window_default),
-                model.max_tokens.unwrap_or(max_tokens_default),
+                model.max_tokens.or(max_tokens_default),
                 Some(Self::model_reasoning_info(&section, Some(model))),
             ),
             // The catalog is advisory: unknown models pass as text-only.
@@ -437,7 +436,7 @@ impl LlmAdapter for DeepSeekAdapter {
                 input_modalities: modalities,
             },
             context_window: Some(context_window),
-            default_max_tokens: Some(max_tokens),
+            default_max_tokens: max_tokens,
             reasoning,
         })
     }
@@ -473,10 +472,8 @@ impl LlmAdapter for DeepSeekAdapter {
             Self::base_url(&section).trim_end_matches('/')
         );
         // 超时纪律(与 openai.rs 同口径):只给「发出请求 → 响应头返回」
-        // 设 TTFB 超时,大体量 + 深度思考请求按请求体规模放宽;流式体不设
-        // 任何 denia 侧超时,上游不报错就一直流。
-        let body_size = serde_json::to_string(&body).map(|s| s.len()).unwrap_or(0);
-        let ttfb_timeout = if body_size > 100_000 { 120 } else { 60 };
+        // 设 TTFB 超时(见 `http::TTFB_TIMEOUT`),超时由 RetryPolicy 自动
+        // 重发;流式体不设任何 denia 侧超时,上游不报错就一直流。
         let response = send_sse(
             self.http
                 .post(&url)
@@ -485,7 +482,7 @@ impl LlmAdapter for DeepSeekAdapter {
                 .header("accept", "text/event-stream")
                 .header("user-agent", USER_AGENT)
                 .json(&body),
-            Duration::from_secs(ttfb_timeout),
+            crate::http::TTFB_TIMEOUT,
         )
         .await?;
 

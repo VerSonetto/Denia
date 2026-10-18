@@ -612,8 +612,12 @@ impl SessionDriver {
         self.system_prompt.clone()
     }
 
-    /// 估算当前提示词的组成部分大小(字节):系统提示词(含模型框架)与
-    /// 工具声明。供前端"上下文窗口占用"面板展示占比。
+    /// 估算当前提示词的组成部分大小(字节):系统提示词(人格排在框架外 +
+    /// 框架包裹的纪律段)与工具声明。供前端"上下文窗口占用"面板展示占比。
+    ///
+    /// 走 [`denia_system_prompt::render_model_system`],与 wire 层实际发出的
+    /// system 同源;此前把 `render_prompt` 与它的带框版本相加,同一份文本
+    /// 被算了两遍。
     pub fn prompt_parts(
         &self,
         cwd: &str,
@@ -630,10 +634,9 @@ impl SessionDriver {
                 ..Default::default()
             })
             .map_err(|error| error.to_string())?;
-        let system = denia_system_prompt::render_prompt(&assembly);
-        let framed = denia_system_prompt::frame_system_prompt_for_model(&system);
+        let system = denia_system_prompt::render_model_system(&assembly);
         let tools = serde_json::to_string(&assembly.tools).map_err(|error| error.to_string())?;
-        Ok((system.len() + framed.len(), tools.len()))
+        Ok((system.len(), tools.len()))
     }
 
     /// 手动压缩(上下文面板按钮):从日志最近一次请求头部恢复请求形态
@@ -789,6 +792,200 @@ impl SessionDriver {
         {
             state.clear();
         }
+    }
+
+    /// 会话回退后的内存态同步。
+    ///
+    /// rewind 是**物理截断**日志:被截掉那条分支里读过的文件,其"上一条读取
+    /// 结果"已经不在模型上下文里,而读状态表还记着——文件内容没变就仍判
+    /// 新鲜,模型重读只会拿到"自上次读取以来未变更"而永远看不到内容。压缩
+    /// 断路器同理:失败计数与 rapid-refill 计数记的都是被截掉那条分支的账,
+    /// 留着会让新分支一撞阈值就熔断、自动压缩停摆。
+    ///
+    /// 两张表都整条摘除:下一个 turn 开始时冷恢复会按截断后的日志重建读状态
+    /// (只认日志里还在的读取),压缩断路器从零起算。
+    pub fn on_session_rewound(&self, session_id: &str) {
+        self.clear_read_state(session_id);
+        self.clear_compaction_state(session_id);
+    }
+
+    /// 冷恢复:从会话日志重建文件读状态。
+    ///
+    /// 只在表为空时执行——活会话的表由工具执行维护,回放不能覆盖它。
+    /// 数据源是 `read_file` 结果里的 `readStamp` meta(读取当时的路径/范围/
+    /// mtime/size):只认结构化字段,不解析正文文本猜状态。
+    ///
+    /// 没有这层重建,进程重启或会话被驱逐后,模型"看过"的文件会被写前
+    /// 校验按"从未读过"拒,每个待改文件都要白读一遍。重建条目不带正文
+    /// (正文在恢复出的历史里,不重复存)也不带内容指纹(写前校验退化为
+    /// `(mtime, size)`——与超过指纹上限的大文件同口径)。返回重建条目数。
+    pub fn hydrate_read_state_from_history(&self, session: &Session) -> usize {
+        let shared = self.read_state_for(session.id());
+        {
+            let state = shared.lock().unwrap_or_else(|poison| poison.into_inner());
+            if !state.is_empty() {
+                return 0;
+            }
+        }
+        let Ok(mut state) = shared.lock() else {
+            return 0;
+        };
+        let mut restored = 0usize;
+        for envelope in session.events() {
+            let SessionEvent::ToolResult {
+                call_id,
+                is_error,
+                meta: Some(meta),
+                ..
+            } = &envelope.event
+            else {
+                continue;
+            };
+            if *is_error {
+                continue;
+            }
+            let Some(stamp) = meta.get("readStamp") else {
+                continue;
+            };
+            let Some(path) = stamp.get("path").and_then(|value| value.as_str()) else {
+                continue;
+            };
+            let Some(size_bytes) = stamp.get("sizeBytes").and_then(|value| value.as_u64()) else {
+                continue;
+            };
+            state.record(
+                denia_tools::read_state::ReadKey::new(
+                    path,
+                    stamp.get("offset").and_then(|value| value.as_u64()),
+                    stamp.get("limit").and_then(|value| value.as_u64()),
+                ),
+                denia_tools::read_state::ReadEntry {
+                    mtime_ms: stamp.get("mtimeMs").and_then(|value| value.as_u64()),
+                    size_bytes,
+                    fingerprint: None,
+                    is_partial_view: stamp
+                        .get("partialView")
+                        .and_then(|value| value.as_bool())
+                        .unwrap_or(false),
+                    is_full_read: stamp
+                        .get("fullRead")
+                        .and_then(|value| value.as_bool())
+                        .unwrap_or(false),
+                    read_at: std::time::SystemTime::now(),
+                    content: None,
+                    // 保留调用 id:微压缩后按调用失效的逻辑仍能清掉这条,
+                    // 与实时路径同口径(此时"未变更"提示已指向不存在的正文)。
+                    call_id: Some(call_id.clone()),
+                },
+            );
+            restored += 1;
+        }
+        restored
+    }
+
+    /// 压缩后的收尾维护:文件回放 + 读状态重建 + 续场消息。
+    ///
+    /// 自动闸门与手动压缩共用这一段,两条路径压缩后模型看到的东西必须一致:
+    ///
+    /// 1. **回放**:把压缩前读过的文件内容按预算(最多 5 个、单文件 5k token、
+    ///    总量 50k token)以注入消息放回上下文,避免模型"忘了看过什么"立刻
+    ///    重读——那正是压缩后窗口二次膨胀的根源;
+    /// 2. **重建读状态**:被回放的文件在状态表里按读取当时的口径重建条目
+    ///    (mtime/size/指纹沿用旧值——压缩期间文件若被外部改过,写前校验会
+    ///    重新对比并报 stale,不会按旧内容放行)。只回放不重建的话,模型看得
+    ///    见内容、写前校验却按"从未读过"拒绝,每个待改文件都要多读一次;
+    ///    未被回放的条目清掉——它们的内容已不在上下文里,留着只会让写前
+    ///    校验基于看不见的内容放行;
+    /// 3. **续场消息**:明确告知上下文已压缩、近期消息是逐字原文、直接继续
+    ///    手头的工作,并给出会话日志路径供回查细节。
+    pub fn post_compact_maintenance(
+        &self,
+        session: &Session,
+        emit: &Arc<dyn Fn(&SessionEnvelope) + Send + Sync>,
+    ) {
+        let shared = self.read_state_for(session.id());
+        let entries = match shared.lock() {
+            Ok(state) => state.recent_writable(crate::compact::POST_COMPACT_MAX_FILES),
+            Err(_) => Vec::new(),
+        };
+
+        // 组装"路径 + 内容"列表(只取保留了完整内容的条目),同时记下
+        // 对应的键,供后面的状态重建使用。
+        let mut restored = Vec::new();
+        let mut pairs: Vec<(String, String)> = Vec::new();
+        for (key, entry) in entries {
+            let Some(content) = entry.content.as_ref() else {
+                continue;
+            };
+            pairs.push((key.path.to_string_lossy().replace('\\', "/"), content.clone()));
+            restored.push((key, entry));
+        }
+
+        if !pairs.is_empty() {
+            let texts = crate::compact::build_post_compact_read_state(
+                &pairs,
+                crate::compact::POST_COMPACT_MAX_FILES,
+                crate::compact::POST_COMPACT_MAX_FILE_TOKENS,
+                crate::compact::POST_COMPACT_MAX_TOTAL_TOKENS,
+            );
+            for text in texts {
+                let _ = append(
+                    session,
+                    emit,
+                    SessionEvent::UserMessage {
+                        text,
+                        injected: true,
+                        channel: Some("post-compact-read-state".into()),
+                        images: Vec::new(),
+                    },
+                );
+            }
+        }
+
+        // 重建:同一把锁里清空 + 写回被回放的条目。
+        //
+        // 刻意不走 clear_read_state(它把表从会话表里整条摘除)——压缩后的
+        // 会话马上还要用这张表,而且运行中其他持有同一张表克隆的调用方
+        // (工具上下文)必须看到同一份重建结果,不能被换成一张新表。
+        if let Ok(mut state) = shared.lock() {
+            state.clear();
+            for (key, entry) in restored {
+                state.record(
+                    key,
+                    denia_tools::read_state::ReadEntry {
+                        mtime_ms: entry.mtime_ms,
+                        size_bytes: entry.size_bytes,
+                        fingerprint: entry.fingerprint,
+                        is_partial_view: false,
+                        is_full_read: true,
+                        read_at: entry.read_at,
+                        content: entry.content,
+                        // 产生它的调用已被压缩出投影,后续的微压缩失效
+                        // 逻辑不该再牵连这条重建条目。
+                        call_id: None,
+                    },
+                );
+            }
+        }
+
+        // 续场消息:压缩后的第一件事不是"回顾",而是"接着干"。
+        let transcript = session.directory().join("session.jsonl");
+        let _ = append(
+            session,
+            emit,
+            SessionEvent::UserMessage {
+                text: format!(
+                    "[上下文已压缩] 本会话更早的内容已折叠为上面的摘要;摘要之后的近期消息是逐字原文。\
+                     直接继续手头的工作——不要向用户确认摘要、不要复述已经发生过的事、不要写「我继续」之类的话,\
+                     就像没有中断过一样接着做。需要压缩前的具体细节(原始代码、命令输出、报错原文)时,\
+                     完整会话记录在 {}。",
+                    transcript.display()
+                ),
+                injected: true,
+                channel: Some("post-compact-continue".into()),
+                images: Vec::new(),
+            },
+        );
     }
 
     /// 会话是否已放行某类审批操作(自动编辑档"本窗口放行"的查询口)。
@@ -978,7 +1175,7 @@ pub(crate) struct TurnState {
     pub read_state: denia_tools::read_state::SharedReadState,
     pub output_store: Option<Arc<denia_tools::output::OutputStore>>,
     pub replay: denia_llm::ReplayPolicy,
-    pub output_budget: u64,
+    pub output_budget: Option<u64>,
     pub continuations: u32,
     pub last_real_input: u64,
     /// dsh 对齐:请求头按需落盘的基准(最近快照即重建)。
@@ -1029,7 +1226,7 @@ impl TurnState {
             read_state,
             output_store: None,
             replay: denia_llm::ReplayPolicy::default(),
-            output_budget: 32_768,
+            output_budget: None,
             continuations: 0,
             last_real_input: 0,
             last_header: None,

@@ -144,7 +144,7 @@ impl EditTool {
         Self {
             schema: ToolSchema {
                 name: "edit".to_string(),
-                description: "对工作区内的一个 UTF-8 文本文件做精确字符串替换,单次调用可完成多处编辑。两种参数形式必须二选一:只改一处时给 old_string + new_string,可选 replace_all;同一文件改多处时只给 edits 数组,至少一个编辑项,不要同时给两种形式。old_string 必须与文件原文完全一致(空白与换行都算),默认只能出现一次;replace_all=true 时替换全部出现。多处编辑按数组顺序应用,后一项匹配前一项改完后的内容;任一项失败则整次调用不写入。返回替换发生的行号。先 read_file 确认原文,改完可再读校验。写前会校验文件是否仍是你上次读取的那一版(内容指纹),被其他写入者改过时拒写,需重新 read_file 后重提。".to_string(),
+                description: "对工作区内的一个 UTF-8 文本文件做精确字符串替换,单次调用可完成多处编辑。两种参数形式必须二选一:只改一处时给 old_string + new_string,可选 replace_all;同一文件改多处时只给 edits 数组,至少一个编辑项,不要同时给两种形式。old_string 必须与文件原文完全一致(空白与换行都算),默认只能出现一次;replace_all=true 时替换全部出现。多处编辑按数组顺序应用,后一项匹配前一项改完后的内容;任一项失败则整次调用不写入。返回替换发生的行号。先 read_file 确认原文;编辑成功后无需读回验证(写前已做内容指纹校验,成功即表示已落盘)。写前会校验文件是否仍是你上次读取的那一版(内容指纹),被其他写入者改过时拒写,需重新 read_file 后重提。".to_string(),
                 // 参数形式(单处 vs edits 数组)用扁平对象描述,**不用顶层 oneOf**。
                 // 两种形式的互斥由 `parse_specs` 在运行时 fail-loud 校验,比 schema 更严格。
                 // 刻意避开 oneOf:本地 opencode2api 网关(40080/44180)的免费档按「工具名
@@ -276,12 +276,45 @@ impl Tool for EditTool {
         let mut view = normalize_line_endings(&text);
         let mut anchors: Vec<usize> = Vec::with_capacity(specs.len());
         let mut replaced_total = 0usize;
+        // 走过"行尾空白弹性匹配"的编辑序号(1-based),用于在结果里注明。
+        let mut flexible_matches: Vec<usize> = Vec::new();
         for (index, spec) in specs.iter().enumerate() {
             let old_view = normalize_line_endings(&spec.old);
             let new_view = normalize_line_endings(&spec.new);
             let count = view.matches(&old_view).count();
             let ordinal = index + 1;
             if count == 0 {
+                // 确定性回退:逐行去掉尾随空白后若能唯一命中,就按该位置
+                // 应用——模型从读取输出抄写时最常见的误差就是行尾空格/Tab
+                // 差异。只做这一种归一化,且要求候选唯一;replace_all 不启用
+                // (批量替换必须精确,避免扩大影响面)。命中会在结果里注明。
+                if !spec.all {
+                    let candidates = trailing_whitespace_candidates(&view, &old_view);
+                    if candidates.len() == 1 {
+                        let start = candidates[0];
+                        let old_line_count = old_view.matches('\n').count() + 1;
+                        let mut lines: Vec<String> =
+                            view.split('\n').map(str::to_string).collect();
+                        let new_lines: Vec<String> =
+                            new_view.split('\n').map(str::to_string).collect();
+                        lines.splice(start..start + old_line_count, new_lines);
+                        view = lines.join("\n");
+                        // start 是 0-based 行下标;行锚点按 1-based 报告。
+                        anchors.push(start + 1);
+                        replaced_total += 1;
+                        flexible_matches.push(ordinal);
+                        continue;
+                    }
+                    if candidates.len() > 1 {
+                        return tool_error(
+                            format!(
+                                "第 {ordinal} 处编辑的 old_string 精确匹配未命中,但有 {} 处仅行尾空白不同",
+                                candidates.len()
+                            ),
+                            "带上更多上下文使其唯一,或确认全部替换时给该项设置 replace_all=true;edits 全有或全无,本次调用未写入任何内容".to_string(),
+                        );
+                    }
+                }
                 // 尽力给出贴近的失败原因:原文里是否只差空白。
                 let relaxed_match = view.split_whitespace().collect::<String>()
                     == old_view.split_whitespace().collect::<String>();
@@ -402,7 +435,7 @@ impl Tool for EditTool {
         }
         // 成功消息给出每处编辑的行锚点(按 edits 顺序,与前端逐 hunk 对齐);
         // 单处形式保持原有文案。行锚点列表很长时截断,总数已在前缀里。
-        let content = if multi {
+        let mut content = if multi {
             let listed: Vec<String> = anchors
                 .iter()
                 .take(8)
@@ -431,6 +464,20 @@ impl Tool for EditTool {
                 anchors[0],
             )
         };
+        // 弹性匹配过的编辑单独注明:语义等价,但让调用方能看出来是哪几处。
+        if !flexible_matches.is_empty() {
+            let ordinals: Vec<String> = flexible_matches
+                .iter()
+                .map(|index| format!("#{index}"))
+                .collect();
+            content.push_str(&format!(
+                "(其中 {} 处按行尾空白弹性匹配命中)",
+                ordinals.join("、")
+            ));
+        }
+        // 成功即落盘(写前已做内容指纹校验):明说无需读回验证,避免模型
+        // 为"确认改动"多发一轮 read_file。
+        let content = format!("{content}(文件内容状态已是最新,无需读回验证)");
         // 写入成功后刷新读状态:文件内容已是编辑后的版本,后续 Edit
         // 同一文件不会因写前校验而误报过期。
         if let Some(shared) = ctx.read_state.as_ref() {
@@ -472,6 +519,24 @@ fn preview(text: &str) -> String {
 fn line_of(text: &str, needle: &str) -> usize {
     let pos = text.find(needle).unwrap_or(0);
     1 + text[..pos].bytes().filter(|byte| *byte == b'\n').count()
+}
+
+/// 尾随空白弹性匹配:把文件与 old_string 都按行去掉尾随空白后再找位置。
+/// 只修"行尾空格/Tab 差异"这一种抄写误差,不做缩进/引号/语义猜测。
+/// 返回全部候选的起始行(0-based);调用方要求候选恰好为 1 才应用。
+fn trailing_whitespace_candidates(view: &str, old: &str) -> Vec<usize> {
+    let view_lines: Vec<&str> = view.split('\n').map(str::trim_end).collect();
+    let old_lines: Vec<&str> = old.split('\n').map(str::trim_end).collect();
+    if old_lines.is_empty() || old_lines.len() > view_lines.len() {
+        return Vec::new();
+    }
+    let mut candidates = Vec::new();
+    for start in 0..=(view_lines.len() - old_lines.len()) {
+        if view_lines[start..start + old_lines.len()] == old_lines[..] {
+            candidates.push(start);
+        }
+    }
+    candidates
 }
 
 /// 把 CRLF 统一成 LF(对齐 dsh `normalizeLineEndings`)。
@@ -617,6 +682,57 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(root.join("a.txt")).unwrap(),
             "world world\n"
+        );
+        std::fs::remove_dir_all(&ctx.cwd).unwrap();
+    }
+
+    #[tokio::test]
+    async fn trailing_whitespace_difference_matches_uniquely_with_note() {
+        let root = temp_root();
+        // 文件里的行尾带空格;模型抄来的 old_string 行尾没有空格。
+        std::fs::write(root.join("a.txt"), "alpha   \nbeta\n").unwrap();
+        let ctx = context(root.clone());
+        let tool = EditTool::new();
+        let out = tool
+            .execute(
+                r#"{"path":"a.txt","old_string":"alpha\nbeta","new_string":"alpha\nbeta2"}"#,
+                &ctx,
+            )
+            .await;
+        assert!(!out.is_error, "{}", out.content);
+        assert!(
+            out.content.contains("行尾空白弹性匹配"),
+            "弹性命中应被注明:{}",
+            out.content
+        );
+        let after = std::fs::read_to_string(root.join("a.txt")).unwrap();
+        assert_eq!(after, "alpha\nbeta2\n");
+        std::fs::remove_dir_all(&ctx.cwd).unwrap();
+    }
+
+    #[tokio::test]
+    async fn trailing_whitespace_difference_with_multiple_candidates_fails() {
+        let root = temp_root();
+        // 两处仅在行尾空白上有差异 → 候选不唯一,必须报错而不是猜。
+        std::fs::write(root.join("a.txt"), "alpha  \nbeta\nalpha \nbeta\n").unwrap();
+        let ctx = context(root.clone());
+        let tool = EditTool::new();
+        let out = tool
+            .execute(
+                r#"{"path":"a.txt","old_string":"alpha\nbeta","new_string":"win"}"#,
+                &ctx,
+            )
+            .await;
+        assert!(out.is_error, "{}", out.content);
+        assert!(
+            out.content.contains("行尾空白不同"),
+            "多候选时应给出弹性候选提示:{}",
+            out.content
+        );
+        // 文件未被改动。
+        assert_eq!(
+            std::fs::read_to_string(root.join("a.txt")).unwrap(),
+            "alpha  \nbeta\nalpha \nbeta\n"
         );
         std::fs::remove_dir_all(&ctx.cwd).unwrap();
     }

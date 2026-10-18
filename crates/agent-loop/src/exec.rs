@@ -63,6 +63,13 @@ pub(crate) async fn execute_calls(
             }
             match decide_for(driver, state, &cwd, call, memory_root.as_deref()) {
                 Decision::Allow => {
+                    // 未证明只读的 shell 命令不与池中调用并发:等已派发的
+                    // 调用收完再单独跑(池空时正常入池,单跑本身即是独占)。
+                    // 静态无法证明只读时,它与同批读/写交叠会产生顺序不可预期的
+                    // 副作用。
+                    if exclusive_shell_call(call) && !in_flight.is_empty() {
+                        break;
+                    }
                     append_call(state, step, call)?;
                     let index = next;
                     let future = dispatch_tool_call(driver, state, &cwd, call);
@@ -97,6 +104,28 @@ pub(crate) async fn execute_calls(
         }
     }
     Ok(())
+}
+
+/// 未证明只读的 shell 命令必须独占执行:静态无法证明它不改状态时,与同批
+/// 其他调用并发会产生顺序不可预期的副作用(典型:一边改文件一边被读)。
+/// 池空时它照常入池——单跑本身即是独占,不需要单独的执行路径。
+///
+/// 判据是 fail-closed 白名单(见 `denia_tools::permission::certified_readonly_command`):
+/// 空命令、解析失败、含重定向、不在白名单——都算"未证明只读"。
+fn exclusive_shell_call(call: &ToolCallRef) -> bool {
+    if call.name != "bash" {
+        return false;
+    }
+    let command = serde_json::from_str::<serde_json::Value>(call.arguments.trim())
+        .ok()
+        .and_then(|value| {
+            value
+                .get("command")
+                .and_then(|c| c.as_str())
+                .map(str::to_string)
+        })
+        .unwrap_or_default();
+    !denia_tools::permission::certified_readonly_command(&command)
 }
 
 /// 落一条 ToolCall 事件(过程透明:被拒/待审批的调用同样先落调用行)。
@@ -148,9 +177,12 @@ async fn commit_result(
             }
             output.artifact = Some(capture.finish(true).await);
         }
+        // 预览两头分配按工具语义倾斜(命令类尾部更重):见
+        // denia_tools::meta::preview_split。
+        let (head_chars, tail_chars) = denia_tools::meta::preview_split(&call.name);
         let mut preview = denia_tools::output::Preview::default();
         preview.push(output.content.as_bytes());
-        output.content = preview.render(8_000, 16_000);
+        output.content = preview.render(head_chars, tail_chars);
         preview_truncation = Some(denia_core::session::TruncationInfo {
             total_chars: original_chars as u64,
             shown_chars: output.content.chars().count() as u64,
@@ -161,7 +193,12 @@ async fn commit_result(
                 output.artifact.as_ref(),
             ));
     }
-    let meta = merge_meta(output.report.as_ref(), output.artifact.as_ref());
+    let meta = merge_read_stamp_meta(
+        state,
+        call,
+        cwd,
+        merge_meta(output.report.as_ref(), output.artifact.as_ref()),
+    );
     let (content, truncation) = denia_tools::support::apply_output_budget(&output.content);
     append(
         &state.session,
@@ -242,6 +279,59 @@ fn merge_into(
         base.entry("outputArtifact".to_string()).or_insert(value);
     }
     (!base.is_empty()).then_some(serde_json::Value::Object(base))
+}
+
+/// 给 `read_file` 的结果补一条 `readStamp`(读取当时的路径/范围/新鲜度)。
+///
+/// 用途是**冷恢复**:进程重启或会话被驱逐后,读状态表是空的,模型"看过"
+/// 的文件会被写前校验按"从未读过"拒,每次继续都要白读一遍。带 stamp 的
+/// 结果落进日志后,下次启动时可以从事件流重建状态
+/// ([`SessionDriver::hydrate_read_state_from_history`])。
+///
+/// 存**读取当时**的 `(mtime, size)` 而不是当下 `stat`:写前校验要比对的
+/// 正是"模型看到的版本"与"磁盘当前版本",存当下值会让会话中断期间的
+/// 外部改动被静默放过。
+///
+/// 工具结果没有这条 stamp 时(读的是目录、路径解析失败、或该结果被
+/// 微压缩清成了占位符)原样返回,不影响其他 meta 键。
+fn merge_read_stamp_meta(
+    state: &TurnState,
+    call: &ToolCallRef,
+    cwd: &Path,
+    meta: Option<serde_json::Value>,
+) -> Option<serde_json::Value> {
+    let Some(stamp) = read_stamp_meta(state, call, cwd) else {
+        return meta;
+    };
+    let mut base = match meta {
+        Some(serde_json::Value::Object(fields)) => fields,
+        _ => serde_json::Map::new(),
+    };
+    base.entry("readStamp".to_string()).or_insert(stamp);
+    Some(serde_json::Value::Object(base))
+}
+
+/// 从读状态表取这次 `read_file` 调用的结构化戳(键与执行时逐字一致)。
+fn read_stamp_meta(state: &TurnState, call: &ToolCallRef, cwd: &Path) -> Option<serde_json::Value> {
+    if call.name != "read_file" {
+        return None;
+    }
+    let path = crate::workspace_instructions::touched_path(cwd, &call.arguments)?;
+    let arguments = serde_json::from_str::<serde_json::Value>(call.arguments.trim()).ok()?;
+    let offset = arguments.get("offset").and_then(|value| value.as_u64());
+    let limit = arguments.get("limit").and_then(|value| value.as_u64());
+    let key = denia_tools::read_state::ReadKey::new(path, offset, limit);
+    let shared = state.read_state.clone();
+    let entry = shared.lock().ok()?.get(&key)?.clone();
+    Some(serde_json::json!({
+        "path": key.path.to_string_lossy().replace('\\', "/"),
+        "offset": key.offset,
+        "limit": key.limit,
+        "mtimeMs": entry.mtime_ms,
+        "sizeBytes": entry.size_bytes,
+        "fullRead": entry.is_full_read,
+        "partialView": entry.is_partial_view,
+    }))
 }
 
 /// 构造打桩占位符:保留 `path`(模型定位文件用)与原体量说明。
@@ -447,11 +537,13 @@ fn classify_call(
     confined: bool,
     memory_root: Option<&Path>,
 ) -> ActionClass {
-    match call.name.as_str() {
-        "exit_plan" => ActionClass::PlanSubmit,
+    // 静态分类与工具定义同源(denia_tools::meta):"哪些工具是写类"的
+    // 知识不再散落在调度层;这里只叠加运行时细化(路径内外、命令启发式)。
+    match denia_tools::meta::tool_action_class(&call.name) {
+        denia_tools::meta::ToolActionClass::PlanSubmit => ActionClass::PlanSubmit,
         // 预设创作:落盘路径服务端固定,按独立类别判定(不走工作区内外)。
-        "create_preset" => ActionClass::PresetCreate,
-        "write_file" | "edit" => {
+        denia_tools::meta::ToolActionClass::PresetCreate => ActionClass::PresetCreate,
+        denia_tools::meta::ToolActionClass::FileWrite => {
             match crate::workspace_instructions::touched_path(cwd, &call.arguments) {
                 // 记忆目录内的 .md 写:独立类别(harness 行为,四档放行)。
                 Some(path)
@@ -466,7 +558,7 @@ fn classify_call(
                 _ => ActionClass::WriteInside,
             }
         }
-        "bash" | "job_start" => {
+        denia_tools::meta::ToolActionClass::Shell => {
             let command = serde_json::from_str::<serde_json::Value>(call.arguments.trim())
                 .ok()
                 .and_then(|value| {
@@ -490,8 +582,8 @@ fn classify_call(
         // bash 不同(命令在 `checks[].command` 里),不能借用上面那套命令
         // 启发式(取不到命令会落到读类放行)。直接按"有写副作用的命令"
         // 归类:自动编辑档弹审批,只读/计划档拒绝。
-        "run_checks" => ActionClass::BashWrite,
-        _ => ActionClass::Read,
+        denia_tools::meta::ToolActionClass::ShellChecks => ActionClass::BashWrite,
+        denia_tools::meta::ToolActionClass::Read => ActionClass::Read,
     }
 }
 
@@ -795,6 +887,48 @@ fn apply_plan_approval(state: &mut TurnState, decision: PlanReviewDecision) -> T
         text.push_str(feedback);
     }
     ToolOutput::text(text)
+}
+
+#[cfg(test)]
+mod exclusive_shell_tests {
+    use super::*;
+
+    fn call(command: &str) -> ToolCallRef {
+        ToolCallRef {
+            id: "c1".into(),
+            name: "bash".into(),
+            arguments: serde_json::json!({ "command": command }).to_string(),
+        }
+    }
+
+    /// 判定语义:只有"已证明只读"的命令才允许与池中调用并发;写嫌疑、
+    /// 解析失败、非 bash 各归其位(fail closed)。
+    #[test]
+    fn only_certified_readonly_commands_share_the_pool() {
+        // 未证明只读:重定向、删除、动态语言、提交——一律独占。
+        assert!(exclusive_shell_call(&call("echo hi > f")));
+        assert!(exclusive_shell_call(&call("rm -rf x")));
+        assert!(exclusive_shell_call(&call("python -c \"open('f','w')\"")));
+        assert!(exclusive_shell_call(&call("git commit -m x")));
+        // 已证明只读:照常与读类并发。
+        assert!(!exclusive_shell_call(&call("ls -la")));
+        assert!(!exclusive_shell_call(&call("git status")));
+        assert!(!exclusive_shell_call(&call("echo hi")));
+        // 参数解析失败 fail closed:按独占处理。
+        let broken = ToolCallRef {
+            id: "c2".into(),
+            name: "bash".into(),
+            arguments: "not json".into(),
+        };
+        assert!(exclusive_shell_call(&broken));
+        // 非 bash 工具不参与这条判定。
+        let read = ToolCallRef {
+            id: "c3".into(),
+            name: "read_file".into(),
+            arguments: r#"{"path":"a.txt"}"#.into(),
+        };
+        assert!(!exclusive_shell_call(&read));
+    }
 }
 
 #[cfg(test)]

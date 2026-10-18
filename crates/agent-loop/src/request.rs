@@ -107,7 +107,7 @@ pub(crate) async fn dispatch_request(
         system: Some(framed_system.to_string()),
         tools: tools.to_vec(),
         temperature: None,
-        max_tokens: Some(state.output_budget),
+        max_tokens: state.output_budget,
         stop: Vec::new(),
     };
     let retry_sink: Option<denia_llm::RetrySink> = Some(Arc::new({
@@ -527,7 +527,7 @@ fn log_request_headers(
     tools: &[ToolSchema],
 ) -> Result<(), LlmFailure> {
     let mut snapshot = build_header_snapshot(&state.selection, framed_system, tools);
-    snapshot.config.max_tokens = Some(state.output_budget);
+    snapshot.config.max_tokens = state.output_budget;
     if state.last_header.as_ref() != Some(&snapshot) {
         let reason = match &state.last_header {
             None if !state.has_request_header => RequestHeaderReason::Initial,
@@ -754,56 +754,6 @@ async fn run_microcompact_gate(driver: &SessionDriver, state: &TurnState, step: 
     }
 }
 
-/// 压缩后的读状态恢复:重新注入压缩前读过的文件内容。
-///
-/// 两件事一起做:
-///
-/// 1. **重新注入内容**:从 read_state 里挑最近读过的文件(最多 5 个、
-///    单文件 5k token、总量 50k token),以注入消息的形式放回上下文;
-/// 2. **清空 read_state**:摘要已接管旧内容的记忆职责。不清空的话,模型
-///    会看到"读过"的标记、却看不到内容,写文件时基于不存在的记忆做决策。
-fn restore_read_state_after_compact(driver: &SessionDriver, state: &TurnState, step: u32) {
-    let shared = state.read_state.clone();
-    let entries = match shared.lock() {
-        Ok(state) => state.recent_writable(crate::compact::POST_COMPACT_MAX_FILES),
-        Err(_) => return,
-    };
-
-    // 组装"路径 + 内容"列表(只取保留了完整内容的条目)。
-    let pairs: Vec<(String, String)> = entries
-        .into_iter()
-        .filter_map(|(key, entry)| {
-            let content = entry.content?;
-            Some((key.path.to_string_lossy().replace('\\', "/"), content))
-        })
-        .collect();
-
-    if !pairs.is_empty() {
-        let texts = crate::compact::build_post_compact_read_state(
-            &pairs,
-            crate::compact::POST_COMPACT_MAX_FILES,
-            crate::compact::POST_COMPACT_MAX_FILE_TOKENS,
-            crate::compact::POST_COMPACT_MAX_TOTAL_TOKENS,
-        );
-        for text in texts {
-            let _ = append(
-                &state.session,
-                &state.emit,
-                SessionEvent::UserMessage {
-                    text,
-                    injected: true,
-                    channel: Some("post-compact-read-state".into()),
-                    images: Vec::new(),
-                },
-            );
-        }
-    }
-
-    // 清空:旧内容要么已重新注入、要么已明确告知"需重读"。
-    driver.clear_read_state(state.session.id());
-    let _ = step;
-}
-
 /// rapid-refill 断路器:连续多少次"压缩后立刻回填"就停止自动压缩。
 pub const RAPID_REFILL_MAX_CONSECUTIVE: u32 = 3;
 
@@ -838,7 +788,7 @@ async fn run_compaction_gate(
     let mut reserved_pressure = pressure;
     reserved_pressure.context_window = reserved_pressure
         .context_window
-        .map(|window| window.saturating_sub(state.output_budget));
+        .map(|window| window.saturating_sub(state.output_budget.unwrap_or(0)));
     if !state.settings.compaction.compact_enabled
         || (!forced && !should_compact(&reserved_pressure, &state.settings.compaction))
         || state
@@ -917,10 +867,8 @@ async fn run_compaction_gate(
                     "compaction refilled quickly"
                 );
             }
-            // 压缩后读状态恢复:
-            // 把压缩前读过的文件内容按预算重新注入,避免模型"忘了看过什么"
-            // 而立刻重新读一遍——那正是压缩后窗口二次膨胀的根源。
-            restore_read_state_after_compact(driver, state, step);
+            // 压缩后收尾维护:文件回放 + 读状态重建 + 续场消息。
+            driver.post_compact_maintenance(&state.session, &state.emit);
             return true;
         }
         Ok(None) => {

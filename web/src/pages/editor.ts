@@ -73,6 +73,38 @@ export function serializeEditor(editor: HTMLElement): string {
   return out
 }
 
+/**
+ * 编辑器是否"实际为空":只有 `<br>` 与空文本节点才算空。
+ *
+ * 不能只看 [`serializeEditor`] 的字符串:浏览器删掉最后一段文字后常补一个
+ * 占位 `<br>`(contenteditable 的固有行为),它会被序列化成 `"\n"`,
+ * 于是"非空"成立、占位提示消失。占位提示必须跟**内容**走,不跟 DOM 结构走。
+ */
+export function draftIsEmpty(node: Node): boolean {
+  for (const child of Array.from(node.childNodes)) {
+    if (child.nodeType === Node.TEXT_NODE) {
+      if ((child.textContent ?? '').length > 0) return false
+      continue
+    }
+    if (child.nodeType !== Node.ELEMENT_NODE) continue
+    if (chipToken(child)) return false
+    if ((child as HTMLElement).tagName === 'BR') continue
+    if (!draftIsEmpty(child)) return false
+  }
+  return true
+}
+
+/**
+ * 把"空/非空"记到 `data-empty` 上:占位提示的显隐只认这个标记,不看
+ * `:empty`(它会被占位 `<br>` 骗过)。
+ */
+export function syncEmptyMark(editor: HTMLElement): boolean {
+  const empty = draftIsEmpty(editor)
+  if (empty) editor.dataset.empty = 'true'
+  else delete editor.dataset.empty
+  return empty
+}
+
 /** 光标定位结果:容器 + 容器内偏移(容器可能是 editor 本身,偏移为子节点序号)。 */
 interface CaretPosition {
   container: Node

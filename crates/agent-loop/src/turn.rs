@@ -13,8 +13,7 @@ use denia_core::session::{SessionEvent, TurnEndReason};
 use denia_core::stream::FinishReason;
 use denia_session::Session;
 use denia_system_prompt::{
-    AssembleContext, PromptAssembly, frame_system_prompt_for_model, render_prompt,
-    render_prompt_for_user,
+    AssembleContext, PromptAssembly, render_model_system, render_prompt_for_user,
 };
 use denia_token_meter::estimate_system_tokens;
 
@@ -71,6 +70,10 @@ pub(crate) async fn run_turn_inner(
     quoted: Vec<(String, String)>,
 ) -> Result<TurnEndReason, LlmFailure> {
     state.turn = state.session.next_turn_number();
+    // 冷恢复:进程重启/会话被驱逐后读状态表是空的,从日志里的 readStamp
+    // 重建——否则模型"看过"的文件会被写前校验按从未读过拒,继续时白读
+    // 一遍。活会话表非空,这一步直接跳过。
+    driver.hydrate_read_state_from_history(&state.session);
     let cwd = state.cwd();
     state.file_history = match &driver.file_history {
         Some(provider) => provider.backend(state.session.id(), &cwd).await,
@@ -233,8 +236,10 @@ pub(crate) async fn run_turn_inner(
                 },
             )?;
         }
-        let model_prompt = render_prompt(&prompt_assembly);
-        let framed_current = frame_system_prompt_for_model(&model_prompt);
+        // 人格排在框架之外、其余段落由框架包住(见 `render_model_system` 的
+        // 注释):框架那句「优先于你的默认角色」只该对工具纪律说,不该把
+        // persona 也标成被注入的覆盖指令。
+        let framed_current = render_model_system(&prompt_assembly);
         // —— 系统提示变更 in-history 追加(对齐 dsh `systemPromptUpdate: 'in-history'`)——
         // wire 层把 system 序列化为请求首条消息:已发过请求的会话里改写它,
         // 等于从第 0 个 token 打碎提供方前缀缓存。因此 system 字节冻结在

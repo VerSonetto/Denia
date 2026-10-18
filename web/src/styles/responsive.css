@@ -423,7 +423,11 @@
   line-height: 26px;
   letter-spacing: 0.005em;
 }
-.prompt-panel .prompt-editor:empty::before {
+.prompt-panel .prompt-editor:empty::before,
+/* data-empty 才是主判据:删完最后一段文字后浏览器会补一个占位 `<br>`,
+   此时 :empty 不再匹配,只有标记还知道"其实没内容"(见 editor.ts 的
+   syncEmptyMark)。:empty 保留作兜底,元素刚挂载、观察器尚未跑时有它。 */
+.prompt-panel .prompt-editor[data-empty='true']::before {
   content: attr(data-placeholder);
   pointer-events: none;
   color: var(--label-tertiary);

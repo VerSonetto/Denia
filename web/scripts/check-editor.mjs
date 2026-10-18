@@ -52,4 +52,21 @@ editor.textContent = '看 @query next'
 assert.equal(mod.insertFileChip(editor, { path: 'src/a.ts', kind: 'file' }, 2, 8), true)
 assert.equal(mod.serializeEditor(editor), '看 @src/a.ts next')
 assert.equal(mod.caretOffsetIn(editor), '看 @src/a.ts'.length)
-console.log('ALL PASS: file chips, draft roundtrip, atomic offsets, trigger boundaries and insertion')
+// A browser-inserted placeholder <br> after deleting everything serializes to a
+// newline; the placeholder hint must still come back, so emptiness is decided by
+// structure (draftIsEmpty) and published on data-empty.
+mod.renderDraft(editor, '', kinds)
+editor.appendChild(document.createElement('br'))
+assert.equal(mod.serializeEditor(editor), '\n')
+assert.equal(mod.draftIsEmpty(editor), true)
+assert.equal(mod.syncEmptyMark(editor), true)
+assert.equal(mod.draftIsEmpty(editor), true)
+editor.insertBefore(document.createTextNode('x'), editor.firstChild)
+assert.equal(mod.draftIsEmpty(editor), false)
+assert.equal(mod.syncEmptyMark(editor), false)
+assert.equal(editor.dataset.empty, undefined)
+// A real line break alone stays "empty" too — there is no content to send.
+editor.textContent = ''
+editor.appendChild(document.createElement('br'))
+assert.equal(mod.draftIsEmpty(editor), true)
+console.log('ALL PASS: file chips, draft roundtrip, atomic offsets, trigger boundaries, insertion and empty-draft detection')

@@ -50,6 +50,14 @@
   --method-post: #e0b060;
   --method-ws: #c9a8f5;
 
+  /* 上下文占用拆分(暗色阶):三段取色相间隔≈100° 的三色 —— 紫蓝/青绿/琥珀,
+     不依赖明度差区分(原灰阶三段亮度差小到肉眼不可分);未占用给一层
+     比面板底略亮的实灰,让彩色段落在总容量上可直接读比例。 */
+  --ctx-system: #9d8cff;
+  --ctx-tools: #2dd4bf;
+  --ctx-messages: #f0a83c;
+  --ctx-unused: #2a2a2f;
+
   --hover-fill: rgba(255, 255, 255, 0.05);
   --active-fill: rgba(255, 255, 255, 0.09);
 
@@ -126,6 +134,12 @@
     --method-post: #b7791f;
     --method-ws: #6d28d9;
 
+    /* 上下文占用拆分(亮色阶):同一色相三角形,取足够深的明度配浅底。 */
+    --ctx-system: #6d4bd6;
+    --ctx-tools: #0f766e;
+    --ctx-messages: #b45309;
+    --ctx-unused: #d5d5d0;
+
     --hover-fill: rgba(0, 0, 0, 0.04);
     --active-fill: rgba(0, 0, 0, 0.07);
 
@@ -187,6 +201,12 @@
   --method-get: #2e7d32;
   --method-post: #b7791f;
   --method-ws: #6d28d9;
+
+  /* 上下文占用拆分(亮色阶):同一色相三角形,取足够深的明度配浅底。 */
+  --ctx-system: #6d4bd6;
+  --ctx-tools: #0f766e;
+  --ctx-messages: #b45309;
+  --ctx-unused: #d5d5d0;
 
   --hover-fill: rgba(0, 0, 0, 0.04);
   --active-fill: rgba(0, 0, 0, 0.07);

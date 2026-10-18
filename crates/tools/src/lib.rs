@@ -17,6 +17,7 @@ mod goal;
 pub mod grep;
 mod ls;
 pub mod mcp;
+pub mod meta;
 pub mod output;
 pub mod permission;
 mod plan;

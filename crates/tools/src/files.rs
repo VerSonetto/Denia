@@ -166,7 +166,7 @@ impl ReadFileTool {
         Self {
             schema: ToolSchema {
                 name: "read_file".to_string(),
-                description: "读取会话工作区中的一个 UTF-8 文本文件。相对路径锚定会话工作区;大文件用 offset/limit 分页读取。读取图片文件(png/jpeg/gif/webp/bmp)时图片会作为视觉输入注入会话(需要可识图模型)。".to_string(),
+                description: "读取会话工作区中的一个 UTF-8 文本文件。相对路径锚定会话工作区;大文件用 offset/limit 分页读取。同一分页重复读取且文件未变更时,直接返回\"未变更\"提示而不重复回灌内容——不要为验证刚做的编辑而重读文件(编辑成功即表示已落盘)。读取图片文件(png/jpeg/gif/webp/bmp)时图片会作为视觉输入注入会话(需要可识图模型)。".to_string(),
                 parameters: serde_json::json!({
                     "type": "object",
                     "properties": {
@@ -444,7 +444,7 @@ impl WriteFileTool {
         Self {
             schema: ToolSchema {
                 name: "write_file".to_string(),
-                description: "在会话工作区写入一个 UTF-8 文本文件:自动创建父目录,已存在的文件会被整体覆盖。新建文件或全量重写用本工具;对现有文件做局部修改请优先用 edit。".to_string(),
+                description: "在会话工作区写入一个 UTF-8 文本文件:自动创建父目录,已存在的文件会被整体覆盖。新建文件或全量重写用本工具;对现有文件做局部修改请优先用 edit。目标文件已存在且本会话未读取过、或读取后又被改动时,写入会被拒绝并提示重新读取。".to_string(),
                 parameters: serde_json::json!({
                     "type": "object",
                     "properties": {

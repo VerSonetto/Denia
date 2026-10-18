@@ -199,6 +199,179 @@ pub fn bash_may_delete(command: &str) -> bool {
     )
 }
 
+/// 严格只读命令判定:只有能"证明"只读的命令才返回 true(fail-closed)。
+///
+/// 与 [`bash_may_write`]/[`bash_may_delete`] 的启发式方向相反:那两个函数为
+/// 写副作用找证据,**证明不了就按读类放行**;本函数为只读找证据,**证明不了
+/// 就拒绝**。调度层若拿它换取免审批或放宽沙箱,误判的代价是未经审批的写
+/// 副作用,所以拒绝侧必须保守。
+///
+/// 判定顺序:
+/// 1. 形态检查:重定向(`>`/`>>`)、命令替换(`$(`、反引号)一律 false——
+///    它们让"文本"与"实际执行的动作"脱钩,静态证明不了任何东西;
+/// 2. 按管道/分号/逻辑与/后台符/换行分段,在**每一段**上判定,任一段不
+///    满足即整体 false(`ls | tee out`、`mkdir x && ls` 都不是只读);
+/// 3. 逐段:命令名(剥路径、引号与 `.exe` 后缀)命中写命令黑名单直接
+///    false;其余命令必须命中只读白名单,且不含写选项(`sort -o`、
+///    `git --output=<file>`);
+/// 4. 未命中白名单 → false(`sed`、`find`、`curl`、`python -c` 等都会
+///    因此拒绝,即使它们偶尔有只读用法——fail-closed 不猜)。
+pub fn certified_readonly_command(command: &str) -> bool {
+    let trimmed = command.trim();
+    if trimmed.is_empty()
+        || trimmed.contains('>')
+        || trimmed.contains("$(")
+        || trimmed.contains('`')
+    {
+        return false;
+    }
+    let mut segments = 0usize;
+    for segment in trimmed.split(['|', ';', '&', '\n']) {
+        let segment = segment.trim();
+        if segment.is_empty() {
+            continue;
+        }
+        segments += 1;
+        if !readonly_segment(segment) {
+            return false;
+        }
+    }
+    // 全是分隔符(如 "&&")的命令没有可判定的段,同样拒绝。
+    segments > 0
+}
+
+/// 写命令黑名单:命中即 false。
+///
+/// 名单里的命令本就不在只读白名单(`_ => false` 也会拒绝),显式列出是
+/// 双重保险:白名单日后扩项时,这些写形态(`sed -i`、`find -delete` 或
+/// `find -exec`、`chmod`/`chown`/`mv`/`rm`/`dd`/`tee`/`truncate`,以及
+/// PowerShell 的 `Set-Content`/`Out-File` 一类)仍然被这里挡住,不必依赖
+/// 每个调用点重新论证。
+const WRITE_COMMANDS: &[&str] = &[
+    "sed",
+    "find",
+    "chmod",
+    "chown",
+    "chgrp",
+    "mv",
+    "dd",
+    "tee",
+    "truncate",
+    "mkdir",
+    "touch",
+    "cp",
+    "rm",
+    "rmdir",
+    "shred",
+    "unlink",
+    "install",
+    "ln",
+    "patch",
+    "del",
+    "erase",
+    "rd",
+    "remove-item",
+    "set-content",
+    "add-content",
+    "out-file",
+    "new-item",
+    "move-item",
+    "copy-item",
+    "rename-item",
+];
+
+/// `git branch` 的查询类选项:参数全部命中才判只读。
+///
+/// `git branch <名字>` 是**创建分支**、`-d`/`-D`/`-m`/`-M` 等是写,所以
+/// 只要出现集合外参数(包括普通名字)就拒绝。
+const GIT_BRANCH_READONLY_ARGS: &[&str] = &[
+    "-a",
+    "-r",
+    "-v",
+    "-vv",
+    "--all",
+    "--remotes",
+    "--verbose",
+    "--list",
+    "--show-current",
+    "--contains",
+    "--merged",
+    "--no-merged",
+    "--points-at",
+    "--format",
+];
+
+/// 单段(已不含管道与命令分隔符)的只读判定。
+fn readonly_segment(segment: &str) -> bool {
+    let tokens = shell_tokens(segment);
+    let Some((head, args)) = tokens.split_first() else {
+        return false;
+    };
+    let program = command_name(head);
+    if WRITE_COMMANDS.contains(&program.as_str()) {
+        return false;
+    }
+    match program.as_str() {
+        // 无写选项的基础只读命令;`echo` 的重定向形态已在形态检查里排除。
+        "echo" | "ls" | "pwd" | "cat" | "head" | "tail" | "wc" | "which" | "where"
+        | "uniq" | "diff" | "stat" | "file" => true,
+        // PowerShell 侧的等价只读命令:bash 工具在 Windows 上经 pwsh 执行,
+        // 只认 Unix 名单等于在主力平台上失效。这些命令本身没有写形式。
+        "get-childitem" | "get-content" | "get-item" | "get-process" | "get-location"
+        | "test-path" | "select-string" | "resolve-path" => true,
+        // `sort -o <file>` 会直接写文件,只放行无输出参数的形式。
+        "sort" => !args.iter().any(|arg| is_output_flag(arg)),
+        // 版本查询属于只读;`node -e`/`node script.js` 都能写,不放行。
+        "node" => matches!(args, ["--version"] | ["-v"]),
+        "git" => git_is_readonly(args),
+        _ => false,
+    }
+}
+
+/// `git` 只读判定:子命令必须在白名单里,且不带写参数。
+fn git_is_readonly(args: &[&str]) -> bool {
+    let Some(subcommand) = args.first() else {
+        return false;
+    };
+    let rest = &args[1..];
+    // `--output=<file>` 是 diff/log 家族的写出口,统一先挡。
+    if rest.iter().any(|arg| is_output_flag(arg)) {
+        return false;
+    }
+    match *subcommand {
+        "status" | "log" | "diff" | "show" | "rev-parse" | "rev-list" | "blame"
+        | "describe" | "shortlog" | "ls-files" | "ls-tree" | "cat-file" | "grep"
+        | "whatchanged" | "merge-base" | "name-rev" | "for-each-ref" => true,
+        "branch" => rest
+            .iter()
+            .all(|arg| GIT_BRANCH_READONLY_ARGS.contains(arg)),
+        _ => false,
+    }
+}
+
+/// `-o`/`--output` 类"写文件"参数(sort 与部分 git 子命令支持)。
+fn is_output_flag(arg: &str) -> bool {
+    arg == "-o" || (arg.starts_with("-o") && arg.len() > 2) || arg.starts_with("--output")
+}
+
+/// 按空白切 token 并剥掉首尾引号。
+///
+/// 不做完整 shell 解析——fail-closed 前提下,解析不了的形态(含空格的
+/// 引号包裹路径等)自然落回"未命中白名单",不会误判成只读。
+fn shell_tokens(segment: &str) -> Vec<&str> {
+    segment
+        .split_whitespace()
+        .map(|token| token.trim_matches(|c| c == '"' || c == '\''))
+        .collect()
+}
+
+/// 命令 token 归一化:取路径最后一段、剥 `.exe` 后缀、ASCII 小写。
+fn command_name(token: &str) -> String {
+    let name = token.rsplit(['/', '\\']).next().unwrap_or(token);
+    let lower = name.to_ascii_lowercase();
+    lower.strip_suffix(".exe").unwrap_or(&lower).to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -304,5 +477,56 @@ mod tests {
         // 写但不删。
         assert!(!bash_may_delete("echo hi > out.txt"));
         assert!(!bash_may_delete("mv a.txt b.txt"));
+    }
+
+    #[test]
+    fn certifies_only_provable_readonly_commands() {
+        // 正例:能证明只读的命令(含 PowerShell 侧与 git 只读子命令)。
+        for command in [
+            "ls -la",
+            "git status",
+            "git status --short",
+            "echo hi",
+            "cat src/lib.rs",
+            "wc -l src/lib.rs",
+            "git log --oneline -5",
+            "git branch",
+            "git branch -a",
+            "sort -u names.txt",
+            "node --version",
+            "Get-ChildItem -Recurse",
+            "Test-Path target",
+        ] {
+            assert!(certified_readonly_command(command), "{command} 应判只读");
+        }
+        // 反例:写形态、未知命令、以及一切能藏写的形态,一律拒绝(fail-closed)。
+        for command in [
+            "",
+            "rm -rf x",
+            "echo hi > f",
+            "echo hi >> f",
+            "git commit -m x",
+            "git branch -d feature",
+            "git branch new-branch",
+            "git diff --output=patch.diff",
+            "sort -o out.txt in.txt",
+            "sed -i s/a/b/ f.txt",
+            "find . -name '*.tmp' -delete",
+            "chmod 755 script.sh",
+            "mkdir build && ls",
+            "ls | tee list.txt",
+            "ls | grep foo",
+            "echo $(rm -rf x)",
+            "python -c \"open('f','w')\"",
+            "curl -X POST https://example.com",
+            "node -e \"require('fs').writeFileSync('f','x')\"",
+            "Get-ChildItem | Remove-Item",
+            "cat f | sh",
+        ] {
+            assert!(
+                !certified_readonly_command(command),
+                "{command} 不应判只读"
+            );
+        }
     }
 }

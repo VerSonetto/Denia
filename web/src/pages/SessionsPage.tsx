@@ -15,8 +15,7 @@ import { optimizePromptText } from '../promptOptimizer';
 import { addSessionLocal, ensureSession, getActiveWorkspace, markStarted, notify, refreshList, markCompacting, setActiveId, setRunningStatus, useCatalogTick, useCompactingFor, useRunningFor, useSessions, useWorkspaces } from '../appStore';
 import { t } from '../i18n';
 import { attach, ensureFollowing, invalidateSession } from '../sessionStreams';
-import { sessionDisplayTitle, subagentSnapshotText } from '../sessionDisplay';
-import { openTurnStartedAt, type TranscriptNode } from '../fold';
+import { sessionDisplayTitle, subagentModelLabel, subagentSnapshotFacts, subagentSnapshotText } from '../sessionDisplay';import { openTurnStartedAt, type TranscriptNode } from '../fold';
 import type { TrajectoryQuote } from '../trajectory';
 import { SessionView } from '../components/SessionView';
 import { AgentPresetSelector } from '../components/AgentPresetSelector';
@@ -33,13 +32,13 @@ import { PlanReviewPanel } from '../components/PlanReviewPanel';
 import { ApprovalDialog, type ApprovalDecision, type ApprovalRequest } from '../components/ApprovalDialog';
 import { ConfirmDialog } from '../components/ConfirmDialog';
 import { ContextRing } from '../components/ContextRing';
-import { IconWorkspace, IconCheck, IconBranch, IconArrowDown, IconChevron, IconClose, IconDownload, IconFile, IconFolder, IconImage, IconPanelOpen, IconPlus, IconSend, IconSparkles, IconUndo, IconSpinner, IconStop, IconSlashCommand } from '../components/icons';
+import { IconWorkspace, IconCheck, IconBranch, IconArrowDown, IconChevron, IconClose, IconDownload, IconFile, IconFolder, IconImage, IconPanelOpen, IconPlus, IconSend, IconSparkles, IconUndo, IconSpinner, IconStop, IconSlashCommand, IconAgentSpawn } from '../components/icons';
 import { resolveSessionReasoningEffort } from '../modelCatalog';
 import { useStickToBottom } from '../hooks/useStickToBottom';
 import { useContainedWheel } from '../hooks/useContainedWheel';
 
 import { collectSkillTokens, parseLeadingCommand } from './slash';
-import { insertFileChip, selectionOffsetsIn, serializeEditor, setCaretOffset } from './editor';
+import { insertFileChip, selectionOffsetsIn, serializeEditor, setCaretOffset, syncEmptyMark } from './editor';
 import { REFERENCE_MIME } from '../fileTree';
 import { applyTotalsEvent, emptyTotals, formatTokens, resetTotals, totalsFromPage, type TotalsAccumulator } from '../stats';
 import { TodoPanel } from '../components/TodoPanel';
@@ -95,6 +94,15 @@ export default function SessionsPage({
   // 只读运行快照的事实，子会话页与父侧面板共用同一份纯函数。
   const descriptorText = useMemo(
     () => subagentSnapshotText(activeSession?.subagent),
+    [activeSession?.subagent],
+  )
+  // 子会话横幅：标题名与键值对同出一份运行快照（与父侧面板同源）。
+  const subagentFacts = useMemo(
+    () => subagentSnapshotFacts(activeSession?.subagent),
+    [activeSession?.subagent],
+  )
+  const subagentModel = useMemo(
+    () => subagentModelLabel(activeSession?.subagent),
     [activeSession?.subagent],
   )
 
@@ -234,6 +242,19 @@ export default function SessionsPage({
   }, [])
 
   const inert = !activeId && !activeWs
+
+  /* 占位提示跟内容走,不跟 DOM 结构走:浏览器删掉最后一段文字后会补一个
+   * 占位 `<br>`,`:empty` 因此不再匹配、提示消失。看观察器而不是只改输入
+   * 回调,是因为改写子树的入口不止输入:slash 菜单回填、历史回退、粘贴与
+   * 撤销都在这一层。 */
+  useEffect(() => {
+    const el = promptRef.current
+    if (!el) return
+    syncEmptyMark(el)
+    const observer = new MutationObserver(() => syncEmptyMark(el))
+    observer.observe(el, { childList: true, subtree: true, characterData: true })
+    return () => observer.disconnect()
+  }, [])
   const composingRef = useRef(false)
   const inputHistory = useInputHistory({ sessionId: activeId })
   const onDraftChange = useCallback((text: string) => {
@@ -1975,12 +1996,13 @@ export default function SessionsPage({
           spellCheck={false}
           onInput={() => {
             // DOM 是草稿事实源:同步 prompt 镜像 + 触发检测(IME 组词期间
-            // 只同步状态,不刷新弹层)。Chrome 删空后常残留 <br>,清掉让
-            // :empty 占位符回归。
+            // 只同步状态,不刷新弹层)。删空后浏览器会补一个占位 <br>,
+            // 占位提示的显隐交给 syncEmptyMark(serializeEditor 把 <br>
+            // 读成换行,只看字符串会让提示消失)。
             const el = promptRef.current
             if (!el) return
             const text = serializeEditor(el)
-            if (!composingRef.current && !text && el.childNodes.length > 0) el.replaceChildren()
+            syncEmptyMark(el)
             onDraftChange(text)
             syncPromptHeight()
             if (!composingRef.current) refreshMenus()
@@ -1991,7 +2013,10 @@ export default function SessionsPage({
           onCompositionEnd={() => {
             composingRef.current = false
             const el = promptRef.current
-            if (el) onDraftChange(serializeEditor(el))
+            if (el) {
+              syncEmptyMark(el)
+              onDraftChange(serializeEditor(el))
+            }
             refreshMenus()
           }}
           onCopy={onEditorCopy}
@@ -2442,7 +2467,42 @@ export default function SessionsPage({
                   onDecision={handlePlanDecision}
                   onExit={handlePlanExit}
                 />
-              ) : activeSession?.subagent ? <div className="runtime-child-composer"><span>{t('runtimeChildReadonly')}</span><small className="runtime-child-snapshot" data-testid="child-snapshot" title={descriptorText}>{descriptorText}</small><button type="button" className="runtime-child-back-button" onClick={() => activeSession.parent_session && go(activeSession.parent_session, null)}>{t('runtimeBackParent')}</button></div> : composerCard}
+              ) : activeSession?.subagent ? (
+                /* 外形沿用输入面板(.prompt-panel):这块坐的就是输入框的位置,
+                   长得像输入框才不突兜;元信息是自解释的短句,不画标签表单。 */
+                <div className="prompt-panel child-banner" data-testid="child-banner">
+                  <div className="child-banner-head">
+                    <span className="child-banner-glyph" aria-hidden="true">
+                      <IconAgentSpawn size={14} />
+                    </span>
+                    <span className="child-banner-tag" title={descriptorText}>
+                      {t('childSubagentLabel')}
+                      <span className="child-banner-model">{subagentModel}</span>
+                    </span>
+                    <button
+                      type="button"
+                      className="child-banner-back"
+                      onClick={() => activeSession.parent_session && go(activeSession.parent_session, null)}
+                    >
+                      {t('runtimeBackParent')}
+                    </button>
+                  </div>
+                  <div className="child-banner-facts" data-testid="child-snapshot" title={descriptorText}>
+                    {subagentFacts.map((fact) => (
+                      <span
+                        className="child-fact"
+                        key={fact.key}
+                        data-fact={fact.key}
+                        title={fact.hint}
+                        aria-label={`${fact.label}：${fact.value}`}
+                      >
+                        {fact.value}
+                      </span>
+                    ))}
+                  </div>
+                  <p className="child-banner-note">{t('runtimeChildReadonly')}</p>
+                </div>
+              ) : composerCard}
               {phase === 'active' && (
                 <StatsBar nodes={transcriptNodes} totals={sessionTotals} openTurnStartedAt={openTurnAt} />
               )}

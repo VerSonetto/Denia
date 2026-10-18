@@ -18,9 +18,37 @@ pub fn router() -> Router<Arc<AppState>> {
     Router::new()
         .route("/api/memories/projects", get(list_projects))
         .route(
+            "/api/memories/projects/{id}/health",
+            get(memory_health),
+        )
+        .route(
             "/api/memories/projects/{id}/{*file}",
             get(read_memory_file).delete(delete_memory_file),
         )
+}
+
+/// 记忆体检:断链/孤儿/重复描述/索引规模。确定性检查,不改任何文件、
+/// 不发起模型调用——语义层面的整理由主代理在会话里完成。
+async fn memory_health(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<impl IntoResponse, ApiError> {
+    let workspace = state.workspaces.get(&id).ok_or_else(|| {
+        ApiError::new(
+            axum::http::StatusCode::NOT_FOUND,
+            "memory/workspace-not-found",
+            "workspace not found",
+        )
+    })?;
+    let root =
+        crate::project_memory::memory_root(&state.home, std::path::Path::new(&workspace.path));
+    // fs 阻塞调用走 spawn_blocking(与列表端点同约定)。
+    let report = tokio::task::spawn_blocking(move || {
+        crate::project_memory::memory_health(&root)
+    })
+    .await
+    .map_err(|e| ApiError::bad_request("memory/health-failed", e.to_string()))?;
+    Ok(Json(json!({ "health": report })))
 }
 
 /// 列出全部工作区的记忆清单(未启用过记忆的工作区 files 为空,不报错)。
@@ -294,6 +322,30 @@ mod tests {
         assert_eq!(file["name"], "user-prefs.md");
         assert!(file["content"].as_str().unwrap().contains("正文"));
         assert_eq!(file["modifiedMs"], files[0]["modifiedMs"]);
+
+        // 体检端点:确定性检查(这里只验证形状与"已登记文件不报孤儿")。
+        let health: Value = client
+            .get(format!(
+                "{base}/api/memories/projects/{}/health",
+                record.id
+            ))
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert!(
+            health["health"]["brokenLinks"].is_array(),
+            "体检应含断链字段:{health}"
+        );
+        assert_eq!(
+            health["health"]["orphans"].as_array().unwrap().len(),
+            0,
+            "user-prefs.md 已登记索引,不应报孤儿:{health}"
+        );
 
         // 缺失 404;非 md 400。
         let status = client

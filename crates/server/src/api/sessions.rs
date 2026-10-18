@@ -872,6 +872,10 @@ async fn rewind_session(
         .session
         .rewind(body.to_seq)
         .map_err(ApiError::from_session)?;
+    // 回退是物理截断:被截掉那条分支的会话内存态记的账已经不作数了,同步
+    // 摘除(读状态表 + 压缩断路器),否则模型重读文件会拿到"未变更"却看不到
+    // 内容、自动压缩也会按旧分支的失败计数熔断。
+    state.driver.on_session_rewound(&id);
     let _ = state.events.send(ServerEvent::SessionsUpdated);
     Ok(Json(json!({
         "ok": true,
@@ -992,6 +996,17 @@ async fn compact_session(
     tokio::spawn(async move {
         // RAII:任务结束(含 panic)自动复位 running + 清 cancel + 广播结束。
         let _guard = admission;
+        // 压缩后的收尾维护(文件回放、读状态重建、续场消息)需要同一条广播
+        // 通道;与 turn 路径同样的"无人订阅不克隆"约定。
+        let emit: Arc<dyn Fn(&SessionEnvelope) + Send + Sync> = {
+            let followers = followers.clone();
+            Arc::new(move |envelope: &SessionEnvelope| {
+                if followers.receiver_count() == 0 {
+                    return;
+                }
+                let _ = followers.send(envelope.clone());
+            })
+        };
         match driver.compact_manually(&session, token).await {
             Ok(Some(outcome)) => {
                 // 成功:落 append-only 摘要事件并广播 —— 前端据此把"正在
@@ -1008,6 +1023,9 @@ async fn compact_session(
                 }) {
                     Ok(envelope) => {
                         let _ = followers.send(envelope);
+                        // 与自动压缩路径一致:回放最近读过的文件、重建读状态、
+                        // 注入续场消息。放在摘要落盘之后,重放时顺序正确。
+                        driver.post_compact_maintenance(&session, &emit);
                     }
                     Err(error) => {
                         tracing::warn!(%error, "compaction summary append failed");

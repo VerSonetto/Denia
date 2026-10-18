@@ -31,7 +31,6 @@ use crate::{ChunkStream, LlmAdapter};
 pub const OPENAI_SETTINGS_NS: &str = "llm-openai";
 
 const DEFAULT_CONTEXT_WINDOW: u64 = 262_144;
-const DEFAULT_MAX_TOKENS: u64 = 32_768;
 const DISCOVERY_RESPONSE_CAP: usize = 4 * 1024 * 1024;
 const USER_AGENT: &str = concat!("denia/", env!("CARGO_PKG_VERSION"));
 
@@ -342,7 +341,7 @@ impl LlmAdapter for OpenAiCompatAdapter {
         let context_default = profile
             .default_context_window
             .unwrap_or(DEFAULT_CONTEXT_WINDOW);
-        let max_tokens_default = profile.default_max_tokens.unwrap_or(DEFAULT_MAX_TOKENS);
+        let max_tokens_default = profile.default_max_tokens;
         let found = profile.models.iter().find(|m| m.id == model);
         let (name, description, modalities, context_window, max_tokens, reasoning) = match found {
             Some(entry) => (
@@ -350,7 +349,7 @@ impl LlmAdapter for OpenAiCompatAdapter {
                 entry.description.clone(),
                 openai_modalities(entry),
                 entry.context_window.unwrap_or(context_default),
-                entry.max_tokens.unwrap_or(max_tokens_default),
+                entry.max_tokens.or(max_tokens_default),
                 openai_reasoning_info(entry),
             ),
             None => (
@@ -371,7 +370,7 @@ impl LlmAdapter for OpenAiCompatAdapter {
                 input_modalities: modalities,
             },
             context_window: Some(context_window),
-            default_max_tokens: Some(max_tokens),
+            default_max_tokens: max_tokens,
             reasoning,
         })
     }
@@ -393,7 +392,7 @@ impl LlmAdapter for OpenAiCompatAdapter {
         provider: &str,
         model: &str,
         explicit: Option<u64>,
-    ) -> Result<u64, LlmError> {
+    ) -> Result<Option<u64>, LlmError> {
         let profile = self.profile(provider)?;
         let limit = profile
             .models
@@ -402,9 +401,7 @@ impl LlmAdapter for OpenAiCompatAdapter {
             .and_then(|entry| entry.max_tokens);
         Ok(explicit
             .or(profile.default_max_tokens)
-            .unwrap_or(DEFAULT_MAX_TOKENS)
-            .min(limit.unwrap_or(u64::MAX))
-            .max(1))
+            .map(|budget| budget.min(limit.unwrap_or(u64::MAX)).max(1)))
     }
 
     async fn stream(
@@ -425,10 +422,8 @@ impl LlmAdapter for OpenAiCompatAdapter {
         let max_tokens = request
             .max_tokens
             .or(profile.default_max_tokens)
-            .unwrap_or(DEFAULT_MAX_TOKENS)
-            .min(limit.unwrap_or(u64::MAX))
-            .max(1);
-        request.max_tokens = Some(max_tokens);
+            .map(|budget| budget.min(limit.unwrap_or(u64::MAX)).max(1));
+        request.max_tokens = max_tokens;
         let request = &request;
         let body = match protocol {
             WireProtocol::ChatCompletions => protocols::build_openai_body(request),
@@ -465,13 +460,12 @@ impl LlmAdapter for OpenAiCompatAdapter {
         builder = builder.headers(custom_headers);
         // 超时纪律:连接阶段由 client 的 connect_timeout 负责;这里只给
         // 「发出请求 → 响应头返回」设 TTFB 超时——大体量 + 深度思考请求
-        // 提供方受理慢,实测 200K 字符 payload 正常 TTFB 21.8s,按请求体
-        // 规模放宽。流式体不设任何 denia 侧超时:上游不报错就一直流
+        // 超时按 TIMEOUT 计、由 RetryPolicy 自动重发(实测 200K 字符
+        // payload 的正常 TTFB 曾到 21.8s,30s 的余量并不宽裕)。
+        // 流式体不设任何 denia 侧超时:上游不报错就一直流
         // (reqwest 的 .timeout() 是覆盖响应体读完的总超时,会把长思考
         // 模型在流中途掐死,绝不能挂)。
-        let body_size = serde_json::to_string(&body).map(|s| s.len()).unwrap_or(0);
-        let ttfb_timeout = if body_size > 100_000 { 120 } else { 60 };
-        let response = send_sse(builder.json(&body), Duration::from_secs(ttfb_timeout)).await?;
+        let response = send_sse(builder.json(&body), crate::http::TTFB_TIMEOUT).await?;
 
         if !response.status().is_success() {
             let status = response.status();

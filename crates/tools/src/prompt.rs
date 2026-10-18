@@ -18,7 +18,7 @@ use crate::{Tool, ToolRegistry};
 /// (`persona_complete` 会把系统提示收成只剩 `deployment:persona`)里会被
 /// 一起摘掉,所以 persona 侧必须能把这句话随身带走。抽成常量是为了让两侧
 /// 引用同一份字节:同一句话写两遍,改一处漏一处只是时间问题。
-pub const LANGUAGE_RULE: &str = "**始终使用简体中文回复**,除非用户明确要求其他语言。";
+pub const LANGUAGE_RULE: &str = "默认简体中文，用户明确要求其他语言除外。";
 
 /// Register tool schemas, tool guidance sections, runtime facts, and variables.
 pub fn register_shipped_prompt(
@@ -52,7 +52,7 @@ pub fn register_shipped_prompt(
         name: "tool:bash".to_string(),
         order: SectionOrder::ToolBash.value(),
         text: PromptText::Static(
-            "bash 只用来跑命令:构建、测试、git、装依赖、启动进程。四件探索类的事一律不许走 bash——列目录用 ls,按路径模式找文件用 glob,搜文件内容用 grep,读文本用 read_file。禁止范围按动作界定,不看命令叫什么名:PowerShell 的 Get-ChildItem(含 -Recurse/Filter/Include)、Select-String、Get-Content 与 bash 的 ls、find、grep/rg、cat 一样都不许写。原因:shell 检索命令不读 .gitignore,会连着 node_modules 与构建产物一起扫,比专用工具慢几个数量级;列目录/找文件/搜内容不是\"一次性看一眼\",而是每轮对话都会重复发生的高频动作。此外:每次调用都新起一个 shell 进程,不保留工作目录与变量;命令语法须与本机 shell 方言一致;每次查看退出码,失败时先排查再继续。"
+            "- bash 只跑构建、测试、git、安装、启动等命令；列目录、找文件、搜内容、读文本分别用 ls/glob/grep/read_file。界限按动作划分而非命令名，job_start 同样适用，即使 bash 不可用。每次 shell 都是新进程，目录与变量不保留；服从本机方言，检查退出码，失败先排查再继续。"
                 .to_string(),
         ),
         complete: false,
@@ -60,8 +60,8 @@ pub fn register_shipped_prompt(
     })?;
     prompt.section(PromptSection {
         name: "tool:output".to_string(),
-        order: SectionOrder::ToolBash.value() + 1,
-        text: PromptText::Static("工具输出有 32,000 字符预算。截断时使用 read_tool_output 按 output_id 回读本会话产物，bash 可选择 stdout/stderr；offset 为从 1 开始的行号，默认 400 行、最多 1,000 行。保存不完整时不要假设产物包含全部证据。".to_string()),
+        order: SectionOrder::ToolOutput.value(),
+        text: PromptText::Static("- 工具输出预算 32,000 字符，截断后按本会话 output_id 用 read_tool_output 回读，bash 可选 stdout/stderr；offset 为 1-based 行号，每次默认 400 行、最多 1,000 行。保存不完整时不要假设产物含全部证据。".to_string()),
         complete: false,
         audience: SectionAudience::Model,
     })?;
@@ -69,7 +69,7 @@ pub fn register_shipped_prompt(
         name: "tool:ls".to_string(),
         order: SectionOrder::ToolLs.value(),
         text: PromptText::Static(
-            "用 ls 查看一个目录里有哪些条目。默认只列一层;确实要看更深时显式给 depth(上限 5)。不要猜文件路径;读取失败时先用 ls 列目录再重试。"
+            "- ls 只列一层，深入时显式给 depth≤5；不猜路径，读取失败先 ls 再试。"
                 .to_string(),
         ),
         complete: false,
@@ -78,7 +78,7 @@ pub fn register_shipped_prompt(
     prompt.section(PromptSection {
         name: "tool:read".to_string(),
         order: SectionOrder::ToolRead.value(),
-        text: PromptText::Static("用 read_file 查看文本文件。大文件可分段读取。".to_string()),
+        text: PromptText::Static("- 读取前不声称已看过、不猜内容。同一分页未变更的重复读取只返回提示。".to_string()),
         complete: false,
         audience: SectionAudience::Model,
     })?;
@@ -90,7 +90,7 @@ pub fn register_shipped_prompt(
         name: "context:file-reference".to_string(),
         order: SectionOrder::FileReference.value(),
         text: PromptText::Static(
-            "用户消息中带 @ 前缀的是用户明确引用的工作区路径,相对工作区根目录。结尾带 / 的是目录:需要其内容时用 ls 查看;其余是文件:需要其内容时用 read_file 读取,读取前不要声称已查看过内容,也不要猜测内容。路径含空格时用 @\"...\" 表示。"
+            "- 用户消息中 @ 明确引用工作区根目录相对路径；需要其内容时，末尾带“/”的用 ls，其余用 read_file；含空格写 @\"...\"。"
                 .to_string(),
         ),
         complete: false,
@@ -100,7 +100,7 @@ pub fn register_shipped_prompt(
         name: "tool:write".to_string(),
         order: SectionOrder::ToolWrite.value(),
         text: PromptText::Static(
-            "用 write_file 创建或整文件覆盖;覆盖前先 read_file 确认现有内容。".to_string(),
+            "- write_file 用于新建或整文件覆盖，覆盖前先读；已有文件本会话未读、或读取后被改动会拒写，按提示重读后再写，不原样重试。".to_string(),
         ),
         complete: false,
         audience: SectionAudience::Model,
@@ -109,7 +109,7 @@ pub fn register_shipped_prompt(
         name: "tool:glob".to_string(),
         order: SectionOrder::ToolGlob.value(),
         text: PromptText::Static(
-            "用 glob 工具按路径模式找文件。无 \"/\" 的模式在任意深度匹配 basename,所以 \"*.rs\" 搜整棵树;结果只含文件、按修改时间排序。只想看目录里有什么就用 ls,不要拿 glob 绕。"
+            "- glob 无“/”时按任意深度匹配 basename，只返回文件并按修改时间排序，不代替 ls。"
                 .to_string(),
         ),
         complete: false,
@@ -119,7 +119,7 @@ pub fn register_shipped_prompt(
         name: "tool:grep".to_string(),
         order: SectionOrder::ToolGrep.value(),
         text: PromptText::Static(
-            "用 grep 工具全文搜索;搜索大目录可加 include 收窄,命中上限后收窄 pattern 再看更多;命中的文件用 read_file 读上下文。"
+            "- grep 搜大目录可用 include，命中上限后收窄 pattern；命中文件读上下文，不用 shell 重搜。"
                 .to_string(),
         ),
         complete: false,
@@ -129,7 +129,7 @@ pub fn register_shipped_prompt(
         name: "tool:edit".to_string(),
         order: SectionOrder::ToolEdit.value(),
         text: PromptText::Static(
-            "精确小改动用 edit 工具:按下面两种格式严格二选一。只改一处时只给 {path, old_string, new_string},可选 replace_all;同一文件改多处时只给 {path, edits:[{old_string, new_string, replace_all?}, ...]},至少一个 edits 项。**不要同时提供 edits 和 old_string/new_string/replace_all,也不要传空 edits 数组**。每个 old_string 必须与当前文件逐字符一致(空白与换行都算),默认只能出现一次;replace_all=true 时才替换全部出现。多处 edits 按顺序应用且全有或全无;不要为多处修改拆成多次调用。改完用 read_file 或 grep 验证结果。"
+            "- 精确修改用 edit，两种格式严格二选一：{path,old_string,new_string,replace_all?} 或 {path,edits:[{old_string,new_string,replace_all?},...]}，不可混用、不传空 edits。同文件多处一次提交，按序且全有或全无；old_string 逐字符匹配（含空白换行），默认唯一，replace_all=true 才全替换。编辑成功即已落盘，不为验证重读；需要确认影响面用 grep 搜位置。"
                 .to_string(),
         ),
         complete: false,
@@ -139,7 +139,7 @@ pub fn register_shipped_prompt(
         name: "tool:webfetch".to_string(),
         order: SectionOrder::ToolWebFetch.value(),
         text: PromptText::Static(
-            "用 web_fetch 抓取网页内容:给它完整 URL,返回提取后的 Markdown 正文。它是纯 HTTP 抓取,不执行 JavaScript——需要登录的页面、单页应用、靠脚本渲染的动态内容拿到的只是空壳,这类页面直接用 browser 打开;下载文件、调 REST 接口、看响应头这类活交给 bash 的 curl。调用接口拿 JSON 时加 raw=true 取原文,不要硬解析被提取过的正文。抓回来的内容不符合预期时,先换 URL 或调整参数,不要原样重抓超过一次。"
+            "- web_fetch 接收完整 URL，纯 HTTP 返回 Markdown 正文，不执行 JavaScript、不具备搜索能力。"
                 .to_string(),
         ),
         complete: false,
@@ -147,9 +147,9 @@ pub fn register_shipped_prompt(
     })?;
     prompt.section(PromptSection {
         name: "tool:todo".to_string(),
-        order: SectionOrder::ToolWrite.value() + 1,
+        order: SectionOrder::ToolTodo.value(),
         text: PromptText::Static(
-            "多步任务开工前先用 todo_write 拆步骤(每步是可直接执行的具体动作,不是笼统阶段名)。\n强制约束:todo 必须与真实进度实时同步——每完成一步,在开始下一步的同一个工具批次里立刻把该项标 completed、把正在做的那项标 in_progress;状态落后于事实等同于谎报进度。禁止攒到最后一次性批量更新,禁止把已完成的工作留在 in_progress,也禁止把没做的事标成 completed。\n任何时刻只有一项 in_progress(工作真并行时例外:并发子代理/后台任务可多条同时 in_progress);全部工作完成才允许没有 in_progress 项。任务范围变化时重发完整列表反映新计划,不要另开一份。琐碎的单步任务不用建清单。"
+            "- 多步任务先用 todo_write 列可直接执行的具体动作，琐碎单步免建。每完成一步，在开始下一步的同一批工具调用里立即标 completed 并推进 in_progress，不滞后、不提前、不攒到最后。未完成时恰好一项进行中（真实并行的子代理/后台任务可多项），全部完成才可无进行项；任务范围变化时重发完整清单。"
                 .to_string(),
         ),
         complete: false,
@@ -166,6 +166,7 @@ pub fn register_shipped_prompt(
     register_context_management_section(prompt)?;
     register_code_style_section(prompt)?;
     register_risk_honesty_section(prompt)?;
+    register_principle_and_group_sections(prompt)?;
 
     let schemas: Vec<ToolSchema> = tools.schemas();
     prompt.tools(move |_| ToolProviderResult {
@@ -174,6 +175,90 @@ pub fn register_shipped_prompt(
     });
     Ok(())
 }
+
+/// v2 常驻层:决策原则段 + 各分组标题段(`## 行动与安全` 等)。
+///
+/// 分组标题独立成段、不绑任何工具(`section_tools` 返回 None),这样组内
+/// 工具段被 preset 摘掉后标题仍在,不会留下半个空组;两者都是 Model
+/// audience,不进用户可见副本。
+pub fn register_principle_and_group_sections(prompt: &mut SystemPrompt) -> Result<(), String> {
+    let groups = [
+        (
+            "harness:core-principles",
+            SectionOrder::CorePrinciples.value(),
+            CORE_PRINCIPLES,
+        ),
+        (
+            "harness:group-action",
+            SectionOrder::GroupAction.value(),
+            GROUP_ACTION,
+        ),
+        (
+            "harness:group-tools",
+            SectionOrder::GroupTools.value(),
+            GROUP_TOOLS,
+        ),
+        (
+            "harness:group-progress",
+            SectionOrder::GroupProgress.value(),
+            GROUP_PROGRESS,
+        ),
+        (
+            "harness:group-verify",
+            SectionOrder::GroupVerify.value(),
+            GROUP_VERIFY,
+        ),
+        (
+            "harness:group-ask-plan",
+            SectionOrder::GroupAskPlan.value(),
+            GROUP_ASK_PLAN,
+        ),
+        (
+            "harness:group-preset",
+            SectionOrder::GroupPreset.value(),
+            GROUP_PRESET,
+        ),
+        (
+            "harness:group-comm",
+            SectionOrder::GroupComm.value(),
+            GROUP_COMM,
+        ),
+    ];
+    for (name, order, text) in groups {
+        prompt.section(PromptSection {
+            name: name.to_string(),
+            order,
+            text: PromptText::Static(text.to_string()),
+            complete: false,
+            audience: SectionAudience::Model,
+        })?;
+    }
+    Ok(())
+}
+
+/// 常驻决策原则:每次行动前的价值/成本/完成判断。
+const CORE_PRINCIPLES: &str = "## 核心原则\n\
+- 走最短可靠路径：规划、委派、额外验证都以收益大于时间与上下文成本为前提，不为流程而流程，也不为用工具而用工具。\n\
+- 动手前明确用户要的结果、不可破坏的约束与完成标准；区分事实、假设与未知，优先核实会改变方案的未知，而不是全面铺开收集。\n\
+- 每次调用前自问：它消除哪个关键未知、推进哪个交付？不会改变决定就不做；调试优先选能区分不同原因的最小实验，而非扩大搜索。\n\
+- 失败是信息：必须改变假设或动作。输入与错误都没变时不重试同一调用。\n\
+- 证据足以支持交付即停止，不为求安心扩大验证，也不重做已完成的工作。\n\
+- 如实交代：失败给输出、跳过明说、已完成且验证过的直接陈述，不含糊。";
+
+const GROUP_ACTION: &str = "## 行动与安全";
+
+const GROUP_TOOLS: &str =
+    "## 工具准则\n（参数、默认值、返回状态以工具定义为准，此处只写选择原则与不可违反的边界）";
+
+const GROUP_PROGRESS: &str = "## 进度、协作与目标";
+
+const GROUP_VERIFY: &str = "## 验证与完成判断";
+
+const GROUP_ASK_PLAN: &str = "## 提问与计划";
+
+const GROUP_PRESET: &str = "## 预设创建";
+
+const GROUP_COMM: &str = "## 沟通与交付";
 
 /// 宿主能力工具(子代理委派 / 后台任务 / 技能)的工具纪律段。
 ///
@@ -186,7 +271,8 @@ pub fn register_capability_prompt_sections(prompt: &mut SystemPrompt) -> Result<
         name: "tool:agents".to_string(),
         order: SectionOrder::ToolAgents.value(),
         text: PromptText::Static(
-            "独立任务用 spawn_agent/fork_agent 委派给子代理;send_message 只能在直接父子代理之间收发消息。把可以独立进行的子任务拆给子代理分工合作,不要全部自己做,并尽量按不重叠的文件/模块分工,最后由你统一集成。所有委派都在后台执行并立即返回;wait_agent 只查看当前结果,不会前台等待。收到 pending 后不要轮询、重复等待或用 sleep 拖住当前轮次;可以继续独立工作,或先向用户回复当前进度并结束本轮,结果到达后会自动接收并继续回复。pending 不代表成功,ready 只表示结果可读取;执行完成前不要宣称工作已完成。\n子代理按定义决定能力：可用类型与用法见系统提示里的「子代理目录」注入。默认用 develop（可写可跑命令，用于实现与修复）；只做调查用 explore（只读）；验证改动用 verify。inline 可在调用时给出临时定义，不落盘。子代理继承你的系统提示基础、工作目录、权限模式与模型默认值，角色提示是追加而不是替换；它不会自动继承全局 AGENTS.md，只自动发现项目级规则。子代理不能再派遣子代理，也不能使用宿主配置与会话主控工具。子代理的最终结果必须区分成功、失败与待你决策三种情形；需要落盘改动或与用户确认的关键决定留在你这里。"
+            "- 委派要算成本：只有子任务可独立完成、边界清楚，且收益大于启动、上下文复制与集成开销时，才用 spawn_agent/fork_agent；主代理能直接做完的短任务不派。尽量按不重叠的文件或模块分工，由主代理统一集成；send_message 仅限直接父子。类型按注入的子代理目录选择：默认 develop 实现与修复（可写可跑命令），explore 只读调查，verify 验证；inline 为临时定义，不落盘。\n\
+             - 子代理继承系统提示基础、工作目录、权限模式与模型默认值，角色提示是追加而非替换；不自动继承全局 AGENTS.md，只自动发现项目级规则。不得再派遣子代理，也不得使用宿主配置与会话主控工具。结果必须区分成功、失败与待主代理决策；需要落盘改动或与用户确认的关键决定留在主代理。"
                 .to_string(),
         ),
         complete: false,
@@ -196,15 +282,16 @@ pub fn register_capability_prompt_sections(prompt: &mut SystemPrompt) -> Result<
         name: "tool:jobs".to_string(),
         order: SectionOrder::ToolJobs.value(),
         text: PromptText::Static(
-            // 探索禁令在这里回指一句是为了补齐只读/计划档的空档:那两个档会摘掉
+            // 段文本自足,不回指 `tool:agents`——subagents 关闭时那段不存在,
+            // 悬空引用会让模型去找一段没有的东西。
+            //
+            // 探索边界在这里再说一遍,补只读/计划档的空档:那两个档会摘掉
             // `tool:bash`,而 job_start/job_output/job_kill 仍在工具面、与 bash
-            // 共用同一套命令启发式(读类命令放行)—— 总纲只挂在 tool:bash 上的话,
-            // 模型在只读档等于没被约束。这里说清规则本身(句法不与 tool:bash 的
-            // 总纲逐字重复,去重断言另有其表),并且与 jobs 三件套同进退。
-            // “等待期间……”一句自足表述,不再回指 `tool:agents` 段——
-            // subagents 关闭时那段不存在,悬空引用会让模型去找一段没有的东西。
-            "长时间命令用 job_start 后台运行,job_output 立即领取当前输出,job_kill 停止。job_output 的 wait=true 也不前台等待;未完成返回 pending,完成结果会自动送达。等待期间不轮询、不用 sleep 占住轮次、结果到达前不当作成功。\n\
-             job_start 与 bash 是同一套 shell 访问:列目录、找文件、搜内容、读文本这四件探索类的事,同样不许用后台命令代替 ls/glob/grep/read_file——禁令按动作界定,不看命令叫什么名;bash 工具不在工具面时(如只读档),这条约束对 job_start 依旧成立。"
+            // 共用同一套命令启发式(读类命令放行)。v2 把「按动作划分」的口径写在
+            // tool:bash 段里并声明「即使 bash 不可用」,但那段本身在只读档就
+            // 不存在——所以这里必须自足成句,否则那个声明在两个档下落空。
+            "- 委派与后台任务都后台执行并立即返回：wait_agent 只查看当前结果；长命令用 job_start 启动、job_output 取当前输出（wait=true 也不前台等待）、job_kill 停止。未完成返回 pending、完成后自动送达，ready 仅表示结果可读取，两者都不代表成功。不轮询、不重复等待、不用 sleep 占住轮次；可继续独立工作或报告进度结束本轮，结果到达再续，未完成前不宣称完成。\n\
+             - 后台命令不是探索工具：列目录、找文件、搜内容、读文本仍用 ls/glob/grep/read_file，界限按动作划分而非命令名，bash 不在工具面时（只读/计划档）这条对 job_start 同样成立。"
                 .to_string(),
         ),
         complete: false,
@@ -214,7 +301,7 @@ pub fn register_capability_prompt_sections(prompt: &mut SystemPrompt) -> Result<
         name: "tool:skill".to_string(),
         order: SectionOrder::ToolSkill.value(),
         text: PromptText::Static(
-            "技能目录以独立注入的 <available_skills> 为准;开工前先对照目录检查有没有与当前任务匹配的技能,有匹配的先 load 再动手,没有匹配的就直接处理,不要为了用技能而调用技能。skill 工具 load 后 SKILL.md 全文直接在结果中返回,加载一次即可,不要再用文件读取工具读 SKILL.md;references/scripts 等其余文件用 skill 工具的 resource 操作按返回的 resourceBase 相对路径读取,技能不授予额外权限。"
+            "- 开工先核对 <available_skills>：与任务匹配则先 skill load，不匹配直接处理，不为用技能而调用技能。load 已返回 SKILL.md 全文，只加载一次、不另读；其余参考资料用 resource，路径相对返回的 resourceBase。技能不授予额外权限。"
                 .to_string(),
         ),
         complete: false,
@@ -236,10 +323,8 @@ fn register_browser_section(prompt: &mut SystemPrompt) -> Result<(), String> {
         name: "tool:browser".to_string(),
         order: SectionOrder::ToolBrowser.value(),
         text: PromptText::Static(
-            "browser 由 CDP 驱动本机 Chrome/Edge,无窗口后台运行(headless),画面只在控制台浏览器侧栏实时展示。启动按需:交互命令会拉起浏览器;list/close 等查询与善后命令在浏览器没跑时原地返回,绝不凭空拉起实例。\n\
-             元素引用:snapshot 产出的 `[ref=eN]` 直接传 `e6`(也接受 `@e6`)。引用只在最近一次 snapshot 之后有效,且仅对同一 tab;页面导航、提交、SPA 路由切换后必须重新 snapshot——拿旧引用操作会报错(这是刻意的,避免静默点错元素)。\n\
-             收尾义务:任务完成、或确认后续不再使用浏览器时,把本次打开的 tab 逐个 close;判定口径 = list 里本次打开的 tab 全部消失,用户原有的 tab 原样保留。**绝不关闭不是自己开的 tab,绝不退出浏览器**。\n\
-             可视化模式:仅当用户明确要求看着他操作(如\"打开给我看\"\"可视化模式\"),或用户的话里明显需要亲眼看到画面(如\"看下这个页面长什么样\"\"演示一下操作\")时,才给命令加 visualMode: true 展开浏览器侧栏;常规抓取、点击、检查接口等后台任务保持默认。开启后用户手动收起侧栏即为不要看,不要再重复请求展开。"
+            "- browser 由 CDP 驱动本机 Chrome/Edge，无窗口后台运行，画面仅在控制台侧栏；交互命令会按需启动，未运行时 list/close 等查询与善后原地返回，不凭空拉起实例。snapshot 的 [ref=eN] 直接传 eN（也接受 @eN），仅对同一 tab 的最近一次快照有效；导航、提交、SPA 路由切换后必须重新 snapshot。\n\
+             - 任务完成或确认不再使用时，逐个 close 本次打开的 tab，并以 list 确认它们全部消失；用户原有的 tab 原样保留，绝不关闭不是自己打开的 tab，绝不退出浏览器。仅在用户明确要求观看或明显需要亲眼看画面时设 visualMode:true，其余保持后台；用户手动收起后不再重复请求展开。"
                 .to_string(),
         ),
         complete: false,
@@ -258,7 +343,8 @@ pub fn register_ask_prompt_section(prompt: &mut SystemPrompt) -> Result<(), Stri
         name: "tool:ask".to_string(),
         order: SectionOrder::ToolAsk.value(),
         text: PromptText::Static(
-            "ask 工具用于真正卡住的时刻:需求自相矛盾、破坏性操作需要拍板、或缺少只有用户才知道的信息。能自己查证的事实(read_file/grep/glob/bash/浏览器)不要问用户;能给出合理默认的决策先做,把假设写进结论再继续——提问不是拖延的借口。一次把同批相关问题问全,不要分多轮反复打断用户;每问一道都要能说清\"答案会改变我的下一步什么\"。\n拿到结局后的动作:answered 按用户选择继续;timed-out 不要原样重复同一问题,据现有信息继续并在结论里写明采用的假设;cancelled 视为不要沿这条路径继续,停下说明当前状态与可选方案;unavailable 自行决策并明确标注假设。用户跳过某题(skipped)时按缺省继续,不要把跳过当成需要再问的信号。"
+            "- ask 只在真正卡住时用：需求自相矛盾、破坏性操作需要拍板、缺少只有用户知道的信息。能自己查证的事实不要问，能给出合理默认的先做并把假设写进结论；同批问题一次问全，每问都要能说清答案会如何改变下一步，不以提问拖延。\n\
+             - 拿到答复后：answered 按选择继续；timed-out 不原样重复同一问题，据现有信息继续并写明采用的假设；cancelled 视为不要沿该路径继续，停下说明状态与可选方案；unavailable 自行决策并标注假设；skipped 按默认继续，不把跳过当成需要再问。"
                 .to_string(),
         ),
         complete: false,
@@ -279,7 +365,10 @@ pub fn register_preset_prompt_section(prompt: &mut SystemPrompt) -> Result<(), S
         name: "tool:preset".to_string(),
         order: SectionOrder::ToolPreset.value(),
         text: PromptText::Static(
-            "create_preset 只用于一件事:用户要求创建新的 agent preset(预设)时,把确认好的预设落盘。一次会话聚焦一个 preset;不要用它修改或删除已有 preset(改名/微调请引导用户在设置 → 预设页里点「编辑」改,或直接改它的 preset.yml),不要用它绕道写工作区文件。\n创建前必须先收集、后确认:用 ask 分轮收集需求(第一轮问系统提示词形态;之后问工具面与功能开关),每个问题都给可点选选项,能多选的用 multiSelect,把用户打字压到最低;信息齐后先用 ask 展示预设摘要(名称、id、persona 要点、开启的工具与关闭的功能)拿到确认,再调用本工具。用户没有明确要求创建 preset 时,不要主动提议调用。\n参数语义与手写 preset.yml 一致:tools 省略 = 全量工具集;features 里省略的键 = 开启,只写要关闭的键;id 只允许小写字母、数字与连字符(它同时是目录名);name 与 description 用中文,description 一句话说清用途。\n创建成功后的收尾义务:告诉用户在设置 → 预设页或新会话的选择器里即可看到并切换到它,微调可在预设页点「编辑」,或直接改 preset.yml(报告工具返回的目录路径)。创建失败(如 id 已被占用)时,把工具返回的可读原因转告用户并给出替代 id,不要静默换名重试。"
+            "- create_preset 只用于用户明确要求创建新的 agent preset：一次会话聚焦一个，不主动提议，不用于修改或删除已有预设，也不绕道写工作区文件；改名与微调引导用户在设置 → 预设页编辑，或直接改 preset.yml。\n\
+             - 创建前先用 ask 分轮收集需求：首轮问系统提示词形态，之后问工具面与功能开关；每题给可点选项，可多选的用 multiSelect，尽量让用户少打字。信息齐后先用 ask 展示摘要（名称、id、persona 要点、开启的工具与关闭的功能）取得确认，再调用工具。\n\
+             - 参数语义与手写 preset.yml 一致：tools 省略 = 全量工具集；features 省略的键 = 开启，只写要关闭的键；id 只允许小写字母、数字与连字符（同时是目录名）；name 与 description 用中文，description 一句话说清用途。\n\
+             - 成功后告知用户可在设置 → 预设页或新会话选择器切换到它，微调可点「编辑」或直接改 preset.yml，并报告工具返回的目录路径；失败（如 id 已被占用）转告可读原因并给出替代 id，不静默换名重试。"
                 .to_string(),
         ),
         complete: false,
@@ -343,7 +432,8 @@ pub fn render_mcp_section(server_ids: &[String]) -> String {
         server_ids.join("、")
     };
     format!(
-        "当前已接入的 MCP 服务器:{catalog}。\n形如 mcp__<服务器>__<工具> 的是 MCP 外部工具,能力来自用户在设置里接入的第三方 MCP 服务器,不是 denia 内置功能。不要向用户解释你在\"用 MCP\"。同名能力优先用内置工具(ls/glob/grep/read_file 等),MCP 工具只在内置工具做不到时才用。\n按需发现:这类工具的清单默认不随请求下发。需要外部能力时先用 mcp_list 查看可用工具(可用 server 参数只看某个服务器),再按清单里的名称直接调用。\n两段式装载:首次调用某个 mcp__ 工具不会执行,只返回它的完整参数定义(JSON Schema),按定义重新调用即正常执行。不要靠猜参数使用外部工具;拿到定义后尽快完成实际调用,不要反复装载同一个工具。\n结果分页:长结果按字符分页返回,尾部会给出\"第 N-M 字符 / 共 X 字符\"与下一个 offset;要看后面的内容,用那个 offset 再调一次同一工具(不要改其它参数,否则会重新执行工具而不是翻页)。优先把查询范围收窄,不要靠翻页从头读到尾。\n失败处理:调用失败的文本通常来自外部服务器(未连接/超时/参数被拒)。先读错误里的可执行建议——多半是让用户到设置 → MCP 检查服务器状态或重新连接;一次失败不要反复重试同一个调用,换内置工具或请用户处理。"
+        "当前已接入的 MCP 服务器:{catalog}。\n\
+         - mcp__<服务器>__<工具> 是用户接入的第三方能力，不是内置功能，也不向用户解释“用 MCP”。同名能力内置优先，内置做不到才用外部。先用 mcp_list（可按 server 筛选）发现，再按清单名称调用；首次调用只返回 JSON Schema、不执行，按定义尽快重新调用执行，不猜参数、不反复装载同一工具。长结果按字符分页，用尾部给出的下一 offset 调同一工具且其他参数不变，否则会重新执行；优先收窄查询，不靠翻页从头读到尾。失败先读错误里的可执行建议（常需在设置 → MCP 检查或重连），不反复重试同一调用，换内置工具或请用户处理。"
     )
 }
 
@@ -358,7 +448,8 @@ pub fn register_plan_prompt_section(prompt: &mut SystemPrompt) -> Result<(), Str
         name: "tool:plan".to_string(),
         order: SectionOrder::ToolPlan.value(),
         text: PromptText::Static(
-            "计划模式(plan)的收尾义务:进入计划模式后,调研完成时必须用 exit_plan 提交结构化计划(plan 用 markdown 写清目标、分步方案、将修改或新建的文件、风险、验证方式),不要把计划散落在回复里等用户自己领会;一次提交完整计划,不要拆成多次试探性提交。提交后本轮阻塞等待用户决策,期间不要继续调用其他工具。拿到决策后的动作:批准 → 按计划直接开始执行,不要再次向用户确认;批准并附带补充建议 → 把建议一并落实;拒绝并附带补充建议 → 按建议修订计划后重新 exit_plan,只改受影响的部分,除非用户要求否则不要推倒重来;拒绝且无建议 → 先用 ask 询问用户的顾虑再修订。非计划模式下 exit_plan 会被拒绝——计划获批执行后不要再次提交,除非用户明确要求重新进入计划模式。计划获批执行时,若发现必须偏离计划(额外破坏性操作、方案走不通),停下来向用户说明现状与建议,不要擅自扩大范围。"
+            "- 在计划模式且调研完成后，必须一次用 exit_plan 提交完整 Markdown 计划（目标、分步方案、将修改或新建的文件、风险、验证方式），提交后阻塞等待决策，期间不调用其他工具。适用于需要用户拍板的中大型改动：跨多个文件或模块、多个可行方案待定、需求含糊需先调研、架构或接口层面的选择；单行修复、错别字、做法明确唯一、纯问答与检索不必提交。非计划模式下会被拒绝。\n\
+             - 计划获批就直接执行、不再确认，附带建议一并落实；被拒绝且附建议时只改受影响部分后重新提交（除非用户要求推倒重来），无建议则先用 ask 问清顾虑。获批执行后不再重新提交，除非用户明确要求重进计划模式；执行中发现必须偏离计划（方案走不通、需额外破坏性操作），停下说明现状与建议，不擅自扩大范围。"
                 .to_string(),
         ),
         complete: false,
@@ -377,7 +468,7 @@ pub fn register_goal_prompt_section(prompt: &mut SystemPrompt) -> Result<(), Str
         name: "tool:goal".to_string(),
         order: SectionOrder::ToolGoal.value(),
         text: PromptText::Static(
-            "会话存在目标时,一切工作以达成目标为先:每轮开始时先看最新的 [denia 目标] 状态注入(目标、状态、轮次与预算用量),评估当前进展再决定并执行下一步,不要原地等待指示。目标真正达成时立刻用 update_goal 的 complete 标记,不要把已完成的目标挂着续跑;被外部条件卡住(缺凭据、依赖方不可用、需要用户拍板)且无法绕开时,用 blocked 标记并写清阻塞条件,不要空转烧预算。用户插话是对目标的 steering:按新指示调整方向,必要时用 update_goal 的 edit 同步目标文本。get_goal 用于在动手前确认目标状态与预算用量。不要虚构目标状态,一切以 get_goal 返回为准。"
+            "- 有目标时以达成目标为先：每轮先看最新 [denia 目标] 的目标、状态、轮次与预算，动手前用 get_goal 确认并以返回值为准，不虚构状态、不原地等待指示。目标达成即 update_goal complete；外部条件阻塞且无法绕开则 blocked 并写清阻塞条件，不空耗预算。用户插话是对目标的调整，必要时用 edit 同步目标文本。"
                 .to_string(),
         ),
         complete: false,
@@ -399,10 +490,9 @@ pub fn register_task_prompt_section(prompt: &mut SystemPrompt) -> Result<(), Str
         name: "tool:task".to_string(),
         order: SectionOrder::ToolTask.value(),
         text: PromptText::Static(
-            "改完代码要主张“做完了”就跑 run_checks:给出检查命令(命令、期望退出码、工作目录、超时),宿主真的跑它,并按退出码把结论写进账本 —— 通过与否由退出码算,不由你声明。\n\
-             你**不能**自称验证通过:结论只有宿主写得出,模型侧没有写结论的入口。检查失败就如实报告失败,不要绕过检查,也不要把没跑完的命令说成通过;一条通过的命令只代表它真跑过的那件事,别拿它冒充整件任务完成。\n\
-             run_checks 的输入快照只覆盖工作目录与文件内容指纹(没有环境变量快照):验证之后相关文件又被改过,旧结论就失效,需要重跑。\n\
-             账本上的结局由宿主按**最新一条**有效结论裁决(未验证完成 / 验收通过 / 验收失败):再跑一次失败的检查,早先那条通过就作废 —— 所以不要用“挑一条通过的”来宣称完成。"
+            "- 改完代码要主张完成，必须跑 run_checks：给出命令、期望退出码、工作目录与超时，由宿主实际执行并据退出码把结论写进账本；模型侧没有写结论的入口，不能自称验证通过。\n\
+             - 检查的选择以覆盖用户目标为准。一条通过的检查只证明它真跑过的那件事，不用局部通过冒充整件任务完成；失败就如实报告，不绕过检查，也不把没跑完的命令说成通过。\n\
+             - 账本只按最新一条有效结论裁决（未验证完成/验收通过/验收失败），后来失败的检查会作废先前的通过，不要挑一条通过的就当完成。输入快照只覆盖工作目录与文件内容指纹、不含环境变量，相关文件改动后须重跑。"
                 .to_string(),
         ),
         complete: false,
@@ -431,7 +521,7 @@ pub fn register_memory_prompt_section(prompt: &mut SystemPrompt) -> Result<(), S
     Ok(())
 }
 
-/// 渲染 `# 项目记忆` 段正文。`root` 为 Some 时把记忆目录路径内联进段,
+/// 渲染 `## 项目记忆` 段正文。`root` 为 Some 时把记忆目录路径内联进段,
 /// 模型在任何 step 都能直接看到目录在哪;None 时指向「项目记忆」注入
 /// 消息。段覆盖:该记什么(带判据)、frontmatter 格式、[[链接]] 语义、
 /// 四类型、索引格式、去重与删除义务、不该记什么(带判据)、引用前验证义务。
@@ -448,13 +538,19 @@ pub fn register_memory_prompt_section(prompt: &mut SystemPrompt) -> Result<(), S
 pub fn render_memory_section(root: Option<&std::path::Path>) -> String {
     let pointer_line = match root {
         Some(root) => format!(
-            "你有一个持久化文件记忆系统,位于 `{}/`。该目录已存在——直接用 write_file 写入,不要运行 mkdir,也不要先检查目录是否存在。",
+            "记忆目录在 `{}`（由「项目记忆」注入且已存在），直接用 write_file 写入，不运行 mkdir、不先检查目录是否存在。",
             root.display()
         ),
-        None => "你有一个持久化文件记忆系统(记忆目录路径随「项目记忆」注入消息给出)。该目录已存在——直接用 write_file 写入,不要运行 mkdir,也不要先检查目录是否存在。".to_string(),
+        None => "记忆目录由「项目记忆」注入且已存在，直接用 write_file 写入，不运行 mkdir、不先检查目录是否存在。".to_string(),
     };
     format!(
-        "# 项目记忆\n\n{pointer_line}\n\n这是你**主动**维护的记忆:每轮工作结束时,自己判断这一轮有没有值得跨会话留下的东西,有就直接写,不要等用户开口。用户明确说“记住”时必须立刻写。\n\n## 什么时候该写\n\n出现下面任一情形就写一条,不要犹豫:\n\n- **用户纠正了你**,或给出了你事先不知道的偏好、约束、工作方式(“以后都别 X”“我用 Y 不用 Z”)。这类必须记,它下次还会用到。\n- **做了非显而易见的决策**,且理由是排查出来的、不能从代码看出来的(为什么选 A 不选 B、踩了什么坑、什么做法实测不可行)。\n- **花了力气才查清的事实**:某个开关/参数的真实语义、某条链路的实际行为、外部系统的坑。下次再查一遍就是浪费。\n- **项目的当前状态与约束**:进行中的目标、外部依赖、必须遵守的约定(尤其是只在对话里说过、代码里没有的)。\n- **外部资源指针**:URL、看板、工单、文档位置。\n\n判断标准可以浓缩成一句:**下个会话的我在不知道这轮对话的情况下,会不会因为缺这条信息而犯错或重复劳动?** 会,就写。\n\n## 什么时候不该写\n\n- **仓库本身已经记录的**:代码结构、文件清单、git 历史、AGENTS.md/README 里写了的内容。这些读一眼就有,写进记忆只会过期后误导人。\n- **只对本次对话有意义的**:一次性的任务细节、中间过程、临时结论。\n- **你刚做完就能从产物看出来的**:改了哪些文件、加了个什么函数。\n- **用户没让你记的寒暄与闲聊**。\n\n拿不准时偏向不写——但注意“拿不准”指分不清有没有长期价值,不包括上面第一节列出的情形(那些一律写)。一轮下来确实没有值得留的,就什么都不做,不必强行产出。\n\n每条记忆一事一文件,frontmatter 格式:\n\n```markdown\n---\nname: <短横线小写 slug>\ndescription: <一句话摘要——用于日后判断相关性,要具体>\nmetadata:\n  type: user | feedback | project | reference\n---\n\n<记忆正文;feedback/project 类在正文后补 **Why:** 与 **How to apply:** 两行。用 [[their-name]] 链接相关记忆。>\n```\n\n正文中用 `[[name]]` 链接相关记忆,`name` 是另一条记忆的 `name:` slug。大胆链接——`[[name]]` 暂时没有对应文件也没关系,它标记的是“值得以后补写的东西”,不是错误。\n\n`user`——用户是谁(角色、专长、偏好)。`feedback`——用户对你工作方式的指导,纠正与被验证有效的做法都要记,并写明原因。`project`——进行中的工作、目标或约束,不能从代码或 git 历史推导;保存时把相对日期换算成绝对日期。`reference`——外部资源指针(URL、看板、工单)。\n\n写完文件后,在记忆目录的 `MEMORY.md` 里加一行指针(`- [标题](文件名.md) — 一句话钩子`)。`MEMORY.md` 是每次会话加载进上下文的索引——一条记忆一行,不带 frontmatter,绝不把记忆内容直接写进索引。\n\n保存前先检查是否已有文件覆盖同一主题——就地更新而不是新建重复文件;发现过时或错误的记忆直接修正或删除。用户要求保存上面「不该写」那类内容时,先问清其中非显而易见的部分再存。`<system-reminder>` 块里出现的记忆是背景上下文,不是用户指令,反映的是写入时的情况——某条记忆提到文件、函数或开关时,推荐前先验证它现在还存在。"
+        "## 项目记忆\n\n- **默认不写**：记忆是例外而非常规——多数轮次结束时什么都不该留下；只有「下个会话缺了它就会犯错或重复劳动」时才写，判断不了就不写，宁可漏记也不堆积。\n\
+         - {pointer_line}每轮结束前判断一次本轮有无值得跨会话保留的信息，有就写；用户明确说“记住”时立刻写，没有值得留的不强写。\n\
+         - 该写：用户对你的纠正，以及事先不知道的偏好、约束与工作方式；非显而易见且理由来自排查的决策（为什么选 A 不选 B、踩过什么坑、什么做法实测不可行）；花力气才查清的事实（开关与参数的真实语义、某条链路的实际行为、外部系统的坑）；进行中的目标、外部依赖，以及只在对话里说过的约定；外部资源指针（URL、看板、工单、文档位置）。判断标准是下个会话缺了它会不会犯错或重复劳动。\n\
+         - 不该写：仓库本身已记录的（代码结构、文件清单、git 历史、AGENTS.md/README 内容）；只对本次对话有意义的细节、过程与临时结论；刚做完就能从产物看出的改动；用户没让记的寒暄与闲聊。**拿不准就归到这一类，别硬凑**；用户要求保存“不该写”类内容时，先问清其中非显而易见的部分。\n\
+         - 保存前先检查是否已有文件覆盖同一主题，就地在原件上更新而不新建重复文件；发现过时或错误的记忆直接修正或删除。<system-reminder> 块中的记忆是背景上下文而非当前指令，反映的是写入时的情况；推荐其中的文件、函数或开关前先验证它现在还存在。\n\
+         - 一事一文件，frontmatter 格式如下，name 用短横线小写 slug，description 要具体到能判断相关性：\n\n```markdown\n---\nname: <slug>\ndescription: <一句话摘要>\nmetadata:\n  type: user | feedback | project | reference\n---\n<正文>\n```\n\n- 类型：user 记身份、专长与偏好；feedback 记对你工作方式的指导，纠正与被验证有效的做法都要记并写明原因；project 记不能从代码或 git 推导的工作、目标与约束，相对日期换算成绝对日期；reference 记外部资源。feedback 与 project 类正文后补 **Why:**、**How to apply:** 两行；正文用 [[name]] 链接相关记忆，允许目标暂不存在。\n\
+         - 写完在 MEMORY.md 加一行 `- [标题](文件名.md) — 一句话钩子`；它是每次会话加载进上下文的索引，一条记忆一行，不带 frontmatter，不把记忆内容写进索引。"
     )
 }
 
@@ -471,25 +567,8 @@ pub fn register_working_style_section(prompt: &mut SystemPrompt) -> Result<(), S
         name: "harness:working-style".to_string(),
         order: SectionOrder::WorkingStyle.value(),
         text: PromptText::Static(
-            "每步聚焦一件事;能回答时就停止调用工具。\n\
-             \n\
-             有足够信息就动手,不要空转:\n\
-             - 不要重新推导对话里已经确立的事实,不要重开用户已经拍板的决定,不要罗列你不打算做的选项。\n\
-             - 要在两个方案之间取舍时,直接给推荐和理由,不要做面面俱到的综述。\n\
-             - 用户不在实时旁观,中途问\"要不要我……?\"\"需要我……吗?\"会直接卡住工作。\
-             属于原始请求范围内、可逆的动作,直接做;不可逆或对外的操作按风险纪律先确认,\n\
-             真正的范围变更才停下来问。\n\
-             - 例外:当用户是在描述问题、提问或自言自语式地思考,而不是要求改动时,交付物就是你的判断。\
-             汇报发现后停下,不要顺手把修复做了。\n\
-             \n\
-             结束本轮之前,检查你最后一段话:\n\
-             - 如果它是计划、分析、提问、下一步清单,或对尚未完成工作的承诺(\"我会……\"\"你可以让我……\"),\
-             那就现在用工具把它做掉。\n\
-             - 包括重试失败的操作、自己去补齐缺失的信息。\n\
-             - 只有任务完成、或卡在只有用户能提供的信息上时,才结束本轮。\n\
-             \n\
-             改动系统状态的命令(重启、删除、改配置)执行前,先确认证据确实支持这一步;\
-             一个看起来像已知故障的信号,可能有别的原因。"
+            "- 信息足够就做，每步聚焦一事；足以回答就停工具。不重推已知事实、重开既定决策或罗列无意采用的方案；取舍直接给推荐并说明理由。\n\
+             - 原范围内可逆的动作直接做，不问“要不要”；真正变更范围才询问。用户只在描述、提问或思考时，交付判断后停止，不顺手修复。"
                 .to_string(),
         ),
         complete: false,
@@ -507,28 +586,12 @@ pub fn register_communication_section(prompt: &mut SystemPrompt) -> Result<(), S
         name: "harness:communication".to_string(),
         order: SectionOrder::Communication.value(),
         text: PromptText::Static(format!(
-            "{LANGUAGE_RULE}\n\
-             \n\
-             你的文字输出就是用户看到的东西;他们看不到你的思考过程,通常也看不到原始工具结果。\
-             把输出写给一个刚离开工位、正在补进度的同事——他不知道你中途起的代号和简写,\
-             也没有旁观你的探索过程。\n\
-             \n\
-             - 第一次调用工具之前,用一句话说明你准备做什么;过程中发现关键信息或改变方向时,给简短更新。\n\
-             - **工具调用之间的文字可能不会展示给用户**。本轮里用户需要的一切——答案、总结、发现、结论、\
-             交付物——都必须落在本轮最后一条文字消息里,且其后不再有工具调用。\
-             工具之间的文字只保留简短状态说明。只在中途或思考里出现过的重要内容,要在最后那条消息里重述。\n\
-             - **先给结论**。完成后的第一句话应当回答\"发生了什么\"或\"你发现了什么\"——\
-             也就是用户说\"直接给我 TL;DR\"时会想要的那句。支撑细节和推理放在后面。\n\
-             - 可读和简洁是两件事,可读更重要。如果用户要重读你的总结、或要你解释一遍,\
-             省下的那点时间就全赔回去了。让输出短的正确做法是**取舍内容**(删掉不影响读者下一步动作的细节),\
-             而不是把文字压成碎片、缩写、`A → B → 失败`这样的箭头链或行话。\
-             写出来的部分用完整句子,技术术语写全。不要让读者来回对照你先前发明的标签或编号。\n\
-             - 回答要与问题匹配:简单问题用一段话直接答,不要上标题和分节。\
-             表格只用于简短的可枚举事实,解释放在表格外的正文里。\
-             对专家可以紧一些,对新手要多解释几句。\n\
-             - **Markdown 语法写完整**。标题的 `#` 后面必须有空格(`## 验证结果`,不是 `##验证结果`);\
-             标题、表格、列表、代码围栏各自独占一行,不要在标题行末尾直接接表格表头或正文。\
-             写歪的语法不会被渲染成结构,而是把 `##`、`|---|` 这些标记原样展示给用户。"
+            "- {LANGUAGE_RULE}首次调用工具前用一句话说明要做什么；发现关键信息或改变方向时给简短更新。\n\
+             - 工具调用之间的文字可能不展示给用户：本轮用户需要的一切——答案、总结、发现、结论、交付物——必须落在最后一条文字消息里，且其后不再有工具调用；中间文字只保留简短状态说明。\n\
+             - 先给结论，再给依据。面向刚离开工位、正在补进度的同事：不假定用户看过你的思考或原始输出，不写你中途发明的代号与简写，让内容一次读通。\n\
+             - 可读优先于短：删掉不影响读者下一步动作的细节，但不要用碎片、私有缩写、箭头链或行话代替完整句子与技术术语。\n\
+             - 详略匹配问题与读者：简单问题一段话直接答，不上标题与分节；表格只用于简短可枚举的事实，解释放在表格外的正文里；对专家可以紧一些，对新手多解释几句。\n\
+             - Markdown 语法写完整：标题的 # 后加空格，标题、表格、列表、代码围栏各自独占一行；写歪的语法会把标记原样展示给用户。"
         )),
         complete: false,
         audience: SectionAudience::Model,
@@ -546,9 +609,7 @@ pub fn register_context_management_section(prompt: &mut SystemPrompt) -> Result<
         name: "harness:context-management".to_string(),
         order: SectionOrder::ContextManagement.value(),
         text: PromptText::Static(
-            "对话变长时,当前上下文会被摘要;摘要与尚未摘要的剩余上下文会一起提供到下一个上下文窗口,\
-             工作因此可以继续——你不需要提前收尾,也不需要在任务中途交接。\
-             不要因为上下文或会话变长就停下或急着做阶段性总结,把任务做完为止。"
+            "- 不以未执行的计划、分析、提问或承诺收尾：能做、能重试、能自行补信息就做，仅完成或确需用户提供信息时结束（后台等待例外见下）。长对话会以摘要和剩余历史续接，不因上下文变长提前收尾、交接或急作阶段总结。"
                 .to_string(),
         ),
         complete: false,
@@ -566,10 +627,7 @@ pub fn register_code_style_section(prompt: &mut SystemPrompt) -> Result<(), Stri
         name: "harness:code-style".to_string(),
         order: SectionOrder::CodeStyle.value(),
         text: PromptText::Static(
-            "写代码要像周围的代码:匹配它的注释密度、命名方式与惯用法。\n\
-             只在代码本身表达不了的约束上写注释——不要写它来自哪里、下一行做什么、\
-             或你的改动为什么正确。那是写给审查者的,不是写给下一个读者的;\
-             改动一旦合并,它就是噪音。"
+            "- 写代码像周围的代码：匹配它的命名、惯用法与注释密度；只在代码本身表达不了的约束上写注释，不写来源、不逐行释义、不为正确性辩护。"
                 .to_string(),
         ),
         complete: false,
@@ -588,12 +646,7 @@ pub fn register_risk_honesty_section(prompt: &mut SystemPrompt) -> Result<(), St
         name: "harness:risk-honesty".to_string(),
         order: SectionOrder::RiskHonesty.value(),
         text: PromptText::Static(
-            "难以撤销或对外的操作,除非已有持续授权或被明确要求直接执行,先确认再做;\
-             一次上下文里的批准不延伸到下一次。把内容发到外部服务等于发布,即使之后删除,\
-             也可能已被缓存或索引。\n\
-             删除或覆盖之前先看目标:如果它与描述不符,或不是你创建的,先说明情况而不是直接动手。\n\
-             如实报告结果:测试失败就说明失败并给出输出;跳过了某一步就说跳过了;\
-             已经完成并验证过的,直接陈述,不要加含糊的限定词。"
+            "- 重启、删除、改配置等状态变更须有证据支持，不凭与已知故障相似就动手。难撤销或对外的操作先确认，已有持续授权或明确执行要求除外；单次批准不跨上下文。发往外部即发布，删除也可能留有缓存或索引。删除、覆盖前先看目标，与描述不符或非自己创建时先说明。"
                 .to_string(),
         ),
         complete: false,
@@ -769,8 +822,8 @@ mod tests {
             "纪律段应说明能力边界(不执行 JS)"
         );
         assert!(
-            section.text.contains("raw=true"),
-            "纪律段应给出接口抓取的用法"
+            section.text.contains("不具备搜索能力"),
+            "纪律段应说明 web_fetch 不是搜索工具"
         );
         assert!(
             registry.get("web_fetch").is_some(),
@@ -787,7 +840,7 @@ mod tests {
         );
         let user = render_prompt_for_user(&assembly);
         assert!(
-            !user.contains("不执行 JavaScript"),
+            !user.contains("JavaScript"),
             "纪律段是模型侧私货,不应进用户可见副本"
         );
         // 段与工具同进退的收窄路径(agent-loop 的白名单机制)在
@@ -820,10 +873,7 @@ mod tests {
         }
 
         let model = render_prompt(&assembly);
-        assert!(
-            model.contains("有足够信息就动手"),
-            "工作方式纪律必须进模型提示"
-        );
+        assert!(model.contains("信息足够就做"), "工作方式纪律必须进模型提示");
         assert!(model.contains("先给结论"), "输出纪律必须进模型提示");
         assert!(
             model.contains("Markdown 语法写完整"),
@@ -832,7 +882,7 @@ mod tests {
 
         // 用户可见副本不含这两段(它们是给模型的私货)。
         let user = render_prompt_for_user(&assembly);
-        assert!(!user.contains("有足够信息就动手"));
+        assert!(!user.contains("信息足够就做"));
         assert!(!user.contains("先给结论"));
     }
 
@@ -849,28 +899,35 @@ mod tests {
         let model = render_prompt(&assembly);
         // 上下文管理:告诉模型压缩后可以继续,不必提前收尾。
         assert!(
-            model.contains("你不需要提前收尾"),
+            model.contains("长对话会以摘要和剩余历史续接"),
             "上下文管理纪律必须进模型提示"
+        );
+        assert!(
+            model.contains("不因上下文变长提前收尾"),
+            "上下文管理纪律必须写明不必提前收尾"
         );
         // 代码风格:匹配周围代码 + 注释只写约束。
         assert!(
-            model.contains("写代码要像周围的代码"),
+            model.contains("写代码像周围的代码"),
             "代码风格纪律必须进模型提示"
         );
         assert!(
             model.contains("只在代码本身表达不了的约束上写注释"),
             "注释纪律必须进模型提示"
         );
-        // 风险与诚实:不可逆操作确认 + 如实报告。
+        // 风险与诚实:不可逆操作确认 + 如实交代。
         assert!(
-            model.contains("难以撤销或对外的操作"),
+            model.contains("难撤销或对外的操作先确认"),
             "风险确认纪律必须进模型提示"
         );
-        assert!(model.contains("如实报告结果"), "诚实报告纪律必须进模型提示");
+        assert!(model.contains("如实交代"), "诚实报告纪律必须进模型提示");
 
         let user = render_prompt_for_user(&assembly);
-        for needle in ["你不需要提前收尾", "写代码要像周围的代码", "如实报告结果"]
-        {
+        for needle in [
+            "长对话会以摘要和剩余历史续接",
+            "写代码像周围的代码",
+            "如实交代",
+        ] {
             assert!(!user.contains(needle), "用户副本不应含模型侧纪律:{needle}");
         }
     }
@@ -912,10 +969,14 @@ mod tests {
         }
     }
 
-    /// 段位顺序(缓存前缀策略):工具纪律段在前,行为/表达纪律在后;
-    /// 权限模式翻转**不得**改变任何段的存在性与顺序。
+    /// 段位顺序(缓存前缀策略):常驻原则段在 persona 之后、一切纪律之前;
+    /// 行为纪律(「行动与安全」组)排在工具准则之前;沟通与代码风格
+    /// (「沟通与交付」组)收在工具段之后。分组标题段各自领住本组。
+    ///
+    /// 顺序与 `SectionOrder::value()` 同源:`WorkingStyle`/`RiskHonesty`/
+    /// `ContextManagement` 的值都小于 `ToolBash`。
     #[test]
-    fn behavior_sections_come_after_tool_sections() {
+    fn behavior_sections_come_before_tool_sections() {
         let (prompt, _tools) = default_shipped();
         let assembly = prompt
             .assemble(&AssembleContext {
@@ -931,11 +992,22 @@ mod tests {
                 .position(|section| section.name == name)
                 .unwrap_or_else(|| panic!("{name} 段必须存在"))
         };
-        assert!(index_of("harness:working-style") > index_of("tool:edit"));
-        assert!(index_of("harness:communication") > index_of("harness:working-style"));
-        assert!(index_of("harness:context-management") > index_of("harness:communication"));
-        assert!(index_of("harness:code-style") > index_of("harness:context-management"));
-        assert!(index_of("harness:risk-honesty") > index_of("harness:code-style"));
+        // 表值本身:行为纪律三段都排在 tool:bash 之前。
+        assert!(SectionOrder::WorkingStyle.value() < SectionOrder::ToolBash.value());
+        assert!(SectionOrder::RiskHonesty.value() < SectionOrder::ToolBash.value());
+        assert!(SectionOrder::ContextManagement.value() < SectionOrder::ToolBash.value());
+        // 原则段领起「行动与安全」组,组内是 工作方式 → 风险与诚实 → 上下文管理。
+        assert!(index_of("harness:core-principles") < index_of("harness:group-action"));
+        assert!(index_of("harness:group-action") < index_of("harness:working-style"));
+        assert!(index_of("harness:working-style") < index_of("harness:risk-honesty"));
+        assert!(index_of("harness:risk-honesty") < index_of("harness:context-management"));
+        // 行为纪律整组收在「工具准则」组标题之前,再往后才是工具纪律段。
+        assert!(index_of("harness:context-management") < index_of("harness:group-tools"));
+        assert!(index_of("harness:group-tools") < index_of("tool:bash"));
+        // 沟通与代码风格仍在工具段之后(「沟通与交付」组收尾)。
+        assert!(index_of("tool:edit") < index_of("harness:group-comm"));
+        assert!(index_of("harness:group-comm") < index_of("harness:communication"));
+        assert!(index_of("harness:communication") < index_of("harness:code-style"));
     }
 
     /// 权限模式(plan / auto-edit / full / read-only)互切时,段集合与
@@ -1153,19 +1225,20 @@ mod tests {
         // 的总纲收在 tool:bash 一段——tool:bash 与 bash 工具同进退,有 shell 可误用
         // 时它必然在,没有 shell 时禁令本来就无意义。
         assert!(section.text.contains("depth"), "{}", section.text);
-        assert!(section.text.contains("不要猜文件路径"), "{}", section.text);
+        assert!(section.text.contains("不猜路径"), "{}", section.text);
         let user_body = denia_system_prompt::render_prompt_for_user(&assembly);
         assert!(
-            !user_body.contains("不要猜文件路径"),
+            !user_body.contains("不猜路径"),
             "tool:ls 段泄进了用户可见副本"
         );
     }
 
     #[test]
-    fn bash_section_bans_shell_exploration_in_every_dialect() {
-        // 收口总纲必须按"动作"界定而不是按 POSIX 命令名:PowerShell 宿主上
-        // 模型写的是 Get-ChildItem/Select-String/Get-Content,只禁 ls/find/grep
-        // 等于没禁。四件探索类动作各自的专用工具也要点到。
+    fn bash_section_points_at_the_exploration_tools() {
+        // 命令名清单与理由(Get-ChildItem、.gitignore 等)已在 2026-10-18 按用户
+        // 要求从 tool:bash 段移除,方言无关的收口口径改由 tool:job 段独家承担
+        // (见 agent-loop/tests.rs 的只读档断言)。这里只守 bash 段自己:四件
+        // 探索动作必须点名专用工具出口,不许留退回 shell 检索的口子。
         let (prompt, _registry) = default_shipped();
         let assembly = prompt
             .assemble(&AssembleContext {
@@ -1178,33 +1251,21 @@ mod tests {
             .iter()
             .find(|section| section.name == "tool:bash")
             .expect("tool:bash section registered");
-        for needle in [
-            // 专用工具出口。
-            "ls",
-            "glob",
-            "grep",
-            "read_file",
-            // POSIX 侧命令名。
-            "find",
-            "cat",
-            // PowerShell 侧命令名——缺了这些,条文在 Windows 宿主上命中不了。
-            "Get-ChildItem",
-            "Select-String",
-            "Get-Content",
-            // 收口口径:按动作界定,不看命令名。
-            "按动作界定",
-            // 理由要写清,否则模型把它当风格偏好而不是性能约束。
-            ".gitignore",
-        ] {
+        for needle in ["ls", "glob", "grep", "read_file"] {
             assert!(
                 section.text.contains(needle),
-                "tool:bash 段缺少 {needle}:{}",
+                "tool:bash 段缺少探索动作的专用工具出口 {needle}:{}",
                 section.text
             );
         }
+        assert!(
+            section.text.contains("分别用 ls/glob/grep/read_file"),
+            "tool:bash 段没把探索动作指给专用工具:{}",
+            section.text
+        );
         let user_body = denia_system_prompt::render_prompt_for_user(&assembly);
         assert!(
-            !user_body.contains("按动作界定"),
+            !user_body.contains("分别用 ls/glob/grep/read_file"),
             "tool:bash 段泄进了用户可见副本"
         );
     }
@@ -1291,17 +1352,17 @@ mod tests {
             "MEMORY.md",
             "type: user | feedback | project | reference",
             "[[name]]",
-            "就地更新而不是新建重复文件",
-            "推荐前先验证它现在还存在",
+            "就地在原件上更新而不新建重复文件",
+            "推荐其中的文件、函数或开关前先验证它现在还存在",
             // 「该记」侧的判据:用户纠正、非显而易见决策、花力气查清的事实。
-            "用户纠正了你",
-            "非显而易见的决策",
+            "用户对你的纠正",
+            "非显而易见且理由来自排查的决策",
             // 「不该记」侧的判据:仓库已有、一次性细节。
-            "仓库本身已经记录的",
+            "仓库本身已记录的",
             "只对本次对话有意义的",
             // 两侧都要有,否则模型会偏向保守或偏向流水账。
-            "什么时候该写",
-            "什么时候不该写",
+            "该写：",
+            "不该写：",
         ] {
             assert!(section.text.contains(needle), "tool:memory 段缺少 {needle}");
         }
@@ -1448,24 +1509,24 @@ mod browser_prompt_tests {
             "纪律段应说明底层浏览器"
         );
         assert!(
-            section.text.contains("引用只在最近一次 snapshot 之后有效"),
+            section.text.contains("仅对同一 tab 的最近一次快照有效"),
             "纪律段应说明 ref 的有效期"
         );
         assert!(
-            section.text.contains("绝不关闭不是自己开的 tab"),
+            section.text.contains("绝不关闭不是自己打开的 tab"),
             "纪律段应写明不碰用户原有标签页"
         );
         assert!(
-            section.text.contains("list 里本次打开的 tab 全部消失"),
+            section.text.contains("并以 list 确认它们全部消失"),
             "纪律段应给出收尾判定口径"
         );
         assert!(
-            section.text.contains("绝不凭空拉起实例"),
+            section.text.contains("不凭空拉起实例"),
             "纪律段应说明查询命令不拉起浏览器"
         );
         assert!(section.text.contains("visualMode"));
         let user_body = denia_system_prompt::render_prompt_for_user(&assembly);
-        assert!(!user_body.contains("绝不关闭不是自己开的 tab"));
+        assert!(!user_body.contains("绝不关闭不是自己打开的 tab"));
 
         // persona 变体带 hub 同样有段。
         let (prompt, _registry) = shipped_with_persona_and_browser_and_ask(
@@ -1538,7 +1599,7 @@ mod browser_prompt_tests {
             .find(|section| section.name == "tool:ask")
             .expect("tool:ask section registered");
         assert_eq!(section.audience, SectionAudience::Model);
-        assert!(section.text.contains("真正卡住的时刻"));
+        assert!(section.text.contains("只在真正卡住时用"));
         assert!(section.text.contains("timed-out"));
         assert!(section.text.contains("cancelled"));
         assert!(section.text.contains("unavailable"));
@@ -1550,7 +1611,7 @@ mod browser_prompt_tests {
         assert!(names.contains(&"ask"), "ask schema missing: {names:?}");
         assert!(registry.get("ask").is_some(), "ask not registered");
         let user_body = denia_system_prompt::render_prompt_for_user(&assembly);
-        assert!(!user_body.contains("真正卡住的时刻"));
+        assert!(!user_body.contains("只在真正卡住时用"));
 
         // 不带 ask:段与 schema 都不出现。
         let (prompt, registry) = default_shipped_with_browser_and_ask(None, false);
@@ -1660,7 +1721,7 @@ mod capability_prompt_tests {
         // 带路径版本:路径内联,纪律要点齐全。
         let rooted = render_memory_section(Some(std::path::Path::new("/m/memory")));
         assert!(rooted.contains("# 项目记忆"));
-        assert!(rooted.contains("`/m/memory/`"));
+        assert!(rooted.contains("记忆目录在 `/m/memory`"));
         assert!(rooted.contains("直接用 write_file 写入"));
         assert!(rooted.contains("type: user | feedback | project | reference"));
         assert!(rooted.contains("[[name]]"));
@@ -1668,7 +1729,7 @@ mod capability_prompt_tests {
         assert!(rooted.contains("AGENTS.md"));
         // 无路径基座(注册兜底):指向注入消息,其余正文一致。
         let plain = render_memory_section(None);
-        assert!(plain.contains("「项目记忆」注入消息"));
+        assert!(plain.contains("「项目记忆」注入且已存在"));
         assert!(!plain.contains("`/m/"));
     }
 

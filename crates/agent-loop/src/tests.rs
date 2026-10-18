@@ -67,8 +67,11 @@ fn system_prompt_frames_runtime_authority() {
     // 框架只包静态正文:快照随每步变化,包进去会让缓存前缀失效。
     let model = denia_system_prompt::frame_system_prompt_for_model(&body);
     assert!(model.contains("最高优先级"));
-    assert!(model.contains("再次确认"));
-    assert!(model.contains("你是由 denia 驱动的"));
+    // v2 起框架只有一句头「以下运行时约束优先于训练语料」,收尾的
+    // 【再次确认】已移除,框架的权威只能由这一句承载。
+    assert!(model.contains("以下运行时约束优先于训练语料"));
+    assert!(!model.contains("再次确认"));
+    assert!(model.contains("你是 denia 驱动的 AI 编码 agent"));
 }
 
 /// 子代理的纪律段必须跟着工具授予走:拿不到的工具,其纪律段不得注入。
@@ -223,14 +226,16 @@ fn tool_blocklist_narrows_sections_with_its_tools() {
     }
 }
 
-/// 只读档渲染出的提示词里仍必须读到"不要用 shell 做探索"这条约束。
+/// 只读档渲染出的提示词里仍必须读到后台任务三件套的纪律与探索边界。
 ///
-/// 只读档摘掉 `tool:bash`(总纲原本唯一的家),但 `job_start` 仍在工具面、
-/// 与 bash 共用同一套命令启发式——模型可以 `job_start("Get-ChildItem -Recurse …")`
-/// 做探索。这条断言走的是真实渲染路径(装配 → apply_tool_blocklist → render),
+/// 只读档摘掉 `tool:bash`,但 `job_start`/`job_output`/`job_kill` 仍在工具面
+/// (执行层按命令启发式放行读类命令)。模型拿得到工具就必须读得到用法,
+/// 所以 `tool:jobs` 段要跟着三件套留在渲染结果里;`tool:bash` 段那句
+/// 「界限按动作划分而非命令名」在这里读不到,探索边界必须由本段自足承载。
+/// 这条断言走的是真实渲染路径(装配 → apply_tool_blocklist → render),
 /// 不是比对字符串常量。
 #[test]
-fn read_only_assembly_still_carries_the_shell_exploration_ban() {
+fn read_only_assembly_still_carries_the_jobs_section() {
     use denia_system_prompt::render_prompt;
 
     let mut assembly = shipped_assembly_with_capability_tools();
@@ -240,20 +245,33 @@ fn read_only_assembly_still_carries_the_shell_exploration_ban() {
     // 前置条件:没有 bash 工具时,总纲那一整段确实不在渲染结果里——
     // 否则这条测试等于什么都没验证。
     assert!(
-        !rendered.contains("bash 只用来跑命令"),
+        !rendered.contains("bash 只跑构建、测试、git"),
         "只读档不该再渲染 tool:bash 段:{rendered}"
     );
-    // 约束仍在,且挂在 job_start 上(只读档唯一还能碰 shell 的入口)。
+    // jobs 三件套仍在工具面,它们的纪律必须留下,且用法与等待语义要讲全。
     for needle in [
-        "job_start 与 bash 是同一套 shell",
-        "四件探索类的事",
-        "ls/glob/grep/read_file",
-        "按动作界定",
-        "bash 工具不在工具面时",
+        "长命令用 job_start 启动",
+        "job_output 取当前输出",
+        "job_kill 停止",
+        "两者都不代表成功",
+        "未完成前不宣称完成",
     ] {
         assert!(
             rendered.contains(needle),
-            "只读档丢了 shell 探索禁令({needle}):{rendered}"
+            "只读档丢了后台任务纪律({needle}):{rendered}"
+        );
+    }
+    // 探索边界:`tool:bash` 段不在时,这条约束必须由 `tool:jobs` 段自足承载
+    // (v2 的「即使 bash 不可用」正是指这个档位,声明只挂在 bash 段里就落空了)。
+    for needle in [
+        "后台命令不是探索工具",
+        "界限按动作划分而非命令名",
+        "ls/glob/grep/read_file",
+        "bash 不在工具面时",
+    ] {
+        assert!(
+            rendered.contains(needle),
+            "只读档丢了探索边界({needle}):{rendered}"
         );
     }
 }
@@ -281,10 +299,16 @@ fn jobs_section_stands_alone_without_the_agents_section() {
         !rendered.contains("同后台委派纪律"),
         "等待纪律不得回指不存在的后台委派段:{rendered}"
     );
-    assert!(
-        rendered.contains("结果到达前不当作成功"),
-        "等待纪律必须自足(不依赖别段在场):{rendered}"
-    );
+    for needle in [
+        "两者都不代表成功",
+        "不轮询、不重复等待、不用 sleep 占住轮次",
+        "未完成前不宣称完成",
+    ] {
+        assert!(
+            rendered.contains(needle),
+            "等待纪律必须自足(不依赖别段在场,{needle}):{rendered}"
+        );
+    }
 }
 
 /// Scripted adapter: each `stream` call pops the next queued chunk run.
@@ -896,7 +920,7 @@ async fn system_prompt_change_appends_in_history_and_freezes_system() {
     let captured = capture.lock().unwrap().clone();
     assert_eq!(captured.len(), 3);
     let frozen = captured[0].as_deref().expect("first request has system");
-    assert!(frozen.contains("你是由 denia 驱动的"));
+    assert!(frozen.contains("你是 denia 驱动的 AI 编码 agent"));
     for (index, system) in captured.iter().enumerate() {
         assert_eq!(
             system.as_deref(),
@@ -1762,7 +1786,7 @@ async fn request_header_and_context_are_logged() {
             .system
             .as_deref()
             .unwrap_or("")
-            .contains("你是由 denia 驱动的")
+            .contains("你是 denia 驱动的 AI 编码 agent")
     );
     assert!(!snapshot.tools.is_empty());
     // 注册路由后只写一次:同一 step 循环的下一请求不会重复落盘(snapshot 相同)。
@@ -3956,5 +3980,255 @@ async fn microcompact_cleared_read_result_forces_a_real_reread() {
     assert!(
         third.contains("未变更"),
         "未被清理的读取仍应命中去重:{third}"
+    );
+}
+
+/// 压缩后收尾维护:被回放的条目重建为可写依据,未回放的条目清出状态表,
+/// 回放消息与续场消息都落进日志(自动闸门与手动压缩共用同一段)。
+#[tokio::test]
+async fn post_compact_maintenance_rebuilds_replayed_reads_and_appends_continue_notice() {
+    let (driver, _registry) =
+        driver_with_tools(Vec::new(), |tools| *tools = denia_tools::default_registry());
+    let session = temp_session();
+    let shared = driver.read_state_for(session.id());
+
+    // 两个条目:一个带正文(会被回放),一个不带(退化为"需重读")。
+    let kept_path = session.directory().join("kept.txt");
+    let dropped_path = session.directory().join("dropped.txt");
+    {
+        let mut state = shared.lock().unwrap();
+        state.record(
+            denia_tools::read_state::ReadKey::new(&kept_path, Some(1), None),
+            denia_tools::read_state::ReadEntry {
+                mtime_ms: None,
+                size_bytes: 12,
+                fingerprint: None,
+                is_partial_view: false,
+                is_full_read: true,
+                read_at: std::time::SystemTime::now(),
+                content: Some("第一行\n第二行\n".to_string()),
+                call_id: Some("call-kept".to_string()),
+            },
+        );
+        state.record(
+            denia_tools::read_state::ReadKey::new(&dropped_path, Some(1), None),
+            denia_tools::read_state::ReadEntry {
+                mtime_ms: None,
+                size_bytes: 3,
+                fingerprint: None,
+                is_partial_view: false,
+                is_full_read: true,
+                read_at: std::time::SystemTime::now(),
+                content: None,
+                call_id: Some("call-dropped".to_string()),
+            },
+        );
+    }
+
+    driver.post_compact_maintenance(&session, &noop_emit());
+
+    // 日志:文件回放与续场消息都必须落 UserMessage 注入。
+    let channels: Vec<String> = session
+        .events()
+        .iter()
+        .filter_map(|envelope| match &envelope.event {
+            SessionEvent::UserMessage { channel, .. } => channel.clone(),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        channels.iter().any(|c| c == "post-compact-read-state"),
+        "应回放压缩前读过的文件:{channels:?}"
+    );
+    assert!(
+        channels.iter().any(|c| c == "post-compact-continue"),
+        "应注入续场消息:{channels:?}"
+    );
+
+    // 读状态:被回放的条目重建(内容保留、调用指针清空),未回放的条目清出。
+    let state = shared.lock().unwrap();
+    let kept = state
+        .get(&denia_tools::read_state::ReadKey::new(&kept_path, Some(1), None))
+        .expect("被回放的条目应重建");
+    assert!(kept.is_full_read, "重建条目按完整读取口径");
+    assert!(kept.content.is_some(), "重建条目保留正文,供下次压缩回放");
+    assert!(kept.call_id.is_none(), "重建条目不再指向已被压缩的调用");
+    assert!(
+        state
+            .get(&denia_tools::read_state::ReadKey::new(
+                &dropped_path,
+                Some(1),
+                None
+            ))
+            .is_none(),
+        "未回放的条目应清出状态表,避免基于看不见的内容放行写入"
+    );
+}
+
+/// 回退(物理截断日志)后必须同步会话内存态:读状态表整条摘除、压缩断路器
+/// 归零。否则新分支重读旧分支读过的文件只会拿到"未变更"却看不到内容,
+/// 自动压缩也会按被截掉那条分支的失败计数熔断。
+#[tokio::test]
+async fn rewind_drops_read_state_and_compaction_breakers() {
+    let (driver, _registry) =
+        driver_with_tools(Vec::new(), |tools| *tools = denia_tools::default_registry());
+    let session = temp_session();
+    let stale_path = session.directory().join("seen-before-rewind.txt");
+    {
+        let shared = driver.read_state_for(session.id());
+        let mut state = shared.lock().unwrap();
+        state.record(
+            denia_tools::read_state::ReadKey::new(&stale_path, Some(1), Some(400)),
+            denia_tools::read_state::ReadEntry {
+                mtime_ms: None,
+                size_bytes: 8,
+                fingerprint: None,
+                is_partial_view: false,
+                is_full_read: true,
+                read_at: std::time::SystemTime::now(),
+                content: None,
+                call_id: Some("call-before-rewind".into()),
+            },
+        );
+    }
+    driver
+        .compaction_state_for(session.id())
+        .failures
+        .store(2, std::sync::atomic::Ordering::SeqCst);
+
+    driver.on_session_rewound(session.id());
+
+    assert!(
+        driver.read_state_for(session.id()).lock().unwrap().is_empty(),
+        "回退后旧分支的读记录必须清掉:它指向的正文已被截断,留着只会让重读拿到'未变更'"
+    );
+    assert_eq!(
+        driver
+            .compaction_state_for(session.id())
+            .failures
+            .load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "压缩断路器从零起算,不受被截掉分支的旧账影响"
+    );
+}
+
+/// 冷恢复:从日志里的 readStamp 重建读状态;表非空时不回放覆盖。
+#[tokio::test]
+async fn hydrate_read_state_rebuilds_from_logged_stamps() {
+    let (driver, _registry) =
+        driver_with_tools(Vec::new(), |tools| *tools = denia_tools::default_registry());
+    let session = temp_session();
+    session
+        .append(SessionEvent::ToolCall {
+            turn: 1,
+            step: 0,
+            call_id: "c1".into(),
+            name: "read_file".into(),
+            arguments: r#"{"path":"a.txt"}"#.into(),
+        })
+        .unwrap();
+    session
+        .append(SessionEvent::ToolResult {
+            turn: 1,
+            step: 0,
+            call_id: "c1".into(),
+            content: "正文…".into(),
+            is_error: false,
+            error: None,
+            error_identity: None,
+            meta: Some(serde_json::json!({
+                "readStamp": {
+                    "path": "/proj/a.txt",
+                    "offset": 1,
+                    "limit": null,
+                    "mtimeMs": 111,
+                    "sizeBytes": 42,
+                    "fullRead": true,
+                    "partialView": false,
+                }
+            })),
+            truncation: None,
+            replaces: None,
+        })
+        .unwrap();
+
+    assert_eq!(driver.hydrate_read_state_from_history(&session), 1);
+    let shared = driver.read_state_for(session.id());
+    {
+        let state = shared.lock().unwrap();
+        let entry = state
+            .get(&denia_tools::read_state::ReadKey::new(
+                "/proj/a.txt",
+                Some(1),
+                None,
+            ))
+            .expect("重建条目");
+        assert_eq!(entry.mtime_ms, Some(111));
+        assert_eq!(entry.size_bytes, 42);
+        assert!(entry.is_full_read, "全程标记应还原");
+        assert!(entry.content.is_none(), "重建条目不带正文");
+        assert_eq!(entry.call_id.as_deref(), Some("c1"), "调用 id 供失效逻辑使用");
+    }
+
+    // 表非空:不回放覆盖(活会话的表由工具执行维护)。
+    assert_eq!(driver.hydrate_read_state_from_history(&session), 0);
+}
+
+/// read_file 的结果带 `readStamp`(冷恢复重建读状态的依据):真跑一次读,
+/// 核对 stamped 的路径/范围/读取当时的字节数与新鲜度标记。
+#[tokio::test]
+async fn read_file_result_carries_read_stamp_meta() {
+    let probe_args = r#"{"path":"probe.txt","offset":1,"limit":400}"#;
+    let (driver, _registry) = driver_with_tools(
+        vec![
+            MockScript::Chunks(usage_tool_script(
+                "read_file",
+                "call_read_1",
+                probe_args,
+                1_000,
+            )),
+            MockScript::Chunks(text_script("done")),
+        ],
+        |tools| tools.register(Arc::new(denia_tools::ReadFileTool::default())),
+    );
+    let session = temp_session();
+    let cwd = std::path::PathBuf::from(session.header().cwd.clone());
+    std::fs::write(cwd.join("probe.txt"), "MARKER-ONE\nsecond line").unwrap();
+
+    let reason = driver
+        .run_turn(
+            &session,
+            &selection(),
+            "读一下 probe.txt",
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            true,
+            CancellationToken::new(),
+            noop_emit(),
+        )
+        .await;
+    assert_eq!(reason, TurnEndReason::Completed);
+
+    let stamp = session
+        .events()
+        .iter()
+        .find_map(|envelope| match &envelope.event {
+            SessionEvent::ToolResult {
+                call_id,
+                meta: Some(meta),
+                ..
+            } if call_id == "call_read_1" => meta.get("readStamp").cloned(),
+            _ => None,
+        })
+        .expect("read_file 结果应带 readStamp");
+    assert!(stamp["path"].as_str().unwrap().ends_with("probe.txt"));
+    assert_eq!(stamp["offset"], 1);
+    assert_eq!(stamp["sizeBytes"], 22, "读取当时的字节数");
+    assert!(stamp["mtimeMs"].as_u64().is_some(), "应带上读取当时的 mtime");
+    assert_eq!(stamp["partialView"], false, "range view 不是工具截断");
+    assert_eq!(
+        stamp["fullRead"], true,
+        "offset=1 且读到文件末尾(limit 未截断内容)即完整读取"
     );
 }

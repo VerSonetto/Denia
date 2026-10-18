@@ -91,13 +91,14 @@
   white-space: nowrap;
 }
 
+/* 条底 = 未占用部分,所以轨道本身也要读得出:彩色段落在总容量上才能看比例。 */
 .cm-bar {
   display: flex;
-  height: 5px;
+  height: 6px;
   margin-top: 10px;
   overflow: hidden;
   border-radius: var(--r-pill);
-  background: var(--accent-soft);
+  background: var(--ctx-unused);
 }
 
 /* 无启发式拆分时整条走默认色;拆分段的配比由颜色类覆盖。 */
@@ -106,16 +107,21 @@
   background: var(--accent);
 }
 
+/* 段间 1px 分隔:box-sizing 为 border-box,描边吃在宽度里,不干扰占比。 */
+.cm-segment + .cm-segment {
+  border-left: 1px solid var(--bg-layer-2);
+}
+
 .cm-color-system {
-  background: var(--label-primary);
+  background: var(--ctx-system);
 }
 
 .cm-color-tools {
-  background: var(--label-secondary);
+  background: var(--ctx-tools);
 }
 
 .cm-color-messages {
-  background: var(--label-tertiary);
+  background: var(--ctx-messages);
 }
 
 .cm-rows {
@@ -183,8 +189,8 @@
 }
 
 .cm-swatch {
-  width: 8px;
-  height: 8px;
+  width: 9px;
+  height: 9px;
   flex: none;
   border-radius: 2px;
 }

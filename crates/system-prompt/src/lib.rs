@@ -13,7 +13,8 @@ use denia_core::tool::ToolSchema;
 
 pub use render::{
     frame_system_prompt_for_model, is_runtime_context_snapshot, join_context_sections,
-    render_context_sections, render_context_snapshot, render_prompt, render_prompt_for_user,
+    render_context_sections, render_context_snapshot, render_model_system, render_prompt,
+    render_prompt_for_user, render_prompt_parts,
 };
 
 /// Deployment persona section name; shadowing replaces the global persona.
@@ -40,63 +41,79 @@ pub const RUNTIME_CONTEXT_CLEARED: &str =
 pub enum SectionOrder {
     HarnessIdentity,
     DeploymentPersona,
+    /// 常驻决策原则(v2「核心原则」组):走最短可靠路径、失败即信息、证据够就停。
+    /// 排在 persona 之后、所有工具纪律之前——它是后面每一段的判断前提。
+    CorePrinciples,
+    /// 「行动与安全」组标题。
+    GroupAction,
+    /// 工作方式纪律段:
+    /// 有足够信息就行动、不重复推导、不罗列不打算做的选项。
+    WorkingStyle,
+    /// 风险与诚实纪律段:
+    /// 难以撤销/对外的操作先确认;删除前先看目标;如实报告结果。
+    RiskHonesty,
+    /// 上下文管理纪律段:
+    /// 上下文变长会被摘要,工作可以继续,不必提前收尾或中途交接。
+    ContextManagement,
+    /// 「工具准则」组标题(含"参数与默认值以工具定义为准"的口径提示)。
+    GroupTools,
     ToolBash,
-    /// 列目录工具(ls)的纪律段;紧跟 bash 收口段,是"看目录里有什么"的专用入口。
+    /// 列目录工具(ls)的纪律段;是"看目录里有什么"的专用入口。
     ToolLs,
-    ToolRead,
-    /// 用户消息中 `@路径` 文件引用说明(对照 dsh FILE_REFERENCE 段),紧跟 read 纪律。
-    FileReference,
-    ToolWrite,
+    /// 路径模式找文件(glob)的纪律段。
     ToolGlob,
+    /// 全文搜索(grep)的纪律段。
     ToolGrep,
+    /// 用户消息中 `@路径` 文件引用说明(对照 dsh FILE_REFERENCE 段)。
+    FileReference,
+    ToolRead,
+    ToolWrite,
     ToolEdit,
-    /// 宿主能力工具(子代理委派)的工具纪律段;仅在注册了对应工具时注入。
-    ToolAgents,
-    /// 后台任务工具(job 三件套)的工具纪律段。
-    ToolJobs,
+    /// 工具输出预算与回读纪律(与 read_tool_output 同进退)。
+    ToolOutput,
     /// 技能工具(skill)的工具纪律段。
     ToolSkill,
     /// 网页抓取工具(web_fetch)的纪律段;随 default_registry 注册。
     ToolWebFetch,
     /// 浏览器工具的资源回收纪律段;仅在注册了 browser 工具时注入。
     ToolBrowser,
-    /// 提问工具(ask)的使用纪律段;仅在注册了 ask 工具时注入。
-    ToolAsk,
-    /// 预设创作工具(create_preset)的纪律段;仅在注册了该工具的部署
-    /// (控制台)注入,配合创造模式 preset 使用。
-    ToolPreset,
-    /// 会话目标工具(get_goal/update_goal)的纪律段;随 default_registry
-    /// 注册,仅存在目标的会话在上下文注入里携带目标详情。
-    ToolGoal,
-    /// 任务验证账本工具(run_checks)的纪律段;随 default_registry 注册,
-    /// preset 关闭 taskLedger 时与工具一起消失。
-    ToolTask,
-    /// 计划呈交工具(exit_plan)的纪律段;仅计划模式注入。
-    ToolPlan,
     /// MCP 外部工具(`mcp__<server>__<tool>`)的纪律段;仅在至少有一个
     /// MCP 服务器已连接时注入。
     ToolMcp,
-    /// 项目记忆(记忆目录写沉淀 + MEMORY.md 索引维护)的纪律段;仅在
-    /// 项目记忆启用(runtime.memoryEnabled)时注入。
+    /// 「进度、协作与目标」组标题。
+    GroupProgress,
+    ToolTodo,
+    /// 宿主能力工具(子代理委派)的工具纪律段;仅在注册了对应工具时注入。
+    ToolAgents,
+    /// 后台任务工具(job 三件套)的工具纪律段。
+    ToolJobs,
+    /// 会话目标工具(get_goal/update_goal)的纪律段。
+    ToolGoal,
+    /// 「验证与完成判断」组标题。
+    GroupVerify,
+    /// 任务验证账本工具(run_checks)的纪律段;preset 关闭 taskLedger 时与工具一起消失。
+    ToolTask,
+    /// 「提问与计划」组标题。
+    GroupAskPlan,
+    /// 提问工具(ask)的使用纪律段;仅在注册了 ask 工具时注入。
+    ToolAsk,
+    /// 计划呈交工具(exit_plan)的纪律段;仅计划模式注入。
+    ToolPlan,
+    /// 「预设创建」组标题。
+    GroupPreset,
+    /// 预设创作工具(create_preset)的纪律段;仅在控制台部署注入。
+    ToolPreset,
+    /// 项目记忆(记忆目录写沉淀 + MEMORY.md 索引维护)的纪律段;
+    /// 段自带一级标题,不另配组标题。
     ToolMemory,
-    /// 工作方式纪律段:
-    /// 有足够信息就行动、不重复推导、不罗列不打算做的选项。
-    ///
-    /// 放在工具段之后、输出纪律之前——它约束的是"怎么推进工作",
-    /// 而不是"怎么说话"。
-    WorkingStyle,
+    /// 「沟通与交付」组标题。
+    GroupComm,
     /// 输出与沟通纪律段:
     /// 先给结论、为读者写、可读性优先于简洁。
     Communication,
-    /// 上下文管理纪律段:
-    /// 上下文变长会被摘要,工作可以继续,不必提前收尾或中途交接。
-    ContextManagement,
     /// 代码风格纪律段:
     /// 代码要像周围的代码;注释只写代码本身表达不了的约束。
     CodeStyle,
-    /// 风险与诚实纪律段:
-    /// 难以撤销/对外的操作先确认;删除前先看目标;如实报告结果。
-    RiskHonesty,
 }
 
 impl SectionOrder {
@@ -105,31 +122,41 @@ impl SectionOrder {
         match self {
             Self::HarnessIdentity => -1000,
             Self::DeploymentPersona => 0,
+            Self::CorePrinciples => 100,
+            Self::GroupAction => 200,
+            Self::WorkingStyle => 210,
+            Self::RiskHonesty => 220,
+            Self::ContextManagement => 230,
+            Self::GroupTools => 900,
             Self::ToolBash => 1000,
-            Self::ToolLs => 1050,
-            Self::ToolRead => 1100,
-            Self::FileReference => 1150,
-            Self::ToolWrite => 1200,
-            Self::ToolGlob => 1300,
-            Self::ToolGrep => 1400,
-            Self::ToolEdit => 1500,
-            Self::ToolAgents => 1600,
-            Self::ToolJobs => 1700,
-            Self::ToolSkill => 1800,
-            Self::ToolWebFetch => 1850,
-            Self::ToolBrowser => 1900,
-            Self::ToolAsk => 2000,
-            Self::ToolPreset => 2060,
-            Self::ToolGoal => 1950,
-            Self::ToolTask => 1960,
-            Self::ToolPlan => 2050,
-            Self::ToolMcp => 2100,
-            Self::ToolMemory => 2150,
-            Self::WorkingStyle => 2200,
-            Self::Communication => 2250,
-            Self::ContextManagement => 2260,
-            Self::CodeStyle => 2270,
-            Self::RiskHonesty => 2280,
+            Self::ToolLs => 1010,
+            Self::ToolGlob => 1020,
+            Self::ToolGrep => 1030,
+            Self::FileReference => 1040,
+            Self::ToolRead => 1050,
+            Self::ToolWrite => 1060,
+            Self::ToolEdit => 1070,
+            Self::ToolOutput => 1080,
+            Self::ToolSkill => 1100,
+            Self::ToolWebFetch => 1110,
+            Self::ToolBrowser => 1120,
+            Self::ToolMcp => 1130,
+            Self::GroupProgress => 1200,
+            Self::ToolTodo => 1210,
+            Self::ToolAgents => 1220,
+            Self::ToolJobs => 1230,
+            Self::ToolGoal => 1240,
+            Self::GroupVerify => 1300,
+            Self::ToolTask => 1310,
+            Self::GroupAskPlan => 1400,
+            Self::ToolAsk => 1410,
+            Self::ToolPlan => 1420,
+            Self::GroupPreset => 1500,
+            Self::ToolPreset => 1510,
+            Self::ToolMemory => 1600,
+            Self::GroupComm => 1700,
+            Self::Communication => 1710,
+            Self::CodeStyle => 1720,
         }
     }
 }
@@ -281,7 +308,10 @@ impl SystemPrompt {
             let _ = prompt.section(PromptSection {
                 name: "harness:identity".to_string(),
                 order: SectionOrder::HarnessIdentity.value(),
-                text: PromptText::Static("你是由 denia 驱动的 AI 编码 agent。".to_string()),
+                text: PromptText::Static(
+                    "你是 denia 驱动的 AI 编码 agent，与用户共同解决真实仓库问题的工程搭档，而非被动执行器。"
+                        .to_string(),
+                ),
                 complete: false,
                 // 身份块对用户可见(展示"你被告知的身份")。
                 audience: SectionAudience::User,
@@ -472,7 +502,7 @@ impl SystemPrompt {
 /// 表达偏好(→ `harness:communication`)——那些各有归属,混进来只会形成
 /// 重复的第二个来源,还会因为 order 0 的位置反过来压制后面的专职段落。
 pub fn default_persona_template() -> &'static str {
-    "你是由 denia 驱动的 AI 编码 agent。"
+    "你是 denia 驱动的 AI 编码 agent，与用户共同解决真实仓库问题的工程搭档，而非被动执行器。"
 }
 
 fn is_valid_variable_name(name: &str) -> bool {
