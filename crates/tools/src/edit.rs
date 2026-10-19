@@ -7,7 +7,9 @@
 //! - 多处编辑走 `edits` 数组:按顺序依次应用(后一项匹配前一项改完后的
 //!   内容),**全有或全无**——任一处匹配失败就报错且不写入,绝不留下
 //!   改了一半的文件;
-//! - 单处形式(old_string/new_string)与 edits 形式二选一,混用报错;
+//! - 单处形式(old_string/new_string)与 edits 形式同时出现时以 edits 为准,
+//!   顶层单处字段被忽略并在结果里回告(不再整次拒绝);
+//! - edits 为空数组时回退到单处字段(模型常把单处误包成数组);
 //! - old_string 与 new_string 相同是无op编辑,直接拒绝;
 //! - 文件必须 UTF-8(编辑是文本操作);
 //! - 替换结果返回计数与行锚点,幂等:再次执行同样的 edit 会因
@@ -60,23 +62,24 @@ struct EditSpec {
     all: bool,
 }
 
-/// 把两种入参形式归一成编辑列表;形式混用与逐项校验都在这里 fail loud。
-fn parse_specs(args: &EditArgs) -> Result<Vec<EditSpec>, (String, String)> {
-    if let Some(edits) = args.edits.as_ref() {
-        if args.old_string.is_some() || args.new_string.is_some() || args.replace_all.is_some() {
-            return Err((
-                "edits 与 old_string/new_string/replace_all 不能同时提供".to_string(),
-                "单处编辑用 old_string + new_string + 可选 replace_all;多处编辑只用 edits 数组,二选一".to_string(),
-            ));
-        }
-        if edits.is_empty() {
-            return Err((
-                "edits 不能为空".to_string(),
-                "多处编辑至少提供一个 edits 项;如果只改一处,改用 old_string 与 new_string"
-                    .to_string(),
-            ));
-        }
-        return edits
+/// 把两种入参形式归一成编辑列表;逐项校验都在这里 fail loud。
+///
+/// **混用不再直接失败**：真实模型常一带同时提交 `edits` 与单处字段（最常见是
+/// 顺手抄了 schema 里的 `replace_all`，或者把单处写成平凡单元素数组）。对这类
+/// 形状做确定性归一，而不是让调用方去猜“到底该删哪个字段”：
+///
+/// - 只要 `edits` 非空，就以 `edits` 为准（它编码的是实际意图，信息更全）；
+/// - 顶层 `old_string` / `new_string` 被忽略；**顶层 `replace_all` 也不再生效**
+///   （从 `edits` 形式起它就不是合法字段，见 [`top_level_ignored`]）；
+/// - 被忽略的字段名回告到工具输出，模型下一轮就不会再带。
+///
+/// `edits` 为空数组时不当作“多处形式”：那个形状几乎总是模型把单处编辑误写成
+/// 数组，此时回退到单处字段；两个都空才报错。
+fn parse_specs(args: &EditArgs) -> Result<(Vec<EditSpec>, Vec<&'static str>), (String, String)> {
+    if args.edits.as_ref().is_some_and(|edits| !edits.is_empty()) {
+        let edits = args.edits.as_ref().expect("checked non-empty");
+        let ignored = top_level_ignored(args);
+        let specs: Vec<EditSpec> = edits
             .iter()
             .enumerate()
             .map(|(index, item)| {
@@ -99,9 +102,17 @@ fn parse_specs(args: &EditArgs) -> Result<Vec<EditSpec>, (String, String)> {
                     all: item.replace_all,
                 })
             })
-            .collect();
+            .collect::<Result<_, _>>()?;
+        return Ok((specs, ignored));
     }
     let Some(old) = args.old_string.as_deref() else {
+        if args.edits.is_some() {
+            return Err((
+                "edits 不能为空".to_string(),
+                "多处编辑至少提供一个 edits 项;如果只改一处,改用 old_string 与 new_string"
+                    .to_string(),
+            ));
+        }
         return Err((
             "缺少编辑内容".to_string(),
             "单处编辑给 old_string 与 new_string;同一文件的多处编辑给 edits 数组;两种形式不要混用"
@@ -126,11 +137,31 @@ fn parse_specs(args: &EditArgs) -> Result<Vec<EditSpec>, (String, String)> {
             "确认要修改的内容;若只是想看文件,用 read_file".to_string(),
         ));
     }
-    Ok(vec![EditSpec {
-        old: old.to_string(),
-        new: new.to_string(),
-        all: args.replace_all.unwrap_or(false),
-    }])
+    Ok((
+        vec![EditSpec {
+            old: old.to_string(),
+            new: new.to_string(),
+            all: args.replace_all.unwrap_or(false),
+        }],
+        Vec::new(),
+    ))
+}
+
+/// `edits` 形式下被忽略的顶层字段名（按固定顺序，便于断言）。
+///
+/// 只列**实际出现**的字段：没传的字段不该凭空出现在回告里。
+fn top_level_ignored(args: &EditArgs) -> Vec<&'static str> {
+    let mut ignored = Vec::new();
+    if args.old_string.is_some() {
+        ignored.push("old_string");
+    }
+    if args.new_string.is_some() {
+        ignored.push("new_string");
+    }
+    if args.replace_all.is_some() {
+        ignored.push("replace_all");
+    }
+    ignored
 }
 
 /// Replaces exact string occurrences in a text file; one call may carry
@@ -144,9 +175,10 @@ impl EditTool {
         Self {
             schema: ToolSchema {
                 name: "edit".to_string(),
-                description: "对工作区内的一个 UTF-8 文本文件做精确字符串替换,单次调用可完成多处编辑。两种参数形式必须二选一:只改一处时给 old_string + new_string,可选 replace_all;同一文件改多处时只给 edits 数组,至少一个编辑项,不要同时给两种形式。old_string 必须与文件原文完全一致(空白与换行都算),默认只能出现一次;replace_all=true 时替换全部出现。多处编辑按数组顺序应用,后一项匹配前一项改完后的内容;任一项失败则整次调用不写入。返回替换发生的行号。先 read_file 确认原文;编辑成功后无需读回验证(写前已做内容指纹校验,成功即表示已落盘)。写前会校验文件是否仍是你上次读取的那一版(内容指纹),被其他写入者改过时拒写,需重新 read_file 后重提。".to_string(),
+                description: "对工作区内的一个 UTF-8 文本文件做精确字符串替换,单次调用可完成多处编辑。推荐两种参数形式之一:只改一处时给 old_string + new_string,可选 replace_all;同一文件改多处时只给 edits 数组,至少一个编辑项。两者同时出现不会报错:以 edits 为准,顶层 old_string/new_string/replace_all 被忽略并在结果里回告。old_string 必须与文件原文完全一致(空白与换行都算),默认只能出现一次;replace_all=true 时替换全部出现。多处编辑按数组顺序应用,后一项匹配前一项改完后的内容;任一项失败则整次调用不写入。返回替换发生的行号。先 read_file 确认原文;编辑成功后无需读回验证(写前已做内容指纹校验,成功即表示已落盘)。写前会校验文件是否仍是你上次读取的那一版(内容指纹),被其他写入者改过时拒写,需重新 read_file 后重提。".to_string(),
                 // 参数形式(单处 vs edits 数组)用扁平对象描述,**不用顶层 oneOf**。
-                // 两种形式的互斥由 `parse_specs` 在运行时 fail-loud 校验,比 schema 更严格。
+                // 两种形式同时出现时由 `parse_specs` 确定性归一(edits 优先),
+                // 不再 fail-loud:真实模型经常顺手带上单处字段,拒掉只会白跑一轮。
                 // 刻意避开 oneOf:本地 opencode2api 网关(40080/44180)的免费档按「工具名
                 // edit + 顶层 oneOf」这一 Claude/Opus 编码工具指纹识别第三方 agent,命中即回
                 // `403 FreeTierError(OpenCode's free tier can only be used from within
@@ -156,7 +188,7 @@ impl EditTool {
                     "type": "object",
                     "required": ["path"],
                     "additionalProperties": false,
-                    "description": "两种参数形式二选一:单处编辑给 old_string + new_string(可选 replace_all);多处编辑只给 edits 数组,不要再带 old_string/new_string/replace_all。混用会被拒绝。",
+                    "description": "推荐二选一:单处编辑给 old_string + new_string(可选 replace_all);多处编辑只给 edits 数组。同时提供时以 edits 为准,顶层单处字段被忽略并在结果里回告。",
                     "properties": {
                         "path": { "type": "string", "description": "要编辑的文件路径;相对路径锚定会话工作区。" },
                         "old_string": { "type": "string", "minLength": 1, "description": "单处编辑:要被替换的原文,必须与文件内容逐字符一致(包含缩进、空格与换行);不能是空串。与 edits 二选一。" },
@@ -165,7 +197,7 @@ impl EditTool {
                         "edits": {
                             "type": "array",
                             "minItems": 1,
-                            "description": "多处编辑:按顺序原子应用同一文件的多个替换;与单处字段互斥,不要同时提供 old_string/new_string/replace_all。",
+                            "description": "多处编辑:按顺序原子应用同一文件的多个替换;与单处字段同时提供时以本数组为准。",
                             "items": {
                                 "type": "object",
                                 "properties": {
@@ -206,7 +238,7 @@ impl Tool for EditTool {
                 );
             }
         };
-        let specs = match parse_specs(&args) {
+        let (specs, ignored) = match parse_specs(&args) {
             Ok(specs) => specs,
             Err((message, hint)) => return tool_error(message, hint),
         };
@@ -473,6 +505,14 @@ impl Tool for EditTool {
             content.push_str(&format!(
                 "(其中 {} 处按行尾空白弹性匹配命中)",
                 ordinals.join("、")
+            ));
+        }
+        // 混用形式被归一后回告被忽略的字段：模型下一轮就知道该删哪个，
+        // 而不是把"写成功了"误读成"所有字段都生效了"。
+        if !ignored.is_empty() {
+            content.push_str(&format!(
+                "(已忽略本次调用里与 edits 同时出现的 {}：edits 形式下顶层 replace_all 不生效,如需全部替换请在对应编辑项里给 replace_all=true)",
+                ignored.join("/")
             ));
         }
         // 成功即落盘(写前已做内容指纹校验):明说无需读回验证,避免模型
@@ -934,7 +974,54 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn edits_array_rejects_mixed_forms() {
+    async fn mixed_forms_normalize_to_edits_instead_of_failing() {
+        let root = temp_root();
+        std::fs::write(root.join("a.txt"), "hello\nworld\n").unwrap();
+        let ctx = context(root.clone());
+        let tool = EditTool::new();
+        // 真实误用形状：模型照抄 schema，一带把单处字段与 edits 同时提交。
+        let out = tool
+            .execute(
+                r#"{"path":"a.txt","old_string":"hello","new_string":"WRONG",
+                    "replace_all":false,
+                    "edits":[{"old_string":"world","new_string":"earth"}]}"#,
+                &ctx,
+            )
+            .await;
+        assert!(!out.is_error, "{}", out.content);
+        assert_eq!(
+            std::fs::read_to_string(root.join("a.txt")).unwrap(),
+            "hello\nearth\n",
+            "edits 应当生效,顶层单处字段应当被忽略"
+        );
+        // 被忽略的字段必须回告，否则模型会以为 replace_all 生效了。
+        assert!(out.content.contains("已忽略"), "{}", out.content);
+        for field in ["old_string", "new_string", "replace_all"] {
+            assert!(out.content.contains(field), "回告缺少 {field}: {}", out.content);
+        }
+        std::fs::remove_dir_all(&ctx.cwd).unwrap();
+    }
+
+    #[tokio::test]
+    async fn empty_edits_falls_back_to_single_form() {
+        let root = temp_root();
+        std::fs::write(root.join("a.txt"), "hello\n").unwrap();
+        let ctx = context(root.clone());
+        let tool = EditTool::new();
+        // 把单处编辑误包成空数组 + 单处字段：意图仍可见（单处），不应报错。
+        let out = tool
+            .execute(
+                r#"{"path":"a.txt","edits":[],"old_string":"hello","new_string":"bye"}"#,
+                &ctx,
+            )
+            .await;
+        assert!(!out.is_error, "{}", out.content);
+        assert_eq!(std::fs::read_to_string(root.join("a.txt")).unwrap(), "bye\n");
+        std::fs::remove_dir_all(&ctx.cwd).unwrap();
+    }
+
+    #[tokio::test]
+    async fn edits_win_over_single_form_fields() {
         let root = temp_root();
         std::fs::write(root.join("a.txt"), "hello\n").unwrap();
         let ctx = context(root.clone());
@@ -943,17 +1030,13 @@ mod tests {
             .execute(
                 r#"{"path":"a.txt","old_string":"hello","new_string":"X",
                     "replace_all":false,
-                    "edits":[{"old_string":"a","new_string":"b"}]}"#,
+                    "edits":[{"old_string":"hello","new_string":"H"}]}"#,
                 &ctx,
             )
             .await;
-        assert!(out.is_error);
-        assert!(
-            out.content
-                .contains("edits 与 old_string/new_string/replace_all 不能同时提供"),
-            "{}",
-            out.content
-        );
+        // 形状合法（edits 非空），归一后按 edits 应用:顶层 new_string 不参与替换。
+        assert!(!out.is_error, "{}", out.content);
+        assert_eq!(std::fs::read_to_string(root.join("a.txt")).unwrap(), "H\n");
         std::fs::remove_dir_all(&ctx.cwd).unwrap();
     }
 
@@ -972,24 +1055,25 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn top_level_replace_all_is_rejected_with_edits() {
+    async fn top_level_replace_all_is_ignored_with_edits() {
         let root = temp_root();
-        std::fs::write(root.join("a.txt"), "hello\n").unwrap();
+        std::fs::write(root.join("a.txt"), "hello\nworld\n").unwrap();
         let ctx = context(root.clone());
         let tool = EditTool::new();
         let out = tool
             .execute(
-                r#"{"path":"a.txt","replace_all":false,"edits":[{"old_string":"hello","new_string":"X"}]}"#,
+                r#"{"path":"a.txt","replace_all":true,"edits":[{"old_string":"world","new_string":"earth"}]}"#,
                 &ctx,
             )
             .await;
-        assert!(out.is_error);
-        assert!(
-            out.content
-                .contains("edits 与 old_string/new_string/replace_all"),
-            "{}",
-            out.content
+        assert!(!out.is_error, "{}", out.content);
+        // 顶层 replace_all 不向 edits 渗透：逐项仍按各自的 replace_all 决定。
+        assert_eq!(
+            std::fs::read_to_string(root.join("a.txt")).unwrap(),
+            "hello\nearth\n",
+            "顶层 replace_all 必须在 edits 形式下被忽略"
         );
+        assert!(out.content.contains("replace_all"), "{}", out.content);
         std::fs::remove_dir_all(&ctx.cwd).unwrap();
     }
     #[tokio::test]
