@@ -434,3 +434,13 @@ export interface WeixinChannelStatus {
     qrContent: string
   } | null
 }
+
+/** QQ 机器人通道状态(/api/channels/qqbot)。 */
+export interface QqbotChannelStatus {
+  connected: boolean
+  account: { appId: string } | null
+  lastError: string | null
+  lastInboundAt: number | null
+  lastInboundChars: number
+  lastAction: string | null
+}

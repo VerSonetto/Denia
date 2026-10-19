@@ -8,4 +8,5 @@
 pub mod bindings;
 pub mod bridge;
 pub mod commands;
+pub mod qqbot;
 pub mod weixin;

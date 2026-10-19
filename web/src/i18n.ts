@@ -1237,6 +1237,19 @@ const zh = {
   weixinCommandsTitle: '在微信里可用',
   weixinCommands:
     '/workspace 列出并选择工作区；/switch 列出并切换会话；/model <供应商id> <模型id> 切换模型；/permission 切换权限模式；/cancel 中断当前轮次。',
+  qqTitle: 'QQ 机器人',
+  qqHint:
+    '在 QQ 开放平台创建机器人后填入 AppID 与 ClientSecret；连接后同样先发 /workspace；群聊里 @ 机器人后再发指令。',
+  qqConnect: '连接',
+  qqConnected: '已连接',
+  qqDisconnected: '未连接',
+  qqAppId: 'AppID',
+  qqClientSecret: 'ClientSecret',
+  qqConnectStarted: '正在连接 QQ 网关…',
+  qqMissingConfig: '请先填写 AppID 与 ClientSecret',
+  qqLoggedOut: '已断开 QQ 连接',
+  qqLastError: '最近错误',
+  qqCommandsTitle: '在 QQ 里可用',
 
   /* ---- 远程连接 ---- */
   remoteTab: '远程连接',
@@ -2546,6 +2559,19 @@ const en: typeof zh = {
   weixinCommandsTitle: 'Available in WeChat',
   weixinCommands:
     '/workspace lists and selects workspaces; /switch lists and switches sessions; /model <provider-id> <model-id> changes the model; /permission changes the permission mode; /cancel aborts the running turn.',
+  qqTitle: 'QQ bot',
+  qqHint:
+    'Create a bot on the QQ Open Platform, then fill in AppID and ClientSecret. After connecting, send /workspace first; in groups @ the bot before a command.',
+  qqConnect: 'Connect',
+  qqConnected: 'Connected',
+  qqDisconnected: 'Disconnected',
+  qqAppId: 'AppID',
+  qqClientSecret: 'ClientSecret',
+  qqConnectStarted: 'Connecting to the QQ gateway…',
+  qqMissingConfig: 'Fill in AppID and ClientSecret first',
+  qqLoggedOut: 'QQ disconnected',
+  qqLastError: 'Last error',
+  qqCommandsTitle: 'Available in QQ',
 
   /* ---- Remote access ---- */
   remoteTab: 'Remote access',

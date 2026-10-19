@@ -16,6 +16,10 @@ use denia_channels::bindings::BindingStore;
 use denia_channels::bridge::{
     ChannelHost, NoticeSink, SessionInfo, TurnOutcome, TurnReply, WorkspaceInfo,
 };
+use denia_channels::qqbot::bot::QqBot;
+use denia_channels::qqbot::client::Client as QqClient;
+use denia_channels::qqbot::gateway;
+use denia_channels::qqbot::store as qq_store;
 use denia_channels::weixin::bot::WeixinBot;
 use denia_channels::weixin::login::spawn_login;
 use denia_channels::weixin::protocol::QrState;
@@ -39,6 +43,11 @@ pub struct ImService {
     login: Mutex<Option<LoginHandle>>,
     bot: Mutex<Option<BotHandle>>,
     status: SharedStatus,
+    qqbot_dir: PathBuf,
+    qq_bindings: Arc<BindingStore>,
+    qq_account: Mutex<Option<qq_store::Account>>,
+    qq_bot: Mutex<Option<BotHandle>>,
+    qq_status: SharedStatus,
 }
 
 struct LoginHandle {
@@ -55,6 +64,9 @@ impl ImService {
         let weixin_dir = store::channel_dir(home);
         let bindings = Arc::new(BindingStore::open(weixin_dir.join("bindings.json")));
         let account = store::load_account(&weixin_dir);
+        let qqbot_dir = qq_store::channel_dir(home);
+        let qq_bindings = Arc::new(BindingStore::open(qqbot_dir.join("bindings.json")));
+        let qq_account = qq_store::load_account(&qqbot_dir);
         Arc::new(Self {
             weixin_dir,
             bindings,
@@ -62,6 +74,11 @@ impl ImService {
             login: Mutex::new(None),
             bot: Mutex::new(None),
             status: Arc::new(Mutex::new(RuntimeStatus::default())),
+            qqbot_dir,
+            qq_bindings,
+            qq_account: Mutex::new(qq_account),
+            qq_bot: Mutex::new(None),
+            qq_status: Arc::new(Mutex::new(RuntimeStatus::default())),
         })
     }
 
@@ -106,11 +123,126 @@ impl ImService {
         )
     }
 
+    pub fn qq_account(&self) -> Option<qq_store::Account> {
+        self.qq_account
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .clone()
+    }
+
+    pub fn qq_status(&self) -> (bool, Option<String>) {
+        self.qq_status
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .snapshot()
+    }
+
+    pub fn qq_activity(&self) -> (Option<u64>, usize, Option<String>) {
+        let status = self
+            .qq_status
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        (
+            status.last_inbound_at,
+            status.last_inbound_chars,
+            status.last_action.clone(),
+        )
+    }
+
+    /// 保存 QQ 凭据并启动网关;连接失败会反映在状态里。
+    pub async fn start_qq(
+        self: &Arc<Self>,
+        host: Arc<dyn ChannelHost>,
+        app_id: String,
+        client_secret: String,
+    ) -> Result<(), String> {
+        let app_id = app_id.trim().to_string();
+        let client_secret = client_secret.trim().to_string();
+        if app_id.is_empty() || client_secret.is_empty() {
+            return Err("AppID 与 ClientSecret 都不能为空".to_string());
+        }
+        let account = qq_store::Account {
+            app_id,
+            client_secret,
+            saved_at: String::new(),
+        };
+        qq_store::save_account(&self.qqbot_dir, &account)?;
+        *self
+            .qq_account
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner()) = Some(account.clone());
+        self.start_qq_bot(host, account);
+        Ok(())
+    }
+
+    pub async fn logout_qq(self: &Arc<Self>) {
+        if let Some(handle) = self
+            .qq_bot
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .take()
+        {
+            handle.cancel.cancel();
+        }
+        if let Err(error) = qq_store::clear_account(&self.qqbot_dir) {
+            tracing::warn!(%error, "删除 QQ 账号失败");
+        }
+        *self
+            .qq_account
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner()) = None;
+        let mut status = self
+            .qq_status
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        status.connected = false;
+        status.last_error = None;
+    }
+
+    fn start_qq_bot(self: &Arc<Self>, host: Arc<dyn ChannelHost>, account: qq_store::Account) {
+        if let Some(handle) = self
+            .qq_bot
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .take()
+        {
+            handle.cancel.cancel();
+        }
+        let client = match QqClient::new(account.app_id, account.client_secret) {
+            Ok(client) => Arc::new(client),
+            Err(error) => {
+                let mut status = self
+                    .qq_status
+                    .lock()
+                    .unwrap_or_else(|poison| poison.into_inner());
+                status.connected = false;
+                status.last_error = Some(error);
+                return;
+            }
+        };
+        let bot = QqBot::new(
+            host,
+            self.qq_bindings.clone(),
+            client.clone(),
+            self.qq_status.clone(),
+        );
+        let cancel = CancellationToken::new();
+        *self
+            .qq_bot
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner()) = Some(BotHandle {
+            cancel: cancel.clone(),
+        });
+        tokio::spawn(gateway::run(client, bot, self.qq_status.clone(), cancel));
+    }
+
     /// 服务启动时若已有账号则直接连上。
     pub async fn auto_connect(self: &Arc<Self>, host: Arc<dyn ChannelHost>) {
-        let account = self.weixin_account();
-        if let Some(account) = account {
-            self.start_bot(host, account).await;
+        if let Some(account) = self.weixin_account() {
+            self.start_bot(host.clone(), account).await;
+        }
+        if let Some(account) = self.qq_account() {
+            self.start_qq_bot(host, account);
         }
     }
 

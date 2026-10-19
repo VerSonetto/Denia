@@ -10,7 +10,7 @@ import { useCallback, useEffect, useState } from 'react'
 import * as api from '../../api'
 import { t } from '../../i18n'
 import { IconCheck, IconTrash } from '../icons'
-import type { WeixinChannelStatus } from '../../types'
+import type { QqbotChannelStatus, WeixinChannelStatus } from '../../types'
 import styles from './MessagingSettings.module.css'
 
 type Notify = (kind: 'ok' | 'err', text: string) => void
@@ -39,6 +39,7 @@ export function MessagingSettings({ notify }: { notify: Notify }) {
     <div className={styles.root}>
       <p className={styles.intro}>{t('channelsIntro')}</p>
       <WeChatCard notify={notify} />
+      <QqCard notify={notify} />
     </div>
   )
 }
@@ -172,6 +173,153 @@ function WeChatCard({ notify }: { notify: Notify }) {
 
       <div className={styles.commands}>
         <p className={styles.commandsTitle}>{t('weixinCommandsTitle')}</p>
+        <p className={styles.hint}>{t('weixinCommands')}</p>
+      </div>
+    </section>
+  )
+}
+
+/** QQ 官方 Bot:填 AppID/ClientSecret 连接,状态异步推进。 */
+function QqCard({ notify }: { notify: Notify }) {
+  const [status, setStatus] = useState<QqbotChannelStatus | null>(null)
+  const [appId, setAppId] = useState('')
+  const [clientSecret, setClientSecret] = useState('')
+  const [busy, setBusy] = useState(false)
+
+  const load = useCallback(async () => {
+    try {
+      setStatus(await api.getQqbotChannel())
+    } catch (error) {
+      notify('err', error instanceof Error ? error.message : String(error))
+    }
+  }, [notify])
+
+  useEffect(() => {
+    void load()
+  }, [load])
+
+  // 连接中轮询:已连接后停止。
+  useEffect(() => {
+    if (!status || status.connected) return
+    const handle = window.setTimeout(() => {
+      void load()
+    }, 2000)
+    return () => window.clearTimeout(handle)
+  }, [status, load])
+
+  const connect = async () => {
+    if (!appId.trim() || !clientSecret.trim()) {
+      notify('err', t('qqMissingConfig'))
+      return
+    }
+    setBusy(true)
+    try {
+      setStatus(await api.connectQqbot(appId.trim(), clientSecret.trim()))
+      setClientSecret('')
+      notify('ok', t('qqConnectStarted'))
+    } catch (error) {
+      notify('err', error instanceof Error ? error.message : String(error))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const logout = async () => {
+    setBusy(true)
+    try {
+      setStatus(await api.logoutQqbot())
+      notify('ok', t('qqLoggedOut'))
+    } catch (error) {
+      notify('err', error instanceof Error ? error.message : String(error))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <section className={styles.card}>
+      <div className={styles.head}>
+        <div className={styles.titleRow}>
+          <span className={styles.title}>{t('qqTitle')}</span>
+          <span
+            className={`${styles.badge} ${status?.connected ? styles.badgeOn : ''}`}
+          >
+            {status?.connected ? t('qqConnected') : t('qqDisconnected')}
+          </span>
+        </div>
+        {status?.connected ? (
+          <button
+            type="button"
+            className={styles.dangerBtn}
+            disabled={busy}
+            onClick={() => void logout()}
+          >
+            <IconTrash size={14} />
+            {t('weixinLogout')}
+          </button>
+        ) : (
+          <button
+            type="button"
+            className={styles.primaryBtn}
+            disabled={busy}
+            onClick={() => void connect()}
+          >
+            <IconCheck size={14} />
+            {t('qqConnect')}
+          </button>
+        )}
+      </div>
+
+      <p className={styles.hint}>{t('qqHint')}</p>
+
+      {!status?.connected && (
+        <div className={styles.config}>
+          <label className={styles.field}>
+            <span className={styles.fieldLabel}>{t('qqAppId')}</span>
+            <input
+              className={styles.input}
+              value={appId}
+              onChange={(event) => setAppId(event.target.value)}
+              placeholder="1000xxxxxx"
+              autoComplete="off"
+            />
+          </label>
+          <label className={styles.field}>
+            <span className={styles.fieldLabel}>{t('qqClientSecret')}</span>
+            <input
+              className={styles.input}
+              type="password"
+              value={clientSecret}
+              onChange={(event) => setClientSecret(event.target.value)}
+              autoComplete="off"
+            />
+          </label>
+        </div>
+      )}
+
+      {status?.connected && status.account && (
+        <div className={styles.meta}>
+          <span>{t('qqAppId')}</span>
+          <code>{status.account.appId}</code>
+        </div>
+      )}
+
+      {status?.lastError && (
+        <p className={styles.error}>
+          {t('qqLastError')}: {status.lastError}
+        </p>
+      )}
+
+      <p className={styles.diagnostic}>
+        {status?.lastInboundAt
+          ? `${t('weixinLastInbound')}: ${new Date(status.lastInboundAt).toLocaleTimeString()}（${status.lastInboundChars} ${t('weixinChars')}）${
+              status.lastAction ? ` → ${status.lastAction}` : ''
+            }`
+          : t('weixinNoInbound')}
+      </p>
+
+      <div className={styles.commands}>
+        <p className={styles.commandsTitle}>{t('qqCommandsTitle')}</p>
         <p className={styles.hint}>{t('weixinCommands')}</p>
       </div>
     </section>

@@ -1429,3 +1429,24 @@ export function startWeixinLogin(): Promise<import('./types').WeixinChannelStatu
 export function logoutWeixin(): Promise<import('./types').WeixinChannelStatus> {
   return http('/api/channels/weixin/logout', { method: 'POST' })
 }
+
+/* ---- 消息通道(QQ 官方 Bot) ---- */
+
+export function getQqbotChannel(): Promise<import('./types').QqbotChannelStatus> {
+  return http('/api/channels/qqbot')
+}
+
+/** 保存 AppID/ClientSecret 并启动网关;连接结果异步反映在状态里。 */
+export function connectQqbot(
+  appId: string,
+  clientSecret: string,
+): Promise<import('./types').QqbotChannelStatus> {
+  return http('/api/channels/qqbot/config', {
+    method: 'POST',
+    body: JSON.stringify({ appId, clientSecret }),
+  })
+}
+
+export function logoutQqbot(): Promise<import('./types').QqbotChannelStatus> {
+  return http('/api/channels/qqbot/logout', { method: 'POST' })
+}

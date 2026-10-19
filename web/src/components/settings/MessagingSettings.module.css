@@ -183,3 +183,37 @@
   opacity: 0.45;
   cursor: not-allowed;
 }
+
+/* QQ 卡片:AppID / ClientSecret 两列输入。 */
+.config {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 10px;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.fieldLabel {
+  font-size: 12px;
+  color: var(--label-secondary);
+}
+
+.input {
+  height: 32px;
+  padding: 0 10px;
+  border: 1px solid var(--border-l2);
+  border-radius: var(--r-sm);
+  background: var(--bg-layer-2);
+  color: var(--label-primary);
+  font-size: 12.5px;
+  outline: none;
+}
+
+.input:focus {
+  border-color: var(--accent);
+}

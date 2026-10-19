@@ -9,6 +9,7 @@ use axum::extract::State;
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use serde::Deserialize;
 use serde_json::json;
 
 use crate::error::ApiError;
@@ -19,6 +20,9 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/api/channels/weixin", get(weixin_status))
         .route("/api/channels/weixin/login", post(weixin_login))
         .route("/api/channels/weixin/logout", post(weixin_logout))
+        .route("/api/channels/qqbot", get(qqbot_status))
+        .route("/api/channels/qqbot/config", post(qqbot_config))
+        .route("/api/channels/qqbot/logout", post(qqbot_logout))
 }
 
 fn weixin_json(state: &AppState) -> serde_json::Value {
@@ -62,4 +66,51 @@ async fn weixin_logout(
 ) -> Result<impl IntoResponse, ApiError> {
     state.im.logout().await;
     Ok(Json(weixin_json(&state)))
+}
+
+fn qqbot_json(state: &AppState) -> serde_json::Value {
+    let account = state.im.qq_account();
+    let (connected, last_error) = state.im.qq_status();
+    let (last_inbound_at, last_inbound_chars, last_action) = state.im.qq_activity();
+    json!({
+        "connected": connected,
+        // client_secret 永不回传:前端只需要展示"连的是哪个 AppID"。
+        "account": account.map(|account| json!({ "appId": account.app_id })),
+        "lastError": last_error,
+        "lastInboundAt": last_inbound_at,
+        "lastInboundChars": last_inbound_chars,
+        "lastAction": last_action,
+    })
+}
+
+async fn qqbot_status(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    Json(qqbot_json(&state))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct QqConfigBody {
+    app_id: String,
+    client_secret: String,
+}
+
+async fn qqbot_config(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<QqConfigBody>,
+) -> Result<impl IntoResponse, ApiError> {
+    let host: Arc<dyn denia_channels::bridge::ChannelHost> =
+        Arc::new(crate::im::ServerChannelHost(state.clone()));
+    state
+        .im
+        .start_qq(host, body.app_id, body.client_secret)
+        .await
+        .map_err(|error| ApiError::bad_request("channel/qq-config", error))?;
+    Ok(Json(qqbot_json(&state)))
+}
+
+async fn qqbot_logout(
+    State(state): State<Arc<AppState>>,
+) -> Result<impl IntoResponse, ApiError> {
+    state.im.logout_qq().await;
+    Ok(Json(qqbot_json(&state)))
 }

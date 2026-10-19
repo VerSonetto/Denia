@@ -1,0 +1,702 @@
+//! QQ 通道的消息处理:绑定、指令、会话轮次与出站。
+//!
+//! 与微信通道共用同一套 `ChannelHost`、`bindings` 与 `commands`;区别在于:
+//! - 绑定 key 是发送者 openid,回复目标是会话(群 group_openid / 私聊 openid);
+//! - 被动回复第一片携带入站 msg_id;
+//! - 单条消息上限 4000 字符。
+
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+use denia_core::config::ModelSelection;
+use denia_core::session::PermissionMode;
+use tokio::sync::mpsc;
+
+use crate::bindings::BindingStore;
+use crate::bridge::{ChannelHost, ImageAttachment, NoticeSink};
+use crate::commands::{self, Command};
+use crate::weixin::bot::split_text;
+use crate::weixin::media;
+use crate::weixin::SharedStatus;
+
+use super::client::Client;
+use super::protocol::{ChatType, InboundMessage, MAX_MESSAGE_LENGTH};
+
+const DEDUP_TTL: Duration = Duration::from_secs(300);
+const MAX_IMAGES_PER_MESSAGE: usize = 4;
+
+pub struct QqBot {
+    host: Arc<dyn ChannelHost>,
+    bindings: Arc<BindingStore>,
+    client: Arc<Client>,
+    status: SharedStatus,
+    /// 每个会话最近一条入站消息 id:被动回复要带。
+    last_msg_ids: Mutex<HashMap<String, String>>,
+    dedup: Mutex<HashMap<String, Instant>>,
+}
+
+impl QqBot {
+    pub fn new(
+        host: Arc<dyn ChannelHost>,
+        bindings: Arc<BindingStore>,
+        client: Arc<Client>,
+        status: SharedStatus,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            host,
+            bindings,
+            client,
+            status,
+            last_msg_ids: Mutex::new(HashMap::new()),
+            dedup: Mutex::new(HashMap::new()),
+        })
+    }
+
+    pub async fn handle_inbound(self: &Arc<Self>, message: InboundMessage) {
+        if message.sender.trim().is_empty() {
+            return;
+        }
+        if self.seen(&message.id) {
+            return;
+        }
+        self.last_msg_ids
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .insert(message.chat_id.clone(), message.id.clone());
+        self.mark_inbound(message.content.chars().count());
+
+        let mut images = Vec::new();
+        for attachment in message
+            .attachments
+            .iter()
+            .filter(|attachment| attachment.is_image())
+            .take(MAX_IMAGES_PER_MESSAGE)
+        {
+            let url = attachment.url.trim();
+            if url.is_empty() {
+                continue;
+            }
+            match self.client.download(url).await {
+                Ok(data) => {
+                    let mime = if attachment.content_type.trim().is_empty() {
+                        media::guess_mime(&data).to_string()
+                    } else {
+                        attachment.content_type.clone()
+                    };
+                    images.push(ImageAttachment { mime, data });
+                }
+                Err(error) => tracing::warn!(%error, "QQ 图片下载失败"),
+            }
+        }
+
+        let text = message.content.trim();
+        if text.is_empty() && images.is_empty() {
+            if !message.attachments.is_empty() {
+                self.send_text(
+                    &message.chat_id,
+                    message.chat_type,
+                    "目前支持文字与图片；语音、文件暂未接入。",
+                )
+                .await;
+            }
+            return;
+        }
+        self.handle_text(
+            &message.sender,
+            &message.chat_id,
+            message.chat_type,
+            text,
+            &images,
+        )
+        .await;
+    }
+
+    async fn handle_text(
+        self: &Arc<Self>,
+        sender: &str,
+        target: &str,
+        chat_type: ChatType,
+        text: &str,
+        images: &[ImageAttachment],
+    ) {
+        if let Some(command) = commands::parse(text) {
+            self.handle_command(sender, target, chat_type, command)
+                .await;
+            return;
+        }
+        self.run_prompt(sender, target, chat_type, text, images)
+            .await;
+    }
+
+    async fn handle_command(
+        self: &Arc<Self>,
+        sender: &str,
+        target: &str,
+        chat_type: ChatType,
+        command: Command,
+    ) {
+        self.set_action(format!("命令 {}", command.name()));
+        match command {
+            Command::Help => {
+                self.send_text(target, chat_type, commands::help_text()).await;
+            }
+            Command::Workspace(None) => {
+                let workspaces = self.host.workspaces().await;
+                let current = self.bindings.get(sender).workspace_id;
+                self.send_text(
+                    target,
+                    chat_type,
+                    commands::workspace_list(&workspaces, current.as_deref()),
+                )
+                .await;
+            }
+            Command::Workspace(Some(argument)) => {
+                self.select_workspace(sender, target, chat_type, &argument)
+                    .await
+            }
+            Command::Switch(None) => self.list_sessions(sender, target, chat_type).await,
+            Command::Switch(Some(argument)) => {
+                self.switch_session(sender, target, chat_type, &argument)
+                    .await
+            }
+            Command::Model(None) => self.show_models(sender, target, chat_type).await,
+            Command::Model(Some(argument)) => {
+                self.change_model(sender, target, chat_type, &argument)
+                    .await
+            }
+            Command::Permission(None) => self.show_permission(sender, target, chat_type).await,
+            Command::Permission(Some(argument)) => {
+                self.change_permission(sender, target, chat_type, &argument)
+                    .await
+            }
+            Command::Cancel => self.cancel_turn(sender, target, chat_type).await,
+            Command::Approve => self.answer_approval(sender, target, chat_type, true).await,
+            Command::Reject => self.answer_approval(sender, target, chat_type, false).await,
+            Command::Unknown(name) => {
+                self.send_text(
+                    target,
+                    chat_type,
+                    format!("未知命令 /{name}。\n\n{}", commands::help_text()),
+                )
+                .await;
+            }
+        }
+    }
+
+    async fn select_workspace(
+        self: &Arc<Self>,
+        sender: &str,
+        target: &str,
+        chat_type: ChatType,
+        argument: &str,
+    ) {
+        let workspaces = self.host.workspaces().await;
+        let found = match argument.trim().parse::<usize>() {
+            Ok(index) if index >= 1 => workspaces.get(index - 1),
+            _ => {
+                let argument = argument.trim();
+                workspaces.iter().find(|workspace| {
+                    workspace.title.eq_ignore_ascii_case(argument)
+                        || workspace.path.eq_ignore_ascii_case(argument)
+                        || workspace.title.contains(argument)
+                })
+            }
+        };
+        match found {
+            Some(workspace) => {
+                self.bindings.update(sender, |binding| {
+                    binding.workspace_id = Some(workspace.id.clone());
+                    binding.session_id = None;
+                });
+                self.send_text(
+                    target,
+                    chat_type,
+                    format!(
+                        "已选择工作区「{}」({})。\n尚未选择会话：下一条消息会新建会话。\n用 /switch 查看该工作区的会话。",
+                        workspace.title, workspace.path
+                    ),
+                )
+                .await;
+            }
+            None => {
+                self.send_text(target, chat_type, "没有找到该工作区。发送 /workspace 查看列表。")
+                    .await;
+            }
+        }
+    }
+
+    async fn list_sessions(self: &Arc<Self>, sender: &str, target: &str, chat_type: ChatType) {
+        let binding = self.bindings.get(sender);
+        let Some(workspace_id) = binding.workspace_id.clone() else {
+            self.send_text(target, chat_type, "请先发送 /workspace 选择工作区。")
+                .await;
+            return;
+        };
+        let workspaces = self.host.workspaces().await;
+        let Some(workspace) = workspaces.iter().find(|workspace| workspace.id == workspace_id) else {
+            self.send_text(target, chat_type, "该工作区已不存在，请重新 /workspace 选择。")
+                .await;
+            return;
+        };
+        match self.host.sessions(&workspace_id).await {
+            Ok(sessions) => {
+                self.send_text(
+                    target,
+                    chat_type,
+                    commands::session_list(workspace, &sessions, binding.session_id.as_deref()),
+                )
+                .await;
+            }
+            Err(error) => {
+                self.send_text(target, chat_type, format!("读取会话失败：{error}"))
+                    .await;
+            }
+        }
+    }
+
+    async fn switch_session(
+        self: &Arc<Self>,
+        sender: &str,
+        target: &str,
+        chat_type: ChatType,
+        argument: &str,
+    ) {
+        let binding = self.bindings.get(sender);
+        let Some(workspace_id) = binding.workspace_id.clone() else {
+            self.send_text(target, chat_type, "请先发送 /workspace 选择工作区。")
+                .await;
+            return;
+        };
+        if argument.eq_ignore_ascii_case("new") {
+            self.bindings.update(sender, |binding| binding.session_id = None);
+            self.send_text(target, chat_type, "已切到新会话：下一条消息会新建会话。")
+                .await;
+            return;
+        }
+        let sessions = match self.host.sessions(&workspace_id).await {
+            Ok(sessions) => sessions,
+            Err(error) => {
+                self.send_text(target, chat_type, format!("读取会话失败：{error}"))
+                    .await;
+                return;
+            }
+        };
+        let found = match argument.trim().parse::<usize>() {
+            Ok(index) if index >= 1 => sessions.get(index - 1),
+            _ => sessions
+                .iter()
+                .find(|session| session.display_name().contains(argument.trim())),
+        };
+        match found {
+            Some(session) => {
+                self.bindings.update(sender, |binding| {
+                    binding.session_id = Some(session.id.clone());
+                });
+                self.send_text(
+                    target,
+                    chat_type,
+                    format!("已切换到会话「{}」。", session.display_name()),
+                )
+                .await;
+            }
+            None => {
+                self.send_text(target, chat_type, "没有找到该会话。发送 /switch 查看列表。")
+                    .await;
+            }
+        }
+    }
+
+    async fn show_models(self: &Arc<Self>, sender: &str, target: &str, chat_type: ChatType) {
+        let binding = self.bindings.get(sender);
+        let models = self.host.models().await;
+        self.send_text(
+            target,
+            chat_type,
+            commands::model_list(binding.model.as_ref(), &models),
+        )
+        .await;
+    }
+
+    async fn change_model(
+        self: &Arc<Self>,
+        sender: &str,
+        target: &str,
+        chat_type: ChatType,
+        argument: &str,
+    ) {
+        let argument = argument.trim();
+        let Some((provider, model)) = argument.split_once(char::is_whitespace) else {
+            self.send_text(
+                target,
+                chat_type,
+                "用法：/model <供应商id> <模型id>，例如 /model Astra deepseek_v4_flash。",
+            )
+            .await;
+            return;
+        };
+        let (provider, model) = (provider.trim(), model.trim());
+        if provider.is_empty() || model.is_empty() {
+            self.send_text(target, chat_type, "供应商 id 与模型 id 都不能为空。")
+                .await;
+            return;
+        }
+        let models = self.host.models().await;
+        match commands::find_model(&models, provider, model) {
+            commands::ModelLookup::Found(option) => {
+                self.bindings.update(sender, |binding| {
+                    binding.model = Some(ModelSelection {
+                        provider: option.provider.clone(),
+                        model: option.model.clone(),
+                        reasoning_effort: None,
+                    });
+                });
+                self.send_text(
+                    target,
+                    chat_type,
+                    format!(
+                        "模型已切换为 {}/{}，下一轮消息生效。",
+                        option.provider, option.model
+                    ),
+                )
+                .await;
+            }
+            commands::ModelLookup::NotFound => {
+                self.send_text(
+                    target,
+                    chat_type,
+                    format!("模型目录里没有 {provider}/{model}。发送 /model 查看可用列表。"),
+                )
+                .await;
+            }
+            commands::ModelLookup::Ambiguous(options) => {
+                let mut list = String::new();
+                for option in options.iter().take(10) {
+                    list.push_str(&format!("- {} {}\n", option.provider, option.model));
+                }
+                self.send_text(
+                    target,
+                    chat_type,
+                    format!("匹配到多个模型，请使用完整 id：\n{list}"),
+                )
+                .await;
+            }
+        }
+    }
+
+    async fn show_permission(self: &Arc<Self>, sender: &str, target: &str, chat_type: ChatType) {
+        let binding = self.bindings.get(sender);
+        let current = match &binding.session_id {
+            Some(session_id) => self
+                .host
+                .session_permission(session_id)
+                .await
+                .unwrap_or_else(|_| binding.permission.unwrap_or(PermissionMode::AutoEdit)),
+            None => binding.permission.unwrap_or(PermissionMode::AutoEdit),
+        };
+        self.send_text(target, chat_type, commands::permission_list(current))
+            .await;
+    }
+
+    async fn change_permission(
+        self: &Arc<Self>,
+        sender: &str,
+        target: &str,
+        chat_type: ChatType,
+        argument: &str,
+    ) {
+        let Some(mode) = PermissionMode::parse(argument) else {
+            self.send_text(
+                target,
+                chat_type,
+                "未知权限档位。可选：read-only、auto-edit、plan、full。",
+            )
+            .await;
+            return;
+        };
+        self.bindings.update(sender, |binding| {
+            binding.permission = Some(mode);
+        });
+        let binding = self.bindings.get(sender);
+        if let Some(session_id) = binding.session_id {
+            match self.host.set_permission(&session_id, mode).await {
+                Ok(()) => {
+                    self.send_text(
+                        target,
+                        chat_type,
+                        format!(
+                            "当前会话权限已切换为{}（{}）。",
+                            commands::permission_label(mode),
+                            mode.as_str()
+                        ),
+                    )
+                    .await;
+                }
+                Err(error) => {
+                    self.send_text(target, chat_type, format!("切换权限失败：{error}"))
+                        .await;
+                }
+            }
+        } else {
+            self.send_text(
+                target,
+                chat_type,
+                format!(
+                    "已设置新建会话的权限为{}（{}）。",
+                    commands::permission_label(mode),
+                    mode.as_str()
+                ),
+            )
+            .await;
+        }
+    }
+
+    async fn cancel_turn(self: &Arc<Self>, sender: &str, target: &str, chat_type: ChatType) {
+        let binding = self.bindings.get(sender);
+        let Some(session_id) = binding.session_id else {
+            self.send_text(target, chat_type, "当前没有会话。").await;
+            return;
+        };
+        match self.host.cancel(&session_id).await {
+            Ok(()) => self.send_text(target, chat_type, "已中断当前轮次。").await,
+            Err(error) => {
+                self.send_text(target, chat_type, format!("中断失败：{error}"))
+                    .await;
+            }
+        }
+    }
+
+    async fn answer_approval(
+        self: &Arc<Self>,
+        sender: &str,
+        target: &str,
+        chat_type: ChatType,
+        approve: bool,
+    ) {
+        let Some(session_id) = self.bindings.get(sender).session_id else {
+            self.send_text(target, chat_type, "当前没有会话。").await;
+            return;
+        };
+        match self.host.answer_approval(&session_id, approve).await {
+            Ok(true) => {
+                let text = if approve { "已放行。" } else { "已拒绝。" };
+                self.send_text(target, chat_type, text).await;
+            }
+            Ok(false) => {
+                self.send_text(target, chat_type, "当前没有待审批的请求。")
+                    .await;
+            }
+            Err(error) => {
+                self.send_text(target, chat_type, format!("结算审批失败：{error}"))
+                    .await;
+            }
+        }
+    }
+
+    async fn run_prompt(
+        self: &Arc<Self>,
+        sender: &str,
+        target: &str,
+        chat_type: ChatType,
+        text: &str,
+        images: &[ImageAttachment],
+    ) {
+        let binding = self.bindings.get(sender);
+        let Some(workspace_id) = binding.workspace_id.clone() else {
+            self.set_action("未选择工作区");
+            self.send_text(target, chat_type, "请先发送 /workspace 选择工作区。")
+                .await;
+            return;
+        };
+        let workspaces = self.host.workspaces().await;
+        if !workspaces.iter().any(|workspace| workspace.id == workspace_id) {
+            self.set_action("工作区已不存在");
+            self.bindings.update(sender, |binding| {
+                binding.workspace_id = None;
+                binding.session_id = None;
+            });
+            self.send_text(target, chat_type, "该工作区已不存在，请重新用 /workspace 选择。")
+                .await;
+            return;
+        }
+        let model = match binding.model.clone() {
+            Some(model) => model,
+            None => match self.host.default_model().await {
+                Ok(model) => {
+                    self.bindings.update(sender, |binding| {
+                        binding.model = Some(model.clone());
+                    });
+                    model
+                }
+                Err(error) => {
+                    self.set_action("没有可用模型");
+                    self.send_text(
+                        target,
+                        chat_type,
+                        format!(
+                            "没有可用模型：{error}\n请先在 denia 控制台配置模型提供商并选择模型。"
+                        ),
+                    )
+                    .await;
+                    return;
+                }
+            },
+        };
+        let permission = binding.permission.unwrap_or(PermissionMode::AutoEdit);
+        let session_id = match binding.session_id.clone() {
+            Some(session_id) => session_id,
+            None => match self.host.create_session(&workspace_id, permission).await {
+                Ok(info) => {
+                    self.bindings.update(sender, |binding| {
+                        binding.session_id = Some(info.id.clone());
+                    });
+                    info.id
+                }
+                Err(error) => {
+                    self.set_action(format!("新建会话失败：{error}"));
+                    self.send_text(target, chat_type, format!("新建会话失败：{error}"))
+                        .await;
+                    return;
+                }
+            },
+        };
+        if self.host.session_running(&session_id).await {
+            self.set_action("上一轮仍在执行");
+            self.send_text(
+                target,
+                chat_type,
+                "上一轮仍在执行。发送 /cancel 可中断，或等它结束后再发。",
+            )
+            .await;
+            return;
+        }
+        self.set_action(format!(
+            "已提交到会话 {}",
+            &session_id[..session_id.len().min(8)]
+        ));
+        let (notice_tx, mut notice_rx) = mpsc::unbounded_channel::<String>();
+        let notifier = {
+            let this = self.clone();
+            let target = target.to_string();
+            tokio::spawn(async move {
+                while let Some(text) = notice_rx.recv().await {
+                    this.send_text(&target, chat_type, &text).await;
+                }
+            })
+        };
+        let prompt = if text.trim().is_empty() && !images.is_empty() {
+            "请看这张图片。"
+        } else {
+            text
+        };
+        let result = self
+            .host
+            .run_turn(&session_id, prompt, images, &model, &NoticeSink::new(notice_tx))
+            .await;
+        notifier.abort();
+        match result {
+            Ok(reply) => {
+                let mut out = reply.text.trim().to_string();
+                if let Some(notice) = reply.outcome.notice() {
+                    out = if out.is_empty() {
+                        notice
+                    } else {
+                        format!("{out}\n\n{notice}")
+                    };
+                }
+                if out.is_empty() {
+                    out = "（本轮没有文本输出）".to_string();
+                }
+                self.set_action(format!("已回复 {} 字", out.chars().count()));
+                self.send_text(target, chat_type, &out).await;
+            }
+            Err(error) => {
+                if error.contains("模型") || error.to_ascii_lowercase().contains("model") {
+                    self.bindings.update(sender, |binding| binding.model = None);
+                }
+                self.set_action(format!("执行失败：{error}"));
+                self.send_text(target, chat_type, format!("执行失败：{error}"))
+                    .await;
+            }
+        }
+    }
+
+    async fn send_text(&self, target: &str, chat_type: ChatType, text: impl AsRef<str>) {
+        let text = text.as_ref();
+        let chunks = split_text(text, MAX_MESSAGE_LENGTH);
+        if chunks.is_empty() {
+            return;
+        }
+        let msg_id = self
+            .last_msg_ids
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .get(target)
+            .cloned();
+        for (index, chunk) in chunks.into_iter().enumerate() {
+            if index > 0 {
+                tokio::time::sleep(Duration::from_millis(300)).await;
+            }
+            let reply = if index == 0 { msg_id.as_deref() } else { None };
+            let seq = (epoch_millis() % 65_536) as u32;
+            if let Err(error) = self
+                .client
+                .send_text(chat_type, target, &chunk, reply, seq)
+                .await
+            {
+                tracing::warn!(%error, "QQ 消息发送失败");
+                self.set_error(format!("发送消息失败：{error}"));
+                return;
+            }
+        }
+    }
+
+    fn mark_inbound(&self, chars: usize) {
+        let mut status = self
+            .status
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        status.last_inbound_at = Some(epoch_millis());
+        status.last_inbound_chars = chars;
+        status.last_action = None;
+    }
+
+    fn set_action(&self, action: impl Into<String>) {
+        let mut status = self
+            .status
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        status.last_action = Some(action.into());
+    }
+
+    fn set_error(&self, error: String) {
+        let mut status = self
+            .status
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        status.connected = false;
+        status.last_error = Some(error);
+    }
+
+    fn seen(&self, id: &str) -> bool {
+        let now = Instant::now();
+        let mut map = self
+            .dedup
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        map.retain(|_, time| now.duration_since(*time) < DEDUP_TTL);
+        if map.contains_key(id) {
+            true
+        } else {
+            map.insert(id.to_string(), now);
+            false
+        }
+    }
+}
+
+fn epoch_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or(0)
+}
