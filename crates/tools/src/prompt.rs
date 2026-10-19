@@ -149,7 +149,7 @@ pub fn register_shipped_prompt(
         name: "tool:todo".to_string(),
         order: SectionOrder::ToolTodo.value(),
         text: PromptText::Static(
-            "- 多步任务先用 todo_write 列可直接执行的具体动作，琐碎单步免建。每完成一步，在开始下一步的同一批工具调用里立即标 completed 并推进 in_progress，不滞后、不提前、不攒到最后。未完成时恰好一项进行中（真实并行的子代理/后台任务可多项），全部完成才可无进行项；任务范围变化时重发完整清单。"
+            "- 多步任务先用 todo_write 列可直接执行的具体动作，琐碎单步免建。每完成一步，在开始下一步的同一批工具调用里立即标 completed 并推进 in_progress，不滞后、不提前、不攒到最后。未完成时恰好一项进行中（真实并行的子代理/后台任务可多项），全部完成才可无进行项；任务范围变化时重发完整清单。todo不只是给用户看的，更是给你看的，你必须实时根据任务的进度更新它的状态"
                 .to_string(),
         ),
         complete: false,
@@ -317,14 +317,15 @@ pub fn register_capability_prompt_sections(prompt: &mut SystemPrompt) -> Result<
 ///
 /// 机制上通过 CDP 驱动**本机 Chrome/Edge**(headless 无窗口后台运行,画面
 /// 走控制台侧边栏),本段负责让模型明白:引用何时失效、收尾该关哪些 tab、
-/// 什么时候才该开可视化模式。
+/// 实例进程为什么必须回收、什么时候才该开可视化模式。
 fn register_browser_section(prompt: &mut SystemPrompt) -> Result<(), String> {
     prompt.section(PromptSection {
         name: "tool:browser".to_string(),
         order: SectionOrder::ToolBrowser.value(),
         text: PromptText::Static(
-            "- browser 由 CDP 驱动本机 Chrome/Edge，无窗口后台运行，画面仅在控制台侧栏；交互命令会按需启动，未运行时 list/close 等查询与善后原地返回，不凭空拉起实例。snapshot 的 [ref=eN] 直接传 eN（也接受 @eN），仅对同一 tab 的最近一次快照有效；导航、提交、SPA 路由切换后必须重新 snapshot。\n\
-             - 任务完成或确认不再使用时，逐个 close 本次打开的 tab，并以 list 确认它们全部消失；用户原有的 tab 原样保留，绝不关闭不是自己打开的 tab，绝不退出浏览器。仅在用户明确要求观看或明显需要亲眼看画面时设 visualMode:true，其余保持后台；用户手动收起后不再重复请求展开。"
+            "- browser 由 CDP 驱动本机 Chrome/Edge，无窗口后台运行，画面仅在控制台侧栏；交互命令会按需启动，未运行时 list/shutdownBrowser 等查询与善后原地返回，不凭空拉起实例。snapshot 的 [ref=eN] 直接传 eN（也接受 @eN），仅对同一 tab 的最近一次快照有效；导航、提交、SPA 路由切换后必须重新 snapshot。\n\
+             - 任务完成或确认不再使用时：逐个 close 本次打开的 tab，并以 list 确认它们全部消失（用户原有的 tab 原样保留，绝不关闭不是自己打开的 tab），然后**必须**调 shutdownBrowser 回收浏览器进程，再用 list 确认（未运行时它返回空 tabs 且 running=false，而 getState 会按需拉起实例，收尾时不要用它）。只 close 不算收尾：实例占住 profile 的单例锁，没回收会让后续启动直接失败；关掉最后一个 tab 会自动回收，但不要依赖它——只要还剩别的 tab（比如用户自己开的），进程就仍在跑。\n\
+             - 仅在用户明确要求观看或明显需要亲眼看画面时设 visualMode:true，其余保持后台；用户手动收起后不再重复请求展开。"
                 .to_string(),
         ),
         complete: false,
@@ -1518,7 +1519,16 @@ mod browser_prompt_tests {
         );
         assert!(
             section.text.contains("并以 list 确认它们全部消失"),
-            "纪律段应给出收尾判定口径"
+            "纪律段应给出 tab 收尾判定口径"
+        );
+        // 进程回收是本次改动的核心:只 close 不算收尾,必须显式收掉实例。
+        assert!(
+            section.text.contains("shutdownBrowser 回收浏览器进程"),
+            "纪律段应要求收尾时回收浏览器进程"
+        );
+        assert!(
+            section.text.contains("没回收会让后续启动直接失败"),
+            "纪律段应说明不回收的真实代价(profile 单例锁)"
         );
         assert!(
             section.text.contains("不凭空拉起实例"),

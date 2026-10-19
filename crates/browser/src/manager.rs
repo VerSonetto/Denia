@@ -6,7 +6,11 @@
 //! - tab 身份自维护(`t1`、`t2`…),映射到 chromiumoxide 的 `Page`;
 //! - `[ref=eN]` 引用表按 tab 存放(最近一次 snapshot 分配),页面导航后作废;
 //! - 浏览器进程退出由双看护发现:驱动层的连接断开信号 + `Browser::try_wait`
-//!   轮询(进程被杀时连接流可能不结束,必须兜底)。
+//!   轮询(进程被杀时事件流可能不结束,必须兜底);
+//! - **实例不会空转占资源**:最后一个 tab 被关就立即回收进程(Chrome 在
+//!   零窗口时本就该退出,留着只是被 CDP 吊着),另有闲置看护兜底,以及模型
+//!   显式的 `shutdownBrowser`。回收失败会留下占住 profile 单例锁的残留,
+//!   下次冷启动先走 [`procctl::reap_stale`] 清扫。
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -38,10 +42,37 @@ use tokio::sync::{Mutex, broadcast};
 use crate::driver::{self, LaunchSpec, Session};
 use crate::elements;
 use crate::network::NetworkLog;
+use crate::procctl;
 use crate::{BrowserCommand, CommandOutcome};
 
 /// tab 上限:防止模型无限开页把浏览器撑爆。
 const TAB_LIMIT: usize = 32;
+
+/// 本命令是否需要一个可操作的活动 tab(零页面时要不要补一个空白页)。
+///
+/// 排除项都是「不得凭空开页」的:查询与善后命令(`getState`/`list`/`close`)、
+/// 自己建页的命令(`newTab`)、按 id 精确定位的命令(`activate`)与回收。
+/// 漏一个就会让收尾路径先拉起实例再自杀,多一个则会让旧有命令报「没有活动 tab」。
+fn needs_target_tab(command: &BrowserCommand) -> bool {
+    !matches!(
+        command,
+        BrowserCommand::GetState { .. }
+            | BrowserCommand::List
+            | BrowserCommand::Close { .. }
+            | BrowserCommand::NewTab { .. }
+            | BrowserCommand::Activate { .. }
+            | BrowserCommand::ShutdownBrowser
+    )
+}
+
+/// 闲置多久就自动回收实例(模型忘了收尾时的兜底)。
+///
+/// 取 5 分钟:比一次完整任务里两次浏览器命令的常见间隔长得多,又短到不会
+/// 让一个 Chrome 进程树挂满半天。可用 `DENIA_BROWSER_IDLE_SECS` 调;0 关闭。
+const IDLE_RELEASE: Duration = Duration::from_secs(300);
+
+/// 闲置看护的轮询间隔(粒度不需要比 IDLE_RELEASE 细)。
+const IDLE_TICK: Duration = Duration::from_secs(10);
 
 /// 单个 tab 的运行时状态。
 #[derive(Debug, Clone)]
@@ -218,7 +249,8 @@ pub struct BrowserManager {
     /// 启动互斥:并发命令同时发现未启动时,只放一个进去拉起。
     starting: Mutex<()>,
     /// 串行化命令生命周期,避免并发命令交叉使用已失效的 Page。
-    command_gate: Mutex<()>,
+    /// Arc:闲置看护任务抢不到门时要能跳过本轮。
+    command_gate: Arc<Mutex<()>>,
     generation: AtomicU64,
     event_broadcast: broadcast::Sender<BrowserEvent>,
     /// 挂起 JS dialog(tabId -> 信息):handleDialog 消费。
@@ -234,7 +266,14 @@ pub struct BrowserManager {
     /// 用户数据目录(profile 落盘位置)。
     home: PathBuf,
     /// tab 归属:owner(会话 id) → 它产生/操作过的 tab id。
-    tab_owners: TabOwners,
+    /// Arc:回收逻辑与闲置看护任务需共用同一份记录。
+    tab_owners: Arc<TabOwners>,
+    /// 回收句柄:工具、零 tab 自动回收与闲置看护三条路径共用。
+    releaser: Releaser,
+    /// 最近一条浏览器命令的时刻(epoch ms):闲置看护据此回收进程。
+    last_activity_ms: Arc<AtomicU64>,
+    /// 闲置看护只起一个(跟 manager 同生命周期,不随会话重启而换)。
+    watchdog_started: AtomicU64,
 }
 
 /// tab 归属登记表。
@@ -290,25 +329,156 @@ impl TabOwners {
             .map(|tabs| tabs.iter().cloned().collect())
             .unwrap_or_default()
     }
+
+    /// 实例被回收后清空全部归属:tab 随进程一起没了,留着记录会让后续
+    /// `close_owned` 把新实例的同名 tab(t1/t2…)当成旧tab 关掉。
+    fn clear_all(&self) {
+        if let Ok(mut guard) = self.inner.lock() {
+            guard.clear();
+        }
+    }
+}
+
+/// 回收所需状态的共享句柄。
+///
+/// 抽出来的原因:同一个回收动作有三个发起方——模型显式 `shutdownBrowser`、
+/// 最后一个 tab 被关、闲置看护。看护是独立 tokio 任务,拿不到 `&self`,
+/// 所以把要碰的几张表集中到这个可 `Clone` 的句柄上,三条路径跑同一实现
+/// 否则三处副本迟早不一致,而这里不一致的代价就是进程回收不干净。
+#[derive(Clone)]
+struct Releaser {
+    inner: Arc<Mutex<Option<Inner>>>,
+    ref_tables: Arc<std::sync::Mutex<HashMap<String, HashMap<String, i64>>>>,
+    target_ids: Arc<std::sync::Mutex<HashMap<String, String>>>,
+    dialogs: Arc<std::sync::Mutex<HashMap<String, Value>>>,
+    network_log: Arc<std::sync::Mutex<NetworkLog>>,
+    tab_owners: Arc<TabOwners>,
+    broadcast: broadcast::Sender<BrowserEvent>,
+}
+
+impl Releaser {
+    /// 只清会话与 per-tab 表(不动进程):浏览器已自杀或被外部杀掉时用。
+    async fn clear_session_if(&self, generation: u64) {
+        let mut guard = self.inner.lock().await;
+        let tabs: Vec<String> = match guard.as_mut() {
+            Some(current) if current.session.generation == generation => {
+                current.pages.keys().cloned().collect()
+            }
+            // 代次不符 = 已是新会话,不归本次清理。
+            _ => return,
+        };
+        *guard = None;
+        drop(guard);
+        self.forget_tabs(&tabs);
+        self.tab_owners.clear_all();
+        let _ = self.broadcast.send(BrowserEvent::Exited);
+    }
+
+    /// 回收一个实例:关页面 → `Browser.close` → 超时强杀进程树 → 清状态。
+    ///
+    /// 幂等:没有活跃会话时返回 `false`(收尾动作重复执行是常态)。
+    /// 调用方需已持命令门,确保不与在跑的命令交叉。
+    async fn release(&self, cause: &str) -> bool {
+        let taken = {
+            let mut guard = self.inner.lock().await;
+            guard.take()
+        };
+        let Some(mut inner) = taken else {
+            return false;
+        };
+        // 清理清单趁还能读时拿下来,drop 之后就没机会了。
+        let tabs: Vec<String> = inner.pages.keys().cloned().collect();
+        // 画面先停:帧回调往已死的连接上推只会刷警告。
+        if let Some(tab_id) = inner.screencast_tab.take()
+            && let Some(page) = inner.pages.get(&tab_id)
+        {
+            let _ = page.execute(StopScreencastParams::default()).await;
+        }
+        // 给回收加上限,不让一个拖着的 Chrome 把调用挂死。
+        let gone = match tokio::time::timeout(
+            Duration::from_secs(15),
+            driver::shutdown(&mut inner.session),
+        )
+        .await
+        {
+            Ok(shutdown) => shutdown.gone,
+            Err(_) => {
+                tracing::warn!("浏览器实例({cause})回收超时,补一次进程树强杀");
+                procctl::reap_own(inner.session.pid, Some(&inner.session.exe)).await
+            }
+        };
+        if gone {
+            tracing::info!("浏览器实例({cause})已回收");
+            inner.session.release_profile_token();
+        } else {
+            // 进程还在:归属记录留着,下次冷启动的 reap_stale 按 PID+身份再清算。
+            tracing::warn!("浏览器实例({cause})未收干净,保留记录交由下次启动清算");
+            inner.session.keep_profile_record();
+        }
+        drop(inner);
+
+        self.forget_tabs(&tabs);
+        // tab 随进程一起没了:归属记录必须同步清空,否则下次拉起后
+        // `close_owned` 会把新实例的同名 tab(t1/t2…)当成旧 tab 关掉。
+        self.tab_owners.clear_all();
+        let _ = self.broadcast.send(BrowserEvent::Exited);
+        true
+    }
+
+    /// 丢弃已消失 tab 的引用表/目标映射/弹窗/抓包缓冲。
+    fn forget_tabs(&self, tabs: &[String]) {
+        for tab_id in tabs {
+            if let Ok(mut tables) = self.ref_tables.lock() {
+                tables.remove(tab_id);
+            }
+            if let Ok(mut ids) = self.target_ids.lock() {
+                ids.remove(tab_id);
+            }
+            if let Ok(mut dialogs) = self.dialogs.lock() {
+                dialogs.remove(tab_id);
+            }
+            if let Ok(mut log) = self.network_log.lock() {
+                log.clear(tab_id);
+            }
+        }
+    }
 }
 
 impl BrowserManager {
     pub fn new(home: PathBuf) -> Self {
         let (event_broadcast, _) = broadcast::channel(256);
         let spec = LaunchSpec::new(&home);
+        let inner: Arc<Mutex<Option<Inner>>> = Arc::new(Mutex::new(None));
+        let pending_dialogs = Arc::new(std::sync::Mutex::new(HashMap::new()));
+        let network_log = Arc::new(std::sync::Mutex::new(NetworkLog::default()));
+        let ref_tables = Arc::new(std::sync::Mutex::new(HashMap::new()));
+        let target_ids = Arc::new(std::sync::Mutex::new(HashMap::new()));
+        let tab_owners = Arc::new(TabOwners::default());
+        let releaser = Releaser {
+            inner: inner.clone(),
+            ref_tables: ref_tables.clone(),
+            target_ids: target_ids.clone(),
+            dialogs: pending_dialogs.clone(),
+            network_log: network_log.clone(),
+            tab_owners: tab_owners.clone(),
+            broadcast: event_broadcast.clone(),
+        };
         Self {
-            inner: Arc::new(Mutex::new(None)),
+            inner,
             starting: Mutex::new(()),
-            command_gate: Mutex::new(()),
+            command_gate: Arc::new(Mutex::new(())),
             generation: AtomicU64::new(0),
             event_broadcast,
-            pending_dialogs: Arc::new(std::sync::Mutex::new(HashMap::new())),
-            network_log: Arc::new(std::sync::Mutex::new(NetworkLog::default())),
-            ref_tables: Arc::new(std::sync::Mutex::new(HashMap::new())),
-            target_ids: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            pending_dialogs,
+            network_log,
+            ref_tables,
+            target_ids,
             spec,
             home,
-            tab_owners: TabOwners::default(),
+            tab_owners,
+            releaser,
+            last_activity_ms: Arc::new(AtomicU64::new(0)),
+            watchdog_started: AtomicU64::new(0),
         }
     }
 
@@ -504,6 +674,9 @@ impl BrowserManager {
             return Ok(());
         }
         let generation = self.generation.fetch_add(1, Ordering::SeqCst) + 1;
+        // 拉起即刷新活动时钟:闲置预算从「本次开始用」算起,而不是从上一条
+        // 命令算起 —— 否则空窗期超过预算后,刚拉起的实例会被立刻当陈闲收掉。
+        self.last_activity_ms.store(now_ms(), Ordering::SeqCst);
         let (session, exit) = driver::launch(&self.spec, generation).await?;
 
         let mut inner = Inner {
@@ -534,17 +707,12 @@ impl BrowserManager {
                 inner.active_tab = Some(tab_id);
             }
         }
-        // 没有任何可用页面时开一个空白页,保证模型有落点。
-        if inner.pages.is_empty() {
-            let page = inner
-                .session
-                .browser
-                .new_page("about:blank")
-                .await
-                .map_err(|error| format!("创建初始标签页失败: {error}"))?;
-            let tab_id = inner.register(page, "about:blank".to_string(), String::new());
-            inner.active_tab = Some(tab_id);
-        }
+        // 不再预建空白页:持久化 profile 恢复回来的页面照常登记,没有就空着。
+        //
+        // 两个理由:① 占位页让 `pages.is_empty()` 永远不成立,「最后一个 tab
+        // 关闭即回收」就永远不会触发,而用户自己的 tab 还会被它一并收掉;② 模型
+        // 拿不到活动 tab 时,命令层会把错误原样传回(报 tab 不存在),比默默多一个
+        // 没人要的窗口好。真需要落点的 navigate/newTab/snapshot 都会自己开页。
 
         // 浏览器级事件:target 销毁(页面被关闭)时清注册表。
         match inner
@@ -567,32 +735,35 @@ impl BrowserManager {
 
         *self.inner.lock().await = Some(inner);
 
+        // 闲置看护:模型忘了收尾(或子代理中途挂)时兜底回收。
+        self.ensure_idle_watchdog();
+
         // 退出看护 1:驱动层退出信号(连接断开/主动关闭)。
-        let inner_slot = self.inner.clone();
-        let broadcast = self.event_broadcast.clone();
+        // 走 releaser 统一入口:进程没了也要把 per-tab 表与归属记录带走,
+        // 否则下次拉起会撞上同名的陈引用。
+        let releaser = self.releaser.clone();
         tokio::spawn(async move {
             let _ = exit.await;
-            clear_session_if(&inner_slot, &broadcast, generation).await;
+            releaser.clear_session_if(generation).await;
         });
         // 退出看护 2:进程存活轮询(浏览器被杀时事件流可能静默停摆,这里兜底)。
+        let releaser = self.releaser.clone();
         let inner_slot = self.inner.clone();
-        let broadcast = self.event_broadcast.clone();
         tokio::spawn(async move {
             loop {
                 tokio::time::sleep(Duration::from_millis(1000)).await;
-                let mut slot = inner_slot.lock().await;
-                let Some(current) = slot.as_mut() else { break };
-                if current.session.generation != generation {
-                    break;
-                }
-                match current.session.browser.try_wait() {
-                    Ok(Some(_)) | Err(_) => {
-                        *slot = None;
-                        drop(slot);
-                        let _ = broadcast.send(BrowserEvent::Exited);
+                let dead = {
+                    let mut slot = inner_slot.lock().await;
+                    // 会话已不在(别的看护收走了):本轮清理到此为止。
+                    let Some(current) = slot.as_mut() else { break };
+                    if current.session.generation != generation {
                         break;
                     }
-                    Ok(None) => {}
+                    matches!(current.session.browser.try_wait(), Ok(Some(_)) | Err(_))
+                };
+                if dead {
+                    releaser.clear_session_if(generation).await;
+                    break;
                 }
             }
         });
@@ -775,6 +946,37 @@ impl BrowserManager {
         let started = Instant::now();
         // 命令串行化:并发命令交叉使用同一 Page/会话易触发竞态。
         let _gate = self.command_gate.lock().await;
+        self.last_activity_ms.store(now_ms(), Ordering::SeqCst);
+
+        // 善后类命令不得拉起实例:否则模型收尾时「确认已回收」本身会把
+        // 浏览器再开回来。没在跑就原地报成功(released=false)。
+        if matches!(command, BrowserCommand::ShutdownBrowser) {
+            let released = self.releaser.release("tool").await;
+            return CommandOutcome {
+                elapsed_ms: started.elapsed().as_millis() as u64,
+                ..CommandOutcome::ok_value(
+                    json!({ "released": released, "running": false }),
+                    0,
+                )
+            };
+        }
+        // 未运行时的 list/close:原地返回。close 若走下面的通用路径,会先把
+        // 实例拉起来(带一个初始空白页)再把它关掉 —— 收尾动作自己把浏览器
+        // 开了一个来回,既浪费也可能误碰刚恢复的会话。
+        if matches!(command, BrowserCommand::List | BrowserCommand::Close { .. })
+            && self.inner.lock().await.is_none()
+        {
+            let value = match &command {
+                BrowserCommand::Close { tab_id } => {
+                    json!({ "closed": tab_id, "running": false, "note": "浏览器本来就没在跑" })
+                }
+                _ => json!({ "tabs": [], "running": false }),
+            };
+            return CommandOutcome {
+                elapsed_ms: started.elapsed().as_millis() as u64,
+                ..CommandOutcome::ok_value(value, 0)
+            };
+        }
         if let Err(error) = self.get_or_start().await {
             return CommandOutcome::err("not_running", error, started.elapsed().as_millis() as u64);
         }
@@ -784,7 +986,7 @@ impl BrowserManager {
         // 弹窗挂起等待处理"的语义。
         let mut event_rx = self.event_broadcast.subscribe();
         let outcome = tokio::select! {
-            result = self.dispatch(command) => match result {
+            result = self.dispatch(command.clone()) => match result {
                 Ok(outcome) => outcome,
                 Err(error) => CommandOutcome::err(
                     error_code(&error),
@@ -810,16 +1012,133 @@ impl BrowserManager {
                 ),
             },
         };
+        // 自动回收:最后一个 tab 被关(或被外部关掉)后,实例不得空转 ——
+        // Chrome 零窗口时本就该退,留着只是白占资源与 profile 单例锁,且一旦
+        // 变成孤儿,下次冷启动会直接报 `ExitStatus(21)`。
+        if matches!(command, BrowserCommand::Close { .. }) {
+            let empty = {
+                let guard = self.inner.lock().await;
+                guard.as_ref().is_some_and(|inner| inner.pages.is_empty())
+            };
+            if empty {
+                tracing::info!("最后一个 tab 已关闭,自动回收浏览器进程");
+                self.releaser.release("last-tab").await;
+            }
+        }
         CommandOutcome {
             elapsed_ms: started.elapsed().as_millis() as u64,
             ..outcome
         }
     }
 
+    /// 当前是否有活跃会话(不触发拉起)。
+    pub async fn is_running(&self) -> bool {
+        self.inner.lock().await.is_some()
+    }
+
+    /// 供工具与 REST 层显式调用:回收浏览器进程。
+    ///
+    /// 不走命令分发,因此**不会拉起实例**;本来就没在跑也算成功。
+    pub async fn shutdown_browser(&self) -> CommandOutcome {
+        let _gate = self.command_gate.lock().await;
+        let released = self.releaser.release("tool").await;
+        CommandOutcome::ok_value(json!({ "released": released, "running": false }), 0)
+    }
+
+    /// 闲置自动回收的时长;`DENIA_BROWSER_IDLE_SECS=0` 关闭该看护。
+    fn idle_release() -> Duration {
+        std::env::var("DENIA_BROWSER_IDLE_SECS")
+            .ok()
+            .and_then(|raw| raw.trim().parse::<u64>().ok())
+            .map(Duration::from_secs)
+            .unwrap_or(IDLE_RELEASE)
+    }
+
+    /// 起闲置看护(全 manager 一个,永不退出)。
+    ///
+    /// 兜的是「模型忘了收尾」与「子代理中途挂」两种情况:前者靠工具纪律,
+    /// 后者只能靠这里。不收正在看画面的实例 —— 侧栏开着 = 用户在用。
+    ///
+    /// 不按代挂任务、也不在退出时复位标志:那样与下一次拉起有竞态(旧任务还
+    /// 没复位、新一代 compare_exchange 失败 → 那一代就没看护了),而常驻一个
+    /// 任务只需多睡一个 tick,没这个麻烦。
+    fn ensure_idle_watchdog(&self) {
+        let budget = Self::idle_release();
+        if budget.is_zero() {
+            return;
+        }
+        if self
+            .watchdog_started
+            .compare_exchange(0, 1, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
+            return;
+        }
+        let releaser = self.releaser.clone();
+        let gate = self.command_gate.clone();
+        let last_activity = self.last_activity_ms.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(IDLE_TICK).await;
+                let idle_ms = now_ms().saturating_sub(last_activity.load(Ordering::SeqCst));
+                let watching = {
+                    let guard = releaser.inner.lock().await;
+                    match guard.as_ref() {
+                        // 没会话:无事可做,继续等(不退出)。
+                        None => continue,
+                        Some(current) => current.screencast_tab.is_some(),
+                    }
+                };
+                if idle_ms < budget.as_millis() as u64 || watching {
+                    continue;
+                }
+                // 抢命令门:确保不与在跑的命令交叉;抢不到就下一轮再看。
+                let Ok(_gate_guard) = gate.try_lock() else {
+                    continue;
+                };
+                tracing::info!("浏览器空闲 {}s 未使用,自动回收进程", idle_ms / 1000);
+                releaser.release("idle").await;
+            }
+        });
+    }
+
     /// 命令分发(已确保会话就绪)。
     async fn dispatch(&self, command: BrowserCommand) -> Result<CommandOutcome, String> {
         let mut guard = self.inner.lock().await;
-        let inner = guard.as_mut().ok_or_else(|| "浏览器未启动".to_string())?;
+
+        // 惰性落点:启动不再预建空白页(那会让 `pages.is_empty()` 永远不成立,
+        // 最后一个 tab 的自动回收就永远不会触发)。只有确实要操作页面的命令才补
+        // 一个 about:blank —— 保留旧有「模型总能拿到落点」的行为;
+        // close/list/getState 等善后与查询路径绝不能开页,否则「收尾动作
+        // 自己把浏览器开了回来」又会出现。
+        if guard
+            .as_ref()
+            .is_some_and(|inner| inner.pages.is_empty())
+            && needs_target_tab(&command)
+        {
+            let (tab_id, page) = {
+                let inner = guard
+                    .as_mut()
+                    .ok_or_else(|| "浏览器未启动(会话已被回收)".to_string())?;
+                let page = inner
+                    .session
+                    .browser
+                    .new_page("about:blank")
+                    .await
+                    .map_err(|error| format!("创建标签页失败: {error}"))?;
+                let tab_id =
+                    inner.register(page.clone(), "about:blank".to_string(), String::new());
+                inner.active_tab = Some(tab_id.clone());
+                (tab_id, page)
+            };
+            // 挂监听要 `&self` 但不能持会话锁(与 newTab 同一做法):先放锁。
+            drop(guard);
+            self.wire_page(tab_id, page).await;
+            guard = self.inner.lock().await;
+        }
+        let inner = guard
+            .as_mut()
+            .ok_or_else(|| "浏览器未启动(会话已被回收)".to_string())?;
 
         match command {
             BrowserCommand::GetState { tab_id } => {
@@ -836,6 +1155,11 @@ impl BrowserManager {
                 json!({ "tabs": inner.tab_list() }),
                 0,
             )),
+            // 回收在 execute 里拦下:dispatch 已持 inner 锁,而 release 也要拿
+            // 那把锁 —— 在这儿做会自锁。留分支只为 enum 新成员在此可见。
+            BrowserCommand::ShutdownBrowser => {
+                unreachable!("shutdownBrowser 由 execute 直接处理,不进分发")
+            }
             BrowserCommand::NewTab { url } => {
                 if inner.pages.len() >= TAB_LIMIT {
                     return Err(format!("标签页已达上限({TAB_LIMIT});先关闭不用的标签页"));
@@ -1510,24 +1834,6 @@ fn serde_str_id<T: serde::Serialize>(value: &T) -> String {
         .ok()
         .and_then(|value| value.as_str().map(str::to_string))
         .unwrap_or_default()
-}
-
-/// 退出看护:清掉指定代次的会话并广播(幂等;代次不符不动)。
-async fn clear_session_if(
-    slot: &Arc<Mutex<Option<Inner>>>,
-    broadcast: &broadcast::Sender<BrowserEvent>,
-    generation: u64,
-) {
-    let mut guard = slot.lock().await;
-    let same_generation = guard
-        .as_ref()
-        .map(|inner| inner.session.generation == generation)
-        .unwrap_or(false);
-    if same_generation {
-        *guard = None;
-        drop(guard);
-        let _ = broadcast.send(BrowserEvent::Exited);
-    }
 }
 
 /// 错误码归类(前端/模型据此判断可重试性)。

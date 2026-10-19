@@ -836,9 +836,196 @@ async fn closes_only_the_owning_sessions_tabs() {
         .as_array()
         .cloned()
         .unwrap_or_default();
-    // 初始空白页 + child-b 的 tab 共 2 个;child-a 的不得残留。
-    assert_eq!(tabs.len(), 2, "初始页 + child-b 的 tab:{tabs:?}");
+    // 只剩 child-b 的 tab：启动不再预建空白页（那会让「最后一个 tab 关闭即
+    // 回收」永远触发不了），child-a 的已关，两者都不得残留。
+    assert_eq!(tabs.len(), 1, "应只剩 child-b 的 tab:{tabs:?}");
 
     println!("==> tab 归属清理通过（只关自己名下的 tab）");
+}
+
+/// 回收回归:实例不得在“用完”之后留在后台。
+///
+/// 验的是真实代价:残留的 Chrome 占住 profile 单例锁,下一次冷启动会直接
+/// 报 `ExitStatus(21)` —— 那就是“浏览器启动不了了”的根因。判定不用看控制面
+/// 自说的状态,而是直接问操作系统:那个 profile 还被活进程占着吗。
+#[tokio::test]
+#[ignore = "启动真实浏览器(系统 Chrome/Edge),手动运行"]
+async fn reclaims_browser_process_when_done() {
+    let home = temp_home("reclaim");
+    let profile = denia_browser::default_profile_dir(&home);
+    let manager = BrowserManager::new(home.clone());
+
+    // 1. 开两个 tab,占住 profile。
+    let first = manager
+        .execute(BrowserCommand::NewTab {
+            url: Some("data:text/html,<title>one</title>one".to_string()),
+        })
+        .await;
+    let first_tab = value_of(&first, "newTab one")["tabId"]
+        .as_str()
+        .expect("tabId")
+        .to_string();
+    let second = manager
+        .execute(BrowserCommand::NewTab {
+            url: Some("data:text/html,<title>two</title>two".to_string()),
+        })
+        .await;
+    let second_tab = value_of(&second, "newTab two")["tabId"]
+        .as_str()
+        .expect("tabId")
+        .to_string();
+    assert!(
+        denia_browser::browser_profile_held(&profile),
+        "前置:实例在跑时应占住 profile"
+    );
+    // 正向对照:残留计数在「在跑」时必须非空 —— 否则后面那几条
+    // `leftovers.is_empty()` 断言可能是过滤器写坏了的假通过。
+    let running = processes_on_profile(&profile);
+    assert!(
+        !running.is_empty(),
+        "前置:在跑时应能数到浏览器进程(否则收尾断言无判别力)"
+    );
+    println!("在跑的浏览器进程(含 Chrome 子进程):{running:?}");
+
+    // 2. 还剩一个 tab 时 close 不会触发回收(不得误伤还在用的会话)。
+    manager
+        .execute(BrowserCommand::Close {
+            tab_id: Some(first_tab.clone()),
+        })
+        .await;
+    assert!(
+        manager.is_running().await,
+        "还剩 {second_tab} 未关时不得提前回收"
+    );
+
+    // 3. 最后一个 tab 关掉 → 自动回收。
+    manager
+        .execute(BrowserCommand::Close {
+            tab_id: Some(second_tab.clone()),
+        })
+        .await;
+    let reclaimed = wait_until(|| async { !denia_browser::browser_profile_held(&profile) }).await;
+    assert!(
+        reclaimed,
+        "最后一个 tab 关闭后必须回收进程并释放 profile"
+    );
+    assert!(!manager.is_running().await, "控制面也不得再报在跑");
+    // 主进程退了不算收干净:Chrome 的 gpu/network/utility/crashpad 子进程会
+    // 在父进程死后继续占资源。这一步按命令行里的 profile 路径数残留。
+    let leftovers = processes_on_profile(&profile);
+    assert!(
+        leftovers.is_empty(),
+        "回收后不得有任何还挂着该 profile 的浏览器进程:{leftovers:?}"
+    );
+
+    // 4. 回收后能冷启动起来(这就是残留时报 ExitStatus(21) 的那一步)。
+    let reopened = manager
+        .execute(BrowserCommand::NewTab {
+            url: Some("data:text/html,<title>again</title>".to_string()),
+        })
+        .await;
+    assert!(
+        reopened.ok,
+        "回收后必须能再次拉起: {:?}",
+        reopened.error
+    );
+    assert!(
+        denia_browser::browser_profile_held(&profile),
+        "重新拉起应重新占用 profile"
+    );
+
+    // 5. 显式回收:模型收尾靠这一条。
+    let outcome = manager
+        .execute(BrowserCommand::ShutdownBrowser)
+        .await;
+    let value = value_of(&outcome, "shutdownBrowser");
+    assert_eq!(value["released"].as_bool(), Some(true), "应报回收了一个实例");
+    assert!(
+        wait_until(|| async { !denia_browser::browser_profile_held(&profile) }).await,
+        "shutdownBrowser 之后 profile 必须自尤"
+    );
+
+    // 6. 善后命令不得反过来拉起实例:本来就没跑 → 原地返回,不开进程。
+    let again = manager
+        .execute(BrowserCommand::ShutdownBrowser)
+        .await;
+    let value = value_of(&again, "重复 shutdownBrowser");
+    assert_eq!(value["released"].as_bool(), Some(false), "重复回收是空操作");
+    let listed = manager.execute(BrowserCommand::List).await;
+    let value = value_of(&listed, "list");
+    assert_eq!(
+        value["tabs"].as_array().map(Vec::len),
+        Some(0),
+        "未运行时 list 应返空 tab"
+    );
+    assert_eq!(value["running"].as_bool(), Some(false));
+    manager
+        .execute(BrowserCommand::Close {
+            tab_id: Some("t99".to_string()),
+        })
+        .await;
+    assert!(
+        !denia_browser::browser_profile_held(&profile),
+        "未运行时的 close 不得把实例拉回来"
+    );
+    assert!(!manager.is_running().await);
+    let leftovers = processes_on_profile(&profile);
+    assert!(
+        leftovers.is_empty(),
+        "收尾路径不得留下任何浏览器进程:{leftovers:?}"
+    );
+
+    println!("==> 回收回归全部通过(零 tab 自动回收 + 显式 shutdownBrowser + 善后不拉起 + 无残留进程)");
+}
+
+/// 还挂着这个 profile 的浏览器进程(`PID:名字`)。
+///
+/// 只看命令行里带该 profile 路径的进程 —— 用户自己开的 Chrome 不带这个
+/// 路径,不会被误报。
+#[cfg(windows)]
+fn processes_on_profile(profile: &std::path::Path) -> Vec<String> {
+    // 注意:不要把反斜杠双写 —— PowerShell 的 `-like` 不转义 `\`,双写后永远匹配不上。
+    let marker = profile.to_string_lossy().to_string();
+    let script = format!(
+        "$ErrorActionPreference='Stop'; Get-CimInstance Win32_Process | Where-Object {{ $_.CommandLine -like '*{marker}*' }} | ForEach-Object {{ \"$($_.ProcessId):$($_.Name)\" }}"
+    );
+    let output = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-Command", &script])
+        .output()
+        .expect("query processes");
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        // 只算浏览器镜像:查询用的 powershell 自身命令行里带着同一个
+        // marker,不滤会把自己数成残留。
+        .filter(|line| {
+            let name = line.rsplit(':').next().unwrap_or_default().to_ascii_lowercase();
+            name == "chrome.exe" || name == "msedge.exe" || name.ends_with("chrome.exe") || name.ends_with("msedge.exe")
+        })
+        .map(str::to_string)
+        .collect()
+}
+
+#[cfg(not(windows))]
+fn processes_on_profile(_profile: &std::path::Path) -> Vec<String> {
+    // 非 Windows 上跳过这一项:没有同一套命令行查询手段,主断言(占用释放)
+    // 仍然跑。宁可少一项覆盖,不要在跨平台测试里藏假通过。
+    Vec::new()
+}
+
+/// 轮询等到条件成立(最多 ~10s);回收是异步的,不能直接断言。
+async fn wait_until<F, Fut>(predicate: F) -> bool
+where
+    F: Fn() -> Fut,
+    Fut: std::future::Future<Output = bool>,
+{
+    for _ in 0..100 {
+        if predicate().await {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    false
 }
 

@@ -165,13 +165,15 @@ impl Host {
     /// 开始 accept,直到 `shutdown` 完成。
     ///
     /// 收尾必须走 [`AppState::remote`] 的 `shutdown`:隧道子进程与远程
-    /// listener 都在它手里,不显式收干净就会留下孤儿 cloudflared。
+    /// listener 都在它手里,不显式收干净就会留下孤儿 cloudflared。浏览器同理:
+    /// 残留的 Chrome 占住 profile 单例锁,下次启动会直接失败。
     pub async fn serve(
         self,
         shutdown: impl std::future::Future<Output = ()> + Send + 'static,
     ) -> std::io::Result<()> {
         let _home_lock = self.home_lock;
         let remote = self.state.remote.clone();
+        let browser = self.state.browser.clone();
         axum::serve(
             nodelay(self.listener),
             self.router
@@ -180,6 +182,12 @@ impl Host {
         .with_graceful_shutdown(async move {
             shutdown.await;
             tracing::info!("shutdown signal received");
+            // 浏览器先收:它在等的是 OS 层面的进程回收,放在后面容易被退出流程拖走。
+            // 没在跑时这是空操作,不会把实例反过来拉起。
+            let outcome = browser.shutdown_browser().await;
+            if outcome.ok {
+                tracing::info!("浏览器实例已随服务退出回收");
+            }
             remote.shutdown().await;
         })
         .await

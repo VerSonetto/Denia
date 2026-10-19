@@ -25,12 +25,14 @@ const TOOL_DESCRIPTION: &str = r#"控制内嵌浏览器(CDP 驱动本机 Chrome/
 - 弹窗:getDialog{}、handleDialog{accept, promptText?}(页面 alert/confirm/prompt 会挂起等待处理)
 - 执行:evaluate{expression}(页面 JS,返回 JSON)
 - tab:newTab{url?}、list{}(未运行时返回空 tabs,不拉起实例)、activate{tabId}、close{tabId?}(缺省 tabId = 当前 tab)
+- 回收:shutdownBrowser{} —— 结束浏览器进程并释放 profile 占用。`close` 只关标签页;关掉最后一个 tab 会自动回收,但**不要依赖它**:还留着别的 tab 时实例仍在跑,任务收尾请显式调一次(未运行时它也不报错,且不会拉起实例)
 - 视口:viewportSet{width,height}、viewportReset{}
 - 网络抓包:networkList{urlFilter?, max?}(该 tab 捕获的请求:URL/方法/资源类型/请求体,环形缓冲约 200 条)、networkGetBody{requestId, bodyKind?}(bodyKind 缺省 "response" 取响应体;传 "request" 取 POST 请求体)
 - 可视化模式:任意命令可带 visualMode: true,展开控制台浏览器侧栏让用户实时看到画面;默认不开
 
 元素引用约定:snapshot 产出的 `[ref=eN]` 直接传 `e6`(也接受 `@e6`);ref 只在最近一次 snapshot 之后有效,页面导航后需重新 snapshot。也可以直接传 CSS 选择器或文本定位(`#id`、`[aria-label=...]`、`text=登录`)。
-启动语义:交互命令会按需拉起浏览器;list/close 等查询与善后命令在浏览器没跑时原地返回。
+启动语义:交互命令会按需拉起浏览器;list/shutdownBrowser 等查询与善后命令在浏览器没跑时原地返回。
+回收语义:浏览器实例会占住一份 profile 的目录锁,没回收干净会让下一次启动直接失败。所以不用了就 `shutdownBrowser`,不要只是 `close` 完就走。
 稳定性:点击带轻量可操作性重试(滚动到视图 + 可见性检查),过期引用会明确报错而不是静默点错。
 典型流程:snapshot 拿 ref → 用 ref 交互 → 需要视觉时 screenshot。分析页面接口先 networkList。"#;
 
@@ -97,6 +99,7 @@ impl BrowserTool {
                                 "elementInfo", "evaluate", "waitFor",
                                 "getDialog", "handleDialog",
                                 "newTab", "list", "activate", "close",
+                                "shutdownBrowser",
                                 "viewportSet", "viewportReset",
                                 "networkList", "networkGetBody"
                             ],
@@ -238,7 +241,7 @@ impl Tool for BrowserTool {
             Err(error) => {
                 return ToolOutput {
                     content: format!(
-                        "invalid browser command: {error};命令面:navigate/back/forward/reload/getState/snapshot/screenshot/click/fill/type/press/scroll/hover/select/check/drag/elementInfo/evaluate/waitFor/getDialog/handleDialog/newTab/list/activate/close/viewportSet/viewportReset"
+                        "invalid browser command: {error};命令面:navigate/back/forward/reload/getState/snapshot/screenshot/click/fill/type/press/scroll/hover/select/check/drag/elementInfo/evaluate/waitFor/getDialog/handleDialog/newTab/list/activate/close/shutdownBrowser/viewportSet/viewportReset"
                     ),
                     is_error: true,
                     ..Default::default()

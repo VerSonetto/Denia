@@ -16,12 +16,17 @@
 //!   按 ref 查 backendNodeId,再用 CDP 原语(DOM/Input)定位与操作,
 //!   不往页面注入全局变量(见 elements.rs);
 //! - **无窗口后台运行**:headless 启动,不弹浏览器窗口;
-//!   画面通过控制台侧边栏的 screencast 实时展示。
+//!   画面通过控制台侧边栏的 screencast 实时展示;
+//! - **进程必须回收**:浏览器实例占住 profile 的单例锁,残留会让下一次启动
+//!   以 `ExitStatus(21)` 失败。回收有三层:最后一个 tab 关闭即自动收、
+//!   闲置超时看护、模型显式 `shutdownBrowser`;另有启动前清扫孤儿进程兜底
+//!   (见 [`procctl`])。
 
 mod elements;
 pub mod driver;
 pub mod manager;
 pub mod network;
+mod procctl;
 
 pub use manager::{BrowserEvent, BrowserManager, FrameViewport, TabInfo};
 
@@ -187,6 +192,9 @@ pub enum BrowserCommand {
     StopScreencast {
         tab_id: Option<String>,
     },
+    /// 回收浏览器进程:关掉所有 tab 并结束 Chrome/Edge 进程树,释放 profile 锁。
+    /// 与 `close`(只关标签页)相对 —— 任务收尾必须走这一条。
+    ShutdownBrowser,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize)]
@@ -305,6 +313,7 @@ impl BrowserCommand {
 
             BrowserCommand::NewTab { .. }
             | BrowserCommand::List
+            | BrowserCommand::ShutdownBrowser
             | BrowserCommand::Activate { .. } => None,
         }
     }
@@ -316,4 +325,12 @@ pub type SharedBrowser = Arc<manager::BrowserManager>;
 /// 默认 profile 目录:$DENIA_HOME/browser/profile(持久,登录态跨重启存活)。
 pub fn default_profile_dir(home: &std::path::Path) -> PathBuf {
     home.join("browser").join("profile")
+}
+
+/// 该 profile 是否仍被一个活着的浏览器进程占用(只读:不回收、不抹记录)。
+///
+/// 「收尾收干净没有」只能这么问:控制面状态不算(进程可以活在控制面之外),
+/// 光翻进程列表又不区分是不是本实例拉起的。诊断接口与测试共用这一口径。
+pub fn browser_profile_held(profile_dir: &std::path::Path) -> bool {
+    procctl::held(profile_dir)
 }

@@ -20,3 +20,13 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 base64 = { workspace = true }
 uuid = { workspace = true }
+
+# 进程身份探测(镜像路径 + 创建时间)与子进程树回收:残留的 Chrome 会占住
+# profile 单例锁,让下一次冷启动以看不出所以然的 ExitStatus 失败。
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_ProcessStatus",
+    "Win32_System_Threading",
+] }
