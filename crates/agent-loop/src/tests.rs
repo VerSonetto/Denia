@@ -3136,9 +3136,10 @@ async fn exit_plan_outside_plan_mode_is_denied_without_approval() {
 }
 
 #[tokio::test]
-async fn oversized_write_args_are_stubbed_in_derived_history() {
-    // write_file 大参数(≥8KB):执行成功后参数在**派生历史**里替换为短
-    // 占位(保留 path 与体量说明),日志与 UI 保留全文;小参数不打桩。
+async fn oversized_write_args_leave_the_model_surface_with_their_call() {
+    // write_file 大参数(≥8KB):执行成功后该调用**连同结果**整条退出模型面
+    // (日志与 UI 保留全文),而不是把参数换成占位——占位符本身就是一次
+    // 合法工具调用的形状,留着会被模型照拄成新的调用(缺 content)。
     let big = "x".repeat(9000);
     let (driver, _registry) = driver_with_tools(
         vec![
@@ -3171,32 +3172,32 @@ async fn oversized_write_args_are_stubbed_in_derived_history() {
         "log must keep full arguments"
     );
 
-    // 模型面:大参数换成占位,小参数原样保留。
+    // 模型面:大调用与它的结果整条消失,小参数原样保留。
     let messages = session.derive_messages();
-    let find_call = |id: &str| {
+    assert!(
+        !messages.iter().any(|message| {
+            message.tool_calls.iter().any(|call| call.id == "call_big")
+                || message.tool_call_id.as_deref() == Some("call_big")
+        }),
+        "archived call and its result must leave the model surface"
+    );
+    assert!(
+        !messages
+            .iter()
+            .any(|message| message.content.contains("_args_cleared")
+                || message.content.contains(&big)),
+        "archived args must not survive in the model surface"
+    );
+    assert!(
         messages
             .iter()
-            .find_map(|m| m.tool_calls.iter().find(|c| c.id == id))
-            .unwrap_or_else(|| panic!("{id} must be in derived history"))
-    };
-    let big_call = find_call("call_big");
-    assert!(
-        big_call.arguments.len() < 500,
-        "big args must be stubbed, got {} chars: {}",
-        big_call.arguments.len(),
-        &big_call.arguments[..big_call.arguments.len().min(120)]
+            .any(|message| message.content.contains("已写入 big.js")),
+        "the completed write stays visible as plain text"
     );
-    assert!(
-        big_call.arguments.contains("big.js"),
-        "{}",
-        big_call.arguments
-    );
-    assert!(
-        big_call.arguments.contains("_args_cleared"),
-        "{}",
-        big_call.arguments
-    );
-    let small_call = find_call("call_small");
+    let small_call = messages
+        .iter()
+        .find_map(|message| message.tool_calls.iter().find(|call| call.id == "call_small"))
+        .expect("small call stays on the model surface");
     assert!(
         small_call.arguments.contains("tiny"),
         "small args stay intact: {}",

@@ -61,6 +61,14 @@ pub const NUMERIC_FIELDS: &[&str] = &[
 /// `path` 参数的常见别名:模型偶尔把路径放在 file/filepath/filename 里。
 pub const PATH_ALIASES: &[&str] = &["file", "filepath", "filename", "file_path"];
 
+/// 超长参数归档占位符的标记键。
+///
+/// 归档后的调用不再以占位符形式进模型面(见 `denia_core` 的表面对账),
+/// 这个键只剩两处用途:日志/UI 的占位展示,以及参数解析时识别模型凭幻觉
+/// 复现的旧形状——给出“这是归档占位、请重新生成完整参数”的准确提示。
+/// 字面量本身由 core 定义,两处必须同源。
+pub const ARCHIVED_ARGS_KEY: &str = denia_core::session::ARCHIVED_ARGS_KEY;
+
 /// 解析出第一个 JSON 值(忽略尾部垃圾)。
 fn first_json_value(raw: &str) -> Result<serde_json::Value, String> {
     let mut iter = serde_json::Deserializer::from_str(raw.trim()).into_iter::<serde_json::Value>();
@@ -113,7 +121,21 @@ pub fn parse_tool_args<T: serde::de::DeserializeOwned>(raw: &str) -> Result<T, S
     let mut value = first_json_value(raw)?;
     coerce_numeric_fields(&mut value);
     promote_path_alias(&mut value);
-    serde_json::from_value(value).map_err(|error| humanize_serde_error(&error.to_string()))
+    let archived = value
+        .as_object()
+        .is_some_and(|object| object.contains_key(ARCHIVED_ARGS_KEY));
+    serde_json::from_value(value).map_err(|error| {
+        let message = humanize_serde_error(&error.to_string());
+        if archived {
+            // 正常情况走到这里说明输入是历史归档占位符:它长得像一次合法
+            // 工具调用,模型偶尔会把它当模板照拄。给它一句能直接打断这个
+            // 循环的话,而不是只说“缺字段”。
+            return format!(
+                "{message}。这是历史调用的参数归档占位符,不是可执行参数:请重新生成完整参数,不要照拄历史占位"
+            );
+        }
+        message
+    })
 }
 
 /// 参数解析失败的中文化:把 serde 的英文错误归成模型可直接自纠的中文三句型。
@@ -310,5 +332,23 @@ mod tests {
         }
         let error = parse_tool_args::<StrictArgs>(r#"{"path": "a", "extra": 1}"#).unwrap_err();
         assert_eq!(error, "不支持参数 `extra`");
+    }
+
+    #[test]
+    fn archived_placeholder_gets_an_actionable_error() {
+        // 模型偶尔照抄历史占位符(正常情况下归档的调用根本不进模型面,
+        // 这里只防幻觉):错误必须点名"归档占位符",而不是只说缺字段。
+        #[derive(serde::Deserialize, Debug)]
+        #[allow(dead_code)]
+        struct Args {
+            path: String,
+            content: String,
+        }
+        let error = parse_tool_args::<Args>(
+            r#"{"_args_cleared":"本次调用的参数已归档","path":"a.rs"}"#,
+        )
+        .unwrap_err();
+        assert!(error.starts_with("缺少参数 `content`"), "{error}");
+        assert!(error.contains("归档占位符"), "{error}");
     }
 }

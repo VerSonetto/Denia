@@ -169,4 +169,18 @@ impl ChatMessage {
             tool_call_id: Some(call_id.into()),
         }
     }
+
+    /// assistant 消息在模型面上是否已无任何内容。
+    ///
+    /// 超长参数打桩会把一个工具调用从消息里摘掉;摘掉后如果正文、推理、
+    /// 其余调用都不剩,这条消息就不能再进 wire(空 assistant 消息既浪费
+    /// 计价,部分 provider 也会拒收)。
+    pub fn is_empty_assistant(&self) -> bool {
+        self.role == ChatRole::Assistant
+            && self.content.is_empty()
+            && self.images.is_empty()
+            && self.tool_calls.is_empty()
+            && self.reasoning_content.is_none()
+            && self.reasoning_replay.is_empty()
+    }
 }

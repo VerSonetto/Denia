@@ -349,7 +349,8 @@ impl TokenUsageExt for TokenUsage {
 ///   core,不在这里另写一份判据);
 /// - 摘要节点定位用 `keep_from - 1`(不是压缩事件自己的 seq),第二次压缩
 ///   时“旧摘要是否落在新区间”的判定才能与派生面一致;
-/// - `ArgsCleared` 原位替换单个工具调用的参数(高估消除);
+/// - `ArgsCleared` 把该调用及其结果**成对**移出模型面(高估消除;占位符
+///   不再进模型面,避免被当成调用模板照拄);
 /// - 未应答的工具调用在表面末端补一条合成中断结果(低估消除);
 /// - 带图用户消息在等 tool-result 期间并进 tool-result(而不是单独占一条);
 /// - 带 `replaces` 的工具结果**原位**替换(保持原 seq,与派生面同语义)。
@@ -384,8 +385,22 @@ pub struct ContextMeter {
     /// 应答时(D)撤下。
     unanswered: Vec<UnansweredCall>,
     /// 工具调用 id → 其所在 assistant 表面节点:超长参数打桩(`ArgsCleared`)
-    /// 要原位替换**那一个调用**的参数,需要知道它落在哪条消息上。
+    /// 要把**那一个调用**连同样本成对移出模型面,需要知道它落在哪条消息上。
     call_nodes: HashMap<String, CallNode>,
+    /// assistant 表面节点 seq → 该命中里**非 tool_call** 部分的开销
+    /// (角色框 + 正文 + 推理 + 图片)。归档打桩删掉一个调用后,判断这条
+    /// 消息是不是变成空壳、以及扣减多少,都靠它——不必保存消息正文。
+    assistant_non_call_tokens: HashMap<u64, u64>,
+    /// 工具调用 id → 它那条 tool-result 节点的 seq:归档打桩要把结果
+    /// 连同调用一起移出模型面,计价也必须成对撤下。
+    call_result_nodes: HashMap<String, u64>,
+    /// 已归档打桩的调用 id:模型面上它们的调用与结果都已移除,后续到达
+    /// 的结果(如微压缩链上的 `replaces`)同样不进表面。
+    archived_calls: std::collections::HashSet<String>,
+    /// 归档说明的待落面队列: `(事件 seq, 估算 tokens)`。说明必须排在
+    /// 本步所有工具结果之后(与 `derive_surface` 的 `pending_notes` 同判据),
+    /// 未应答调用清零时才计入表面。
+    pending_notes: Vec<(u64, u64)>,
     /// 等 tool-result 期间注入的带图用户消息里的图片(暂存,并入紧随的
     /// tool-result;对齐 `derive_surface` 的 `pending_tool_images`)。
     pending_tool_images: Vec<ImageData>,
@@ -497,7 +512,7 @@ struct UnansweredCall {
 /// 换了一份”。
 pub type ProjectionStamp = (u64, usize);
 
-/// 工具调用在表面上的位置与自身开销(参数打桩原位替换用)。
+/// 工具调用在表面上的位置与自身开销(归档打桩成对撤回用)。
 ///
 /// 调用 id 不在这里再存一份:它就是 `ContextMeter::call_nodes` 的键(热路径
 /// 上每个工具调用少一次 `String` 克隆)。
@@ -505,8 +520,9 @@ pub type ProjectionStamp = (u64, usize);
 struct CallNode {
     /// 承载该调用的 assistant 表面节点的 seq。
     seq: u64,
-    name: String,
-    /// 该调用当前的启发式开销(id + name + arguments + 块框)。
+    /// 该调用当前的启发式开销(id + arguments + 块框)。
+    ///
+    /// 归档打桩不再需要参数重写,但保留它用于判断“删掉后消息是否只剩空壳”。
     tokens: u64,
 }
 
@@ -520,6 +536,10 @@ impl ContextMeter {
             baseline_nodes: HashMap::new(),
             unanswered: Vec::new(),
             call_nodes: HashMap::new(),
+            assistant_non_call_tokens: HashMap::new(),
+            call_result_nodes: HashMap::new(),
+            archived_calls: std::collections::HashSet::new(),
+            pending_notes: Vec::new(),
             pending_tool_images: Vec::new(),
             folded_projection: None,
             turn_usage: TurnTokenUsage::default(),
@@ -624,26 +644,56 @@ impl ContextMeter {
                     self.sampled_system_tokens = Some(self.system_tokens);
                     self.sampled_tools_tokens = Some(self.tools_tokens);
                 }
-                let Some(message) = extract_assistant_message(blocks) else {
+                let Some(mut message) = extract_assistant_message(blocks) else {
                     return;
                 };
+                // 参数本身就是归档占位符的调用:与 `derive_surface` 同口径,
+                // 整条不进表面,补一条“没有执行”的说明。
+                let mut archived_now = Vec::new();
+                message.tool_calls.retain(|call| {
+                    if denia_core::session::is_archived_arguments(&call.arguments) {
+                        archived_now.push(call.id.clone());
+                        false
+                    } else {
+                        true
+                    }
+                });
+                for call_id in archived_now {
+                    self.archived_calls.insert(call_id);
+                    self.pending_notes.push((
+                        envelope.seq,
+                        estimate_message(&ChatMessage::user(
+                            denia_core::session::ARCHIVED_SKIP_NOTE,
+                        )),
+                    ));
+                }
+                if message.is_empty_assistant() {
+                    self.flush_pending_notes();
+                    return;
+                }
+                let tokens = estimate_message(&message);
+                let call_tokens = estimate_tool_calls(&message.tool_calls);
                 for call in &message.tool_calls {
                     // 未应答的调用在 surface 末端会合成一条中断结果;先计入,
                     // 应答时再撤下。
                     self.note_unanswered(&call.id);
-                    // 记下调用所在节点:参数打桩要原位替换这条消息里的那个调用。
-                    // 调用 id 就是这张表的键,不再在值里存一份(热路径的克隆
-                    // 只留一次)。
+                    // 记下调用所在节点:归档打桩要把这条消息里的那个调用
+                    // 连同它的结果一起移出表面。
                     self.call_nodes.insert(
                         call.id.clone(),
                         CallNode {
                             seq: envelope.seq,
-                            name: call.name.clone(),
                             tokens: estimate_call_tokens(&call.id, &call.name, &call.arguments),
                         },
                     );
                 }
-                self.fold_message_add(envelope.seq, estimate_message(&message));
+                // 非调用部分的开销:删掉一个调用后判断“消息是否只剩空壳”
+                // 与精确扣减都靠它(estimate_message 的 tool_calls 部分是
+                // 逐项相加的,没有舍入交叉)。
+                self.assistant_non_call_tokens
+                    .insert(envelope.seq, tokens.saturating_sub(call_tokens));
+                self.fold_message_add(envelope.seq, tokens);
+                self.flush_pending_notes();
             }
             SessionEvent::ToolResult {
                 call_id,
@@ -653,6 +703,13 @@ impl ContextMeter {
             } => {
                 // 已应答:surface 末端不再为它合成中断结果。
                 self.answer_call(call_id);
+                // 归档打桩已把该调用连同结果移出表面:后续到的结果(微压缩
+                // 链上的 replaces)同样不进模型面(`derive_surface` 对同
+                // call_id 的所有结果一律保留删除)。
+                if self.archived_calls.contains(call_id) {
+                    self.flush_pending_notes();
+                    return;
+                }
                 let tokens = if self.pending_tool_images.is_empty() {
                     estimate_message(&ChatMessage::tool_result(call_id.clone(), content.clone()))
                 } else {
@@ -673,40 +730,69 @@ impl ContextMeter {
                     // 若按新事件 seq 落节点,第二次替换同一个目标时会找不到
                     // 旧节点,导致扣减漏掉。
                     self.surface_tokens = self.surface_tokens.saturating_sub(old_tokens);
+                    self.call_result_nodes
+                        .insert(call_id.clone(), *replaced_seq);
                     self.fold_message_add(*replaced_seq, tokens);
+                    self.flush_pending_notes();
                     return;
                 }
+                self.call_result_nodes
+                    .insert(call_id.clone(), envelope.seq);
                 self.fold_message_add(envelope.seq, tokens);
+                self.flush_pending_notes();
             }
             SessionEvent::ArgsCleared {
                 call_id,
                 placeholder,
                 ..
             } => {
-                // 超长参数打桩:原位替换那条 assistant 消息里的调用参数,只改
-                // 该调用自身的开销。找不到节点说明该调用已不在模型面上
-                // (被压缩折叠),与 `derive_surface` 一样静默跳过。
+                // 归档打桩:把该调用**连同它的结果**移出模型面(与
+                // `derive_surface` 同一投影),再用一条普通 assistant 说明
+                // 代替——占位符本身是一次合法工具调用的形状,留在模型面
+                // 就会被当成模板照抄,"缺少参数"错误就是这么来的。
+                //
+                // 乱序/损坏日志的兜底:若结果还没到,先撒下末尾合成的
+                // 中断结果计价(与派生面的 `unanswered.retain` 同口径)。
+                self.answer_call(call_id);
                 let Some(node) = self.call_nodes.get(call_id).cloned() else {
                     return;
                 };
                 let Some(current) = self.surface_nodes.get(&node.seq).copied() else {
                     return;
                 };
-                let updated = estimate_call_tokens(call_id, &node.name, placeholder);
-                let adjusted = current.saturating_sub(node.tokens).saturating_add(updated);
-                self.surface_nodes.insert(node.seq, adjusted);
-                if updated >= node.tokens {
-                    self.surface_tokens = self.surface_tokens.saturating_add(updated - node.tokens);
+                let Some(non_call) = self.assistant_non_call_tokens.get(&node.seq).copied() else {
+                    return;
+                };
+                // 消息里只剩这一个调用、且没有正文/推理时,删掉后整条退出
+                // 模型面(判据与 `ChatMessage::is_empty_assistant` 同口径:
+                // 空 assistant 的估算恰好就是角色框开销)。
+                let only_call = current.saturating_sub(non_call) == node.tokens;
+                let becomes_empty = only_call && non_call == ROLE_OVERHEAD;
+                self.surface_tokens = self.surface_tokens.saturating_sub(node.tokens);
+                if becomes_empty {
+                    self.surface_tokens = self.surface_tokens.saturating_sub(non_call);
+                    self.surface_nodes.remove(&node.seq);
+                    self.assistant_non_call_tokens.remove(&node.seq);
                 } else {
-                    self.surface_tokens = self.surface_tokens.saturating_sub(node.tokens - updated);
+                    self.surface_nodes
+                        .insert(node.seq, current.saturating_sub(node.tokens));
                 }
-                self.call_nodes.insert(
-                    call_id.clone(),
-                    CallNode {
-                        tokens: updated,
-                        ..node
-                    },
-                );
+                // 结果节点成对撤下:模型面上同 call_id 的所有 tool 消息都会
+                // 被删(含后续压缩链上的原位替换)。
+                if let Some(result_seq) = self.call_result_nodes.remove(call_id)
+                    && let Some(result_tokens) = self.surface_nodes.remove(&result_seq)
+                {
+                    self.surface_tokens = self.surface_tokens.saturating_sub(result_tokens);
+                }
+                self.call_nodes.remove(call_id);
+                self.archived_calls.insert(call_id.clone());
+                // 说明等本步所有结果到齐再计入表面(与派生面同一条件)。
+                let note = denia_core::session::archived_call_note(placeholder);
+                self.pending_notes.push((
+                    envelope.seq,
+                    estimate_message(&ChatMessage::user(note)),
+                ));
+                self.flush_pending_notes();
             }
             SessionEvent::CompactionSummary {
                 summary,
@@ -732,6 +818,14 @@ impl ContextMeter {
                 // 同通道注入会以为"还有旧节点可扣"(实际已被压缩扣过)。
                 self.baseline_nodes
                     .retain(|_, seq| self.surface_nodes.contains_key(seq));
+                self.assistant_non_call_tokens
+                    .retain(|seq, _| self.surface_nodes.contains_key(seq));
+                self.call_result_nodes
+                    .retain(|_, seq| self.surface_nodes.contains_key(seq));
+                // 还没落面的归档说明:seq 落在被压缩区间里就随区间一起丢,
+                // 否则留到下一次 flush(与派生面插入后的 retain 同效果)。
+                self.pending_notes
+                    .retain(|(seq, _)| *seq < *replaces_from || *seq > *replaces_to);
                 // 摘要节点定位与 `derive_surface` 一致:插在保留窗口**之前**
                 // (`keep_from - 1`),而不是压缩事件自身的 seq。这个 seq 决定了
                 // 下一次压缩时“旧摘要是否落在新区间”的判定,口径必须一致。
@@ -767,6 +861,16 @@ impl ContextMeter {
             }
         });
         self.surface_tokens = self.surface_tokens.saturating_sub(answered);
+    }
+
+    /// 归档说明落面:该步还有未应答调用时先挂着(与派生面同条件)。
+    fn flush_pending_notes(&mut self) {
+        if !self.unanswered.is_empty() || self.pending_notes.is_empty() {
+            return;
+        }
+        for (seq, tokens) in std::mem::take(&mut self.pending_notes) {
+            self.fold_message_add(seq, tokens);
+        }
     }
 
     /// 一批事件按顺序增量回放。
@@ -1742,9 +1846,9 @@ mod tests {
 
     #[test]
     fn meter_surface_matches_derived_surface_when_args_cleared() {
-        // 差异 c:超长参数打桩(`ArgsCleared`)在模型面上把 tool_call 的
-        // arguments 原位换成占位符。meter 若继续按原始参数计价,就是**高估**
-        // ——而且高估量恰好是模型永远看不到的那份死重。
+        // 差异 c:超长参数打桩(`ArgsCleared`)把该调用与它那条结果**成对**
+        // 移出模型面。meter 若继续按原始参数计价,就是**高估**——而且高估量
+        // 恰好是模型永远看不到的那份死重。
         let long_args = format!(
             "{{\"path\":\"a.rs\",\"content\":\"{}\"}}",
             "x".repeat(8_000)
@@ -1770,10 +1874,35 @@ mod tests {
             after < before,
             "打桩必须让表面变小: before={before} after={after}"
         );
-        // 差额恰好是那一份 arguments 的估算差(口径断言,不是实现细节)。
+        // 差额 = 该调用的全部开销 + 它那条结果的整条消息 - 归档说明
+        // (调用与结果移出模型面,说明以普通 assistant 文本补回);
+        // 消息正文("动手")保留在表面。
+        let note = denia_core::session::archived_call_note(placeholder);
+        let note_tokens = estimate_message(&ChatMessage::user(note));
         assert_eq!(
             before - after,
-            estimate_text(&long_args) - estimate_text(placeholder)
+            estimate_call_tokens("call_w", "write_file", &long_args)
+                + estimate_message(&ChatMessage::tool_result("call_w", "已写入"))
+                - note_tokens
+        );
+        // 模型面里不能再出现占位符或这条调用:占位符的形状就是一次合法
+        // 工具调用,留着就会被模型照抄成新的调用。
+        let surface = denia_core::session::derive_surface(&events);
+        assert!(
+            !surface.iter().any(|item| {
+                item.message
+                    .tool_calls
+                    .iter()
+                    .any(|call| call.id == "call_w")
+                    || item.message.tool_call_id.as_deref() == Some("call_w")
+            }),
+            "归档后的调用与结果必须成对退出模型面"
+        );
+        assert!(
+            surface
+                .iter()
+                .any(|item| item.message.content.contains("工具调用已完成")),
+            "“写完了”的事实要留住"
         );
     }
 

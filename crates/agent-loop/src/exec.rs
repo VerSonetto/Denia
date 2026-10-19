@@ -218,10 +218,10 @@ async fn commit_result(
     )?;
     // —— 超长参数打桩:write_file/edit 的大参数执行成功后即成死重 ——
     // 文件内容已在磁盘(纪律:改前重读),历史里保留全文只会让后续每个
-    // 请求重复携带并推高上下文压力。落 ArgsCleared 把派生历史里的参数
-    // 替换为短占位(保留 path 与体量),日志与 UI 仍存全文;打桩发生在
+    // 请求重复携带并推高上下文压力。落 ArgsCleared 把派生历史里的这条
+    // 调用**连同结果**移出模型面(占位符只留给日志与 UI),打桩发生在
     // 参数刚进入历史的时点,下一次请求本就要为新内容付一次 miss,此后
-    // 每个请求都省下这份死重,且替换对每个请求确定一致,不破坏前缀缓存。
+    // 每个请求都省下这份死重,且投影对每个请求确定一致,不破坏前缀缓存。
     if !output.is_error
         && matches!(call.name.as_str(), "write_file" | "edit")
         && call.arguments.len() >= ARGS_STUB_THRESHOLD_CHARS
@@ -334,7 +334,10 @@ fn read_stamp_meta(state: &TurnState, call: &ToolCallRef, cwd: &Path) -> Option<
     }))
 }
 
-/// 构造打桩占位符:保留 `path`(模型定位文件用)与原体量说明。
+/// 构造归档占位符:保留 `path` 与原体量说明(日志/UI 展示用)。
+///
+/// 模型面不再看到它——`derive_surface` 会把归档的调用连同结果整条移出;
+/// 这里保留占位只是为了日志与界面还能读出"这次写了哪个文件、多大"。
 /// 参数解析失败时返回 None——宁可不打桩,不损坏历史里的参数结构。
 fn stub_arguments(arguments: &str) -> Option<String> {
     let value: serde_json::Value = serde_json::from_str(arguments.trim()).ok()?;
@@ -342,16 +345,19 @@ fn stub_arguments(arguments: &str) -> Option<String> {
         .get("path")
         .and_then(|path| path.as_str())
         .unwrap_or("(未知路径)");
-    Some(
-        serde_json::json!({
-            "path": path,
-            "_args_cleared": format!(
-                "本次调用的参数已归档(共 {} 字符),文件内容在磁盘上;需要查看或修改时先 read_file 读取。",
-                arguments.len()
-            ),
-        })
-        .to_string(),
-    )
+    let mut object = serde_json::Map::new();
+    object.insert(
+        "path".into(),
+        serde_json::Value::String(path.to_string()),
+    );
+    object.insert(
+        denia_tools::support::ARCHIVED_ARGS_KEY.into(),
+        serde_json::Value::String(format!(
+            "本次调用的参数已归档(共 {} 字符),文件内容在磁盘上;需要查看或修改时先 read_file 读取。",
+            arguments.len()
+        )),
+    );
+    Some(serde_json::Value::Object(object).to_string())
 }
 
 /// 派发前的硬性校验：子代理硬禁项、会话有效工具面、jobs 授权与未知工具。

@@ -916,10 +916,13 @@ pub enum SessionEvent {
         /// 本次新增的输出正文。
         text: String,
     },
-    /// 超长工具参数打桩(模型侧投影):把 `call_id` 对应的工具调用参数在
-    /// 派生历史里替换为 `placeholder`。日志与 UI 保留全文,只有模型面变短。
+    /// 超长工具参数打桩(模型侧投影):把 `call_id` 对应的工具调用**连同
+    /// 它的结果**移出派生历史,`placeholder` 只留给日志与 UI。
+    ///
+    /// 不把占位符写进模型面是刻意的:占位符本身是一次合法工具调用的形状,
+    /// 模型会把它当成上一条写文件的格式照抄,大内容时稳定复现"缺少参数"。
     /// write_file/edit 的大参数执行成功后即成死重——文件已在磁盘,按纪律
-    /// 重读走 read_file;打桩让后续请求不再重复携带全部内容,且替换对每个
+    /// 重读走 read_file;移出后后续请求不再重复携带全部内容,且投影对每个
     /// 请求确定一致,不破坏提供方前缀缓存。
     ArgsCleared {
         turn: u32,
@@ -1202,6 +1205,58 @@ pub fn injection_channel<'a>(
         .find_map(|(prefix, name)| text.starts_with(prefix).then_some(*name))
 }
 
+/// 超长参数归档占位符的标记键。
+///
+/// `placeholder` 是日志/UI 的展示形态,模型面不再看到它;参数解析层用
+/// 同一个字面量识别模型凭幻觉复现的旧形状(`denia_tools` 重导出此常量)。
+pub const ARCHIVED_ARGS_KEY: &str = "_args_cleared";
+
+/// 归档调用在模型面上的替代文本。
+///
+/// 模型需要知道“这一步确实写入成功了”(否则会以为上一步没执行而重做),
+/// 但这段信息不能以工具调用/参数的形式出现——占位符的形状就是一次合法
+/// 工具调用,会被照抄。这里给一段普通注入文本(与 feedback 注入同一模式),
+/// 不含任何可被当成参数的结构。
+pub fn archived_call_note(placeholder: &str) -> String {
+    let value: serde_json::Value = serde_json::from_str(placeholder.trim()).unwrap_or_default();
+    let path = value
+        .get("path")
+        .and_then(|path| path.as_str())
+        .unwrap_or_default();
+    let detail = value
+        .get(ARCHIVED_ARGS_KEY)
+        .and_then(|detail| detail.as_str())
+        .unwrap_or_default();
+    match (path.is_empty(), detail.is_empty()) {
+        (false, false) => format!("[工具调用归档] 已写入 {path}。{detail}"),
+        (false, true) => {
+            format!("[工具调用归档] 已写入 {path}(参数正文已移出上下文,文件内容在磁盘上)。")
+        }
+        (true, false) => format!("[工具调用归档] 上一次工具调用已完成。{detail}"),
+        (true, true) => "[工具调用归档] 上一次工具调用已完成,参数正文已移出上下文(文件内容在磁盘上;需要查看或修改请先 read_file)。".to_string(),
+    }
+}
+
+/// 参数是否是归档占位符(JSON 对象里带 `ARCHIVED_ARGS_KEY`)。
+///
+/// 两种来源都要拦:一是投影把归档调用换成了占位符(旧版本日志留下的
+/// `ArgsCleared`),二是模型自己照抄占位符发出的调用。它们都长得和一次
+/// 合法工具调用一样,留在模型面就会被继续照抄。
+pub fn is_archived_arguments(arguments: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(arguments.trim()).is_ok_and(|value| {
+        value
+            .as_object()
+            .is_some_and(|object| object.contains_key(ARCHIVED_ARGS_KEY))
+    })
+}
+
+/// 历史遗留占位符调用在模型面上的说明:那次调用没有执行。
+///
+/// 与 [`archived_call_note`] 不同——那条表示“已写入”,只用于真实成功
+/// 后被归档的调用;占位符本身作为参数发出去的调用必然没有执行。
+pub const ARCHIVED_SKIP_NOTE: &str =
+    "[工具调用归档] 上一次调用没有执行:它的参数是历史归档占位符,不是有效参数。如仍需要该操作,请重新生成完整参数。";
+
 /// 一条派生 surface 消息及其来源事件 seq。压缩器用它把消息切回事件区间。
 #[derive(Debug, Clone)]
 pub struct SurfaceMessage {
@@ -1253,8 +1308,32 @@ fn derive_surface_inner(events: &[SessionEnvelope]) -> Vec<SurfaceMessage> {
         }
     }
 
+    /// 归档说明落面:该 assistant 消息还有未应答调用时先挂着。
+    fn flush_archived_notes(
+        surface: &mut Vec<SurfaceItem>,
+        pending: &mut Vec<(u64, String)>,
+        unanswered: &[String],
+    ) {
+        if !unanswered.is_empty() || pending.is_empty() {
+            return;
+        }
+        for (seq, note) in pending.drain(..) {
+            // 用 user 注入而不是 assistant 文本:denia 已有"工具结果之后插一条
+            // 注入消息"的固定模式(feedback 等),不会产生连续 assistant;
+            // 内容也不含任何可被照抄成工具调用的结构。
+            surface.push(plain(seq, ChatMessage::user(note)));
+        }
+    }
+
     let mut surface: Vec<SurfaceItem> = Vec::new();
     let mut unanswered: Vec<String> = Vec::new();
+    // 已归档打桩的调用:它们已被移出模型面,之后到达的同 call_id 结果
+    // (微压缩链上的 `replaces`)也必须继续不进面。
+    let mut archived_calls: std::collections::HashSet<String> = std::collections::HashSet::new();
+    // 归档说明:等这条 assistant 消息的所有工具结果都到齐后再落面——
+    // 普通消息夹在 tool_call 与 tool_result 之间会让 provider 拒收
+    // (要求二者相邻)。
+    let mut pending_notes: Vec<(u64, String)> = Vec::new();
     // 压缩折叠:被压缩的区间变成摘要消息,插在保留窗口之前。
     #[derive(Clone)]
     struct PendingSummary {
@@ -1332,13 +1411,32 @@ fn derive_surface_inner(events: &[SessionEnvelope]) -> Vec<SurfaceMessage> {
                 });
             }
             SessionEvent::AssistantMessage { blocks, .. } => {
-                let Some(message) = crate::message::assistant_from_blocks(blocks) else {
+                let Some(mut message) = crate::message::assistant_from_blocks(blocks) else {
                     continue;
                 };
-                for call in &message.tool_calls {
-                    unanswered.push(call.id.clone());
+                // 参数本身是归档占位符的调用(旧版本投影残留,或模型照抄)
+                // 同样不能进模型面:它和一次合法工具调用长得一样,留着只会
+                // 被继续照抄。这类调用从未执行,给一条"没有执行"的说明。
+                let mut archived_now = Vec::new();
+                message.tool_calls.retain(|call| {
+                    if is_archived_arguments(&call.arguments) {
+                        archived_now.push(call.id.clone());
+                        false
+                    } else {
+                        true
+                    }
+                });
+                for call_id in archived_now {
+                    pending_notes.push((seq, ARCHIVED_SKIP_NOTE.to_string()));
+                    archived_calls.insert(call_id);
                 }
-                surface.push(plain(seq, message));
+                if !message.is_empty_assistant() {
+                    for call in &message.tool_calls {
+                        unanswered.push(call.id.clone());
+                    }
+                    surface.push(plain(seq, message));
+                }
+                flush_archived_notes(&mut surface, &mut pending_notes, &unanswered);
             }
             SessionEvent::ToolResult {
                 call_id,
@@ -1348,12 +1446,18 @@ fn derive_surface_inner(events: &[SessionEnvelope]) -> Vec<SurfaceMessage> {
                 ..
             } => {
                 unanswered.retain(|id| id != call_id);
+                if archived_calls.contains(call_id) {
+                    // 归档调用已不在模型面:晚到的结果不再进门,只做结算。
+                    flush_archived_notes(&mut surface, &mut pending_notes, &unanswered);
+                    continue;
+                }
                 let content = content.clone();
                 if let Some(replaced_seq) = replaces
                     && let Some(item) = surface.iter_mut().find(|item| item.seq == *replaced_seq)
                 {
                     item.message = ChatMessage::tool_result(call_id.clone(), content);
                     item.is_error = *is_error;
+                    flush_archived_notes(&mut surface, &mut pending_notes, &unanswered);
                     continue;
                 }
                 if pending_tool_images.is_empty() {
@@ -1378,33 +1482,55 @@ fn derive_surface_inner(events: &[SessionEnvelope]) -> Vec<SurfaceMessage> {
                         channel: None,
                     });
                 }
+                flush_archived_notes(&mut surface, &mut pending_notes, &unanswered);
             }
             SessionEvent::ArgsCleared {
                 call_id,
                 placeholder,
                 ..
             } => {
-                // 找最近一条含该调用的 assistant 表面条目,原位替换参数。
-                // 事件序保证目标唯一且已入 surface(调用先于结果,打桩
-                // 在结果之后);被压缩折叠掉时静默跳过。
-                for item in surface.iter_mut().rev() {
-                    if item.message.role != crate::message::ChatRole::Assistant {
-                        continue;
-                    }
-                    if let Some(call) = item
-                        .message
-                        .tool_calls
-                        .iter_mut()
-                        .find(|call| call.id == *call_id)
-                    {
-                        call.arguments = placeholder.clone();
-                        break;
-                    }
+                // 归档调用整条退出模型面(调用 + 结果),但“这一步写完了”
+                // 的事实要留住——否则模型会以为上一步没执行而重做。
+                //
+                // 留的方式是一段普通 assistant 文本,而不是占位符:占位符
+                // 本身是一次合法工具调用的形状,模型会把它当成上一条写文件的
+                // 模板照抄,写入大文件时稳定复现"缺少参数 `content`"。
+                // 日志与 UI 仍保留全文。
+                //
+                // 事件序保证结果先到;这里再撤一次兜底,避免损坏/旧日志里
+                // 的乱序事件在末尾合成一条没有对应调用的中断结果。
+                unanswered.retain(|id| id != call_id);
+                let Some(position) = surface.iter().position(|item| {
+                    item.message.role == crate::message::ChatRole::Assistant
+                        && item.message.tool_calls.iter().any(|call| call.id == *call_id)
+                }) else {
+                    // 调用已被压缩折掉:结果同样不在模型面上,静默跳过。
+                    continue;
+                };
+                surface[position]
+                    .message
+                    .tool_calls
+                    .retain(|call| call.id != *call_id);
+                if surface[position].message.is_empty_assistant() {
+                    surface.remove(position);
                 }
+                // 结果与被移除的调用必须成对消失,否则模型面会出现没有
+                // 对应 tool_call 的 tool 消息(provider 直接拒收)。
+                surface
+                    .retain(|item| item.message.tool_call_id.as_deref() != Some(call_id.as_str()));
+                // 说明等本步所有结果到齐再落面(见 `flush_archived_notes`)。
+                pending_notes.push((seq, archived_call_note(placeholder)));
+                archived_calls.insert(call_id.clone());
+                flush_archived_notes(&mut surface, &mut pending_notes, &unanswered);
             }
             _ => {}
         }
     }
+
+    // 末尾兜底:正常路径的最后一条 ToolResult 已上过 flush;这里兜的是
+    // 归档事件之后没有新结果的情形。还有未应答调用时不落面(说明的插入
+    // 位置必须排在所有工具结果之后,与 meter 同判据)。
+    flush_archived_notes(&mut surface, &mut pending_notes, &unanswered);
 
     // 摘要消息插到保留窗口之前(对齐 compact boundary 语义:摘要代表被
     // 压缩的旧历史,随后是保留窗口,最后是压缩后新追加的消息)。
@@ -2086,6 +2212,152 @@ mod tests {
         assert_eq!(messages[1].tool_calls.len(), 1);
         assert_eq!(messages[2], ChatMessage::tool_result("c1", "pruned"));
         assert!(!messages[2].content.contains("xxx"));
+    }
+
+    /// 一条 `ToolResult` 事件(归档测试只关心 call_id/内容/替换目标)。
+    fn tool_result_event(call_id: &str, content: &str, replaces: Option<u64>) -> SessionEvent {
+        SessionEvent::ToolResult {
+            turn: 1,
+            step: 1,
+            call_id: call_id.into(),
+            content: content.into(),
+            is_error: false,
+            error: None,
+            error_identity: None,
+            meta: None,
+            replaces,
+            truncation: None,
+        }
+    }
+
+    /// 一条只带工具调用的 assistant 事件(可带一句正文)。
+    fn assistant_calls(text: &str, calls: &[(&str, &str)]) -> SessionEvent {
+        let mut blocks = Vec::new();
+        if !text.is_empty() {
+            blocks.push(ContentBlock::Text {
+                text: text.into(),
+            });
+        }
+        for (id, arguments) in calls {
+            blocks.push(ContentBlock::ToolCall {
+                id: (*id).into(),
+                name: "write_file".into(),
+                arguments: (*arguments).into(),
+                incomplete: false,
+            });
+        }
+        SessionEvent::AssistantMessage {
+            turn: 1,
+            step: 1,
+            blocks,
+            usage: None,
+            interrupted: false,
+            source_event_seqs: Vec::new(),
+            first_token_time: None,
+        }
+    }
+
+    fn user_event(text: &str) -> SessionEvent {
+        SessionEvent::UserMessage {
+            text: text.into(),
+            injected: false,
+            images: Vec::new(),
+            channel: None,
+        }
+    }
+
+    #[test]
+    fn derive_archives_cleared_call_and_result_together() {
+        // 归档打桩后,该调用与它的结果必须成对退出模型面:占位符本身是
+        // 一次合法工具调用的形状,留在模型面就会被照抄成新的调用。
+        let big = "x".repeat(9_000);
+        let big_args = format!(r#"{{"path":"big.js","content":"{big}"}}"#);
+        let events = vec![
+            envelope(1, user_event("写两个文件")),
+            envelope(
+                2,
+                assistant_calls(
+                    "动手",
+                    &[
+                        ("c_big", big_args.as_str()),
+                        ("c_small", r#"{"path":"small.txt","content":"tiny"}"#),
+                    ],
+                ),
+            ),
+            envelope(3, tool_result_event("c_big", "已写入 big", None)),
+            envelope(4, tool_result_event("c_small", "已写入 small", None)),
+            envelope(
+                5,
+                SessionEvent::ArgsCleared {
+                    turn: 1,
+                    step: 1,
+                    call_id: "c_big".into(),
+                    placeholder: String::new(),
+                },
+            ),
+            // 归档之后到达的同 call_id 结果(微压缩链)也不得回表:
+            // 模型面已经没有它的调用了。
+            envelope(6, tool_result_event("c_big", "pruned", Some(3))),
+        ];
+        let messages = derive_messages(&events);
+        assert_eq!(
+            messages.len(),
+            4,
+            "user + assistant + 小调用的结果 + 归档说明"
+        );
+        assert!(
+            !messages.iter().any(|message| {
+                message.tool_calls.iter().any(|call| call.id == "c_big")
+                    || message.tool_call_id.as_deref() == Some("c_big")
+                    || message.content.contains("_args_cleared")
+                    || message.content.contains(&big)
+            }),
+            "归档的调用、结果与参数都不得留在模型面"
+        );
+        assert_eq!(messages[1].content, "动手");
+        assert_eq!(messages[1].tool_calls.len(), 1);
+        assert_eq!(messages[1].tool_calls[0].id, "c_small");
+        assert_eq!(
+            messages[2],
+            ChatMessage::tool_result("c_small", "已写入 small")
+        );
+        // “写完了”的事实以普通注入文本留在模型面(不会诱导重做)。
+        assert_eq!(messages[3].role, crate::message::ChatRole::User);
+        assert!(
+            messages[3].content.contains("上一次工具调用已完成"),
+            "{}",
+            messages[3].content
+        );
+    }
+
+    #[test]
+    fn derive_drops_assistant_message_left_empty_by_archive() {
+        // 单独一条大参数调用、没有正文:归档后整条消息退出模型面,
+        // 不能留下空 assistant 消息。
+        let big_args = format!(r#"{{"path":"big.js","content":"{}"}}"#, "x".repeat(9_000));
+        let events = vec![
+            envelope(1, user_event("go")),
+            envelope(2, assistant_calls("", &[("c_big", big_args.as_str())])),
+            envelope(3, tool_result_event("c_big", "已写入", None)),
+            envelope(
+                4,
+                SessionEvent::ArgsCleared {
+                    turn: 1,
+                    step: 1,
+                    call_id: "c_big".into(),
+                    placeholder: String::new(),
+                },
+            ),
+        ];
+        let messages = derive_messages(&events);
+        assert_eq!(messages.len(), 2, "user + 归档说明");
+        assert_eq!(messages[0], ChatMessage::user("go"));
+        assert_eq!(messages[1].role, crate::message::ChatRole::User);
+        assert!(
+            messages[1].content.contains("上一次工具调用已完成"),
+            "{}",
+            messages[1].content
+        );
     }
 
     #[test]
