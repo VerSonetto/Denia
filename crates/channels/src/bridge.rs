@@ -5,7 +5,7 @@
 
 use async_trait::async_trait;
 use denia_core::config::ModelSelection;
-use denia_core::session::PermissionMode;
+use denia_core::session::{AskQuestion, PermissionMode};
 use serde::Serialize;
 
 /// 一条工作区摘要(供 `/workspace` 列表)。
@@ -99,18 +99,38 @@ pub struct TurnReply {
     pub outcome: TurnOutcome,
 }
 
-/// 轮次进行中主动推给用户的通知(目前用于审批请求)。
+/// 轮次进行中主动推给用户的富通知。
+#[derive(Debug, Clone)]
+pub enum Notice {
+    Text(String),
+    /// 工具调用需要审批;QQ 等支持键盘的平台可渲染成按钮。
+    Approval {
+        session_id: String,
+        request_id: String,
+        tool: String,
+        args_preview: String,
+    },
+    /// `ask` 工具发起提问;支持键盘的平台可把选项渲染成按钮。
+    Ask {
+        session_id: String,
+        request_id: String,
+        questions: Vec<AskQuestion>,
+        timeout_ms: u64,
+    },
+}
+
+/// 轮次进行中主动推给用户的通知(支持文本与富交互两类)。
 #[derive(Clone, Default)]
-pub struct NoticeSink(Option<tokio::sync::mpsc::UnboundedSender<String>>);
+pub struct NoticeSink(Option<tokio::sync::mpsc::UnboundedSender<Notice>>);
 
 impl NoticeSink {
-    pub fn new(sender: tokio::sync::mpsc::UnboundedSender<String>) -> Self {
+    pub fn new(sender: tokio::sync::mpsc::UnboundedSender<Notice>) -> Self {
         Self(Some(sender))
     }
 
-    pub fn send(&self, text: impl Into<String>) {
+    pub fn send(&self, notice: Notice) {
         if let Some(sender) = &self.0 {
-            let _ = sender.send(text.into());
+            let _ = sender.send(notice);
         }
     }
 }
@@ -146,8 +166,22 @@ pub trait ChannelHost: Send + Sync {
     /// 中断会话当前轮次(幂等)。
     async fn cancel(&self, session_id: &str) -> Result<(), String>;
 
-    /// 结算挂起的审批请求;返回是否真的有一个待决请求被结算。
-    async fn answer_approval(&self, session_id: &str, approve: bool) -> Result<bool, String>;
+    /// 结算挂起的审批请求;`request_id` 为空时取最早的一个(文本指令场景)。
+    async fn answer_approval(
+        &self,
+        session_id: &str,
+        request_id: Option<&str>,
+        approve: bool,
+    ) -> Result<bool, String>;
+
+    /// 结算一次 `ask` 提问中单选问题的某个选项;返回是否命中挂起请求。
+    async fn answer_ask(
+        &self,
+        session_id: &str,
+        request_id: &str,
+        question_id: &str,
+        option: &str,
+    ) -> Result<bool, String>;
 
     /// 没有显式模型选择时使用哪个模型(取目录里第一个可用项)。
     async fn default_model(&self) -> Result<ModelSelection, String>;

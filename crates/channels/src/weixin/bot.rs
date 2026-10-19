@@ -12,7 +12,7 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::bindings::BindingStore;
-use crate::bridge::{ChannelHost, ImageAttachment, NoticeSink};
+use crate::bridge::{ChannelHost, ImageAttachment, Notice, NoticeSink};
 use crate::commands::{self, Command};
 
 use super::SharedStatus;
@@ -532,7 +532,7 @@ impl WeixinBot {
             self.send_text(sender, "当前没有绑定会话。").await;
             return;
         };
-        match self.host.answer_approval(&session_id, approve).await {
+        match self.host.answer_approval(&session_id, None, approve).await {
             Ok(true) => {
                 self.send_text(sender, if approve { "已放行。" } else { "已拒绝。" })
                     .await;
@@ -647,12 +647,31 @@ impl WeixinBot {
             "已提交到会话 {}",
             &session_id[..session_id.len().min(8)]
         ));
-        let (notice_tx, mut notice_rx) = mpsc::unbounded_channel::<String>();
+        let (notice_tx, mut notice_rx) = mpsc::unbounded_channel::<Notice>();
         let notifier = {
             let this = self.clone();
             let sender = sender.to_string();
             tokio::spawn(async move {
-                while let Some(text) = notice_rx.recv().await {
+                while let Some(notice) = notice_rx.recv().await {
+                    let text = match notice {
+                        Notice::Text(text) => text,
+                        Notice::Approval {
+                            tool, args_preview, ..
+                        } => format!(
+                            "需要审批：工具 {tool}\n参数预览：{args_preview}\n回复 /approve 放行一次，/reject 拒绝。"
+                        ),
+                        Notice::Ask { questions, .. } => {
+                            let mut out = String::from("需要你的回答：");
+                            for question in &questions {
+                                out.push_str(&format!("\n\n[{}] {}", question.id, question.question));
+                                for option in &question.options {
+                                    out.push_str(&format!("\n- {}", option.label));
+                                }
+                            }
+                            out.push_str("\n\n（微信端暂不支持按钮作答，请在控制台回答）");
+                            out
+                        }
+                    };
                     this.send_text(&sender, &text).await;
                 }
             })
@@ -1025,7 +1044,18 @@ mod tests {
         async fn answer_approval(
             &self,
             _session_id: &str,
+            _request_id: Option<&str>,
             _approve: bool,
+        ) -> Result<bool, String> {
+            Err("noop".into())
+        }
+
+        async fn answer_ask(
+            &self,
+            _session_id: &str,
+            _request_id: &str,
+            _question_id: &str,
+            _option: &str,
         ) -> Result<bool, String> {
             Err("noop".into())
         }

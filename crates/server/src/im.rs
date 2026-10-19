@@ -14,7 +14,7 @@ use async_trait::async_trait;
 use base64::Engine;
 use denia_channels::bindings::BindingStore;
 use denia_channels::bridge::{
-    ChannelHost, NoticeSink, SessionInfo, TurnOutcome, TurnReply, WorkspaceInfo,
+    ChannelHost, Notice, NoticeSink, SessionInfo, TurnOutcome, TurnReply, WorkspaceInfo,
 };
 use denia_channels::qqbot::bot::QqBot;
 use denia_channels::qqbot::client::Client as QqClient;
@@ -578,7 +578,12 @@ impl ChannelHost for ServerChannelHost {
         Ok(())
     }
 
-    async fn answer_approval(&self, session_id: &str, approve: bool) -> Result<bool, String> {
+    async fn answer_approval(
+        &self,
+        session_id: &str,
+        request_id: Option<&str>,
+        approve: bool,
+    ) -> Result<bool, String> {
         let Some(live) = self.0.live.get(session_id) else {
             return Ok(false);
         };
@@ -587,8 +592,13 @@ impl ChannelHost for ServerChannelHost {
                 .pending_approvals
                 .lock()
                 .unwrap_or_else(|poison| poison.into_inner());
-            let key = pending.keys().next().cloned();
-            key.and_then(|key| pending.remove(&key))
+            match request_id {
+                Some(request_id) => pending.remove(request_id),
+                None => {
+                    let key = pending.keys().next().cloned();
+                    key.and_then(|key| pending.remove(&key))
+                }
+            }
         };
         let Some(sender) = sender else {
             return Ok(false);
@@ -605,6 +615,40 @@ impl ChannelHost for ServerChannelHost {
             feedback: None,
         };
         let _ = sender.send(decision);
+        Ok(true)
+    }
+
+    async fn answer_ask(
+        &self,
+        session_id: &str,
+        request_id: &str,
+        question_id: &str,
+        option: &str,
+    ) -> Result<bool, String> {
+        use denia_core::session::{AskAnswer, AskOutcome, AskResolution};
+        let Some(live) = self.0.live.get(session_id) else {
+            return Ok(false);
+        };
+        let sender = {
+            let mut pending = live
+                .pending_asks
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            pending.remove(request_id)
+        };
+        let Some(sender) = sender else {
+            return Ok(false);
+        };
+        let _ = sender.send(AskResolution {
+            outcome: AskOutcome::Answered,
+            answers: vec![AskAnswer {
+                id: question_id.to_string(),
+                selected: vec![option.to_string()],
+                custom: None,
+                skipped: false,
+            }],
+            reason: None,
+        });
         Ok(true)
     }
 
@@ -692,13 +736,30 @@ impl ChannelHost for ServerChannelHost {
                         }
                     }
                     SessionEvent::ApprovalAsked {
+                        request_id,
                         tool,
                         args_preview,
                         ..
                     } => {
-                        notices.send(format!(
-                            "需要审批：工具 {tool}\n参数预览：{args_preview}\n回复 /approve 放行一次，/reject 拒绝。"
-                        ));
+                        notices.send(Notice::Approval {
+                            session_id: session_id.to_string(),
+                            request_id,
+                            tool,
+                            args_preview,
+                        });
+                    }
+                    SessionEvent::AskRequested {
+                        request_id,
+                        questions,
+                        timeout_ms,
+                        ..
+                    } => {
+                        notices.send(Notice::Ask {
+                            session_id: session_id.to_string(),
+                            request_id,
+                            questions,
+                            timeout_ms,
+                        });
                     }
                     SessionEvent::TurnEnd { reason, .. } => {
                         let outcome = match reason {

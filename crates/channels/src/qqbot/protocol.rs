@@ -188,6 +188,174 @@ pub fn text_body(content: &str, msg_id: Option<&str>, msg_seq: u32) -> Value {
     body
 }
 
+/// 审批按钮键盘:允许一次 / 拒绝(同一 group,点击后其余置灰)。
+pub fn approval_keyboard(session_id: &str, request_id: &str) -> Value {
+    json!({
+        "content": {
+            "rows": [{
+                "buttons": [
+                    callback_button(
+                        "allow",
+                        "✅ 允许一次",
+                        "已允许",
+                        &format!("approve:{session_id}:{request_id}:allow-once"),
+                        1,
+                    ),
+                    callback_button(
+                        "deny",
+                        "❌ 拒绝",
+                        "已拒绝",
+                        &format!("approve:{session_id}:{request_id}:deny"),
+                        0,
+                    ),
+                ]
+            }]
+        }
+    })
+}
+
+/// ask 单选题的选项键盘;多选、无选项或超过 5 项时返回 `None`(改发文本)。
+pub fn ask_keyboard(
+    session_id: &str,
+    request_id: &str,
+    question: &denia_core::session::AskQuestion,
+) -> Option<Value> {
+    if question.multi_select || question.options.is_empty() || question.options.len() > 5 {
+        return None;
+    }
+    let buttons: Vec<Value> = question
+        .options
+        .iter()
+        .enumerate()
+        .map(|(index, option)| {
+            callback_button(
+                &format!("opt{index}"),
+                &option.label,
+                &option.label,
+                &format!(
+                    "ask:{session_id}:{request_id}:{}:{index}",
+                    question.id
+                ),
+                if option.recommended { 1 } else { 0 },
+            )
+        })
+        .collect();
+    Some(json!({ "content": { "rows": [{ "buttons": buttons }] } }))
+}
+
+fn callback_button(id: &str, label: &str, visited: &str, data: &str, style: i64) -> Value {
+    json!({
+        "id": id,
+        "render_data": { "label": label, "visited_label": visited, "style": style },
+        "action": {
+            "type": 1,
+            "permission": { "type": 2 },
+            "data": data,
+            "click_limit": 1,
+        },
+        "group_id": "action",
+    })
+}
+
+/// 按钮点击携带的决策。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ButtonAction {
+    Approve {
+        session_id: String,
+        request_id: String,
+        allow: bool,
+    },
+    Ask {
+        session_id: String,
+        request_id: String,
+        question_id: String,
+        option_index: usize,
+    },
+}
+
+pub fn parse_button_data(data: &str) -> Option<ButtonAction> {
+    if let Some(rest) = data.strip_prefix("approve:") {
+        let mut parts = rest.rsplit(':');
+        let decision = parts.next()?;
+        let request_id = parts.next()?;
+        let session_id = parts.next()?;
+        if session_id.is_empty() || request_id.is_empty() {
+            return None;
+        }
+        let allow = match decision {
+            "allow-once" => true,
+            "deny" => false,
+            _ => return None,
+        };
+        return Some(ButtonAction::Approve {
+            session_id: session_id.to_string(),
+            request_id: request_id.to_string(),
+            allow,
+        });
+    }
+    let rest = data.strip_prefix("ask:")?;
+    let mut tail = rest.rsplitn(3, ':');
+    let index = tail.next()?.parse::<usize>().ok()?;
+    let question_id = tail.next()?.to_string();
+    let head = tail.next()?;
+    let (session_id, request_id) = head.split_once(':')?;
+    if session_id.is_empty() || request_id.is_empty() || question_id.is_empty() {
+        return None;
+    }
+    Some(ButtonAction::Ask {
+        session_id: session_id.to_string(),
+        request_id: request_id.to_string(),
+        question_id,
+        option_index: index,
+    })
+}
+
+/// `INTERACTION_CREATE` 事件里与按钮决策相关的字段。
+#[derive(Debug, Clone)]
+pub struct Interaction {
+    pub id: String,
+    pub chat_type: ChatType,
+    pub chat_id: String,
+    pub sender: String,
+    pub button_data: String,
+}
+
+pub fn parse_interaction(d: &Value) -> Option<Interaction> {
+    let id = d.get("id")?.as_str()?.to_string();
+    let chat_type = match d.get("chat_type").and_then(Value::as_i64) {
+        Some(1) => ChatType::Group,
+        Some(2) => ChatType::C2c,
+        _ => return None,
+    };
+    let (chat_id, sender) = match chat_type {
+        ChatType::Group => (
+            d.get("group_openid")?.as_str()?.to_string(),
+            d.get("group_member_openid")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+        ),
+        ChatType::C2c => {
+            let user = d.get("user_openid")?.as_str()?.to_string();
+            (user.clone(), user)
+        }
+    };
+    let button_data = d
+        .pointer("/data/resolved/button_data")
+        .and_then(Value::as_str)?
+        .to_string();
+    if button_data.is_empty() {
+        return None;
+    }
+    Some(Interaction {
+        id,
+        chat_type,
+        chat_id,
+        sender,
+        button_data,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -233,5 +401,102 @@ mod tests {
         assert_eq!(reply["msg_seq"], 7);
         let active = text_body("hi", None, 1);
         assert!(active.get("msg_id").is_none());
+    }
+
+    #[test]
+    fn builds_approval_keyboard_and_parses_decision() {
+        let keyboard = approval_keyboard("s1", "r1");
+        let buttons = &keyboard["content"]["rows"][0]["buttons"];
+        assert_eq!(buttons[0]["action"]["data"], "approve:s1:r1:allow-once");
+        assert_eq!(buttons[1]["action"]["data"], "approve:s1:r1:deny");
+        assert_eq!(
+            parse_button_data("approve:s1:r1:allow-once"),
+            Some(ButtonAction::Approve {
+                session_id: "s1".into(),
+                request_id: "r1".into(),
+                allow: true,
+            })
+        );
+        assert_eq!(
+            parse_button_data("approve:s1:r1:deny"),
+            Some(ButtonAction::Approve {
+                session_id: "s1".into(),
+                request_id: "r1".into(),
+                allow: false,
+            })
+        );
+        assert_eq!(parse_button_data("approve:s1:r1:bogus"), None);
+        assert_eq!(parse_button_data("approve:s1:r1"), None);
+    }
+
+    #[test]
+    fn builds_ask_keyboard_and_parses_option() {
+        use denia_core::session::{AskOption, AskQuestion};
+        let question = AskQuestion {
+            id: "q1".into(),
+            question: "选哪个".into(),
+            header: None,
+            detail: None,
+            options: vec![
+                AskOption {
+                    label: "A".into(),
+                    description: None,
+                    recommended: true,
+                },
+                AskOption {
+                    label: "B".into(),
+                    description: None,
+                    recommended: false,
+                },
+            ],
+            multi_select: false,
+            allow_custom: true,
+        };
+        let keyboard = ask_keyboard("s1", "r1", &question).unwrap();
+        assert_eq!(
+            keyboard["content"]["rows"][0]["buttons"][0]["action"]["data"],
+            "ask:s1:r1:q1:0"
+        );
+        assert_eq!(
+            parse_button_data("ask:s1:r1:q1:1"),
+            Some(ButtonAction::Ask {
+                session_id: "s1".into(),
+                request_id: "r1".into(),
+                question_id: "q1".into(),
+                option_index: 1,
+            })
+        );
+        let multi = AskQuestion {
+            multi_select: true,
+            ..question
+        };
+        assert!(ask_keyboard("s1", "r1", &multi).is_none());
+    }
+
+    #[test]
+    fn parses_interaction_payloads() {
+        let c2c = serde_json::json!({
+            "id": "i1",
+            "chat_type": 2,
+            "user_openid": "u1",
+            "data": { "resolved": { "button_data": "approve:s1:r1:allow-once", "button_id": "allow" } }
+        });
+        let interaction = parse_interaction(&c2c).unwrap();
+        assert_eq!(interaction.id, "i1");
+        assert_eq!(interaction.chat_type, ChatType::C2c);
+        assert_eq!(interaction.chat_id, "u1");
+        assert_eq!(interaction.sender, "u1");
+
+        let group = serde_json::json!({
+            "id": "i2",
+            "chat_type": 1,
+            "group_openid": "g1",
+            "group_member_openid": "m1",
+            "data": { "resolved": { "button_data": "ask:s1:r1:q1:0" } }
+        });
+        let interaction = parse_interaction(&group).unwrap();
+        assert_eq!(interaction.chat_type, ChatType::Group);
+        assert_eq!(interaction.chat_id, "g1");
+        assert_eq!(interaction.sender, "m1");
     }
 }

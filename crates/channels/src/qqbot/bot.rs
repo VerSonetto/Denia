@@ -10,11 +10,11 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use denia_core::config::ModelSelection;
-use denia_core::session::PermissionMode;
+use denia_core::session::{AskQuestion, PermissionMode};
 use tokio::sync::mpsc;
 
 use crate::bindings::BindingStore;
-use crate::bridge::{ChannelHost, ImageAttachment, NoticeSink};
+use crate::bridge::{ChannelHost, ImageAttachment, Notice, NoticeSink};
 use crate::commands::{self, Command};
 use crate::weixin::bot::split_text;
 use crate::weixin::media;
@@ -34,6 +34,8 @@ pub struct QqBot {
     /// 每个会话最近一条入站消息 id:被动回复要带。
     last_msg_ids: Mutex<HashMap<String, String>>,
     dedup: Mutex<HashMap<String, Instant>>,
+    /// 待决 ask 的问题(request_id → 问题),按钮点击按 option index 取标签。
+    pending_asks: Mutex<HashMap<String, AskQuestion>>,
 }
 
 impl QqBot {
@@ -50,6 +52,7 @@ impl QqBot {
             status,
             last_msg_ids: Mutex::new(HashMap::new()),
             dedup: Mutex::new(HashMap::new()),
+            pending_asks: Mutex::new(HashMap::new()),
         })
     }
 
@@ -477,7 +480,7 @@ impl QqBot {
             self.send_text(target, chat_type, "当前没有会话。").await;
             return;
         };
-        match self.host.answer_approval(&session_id, approve).await {
+        match self.host.answer_approval(&session_id, None, approve).await {
             Ok(true) => {
                 let text = if approve { "已放行。" } else { "已拒绝。" };
                 self.send_text(target, chat_type, text).await;
@@ -574,13 +577,55 @@ impl QqBot {
             "已提交到会话 {}",
             &session_id[..session_id.len().min(8)]
         ));
-        let (notice_tx, mut notice_rx) = mpsc::unbounded_channel::<String>();
+        let (notice_tx, mut notice_rx) = mpsc::unbounded_channel::<Notice>();
         let notifier = {
             let this = self.clone();
             let target = target.to_string();
             tokio::spawn(async move {
-                while let Some(text) = notice_rx.recv().await {
-                    this.send_text(&target, chat_type, &text).await;
+                while let Some(notice) = notice_rx.recv().await {
+                    match notice {
+                        Notice::Text(text) => this.send_text(&target, chat_type, &text).await,
+                        Notice::Approval {
+                            session_id,
+                            request_id,
+                            tool,
+                            args_preview,
+                        } => {
+                            let content = format!("需要审批：{tool}\n{args_preview}");
+                            let keyboard =
+                                super::protocol::approval_keyboard(&session_id, &request_id);
+                            this.send_with_keyboard(&target, chat_type, &content, keyboard)
+                                .await;
+                        }
+                        Notice::Ask {
+                            session_id,
+                            request_id,
+                            questions,
+                            ..
+                        } => {
+                            let Some(question) = questions.first() else {
+                                continue;
+                            };
+                            if let Some(keyboard) =
+                                super::protocol::ask_keyboard(&session_id, &request_id, question)
+                            {
+                                this.pending_asks
+                                    .lock()
+                                    .unwrap_or_else(|poison| poison.into_inner())
+                                    .insert(request_id.clone(), question.clone());
+                                let content = format!("需要你的回答：{}", question.question);
+                                this.send_with_keyboard(&target, chat_type, &content, keyboard)
+                                    .await;
+                            } else {
+                                let mut out = format!("需要你的回答：{}", question.question);
+                                for option in &question.options {
+                                    out.push_str(&format!("\n- {}", option.label));
+                                }
+                                out.push_str("\n（选项较多或多选，请到控制台回答）");
+                                this.send_text(&target, chat_type, out).await;
+                            }
+                        }
+                    }
                 }
             })
         };
@@ -618,6 +663,116 @@ impl QqBot {
                 self.send_text(target, chat_type, format!("执行失败：{error}"))
                     .await;
             }
+        }
+    }
+
+    /// 处理按钮点击:ACK 后按 button_data 结算审批或 ask。
+    pub async fn handle_interaction(self: &Arc<Self>, d: serde_json::Value) {
+        let Some(interaction) = super::protocol::parse_interaction(&d) else {
+            return;
+        };
+        if let Err(error) = self.client.ack_interaction(&interaction.id).await {
+            tracing::warn!(%error, "QQ 交互 ACK 失败");
+        }
+        match super::protocol::parse_button_data(&interaction.button_data) {
+            Some(super::protocol::ButtonAction::Approve {
+                session_id,
+                request_id,
+                allow,
+            }) => {
+                let reply = match self
+                    .host
+                    .answer_approval(&session_id, Some(&request_id), allow)
+                    .await
+                {
+                    Ok(true) => {
+                        if allow {
+                            "已允许。".to_string()
+                        } else {
+                            "已拒绝。".to_string()
+                        }
+                    }
+                    Ok(false) => "该审批已处理或已过期。".to_string(),
+                    Err(error) => format!("审批失败：{error}"),
+                };
+                self.send_text(&interaction.chat_id, interaction.chat_type, reply)
+                    .await;
+            }
+            Some(super::protocol::ButtonAction::Ask {
+                session_id,
+                request_id,
+                question_id,
+                option_index,
+            }) => {
+                let option = self
+                    .pending_asks
+                    .lock()
+                    .unwrap_or_else(|poison| poison.into_inner())
+                    .get(&request_id)
+                    .and_then(|question| question.options.get(option_index))
+                    .map(|option| option.label.clone());
+                let Some(option) = option else {
+                    self.send_text(
+                        &interaction.chat_id,
+                        interaction.chat_type,
+                        "该提问已处理或选项已失效。",
+                    )
+                    .await;
+                    return;
+                };
+                let reply = match self
+                    .host
+                    .answer_ask(&session_id, &request_id, &question_id, &option)
+                    .await
+                {
+                    Ok(true) => {
+                        self.pending_asks
+                            .lock()
+                            .unwrap_or_else(|poison| poison.into_inner())
+                            .remove(&request_id);
+                        format!("已选择：{option}")
+                    }
+                    Ok(false) => "该提问已处理或已过期。".to_string(),
+                    Err(error) => format!("提交回答失败：{error}"),
+                };
+                self.send_text(&interaction.chat_id, interaction.chat_type, reply)
+                    .await;
+            }
+            None => {
+                tracing::warn!(button_data = %interaction.button_data, "未知的 QQ 按钮数据");
+            }
+        }
+    }
+
+    /// 发送带键盘的单条消息(审批/ask 按钮)。
+    async fn send_with_keyboard(
+        &self,
+        target: &str,
+        chat_type: ChatType,
+        text: &str,
+        keyboard: serde_json::Value,
+    ) {
+        let msg_id = self
+            .last_msg_ids
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .get(target)
+            .cloned();
+        let seq = (epoch_millis() % 65_536) as u32;
+        if let Err(error) = self
+            .client
+            .send_text_with_keyboard(
+                chat_type,
+                target,
+                text,
+                msg_id.as_deref(),
+                seq,
+                Some(keyboard),
+            )
+            .await
+        {
+            tracing::warn!(%error, "QQ 键盘消息发送失败");
+            self.set_error(format!("发送消息失败：{error}"));
         }
     }
 

@@ -131,6 +131,13 @@ async fn connect_once(
                                     mark_connected(status);
                                 }
                                 "RESUMED" => mark_connected(status),
+                                "INTERACTION_CREATE" => {
+                                    let bot = bot.clone();
+                                    let data = payload.d.clone();
+                                    tokio::spawn(async move {
+                                        bot.handle_interaction(data).await;
+                                    });
+                                }
                                 _ => {
                                     if let Some(message) = parse_inbound(event_type, &payload.d) {
                                         let bot = bot.clone();

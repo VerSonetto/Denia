@@ -116,6 +116,22 @@ impl Client {
         read_json(response).await
     }
 
+    async fn put_json(&self, path: &str, body: Value) -> Result<Value, String> {
+        let mut request = self
+            .http
+            .put(format!("{API_BASE}{path}"))
+            .timeout(API_TIMEOUT)
+            .json(&body);
+        for (name, value) in self.headers().await? {
+            request = request.header(name, value);
+        }
+        let response = request
+            .send()
+            .await
+            .map_err(|error| format!("QQ 请求失败({path}):{error}"))?;
+        read_json(response).await
+    }
+
     pub async fn gateway_url(&self) -> Result<String, String> {
         let value = self
             .get_json(&format!("{API_BASE}{GATEWAY_PATH}"))
@@ -137,12 +153,36 @@ impl Client {
         msg_id: Option<&str>,
         msg_seq: u32,
     ) -> Result<(), String> {
+        self.send_text_with_keyboard(chat_type, chat_id, content, msg_id, msg_seq, None)
+            .await
+    }
+
+    /// 发送带内联键盘的文本(审批/ask 按钮)。内容过长时会截断,不再分片——
+    /// 键盘只能挂在单条消息上。
+    pub async fn send_text_with_keyboard(
+        &self,
+        chat_type: ChatType,
+        chat_id: &str,
+        content: &str,
+        msg_id: Option<&str>,
+        msg_seq: u32,
+        keyboard: Option<Value>,
+    ) -> Result<(), String> {
         let path = match chat_type {
             ChatType::Group => format!("/v2/groups/{chat_id}/messages"),
             ChatType::C2c => format!("/v2/users/{chat_id}/messages"),
         };
         let text: String = content.chars().take(MAX_MESSAGE_LENGTH).collect();
-        self.post_json(&path, text_body(&text, msg_id, msg_seq))
+        let mut body = text_body(&text, msg_id, msg_seq);
+        if let Some(keyboard) = keyboard {
+            body["keyboard"] = keyboard;
+        }
+        self.post_json(&path, body).await.map(|_| ())
+    }
+
+    /// ACK 一次按钮点击;不 ACK 用户端会显示错误图标。
+    pub async fn ack_interaction(&self, interaction_id: &str) -> Result<(), String> {
+        self.put_json(&format!("/interactions/{interaction_id}"), json!({ "code": 0 }))
             .await
             .map(|_| ())
     }
