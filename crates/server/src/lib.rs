@@ -20,6 +20,7 @@ pub mod file_history;
 mod home_lock;
 pub mod host;
 pub(crate) mod infrastructure;
+pub mod im;
 pub mod jobs;
 pub mod mcp_runtime;
 pub mod mcp_settings;

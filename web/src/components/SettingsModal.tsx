@@ -1,5 +1,6 @@
 import { SubagentSettings } from './settings/SubagentSettings'
 import { RemoteAccessSettings } from './settings/RemoteAccessSettings'
+import { MessagingSettings } from './settings/MessagingSettings'
 import { RuntimeSettings } from './settings/RuntimeSettings'
 import { MemorySettings } from './settings/MemorySettings'
 import { SetmActions, SetmBtn, SetmCard, SetmTiles } from './settings/setm'
@@ -15,7 +16,7 @@ import {
   IconClose,
   IconUpdate,
 } from './icons'
-import { IconSettingsGeneral, IconSettingsAgents, IconSettingsPresets, IconSettingsPrompt, IconSettingsModels, IconSettingsMemory, IconSettingsRemote, IconSettingsRuntime, IconSettingsAppearance } from './SettingsIcons'
+import { IconSettingsGeneral, IconSettingsAgents, IconSettingsPresets, IconSettingsPrompt, IconSettingsModels, IconSettingsMemory, IconSettingsRemote, IconSettingsChannels, IconSettingsRuntime, IconSettingsAppearance } from './SettingsIcons'
 import { LlmPanel } from './llm/LlmPanel'
 import { AgentPresetSettings } from './settings/AgentPresetSettings'
 import { normalizePermissionMode, type PermissionMode } from '../types'
@@ -29,6 +30,7 @@ type SettingsTab =
   | 'prompts'
   | 'models'
   | 'memory'
+  | 'channels'
   | 'remote'
   | 'appearance'
 
@@ -41,6 +43,7 @@ const TABS: SettingsTab[] = [
   'prompts',
   'models',
   'memory',
+  'channels',
   'remote',
   'runtime',
   'appearance',
@@ -80,6 +83,8 @@ function tabIcon(tab: SettingsTab, size = 16) {
       return <IconSettingsMemory size={size} />
     case 'remote':
       return <IconSettingsRemote size={size} />
+    case 'channels':
+      return <IconSettingsChannels size={size} />
     case 'appearance':
       return <IconSettingsAppearance size={size} />
   }
@@ -103,6 +108,8 @@ function tabLabel(tab: SettingsTab): string {
       return t('memoryTab')
     case 'remote':
       return t('remoteTab')
+    case 'channels':
+      return t('channelsTab')
     case 'appearance':
       return t('settingsTabAppearance')
   }
@@ -126,6 +133,8 @@ function tabNavDesc(tab: SettingsTab): string {
       return t('memoryTabDesc')
     case 'remote':
       return t('remoteTabDesc')
+    case 'channels':
+      return t('channelsTabDesc')
     case 'appearance':
       return t('settingsTabAppearanceDesc')
   }
@@ -149,6 +158,8 @@ function paneTitle(tab: SettingsTab): string {
       return t('memoryPaneTitle')
     case 'remote':
       return t('remotePaneTitle')
+    case 'channels':
+      return t('channelsPaneTitle')
     case 'appearance':
       return t('catAppearance')
   }
@@ -172,6 +183,8 @@ function paneDesc(tab: SettingsTab): string {
       return t('memoryPaneDesc')
     case 'remote':
       return t('remotePaneDesc')
+    case 'channels':
+      return t('channelsPaneDesc')
     case 'appearance':
       return t('settingsAppearanceHint')
   }
@@ -581,6 +594,8 @@ export function SettingsModal({ notify, onClose, onOpenVersion }: { notify: Noti
 
 
                 {tab === 'memory' && <MemorySettings />}
+
+                {tab === 'channels' && <MessagingSettings notify={notify} />}
 
                 {tab === 'remote' && <RemoteAccessSettings notify={notify} />}
 

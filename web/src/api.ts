@@ -1414,3 +1414,18 @@ export function openInAppOpen(app: string, path: string): Promise<{ ok: boolean 
     20_000,
   )
 }
+
+/* ---- 消息通道(微信) ---- */
+
+export function getWeixinChannel(): Promise<import('./types').WeixinChannelStatus> {
+  return http('/api/channels/weixin')
+}
+
+/** 启动扫码登录;状态异步推进,前端轮询 getWeixinChannel。 */
+export function startWeixinLogin(): Promise<import('./types').WeixinChannelStatus> {
+  return http('/api/channels/weixin/login', { method: 'POST' })
+}
+
+export function logoutWeixin(): Promise<import('./types').WeixinChannelStatus> {
+  return http('/api/channels/weixin/logout', { method: 'POST' })
+}

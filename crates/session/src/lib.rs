@@ -265,6 +265,14 @@ impl Session {
             .clone()
     }
 
+    /// 日志中最大的事件 seq(冷热态都维护)。等待方用它作为增量游标。
+    pub fn last_seq(&self) -> u64 {
+        self.inner
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .last_seq
+    }
+
     /// Envelopes with `seq > after`, in order. SSE replay 专用:不克隆全量,
     /// 只收集增量区间。
     ///

@@ -1208,6 +1208,36 @@ const zh = {
   terminalExitCode: '退出码',
   terminalNew: '新建终端',
 
+  /* ---- 消息平台 ---- */
+  channelsTab: '消息平台',
+  channelsTabDesc: '连接微信等聊天平台，在聊天里驱动 denia',
+  channelsPaneTitle: '消息平台',
+  channelsPaneDesc:
+    '每个平台共用同一套指令：先发 /workspace 选择工作区；/switch 切换会话；/model 切换模型；/permission 切换权限模式。',
+  channelsIntro: '已接入的聊天平台会显示在这里；每个平台共用同一套指令。',
+  weixinTitle: '个人微信',
+  weixinHint:
+    '连接后必须先发送 /workspace 选择工作区：选中工作区后直接发消息会新建会话，/switch 可切到已有会话。',
+  weixinConnect: '扫码登录',
+  weixinRetry: '重新登录',
+  weixinConnected: '已连接',
+  weixinDisconnected: '未连接',
+  weixinAccount: '账号',
+  weixinLogout: '断开连接',
+  weixinLoggedOut: '已断开微信连接',
+  weixinScanHint: '请使用微信扫描二维码，并在手机上确认。',
+  weixinWaitScan: '等待扫码…',
+  weixinScaned: '已扫码，请在微信里确认…',
+  weixinConfirmed: '微信连接成功',
+  weixinLoginFailed: '登录失败，请重试',
+  weixinLastError: '最近错误',
+  weixinLastInbound: '最近消息',
+  weixinNoInbound: '还没有收到消息',
+  weixinChars: '字',
+  weixinCommandsTitle: '在微信里可用',
+  weixinCommands:
+    '/workspace 列出并选择工作区；/switch 列出并切换会话；/model <供应商id> <模型id> 切换模型；/permission 切换权限模式；/cancel 中断当前轮次。',
+
   /* ---- 远程连接 ---- */
   remoteTab: '远程连接',
   remoteTabDesc: '手机扫码操作 denia：局域网直连与临时公网隧道',
@@ -2485,6 +2515,37 @@ const en: typeof zh = {
   terminalExited: '[Process exited]',
   terminalExitCode: 'exit code',
   terminalNew: 'New terminal',
+
+  /* ---- Messaging platforms ---- */
+  channelsTab: 'Messaging',
+  channelsTabDesc: 'Connect WeChat and other chat platforms to drive denia',
+  channelsPaneTitle: 'Messaging platforms',
+  channelsPaneDesc:
+    'Every platform shares the same commands: send /workspace to choose a workspace; /switch changes sessions; /model changes the model; /permission changes the permission mode.',
+  channelsIntro:
+    'Connected chat platforms appear here; every platform shares the same commands.',
+  weixinTitle: 'Personal WeChat',
+  weixinHint:
+    'After connecting you must first send /workspace to choose a workspace: a plain message then starts a new session, and /switch selects an existing one.',
+  weixinConnect: 'Scan to connect',
+  weixinRetry: 'Retry login',
+  weixinConnected: 'Connected',
+  weixinDisconnected: 'Disconnected',
+  weixinAccount: 'Account',
+  weixinLogout: 'Disconnect',
+  weixinLoggedOut: 'WeChat disconnected',
+  weixinScanHint: 'Scan the QR code with WeChat and confirm on your phone.',
+  weixinWaitScan: 'Waiting for the scan…',
+  weixinScaned: 'Scanned — confirm in WeChat…',
+  weixinConfirmed: 'WeChat connected',
+  weixinLoginFailed: 'Login failed, please retry',
+  weixinLastError: 'Last error',
+  weixinLastInbound: 'Last message',
+  weixinNoInbound: 'No messages yet',
+  weixinChars: 'chars',
+  weixinCommandsTitle: 'Available in WeChat',
+  weixinCommands:
+    '/workspace lists and selects workspaces; /switch lists and switches sessions; /model <provider-id> <model-id> changes the model; /permission changes the permission mode; /cancel aborts the running turn.',
 
   /* ---- Remote access ---- */
   remoteTab: 'Remote access',

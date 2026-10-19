@@ -3,6 +3,7 @@
 
 mod agent_presets;
 mod browser;
+mod channels;
 mod credentials;
 mod events;
 mod fs;
@@ -78,6 +79,7 @@ pub fn router() -> Router<Arc<AppState>> {
     Router::new()
         .merge(settings::router())
         .merge(agent_presets::router())
+        .merge(channels::router())
         .merge(subagents::router())
         .merge(browser::router())
         .merge(credentials::router())

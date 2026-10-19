@@ -30,6 +30,47 @@ pub struct PromptCommand {
     quoted: Vec<PromptQuote>,
 }
 
+impl PromptCommand {
+    /// 通道侧构造:纯文本 + 模型选择,不带附件与引用。
+    pub fn text(
+        prompt: impl Into<String>,
+        provider: impl Into<String>,
+        model: impl Into<String>,
+        reasoning_effort: Option<String>,
+    ) -> Self {
+        Self {
+            prompt: prompt.into(),
+            skills: Vec::new(),
+            provider: Some(provider.into()),
+            model: Some(model.into()),
+            reasoning_effort,
+            images: Vec::new(),
+            files: Vec::new(),
+            quoted: Vec::new(),
+        }
+    }
+
+    /// 通道侧构造:文本 + 图片,不带文件与引用。
+    pub(crate) fn text_with_images(
+        prompt: impl Into<String>,
+        provider: impl Into<String>,
+        model: impl Into<String>,
+        reasoning_effort: Option<String>,
+        images: Vec<PromptImage>,
+    ) -> Self {
+        Self {
+            prompt: prompt.into(),
+            skills: Vec::new(),
+            provider: Some(provider.into()),
+            model: Some(model.into()),
+            reasoning_effort,
+            images,
+            files: Vec::new(),
+            quoted: Vec::new(),
+        }
+    }
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct PromptQuote {
@@ -43,11 +84,18 @@ const QUOTE_TOTAL_LIMIT: usize = 256 * 1024;
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct PromptImage {
+pub(crate) struct PromptImage {
     #[serde(default)]
     name: Option<String>,
     mime: String,
     data: String,
+}
+
+impl PromptImage {
+    /// 通道侧构造:调用方传入 base64 数据与 MIME。
+    pub(crate) fn new(name: Option<String>, mime: String, data: String) -> Self {
+        Self { name, mime, data }
+    }
 }
 
 /// 模型是否声明了图片输入能力(input_modalities 含 image)。

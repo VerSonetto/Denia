@@ -54,6 +54,8 @@ pub struct AppState {
     pub open_in_app: Arc<crate::open_in_app::OpenInAppState>,
     /// 远程连接中枢:局域网直连 + Cloudflare 临时隧道的统一入口。
     pub remote: Arc<crate::remote::RemoteManager>,
+    /// 消息通道(微信):账号、扫码登录与长轮询循环。
+    pub im: Arc<crate::im::ImService>,
     /// 绑定地址非回环 ⇒ 远程浏览器 ⇒ 目录选择器走 browse。
     pub bound_remote: bool,
 }
@@ -954,6 +956,7 @@ pub async fn build_state(
         mcp,
         open_in_app: Arc::new(crate::open_in_app::OpenInAppState::new(bound_remote)),
         remote,
+        im: crate::im::ImService::new(home),
         bound_remote,
     };
 

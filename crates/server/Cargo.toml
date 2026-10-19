@@ -21,6 +21,7 @@ denia-llm = { workspace = true }
 denia-tools = { workspace = true }
 denia-mcp = { workspace = true }
 denia-session = { workspace = true }
+denia-channels = { workspace = true }
 denia-agent-loop = { workspace = true }
 denia-browser = { workspace = true }
 denia-terminal = { workspace = true }

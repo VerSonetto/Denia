@@ -417,3 +417,20 @@ export interface RemoteStatus {
 export type RemoteExchangeResult =
   | { status: 'pin-required'; challenge: string; attempts: number }
   | { status: 'ok'; via: RemoteChannel; maxAge: number }
+
+/** 微信通道状态(/api/channels/weixin)。 */
+export interface WeixinChannelStatus {
+  connected: boolean
+  account: { accountId: string; userId: string } | null
+  lastError: string | null
+  /** 最近一条入站消息的时刻、字符数与处理动作(诊断用)。 */
+  lastInboundAt: number | null
+  lastInboundChars: number
+  lastAction: string | null
+  login: {
+    status: string
+    message: string | null
+    qrSvg: string
+    qrContent: string
+  } | null
+}

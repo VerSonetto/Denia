@@ -102,6 +102,11 @@ pub async fn prepare(
     let bound_remote = !addr.ip().is_loopback();
     let state = Arc::new(build_state(&options.home, bound_remote, addr.port()).await?);
 
+    // 微信通道:已有账号则随服务启动自动连上;首次连接走设置页扫码。
+    let channel_host: Arc<dyn denia_channels::bridge::ChannelHost> =
+        Arc::new(crate::im::ServerChannelHost(state.clone()));
+    state.im.auto_connect(channel_host).await;
+
     let web_dir = options
         .web_dir
         .filter(|dir| dir.join("index.html").is_file());

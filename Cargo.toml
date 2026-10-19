@@ -8,6 +8,7 @@ members = [
     "crates/tools",
     "crates/mcp",
     "crates/session",
+    "crates/channels",
     "crates/system-prompt",
     "crates/token-meter",
     "crates/agent-loop",
@@ -31,6 +32,7 @@ lto = "thin"
 codegen-units = 1
 
 [workspace.dependencies]
+aes = "0.8"
 denia-core = { path = "crates/core" }
 denia-settings = { path = "crates/settings" }
 denia-credentials = { path = "crates/credentials" }
@@ -38,6 +40,7 @@ denia-llm = { path = "crates/llm" }
 denia-tools = { path = "crates/tools" }
 denia-mcp = { path = "crates/mcp" }
 denia-session = { path = "crates/session" }
+denia-channels = { path = "crates/channels" }
 denia-agent-loop = { path = "crates/agent-loop" }
 denia-browser = { path = "crates/browser" }
 denia-terminal = { path = "crates/terminal" }
