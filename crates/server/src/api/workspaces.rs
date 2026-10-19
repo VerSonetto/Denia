@@ -101,7 +101,7 @@ async fn delete_workspace(
         state.driver.clear_compaction_state(session_id);
         state.driver.clear_mcp_loads(session_id);
         // 会话附件目录一并回收(粘贴图片每次落盘一张,不清即只增不减)。
-        if let Err(error) = crate::api::uploads::remove_session_uploads(&state.home, session_id) {
+        if let Err(error) = crate::infrastructure::uploads::remove_session_uploads(&state.home, session_id) {
             tracing::warn!(session_id = %session_id, error = %error, "会话附件目录清理失败");
         }
     }

@@ -349,7 +349,7 @@ async fn delete_session(
     // MCP 工具装载表随会话一起回收(重建会话回到轻量工具面)。
     state.driver.clear_mcp_loads(&id);
     // 附件目录随会话一起回收:粘贴图片每次落盘一张,不清就是只增不减的占用。
-    if let Err(error) = crate::api::uploads::remove_session_uploads(&state.home, &id) {
+    if let Err(error) = crate::infrastructure::uploads::remove_session_uploads(&state.home, &id) {
         tracing::warn!(session_id = %id, error = %error, "会话附件目录清理失败");
     }
     // 全局账本去引用:工作区列表里不残留已删会话。

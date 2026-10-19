@@ -23,6 +23,7 @@ use crate::rescue::{detect_fake_names, fake_tool_call_feedback, log_rescued, res
 use crate::runtime_context::RuntimeContextProjection;
 use crate::workspace_instructions::skill_gesture;
 use crate::{SessionDriver, TurnState, append, should_log_system_prompt};
+use crate::LOCAL_FILE_ACCESS;
 
 /// 一次 turn 内跨 step 的可变装配状态(注入基准、touched 路径、手势正文)。
 struct TurnAssembly {
@@ -80,6 +81,10 @@ pub(crate) async fn run_turn_inner(
         None => None,
     };
     prepare_turn_input(driver, state, prompt, images, files, quoted, &cwd).await?;
+    // 本会话已授权可读的本机附件(从日志折叠):read_file 的逐调用沙箱例外
+    // 只认这一份集合。必须在注入之后算 —— 本轮新选的附件就是刚写入的那条
+    // 授权记录;每轮重算所以下一轮、冷恢复可用,rewind 会撤回。
+    state.local_files = crate::local_file_grants(&state.session);
     // 子代理运行快照：角色正文与冻结授权。**读取校验失败即拒绝本轮**，不回退
     // 到默认角色或更宽的工具面（计划 5.3）。
     let subagent = match (
@@ -521,23 +526,47 @@ async fn prepare_turn_input(
     cwd: &std::path::Path,
 ) -> Result<(), LlmFailure> {
     if !files.is_empty() {
-        let list = files
+        // 先落机器可读的授权记录,再落给模型看的通知:前者是 read_file 沙箱
+        // 例外的真值,后者只是可读提示。规范化失败的路径不登记(目录、缺失
+        // 文件、链接不可达),也不展示成可读。
+        let verified: Vec<PathBuf> = files
             .iter()
-            .map(|path| format!("- {path}"))
-            .collect::<Vec<_>>()
-            .join("\n");
-        append(
-            &state.session,
-            &state.emit,
-            SessionEvent::UserMessage {
-                text: format!(
-                    "[harness] 用户上传了文件:\n{list}\n这些文件已保存,可随时用工具读取。"
-                ),
-                injected: true,
-                channel: Some("file-notice".into()),
-                images: Vec::new(),
-            },
-        )?;
+            .filter_map(|path| std::fs::canonicalize(path).ok())
+            .filter(|path| path.is_file())
+            .collect();
+        if !verified.is_empty() {
+            let paths: Vec<String> = verified
+                .iter()
+                .map(|path| path.to_string_lossy().into_owned())
+                .collect();
+            append(
+                &state.session,
+                &state.emit,
+                SessionEvent::UserMessage {
+                    text: crate::encode_grant(state.session.id(), &paths),
+                    injected: true,
+                    channel: Some(LOCAL_FILE_ACCESS.into()),
+                    images: Vec::new(),
+                },
+            )?;
+            let list = files
+                .iter()
+                .map(|path| format!("- {path}"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            append(
+                &state.session,
+                &state.emit,
+                SessionEvent::UserMessage {
+                    text: format!(
+                        "[harness] 用户引用了本机文件(原文件未复制,路径即真实位置):\n{list}\n需要内容时用 read_file 读取;只读/计划模式下这些已选文件同样可读。"
+                    ),
+                    injected: true,
+                    channel: Some("file-notice".into()),
+                    images: Vec::new(),
+                },
+            )?;
+        }
     }
     if !quoted.is_empty() {
         // 轨迹引用:与文件通知同一注入通道,真实用户消息之前落库,

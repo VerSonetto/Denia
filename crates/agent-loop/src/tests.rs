@@ -3293,6 +3293,137 @@ async fn approval_is_re_judged_after_the_session_tightens() {
 }
 
 #[tokio::test]
+async fn selected_local_file_is_readable_in_readonly_but_siblings_are_not() {
+    // 用户用原生选择器选中的工作区外文件,在只读/计划档下必须可读;
+    // 同目录的兄弟文件、父目录都不跟着解锁。
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let dir = std::env::temp_dir().join(format!("denia-local-file-{stamp}"));
+    std::fs::create_dir_all(&dir).unwrap();
+    let picked = dir.join("picked.txt");
+    let sibling = dir.join("sibling.txt");
+    std::fs::write(&picked, "PICKED BODY").unwrap();
+    std::fs::write(&sibling, "SIBLING BODY").unwrap();
+    let picked_raw = picked.to_string_lossy().replace('\\', "/");
+    let sibling_raw = sibling.to_string_lossy().replace('\\', "/");
+
+    let (driver, _registry) = driver_with_tools(
+        vec![
+            MockScript::Chunks(tool_calls_script(&[
+                (
+                    "call_picked",
+                    "read_file",
+                    &format!(r#"{{"path":"{picked_raw}"}}"#),
+                ),
+                (
+                    "call_sibling",
+                    "read_file",
+                    &format!(r#"{{"path":"{sibling_raw}"}}"#),
+                ),
+            ])),
+            MockScript::Chunks(text_script("done")),
+        ],
+        |tools| *tools = denia_tools::default_registry(),
+    );
+    let session = temp_session();
+    session.set_permission_mode(PermissionMode::ReadOnly).unwrap();
+    // 把选中的文件作为本轮附件传入:授权应从这条入站路径建立。
+    driver
+        .run_turn(
+            &session,
+            &selection(),
+            "read these",
+            Vec::new(),
+            vec![picked.to_string_lossy().into_owned()],
+            Vec::new(),
+            true,
+            CancellationToken::new(),
+            noop_emit(),
+        )
+        .await;
+
+    let results = result_texts(&session);
+    assert_eq!(results.len(), 2, "{results:?}");
+    assert!(!results[0].0, "selected file must be readable: {}", results[0].1);
+    assert!(
+        results[0].1.contains("PICKED BODY"),
+        "selected file content must arrive: {}",
+        results[0].1
+    );
+    assert!(results[1].0, "sibling file must stay confined: {}", results[1].1);
+    assert!(
+        !results[1].1.contains("SIBLING BODY"),
+        "sibling content must not leak: {}",
+        results[1].1
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn selected_local_file_grant_does_not_allow_writes_and_survives_next_turn() {
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let dir = std::env::temp_dir().join(format!("denia-local-grant-{stamp}"));
+    std::fs::create_dir_all(&dir).unwrap();
+    let picked = dir.join("picked.txt");
+    std::fs::write(&picked, "ORIGINAL").unwrap();
+    let picked_raw = picked.to_string_lossy().replace('\\', "/");
+
+    let (driver, _registry) = driver_with_tools(
+        vec![
+            // 第一轮:对已授权文件发起写入,必须仍被只读档拒绝。
+            MockScript::Chunks(tool_calls_script(&[(
+                "call_write",
+                "write_file",
+                &format!(r#"{{"path":"{picked_raw}","content":"HACKED"}}"#),
+            )])),
+            MockScript::Chunks(text_script("done")),
+            // 第二轮:不再传附件参数,但授权应当从日志恢复。
+            MockScript::Chunks(tool_calls_script(&[(
+                "call_read_again",
+                "read_file",
+                &format!(r#"{{"path":"{picked_raw}"}}"#),
+            )])),
+            MockScript::Chunks(text_script("done")),
+        ],
+        |tools| *tools = denia_tools::default_registry(),
+    );
+    let session = temp_session();
+    session.set_permission_mode(PermissionMode::ReadOnly).unwrap();
+    driver
+        .run_turn(
+            &session,
+            &selection(),
+            "write it",
+            Vec::new(),
+            vec![picked.to_string_lossy().into_owned()],
+            Vec::new(),
+            true,
+            CancellationToken::new(),
+            noop_emit(),
+        )
+        .await;
+    let first = result_texts(&session);
+    assert_eq!(first.len(), 1, "{first:?}");
+    assert!(first[0].0, "write must stay denied: {}", first[0].1);
+    assert_eq!(std::fs::read_to_string(&picked).unwrap(), "ORIGINAL");
+
+    run_simple_turn(&driver, &session, "read it again").await;
+    let all = result_texts(&session);
+    let second = all.last().expect("second turn produces a tool result");
+    assert!(
+        !second.0 && second.1.contains("ORIGINAL"),
+        "grant must survive into the next turn: {}",
+        second.1
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
 async fn sandbox_still_confines_readonly_and_plan_outside_writes() {
     // 只读/计划档沙箱照旧:区外写不弹审批,策略引擎先行拒绝(Read 类的
     // 区外访问则由工具层 resolve_within 兜底)。

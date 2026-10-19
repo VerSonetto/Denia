@@ -32,7 +32,7 @@ import { PlanReviewPanel } from '../components/PlanReviewPanel';
 import { ApprovalDialog, type ApprovalDecision, type ApprovalRequest } from '../components/ApprovalDialog';
 import { ConfirmDialog } from '../components/ConfirmDialog';
 import { ContextRing } from '../components/ContextRing';
-import { IconWorkspace, IconCheck, IconBranch, IconArrowDown, IconChevron, IconClose, IconDownload, IconFile, IconFolder, IconImage, IconPanelOpen, IconPlus, IconPromptOptimize, IconSend, IconSparkles, IconUndo, IconSpinner, IconStop, IconSlashCommand, IconAgentSpawn } from '../components/icons';
+import { IconWorkspace, IconCheck, IconBranch, IconArrowDown, IconChevron, IconClose, IconDownload, IconFile, IconFolder, IconPanelOpen, IconPlus, IconPromptOptimize, IconSend, IconSparkles, IconUndo, IconSpinner, IconStop, IconSlashCommand, IconAgentSpawn } from '../components/icons';
 import { resolveSessionReasoningEffort } from '../modelCatalog';
 import { useStickToBottom } from '../hooks/useStickToBottom';
 import { useContainedWheel } from '../hooks/useContainedWheel';
@@ -46,7 +46,7 @@ import { GoalBar } from '../components/GoalBar';
 import { QueuedMessagePanel } from '../components/QueuedMessagePanel';
 import { ConversationAxis } from '../components/ConversationAxis';
 import { downloadFile, serializeSession, type ExportFormat } from '../lib/exportSession';
-import type { AskAnswer, CatalogModel, ModelCatalog, ModelSelection, PermissionMode, SessionSummary, SessionTotals, TodoItem, QueuedMessage, UserMessageImage, WorkspaceRecord } from '../types';
+import type { AskAnswer, CatalogModel, ModelCatalog, ModelSelection, PendingAttachment, PermissionMode, SessionSummary, SessionTotals, TodoItem, QueuedMessage, UserMessageImage, WorkspaceRecord } from '../types';
 import { normalizePermissionMode } from '../types';
 import { isGenericImageName } from '../userImages';
 import { setModelSelection as setSharedModelSelection } from '../modelSelectionStore';
@@ -476,7 +476,10 @@ export default function SessionsPage({
     bytes: number
     preview: string
   }[]>([])
-  const [attachments, setAttachments] = useState<{ name: string; mime: string; file: File }[]>([])
+  const [attachments, setAttachments] = useState<PendingAttachment[]>([])
+  // 远程来客没有可用的本机文件选择器(路径在客户端不存在),入口直接隐藏；
+  // 后端同样拒绝,这里是界面层的提前告知。
+  const [canPickLocalFiles, setCanPickLocalFiles] = useState(true)
   // 轨迹引用(芯片挂在输入框上方,随消息以 injected 上下文注入)。
   const [trajQuotes, setTrajQuotes] = useState<TrajectoryQuote[]>([])
   const composerScope = activeId ? `session:${activeId}` : activeWs?.path ? `workspace:${activeWs.path}` : null
@@ -523,7 +526,6 @@ export default function SessionsPage({
   const [agentPresetBusy, setAgentPresetBusy] = useState(false)
   const pendingFullAccessRef = useRef<PermissionMode | null>(null)
   const [approvalReq, setApprovalReq] = useState<ApprovalRequest | null>(null)
-  const fileInputRef = useRef<HTMLInputElement | null>(null)
   const contextSelectionRef = useRef({ start: 0, end: 0 })
   const contextQuotesRef = useRef(trajQuotes)
   contextQuotesRef.current = trajQuotes
@@ -908,29 +910,30 @@ export default function SessionsPage({
     if (text) document.execCommand('insertText', false, text)
   }
 
-  const onPickFiles = useCallback((event: React.ChangeEvent<HTMLInputElement>) => {
-    const files = event.target.files
-    if (!files) return
-    for (const file of Array.from(files)) {
-      setAttachments((previous) => [
-        ...previous,
-        { name: file.name, mime: file.type || 'application/octet-stream', file },
-      ])
+  const onPickFiles = useCallback(async () => {
+    let paths: string[]
+    try {
+      // 只取路径:不读文件内容,大文件也不会进内存或网络。
+      ({ paths } = await api.pickFiles())
+    } catch (error) {
+      notify('err', `${t('pickFilesFailed')}:${error instanceof Error ? error.message : String(error)}`)
+      return
     }
-    event.target.value = ''
+    if (paths.length === 0) return
+    setAttachments((previous) => [
+      ...previous,
+      // 重名只影响显示;发送用的是完整路径,不会互相覆盖。
+      ...paths.map((path) => ({ name: path.split(/[/\\]/).pop() || path, path })),
+    ])
   }, [])
 
-  const fileToBase64 = useCallback((file: File): Promise<string> => {
-    return new Promise((resolve, reject) => {
-      const reader = new FileReader()
-      reader.onload = () => {
-        const result = String(reader.result)
-        const comma = result.indexOf(',')
-        resolve(comma >= 0 ? result.slice(comma + 1) : result)
-      }
-      reader.onerror = () => reject(reader.error)
-      reader.readAsDataURL(file)
-    })
+  // 本机控制台才有原生文件选择器；远程访问时隐藏入口(后端也会拒绝)。
+  useEffect(() => {
+    let cancelled = false
+    void api.pickerCapability()
+      .then(({ remote }) => { if (!cancelled) setCanPickLocalFiles(!remote) })
+      .catch(() => { /* 拿不到能力就保持可用,发送时后端仍是权威校验 */ })
+    return () => { cancelled = true }
   }, [])
 
   /* ---- 对话流贴底跟随 ---- *
@@ -1557,22 +1560,8 @@ export default function SessionsPage({
         skillEntries.map((skill) => skill.name),
       )
       validateContextQuotes(outgoingQuotes)
-      // 附件上传(不限格式):先持久化,再随消息注入路径。
-      const uploadedPaths: string[] = []
-      for (const attachment of outgoingAttachments) {
-        try {
-          const data = await fileToBase64(attachment.file)
-          const result = await api.uploadAttachment({
-            sessionId: id,
-            name: attachment.name,
-            mime: attachment.mime,
-            data,
-          })
-          uploadedPaths.push(result.path)
-        } catch (error) {
-          throw new Error(`${t('uploadFailed')}:${attachment.name}(${error instanceof Error ? error.message : String(error)})`)
-        }
-      }
+      // 附件:直接引用本机路径,不再读内容上传。大文件只是路径一条,不占带宽。
+      const uploadedPaths = outgoingAttachments.map((attachment) => attachment.path)
       await api.postPrompt(id, {
         prompt: body,
         provider: selection?.provider,
@@ -1956,8 +1945,8 @@ export default function SessionsPage({
           ))}
           {attachments.map((attachment, index) => (
             <span className="att-chip" key={`att-${index}`}>
-              {attachment.mime.startsWith('image/') ? <IconImage size={12} /> : <IconFile size={12} />}
-              <span className="att-name" title={attachment.name}>{attachment.name}</span>
+              <IconFile size={12} />
+              <span className="att-name" title={attachment.path}>{attachment.name}</span>
               <button
                 type="button"
                 className="att-remove"
@@ -2156,18 +2145,12 @@ export default function SessionsPage({
       <div className="prompt-bar">
         {/* 左组:添加上下文与权限档位。 */}
         <div className="composer-left">
-          <input
-            ref={fileInputRef}
-            type="file"
-            multiple
-            hidden
-            onChange={onPickFiles}
-          />
           <ComposerContextMenu
             panelAnchorRef={composerPanelRef}
             disabled={inert || optimizing || sending}
             workspacePath={contextWorkspacePath}
             filesAvailable={activeSession?.cwd_alive !== false}
+            canPickLocalFiles={canPickLocalFiles}
             activeId={activeId}
             sessions={sessions}
             commands={!showAttachRow ? [
@@ -2175,7 +2158,7 @@ export default function SessionsPage({
               { name: 'plan', label: t('contextPlan'), description: t('cmdPlanDesc') },
             ] : []}
             onOpen={openContextMenu}
-            onUpload={() => fileInputRef.current?.click()}
+            onUpload={() => { void onPickFiles() }}
             onFile={insertContextFile}
             onSession={addContextSession}
             onCommand={insertContextCommand}

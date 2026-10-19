@@ -23,7 +23,6 @@ mod subagents;
 mod system_prompt;
 mod terminals;
 mod update;
-mod uploads;
 mod workspaces;
 
 use std::sync::Arc;
@@ -89,7 +88,6 @@ pub fn router() -> Router<Arc<AppState>> {
         .merge(runtime::router())
         .merge(skills::router())
         .merge(workspaces::router())
-        .merge(uploads::router())
         .merge(fs::router())
         .merge(events::router())
         .merge(system_prompt::router())

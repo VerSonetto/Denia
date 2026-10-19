@@ -943,7 +943,7 @@ export function postPrompt(
     reasoningEffort?: string
     /** 粘贴的内联图片(base64);模型必须支持识图。 */
     images?: { name?: string; mime: string; data: string }[]
-    /** 已上传文件的绝对路径(作为注入上下文随消息发送)。 */
+    /** 引用的本机文件绝对路径(不再上传副本,模型按需读取)。 */
     files?: string[]
     /** 轨迹引用(标题, 正文);以 injected 上下文消息随本轮注入。 */
     quoted?: { title: string; text: string }[]
@@ -1028,22 +1028,10 @@ export function cancelAsk(id: string, requestId: string): Promise<{ ok: boolean 
   })
 }
 
-/** 上传一个附件(不限格式),返回持久化后的绝对路径与字节数。 */
-export function uploadAttachment(params: {
-  sessionId: string
-  name: string
-  mime: string
-  data: string
-}): Promise<{ path: string; name: string; bytes: number }> {
-  return http('/api/attachments', {
-    method: 'POST',
-    body: JSON.stringify({
-      sessionId: params.sessionId,
-      name: params.name,
-      mime: params.mime,
-      data: params.data,
-    }),
-  })
+/** 选择宿主机上的文件，只返回绝对路径，不读取也不上传内容。
+ *  用户可能停留任意久，不设超时；远程连接时后端直接拒绝。 */
+export function pickFiles(): Promise<{ paths: string[] }> {
+  return http('/api/fs/pick-files', { method: 'POST' }, 0)
 }
 
 /** 当前上下文 token 拆分(token-meter 服务端 fold)。 */

@@ -22,7 +22,7 @@ pub struct PromptCommand {
     /// 粘贴的内联图片(base64);模型必须标记为可识图。
     #[serde(default)]
     images: Vec<PromptImage>,
-    /// 已上传文件(绝对路径);作为注入上下文随消息发送。
+    /// 用户引用的本机文件(绝对路径);作为注入上下文随消息发送。
     #[serde(default)]
     files: Vec<String>,
     /// 轨迹引用(标题, 正文);以 injected 上下文消息随本轮注入。
@@ -226,23 +226,19 @@ impl<'a> SessionCommands<'a> {
                 format!("{shown} 未标记为可识图,粘贴的图片不能发送;请切换到支持图片输入的模型。"),
             ));
         }
-        // 上传文件校验:必须存在且位于会话工作区或本会话上传目录内。
+        // 引用文件校验:本机原生选择器给出的绝对路径,只要求存在且是普通文件。
+        // 不再有"上传副本"这一层:路径指向用户磁盘上的原件,模型经 read_file 按需读取。
+        // 相对路径一律拒绝 —— 相对谁的语义含糊,而选择器永远给绝对路径(fail loud)。
         let mut upload_files = Vec::new();
-        {
-            let cwd = live.session.header().cwd.clone();
-            let uploads_root = self.services.home.join("uploads").join(&id);
-            for file in &body.files {
-                let path = std::path::PathBuf::from(file);
-                let allowed =
-                    (path.starts_with(&cwd) || path.starts_with(&uploads_root)) && path.is_file();
-                if !allowed {
-                    return Err(CommandError::bad_request(
-                        "session/bad-attachment",
-                        format!("文件 '{}' 不在会话工作区或上传目录内", file),
-                    ));
-                }
-                upload_files.push(path.to_string_lossy().to_string());
+        for file in &body.files {
+            let path = std::path::PathBuf::from(file);
+            if !path.is_absolute() || !path.is_file() {
+                return Err(CommandError::bad_request(
+                    "session/bad-attachment",
+                    format!("文件 '{file}' 不是可读取的本机文件"),
+                ));
             }
+            upload_files.push(path.to_string_lossy().to_string());
         }
         // 粘贴图片落盘:与上传文件同一目录、同一套消毒规则。内联 data URL 仍是
         // 首选视觉通道,落盘只是给模型留一条 read_file 可走的备份 —— 协议转换层

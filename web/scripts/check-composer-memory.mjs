@@ -105,8 +105,7 @@ assert.deepEqual(await memory.loadComposer('session:missing'), empty())
 assert.equal(memory.readComposerText('session:missing'), null)
 await assert.rejects(memory.loadComposer('invalid'), /scope/)
 await assert.rejects(memory.saveComposer('workspace:', empty()), /scope/)
-const file = new File(['attachment bytes'], 'example.txt', { type: 'text/plain', lastModified: 123 })
-const attachment = { name: file.name, mime: file.type, file }
+const attachment = { name: 'example.txt', path: 'D:/docs/example.txt' }
 const snapshot = {
   text: 'draft',
   images: [{ name: 'image.png', mime: 'image/png', data: 'YQ==', bytes: 1, preview: 'data:image/png;base64,YQ==' }],
@@ -125,11 +124,19 @@ assert.equal(restored.queue.length, 1)
 assert.deepEqual(restored.images, snapshot.images)
 assert.deepEqual(restored.quotes, snapshot.quotes)
 for (const entry of [restored.attachments[0], restored.queue[0].attachments[0]]) {
-  assert.ok(entry.file instanceof File)
-  assert.equal(entry.file.name, 'example.txt')
-  assert.equal(entry.file.lastModified, 123)
-  assert.equal(await entry.file.text(), 'attachment bytes')
+  assert.equal(entry.name, 'example.txt')
+  assert.equal(entry.path, 'D:/docs/example.txt')
 }
+// 旧草稿（只有 File 句柄、没有绝对路径）必须在恢复时丢弃，否则会在发送时才失败。
+await memory.saveComposer('session:legacy', {
+  ...empty(),
+  attachments: [{ name: 'old.txt', mime: 'text/plain', file: new File(['x'], 'old.txt') }],
+  queue: [{ id: 'q-legacy', text: 'old', images: [], quotes: [],
+    attachments: [{ name: 'old.txt', mime: 'text/plain', file: new File(['x'], 'old.txt') }] }],
+})
+const legacy = await memory.loadComposer('session:legacy')
+assert.deepEqual(legacy.attachments, [], '旧附件形状必须被过滤')
+assert.deepEqual(legacy.queue[0].attachments, [], '队列里的旧附件同样过滤')
 const writes = ['first', 'second', 'third'].map(text => memory.saveComposer('session:ordered', { ...empty(), text }))
 await Promise.all(writes)
 assert.equal(maxActiveWrites, 1)

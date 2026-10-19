@@ -80,6 +80,10 @@ const stubs = new Map([
     export function subscribeEvents(...args) { b.record('subscribeEvents', args); return () => {}; }
     export async function listSkills(...args) { b.record('listSkills', args); return { skills: [] }; }
     export async function getGoal(...args) { b.record('getGoal', args); return { goal: null, tokensUsed: 0, maxRounds: 10 }; }
+    export async function pickFiles(...args) {
+      b.record('pickFiles', args);
+      return { paths: ['D:/mock-workspace/docs/context.txt'] };
+    }
     export async function searchMentions(...args) {
       b.record('searchMentions', args);
       if (args[0] !== 'D:/mock-workspace' || !args[2] || args[2].aborted) throw new Error('Unexpected mention scope/signal');
@@ -99,6 +103,10 @@ const stubs = new Map([
     export async function uploadAttachment(...args) {
       b.record('uploadAttachment', args);
       return { path: 'mock-upload/' + args[0].name };
+    }
+    export async function pickerCapability() {
+      b.record('pickerCapability', []);
+      return { kind: 'native', remote: false };
     }
     ${unexpectedApi.map(name => `export function ${name}(...args) { b.record('${name}', args); throw new Error('Unexpected API: ${name}'); }`).join('\n')}
   `],
@@ -272,14 +280,11 @@ async function chooseSession(id = source.id) {
   await click(row('session', 'data-context-session', id))
   await waitFor(() => chip() && !menu(), 'Session handler must create a quote chip and close the menu')
 }
-async function attachFile(name = 'context.txt', text = 'Attachment fixture') {
-  const input = document.querySelector('input[type="file"][hidden]')
-  const file = new g.File([text], name, { type: 'text/plain' })
-  await act(async () => {
-    Object.defineProperty(input, 'files', { value: [file], configurable: true })
-    input.dispatchEvent(new g.Event('change', { bubbles: true }))
-  })
-  return file
+async function attachFile(name = 'context.txt', path = 'D:/mock-workspace/docs/context.txt') {
+  // 附件不再经隐藏 file input：页面直接调后端原生选择器，只拿绝对路径。
+  bridge.pickerClicks.push({ viaNativeDialog: true, menuWasOpen: !!menu() })
+  await onUploadFromMenu()
+  return { name, path }
 }
 // Never replace the draft wholesale here: DOM Range insertion must preserve existing chip identity.
 g.document.execCommand = (command, _ui, value) => {
@@ -302,14 +307,24 @@ g.document.execCommand = (command, _ui, value) => {
   return true
 }
 const nativeInputClick = g.HTMLInputElement.prototype.click
+// 页面已不再使用隐藏 file input；保留守卫，万一回退成浏览器文件框也能暴露出来。
 g.HTMLInputElement.prototype.click = function () {
   if (this.type === 'file') {
     bridge.pickerClicks.push({ hidden: this.hidden, menuWasOpen: !!menu(), inUploadGesture })
-    return // jsdom cannot open an OS picker.
+    throw new Error('Hidden file input must not be used: attachments go through the host picker')
   }
   return nativeInputClick.call(this)
 }
 let inUploadGesture = false
+/** 点击菜单里的“引用文件”项，触发真实的 onUpload → api.pickFiles 链。 */
+async function onUploadFromMenu() {
+  await openMenu()
+  await act(async () => {
+    inUploadGesture = true
+    try { row('upload').click() } finally { inUploadGesture = false }
+  })
+  await waitFor(() => calls('pickFiles').length > 0, 'Upload item must call the host file picker API')
+}
 let root
 let pickerRequests = 0
 let selectedWorkspaces = []
@@ -381,23 +396,23 @@ async function test(label, run) {
 }
 
 try {
-  await test('1 页面 + 只开菜单；只有上传项同步点击 hidden file input', async () => {
+  await test('1 页面 + 只开菜单；上传项走宿主原生选择器', async () => {
     await mount()
     assert.equal(calls('searchMentions').length, 0, 'Closed menu does not query files')
     await openMenu()
-    assert.equal(bridge.pickerClicks.length, 0)
+    assert.equal(calls('pickFiles').length, 0)
     assert.equal(trigger().getAttribute('aria-expanded'), 'true')
     assert.equal(document.querySelector('.composer-context-popover').parentElement, document.body)
     assert.equal(document.querySelector('.composer-context-popover').dataset.positioned, 'true')
     assert.equal(document.activeElement, search())
     await closeMenu()
-    assert.equal(bridge.pickerClicks.length, 0)
+    assert.equal(calls('pickFiles').length, 0)
     await openMenu()
     await act(async () => {
       inUploadGesture = true
       try { row('upload').click() } finally { inUploadGesture = false }
     })
-    assert.deepEqual(bridge.pickerClicks, [{ hidden: true, menuWasOpen: true, inUploadGesture: true }])
+    await waitFor(() => calls('pickFiles').length === 1, 'Upload item must open the host file picker')
     assert.equal(menu(), null)
     assert.equal(calls('ensureSession').length, 0)
   })
@@ -525,7 +540,7 @@ try {
     assert.equal(document.querySelector('.queue-chip-name').textContent, expectedTitle(source))
     assert.deepEqual(bridge.queue[0].quotes, [expectedQuote()])
     assert.equal(bridge.queue[0].text, 'Queued with context')
-    assert.equal(bridge.queue[0].attachments[0].file, file)
+    assert.equal(bridge.queue[0].attachments[0].path, file.path)
     await click(document.querySelector(`[aria-label="${t('queueEdit')}"]`))
     assert.equal(document.querySelector('.queue-panel'), null)
     assert.equal(chip().querySelector('.att-name').textContent, expectedTitle(source))
@@ -533,13 +548,14 @@ try {
     assert.ok([...document.querySelectorAll('.composer-attachments .att-name')].some(node => node.textContent === file.name))
     await click(sendButton())
     assert.deepEqual(bridge.queue[0].quotes, [expectedQuote()])
-    assert.equal(bridge.queue[0].attachments[0].file, file)
+    assert.equal(bridge.queue[0].attachments[0].path, file.path)
     await act(async () => bridge.publish({ running: false }))
     await waitFor(() => calls('postPrompt').length === 1, 'Finishing the run must flush the queue through page postMessage')
     assertPostedQuote(calls('postPrompt')[0], source, active.id)
     assert.equal(calls('postPrompt')[0].args[1].prompt, 'Queued with context')
-    assert.deepEqual(calls('postPrompt')[0].args[1].files, ['mock-upload/context.txt'])
-    assert.equal(calls('uploadAttachment')[0].args[0].data, Buffer.from('Attachment fixture').toString('base64'))
+    assert.deepEqual(calls('postPrompt')[0].args[1].files, ['D:/mock-workspace/docs/context.txt'])
+    // 附件只传路径：不再读内容、不再调上传端点。
+    assert.equal(calls('uploadAttachment').length, 0, 'Attachments must not be base64-uploaded')
     assert.equal(document.querySelector('.queue-panel'), null)
   })
 

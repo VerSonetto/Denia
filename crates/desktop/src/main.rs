@@ -71,6 +71,9 @@ fn main() {
     if native_folder_picker::is_pick_folder_mode(std::env::args().skip(1)) {
         native_folder_picker::run_as_cli();
     }
+    if native_folder_picker::is_pick_files_mode(std::env::args().skip(1)) {
+        native_folder_picker::run_files_as_cli();
+    }
 
     // 必须在任何子进程之前:给壳持有一个(隐藏的)控制台,否则每一次
     // git/bash/MCP/cloudflared 都会在用户眼前闪一个黑框。见 `console`。

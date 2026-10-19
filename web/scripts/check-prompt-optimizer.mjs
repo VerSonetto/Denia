@@ -21,7 +21,7 @@ globalThis[bridgeKey] = bridge
 const prelude = `const b = globalThis[${JSON.stringify(bridgeKey)}];`
 const unexpectedApi = ['answerApproval', 'answerAsk', 'cancelAsk', 'cancelSession', 'compactSession',
   'forkSession', 'getCheckpointDiff', 'getCheckpoints', 'getSession', 'goalAction', 'rewindSession',
-  'setSessionAgentPreset', 'setSessionPermission', 'chatCompletion', 'postPrompt', 'uploadAttachment']
+  'setSessionAgentPreset', 'setSessionPermission', 'chatCompletion', 'postPrompt', 'pickFiles']
 const stubs = new Map([
   ['composerMemory', `${prelude}
     export async function loadComposer(scope) { return structuredClone(b.memory.get(scope) ?? { text: '', images: [], attachments: [], quotes: [], queue: [] }); }
@@ -35,6 +35,7 @@ const stubs = new Map([
     export function subscribeEvents() { return () => {}; }
     export async function listSkills() { return { skills: [] }; }
     export async function getGoal() { return { goal: null, tokensUsed: 0, maxRounds: 10 }; }
+    export async function pickerCapability() { return { kind: 'native', remote: false }; }
     export async function searchMentions() { return { items: [] }; }
     export async function getSessionPage() { return { events: [], hasMoreBefore: false }; }
     ${unexpectedApi.map(name => `export function ${name}() { throw new Error('Unexpected API: ${name}'); }`).join('\n')}

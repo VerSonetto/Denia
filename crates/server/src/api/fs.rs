@@ -21,6 +21,7 @@ pub fn router() -> Router<Arc<AppState>> {
     Router::new()
         .route("/api/fs/dirs", get(list_dirs))
         .route("/api/fs/pick", post(pick_dir))
+        .route("/api/fs/pick-files", post(pick_files))
         .route("/api/fs/mkdir", post(mkdir))
         .route("/api/fs/capability", get(capability))
         .route("/api/fs/mentions", get(list_mentions))
@@ -112,6 +113,27 @@ struct MkdirBody {
 async fn pick_dir() -> Result<impl IntoResponse, ApiError> {
     let path = crate::native_folder_picker::pick_folder().await?;
     Ok(Json(json!({ "path": path })))
+}
+
+/// 返回宿主机上的绝对文件路径，不读取也不传输内容。
+///
+/// 远程来客必须拒绝：对话框会弹在这台机器的屏幕上，而且手机本地路径
+/// 在这里根本不存在。前端先看 capability 的 `remote` 再决定是否展示入口。
+async fn pick_files(
+    peer: Option<Extension<crate::remote::guard::RemotePeer>>,
+) -> Result<impl IntoResponse, ApiError> {
+    let from_remote = peer
+        .map(|Extension(peer)| peer.via != crate::remote::Via::Local)
+        .unwrap_or(false);
+    if from_remote {
+        return Err(ApiError::new(
+            axum::http::StatusCode::FORBIDDEN,
+            "fs/remote-pick",
+            "远程连接不能使用本机文件选择器；请按工作区路径引用文件",
+        ));
+    }
+    let paths = crate::native_folder_picker::pick_files().await?;
+    Ok(Json(json!({ "paths": paths })))
 }
 
 #[derive(Debug, Deserialize)]

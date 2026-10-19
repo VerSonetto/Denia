@@ -19,15 +19,29 @@ use crate::error::ApiError;
 /// User-visible dialog title.
 pub const DIALOG_TITLE: &str = "denia — 选择工作区目录";
 
+/// 文件引用对话框标题（与目录选择器区分，避免用户以为在换工作区）。
+pub const FILES_DIALOG_TITLE: &str = "denia — 选择要引用的文件";
+
 /// Exclusive CLI mode: show the native folder picker, print one JSON line, exit.
 /// Must run before tracing is installed so stdout stays a single JSON value.
 pub fn run_as_cli() -> ! {
+    run_picker_as_cli(PickerKind::Folder)
+}
+
+pub fn run_files_as_cli() -> ! {
+    run_picker_as_cli(PickerKind::Files)
+}
+
+fn run_picker_as_cli(kind: PickerKind) -> ! {
     #[cfg(windows)]
     win_foreground::start_booster();
 
-    let picked = rfd::FileDialog::new().set_title(DIALOG_TITLE).pick_folder();
-    let path = picked.map(|p| p.to_string_lossy().to_string());
-    match serde_json::to_string(&json!({ "path": path })) {
+    let paths = kind.pick();
+    let output = match kind {
+        PickerKind::Folder => json!({ "path": paths.first() }),
+        PickerKind::Files => json!({ "paths": paths }),
+    };
+    match serde_json::to_string(&output) {
         Ok(line) => {
             println!("{line}");
             std::process::exit(0);
@@ -38,34 +52,71 @@ pub fn run_as_cli() -> ! {
 
 /// Open the host folder picker. `None` means the user cancelled.
 pub async fn pick_folder() -> Result<Option<String>, ApiError> {
+    Ok(pick_paths(PickerKind::Folder).await?.into_iter().next())
+}
+
+/// 返回宿主机的绝对文件路径；取消时是空列表。
+///
+/// 只回路径不回内容：文件留在原处，模型用 read_file 按需读，
+/// 不再复制一份到 uploads 目录。
+pub async fn pick_files() -> Result<Vec<String>, ApiError> {
+    pick_paths(PickerKind::Files).await
+}
+
+async fn pick_paths(kind: PickerKind) -> Result<Vec<String>, ApiError> {
     #[cfg(windows)]
     {
-        pick_folder_via_child().await
+        pick_via_child(kind).await
     }
     #[cfg(not(windows))]
     {
-        pick_folder_in_process().await
+        tokio::task::spawn_blocking(move || kind.pick())
+            .await
+            .map_err(|error| {
+                ApiError::new(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "fs/pick-failed",
+                    error.to_string(),
+                )
+            })
     }
 }
 
-#[cfg(not(windows))]
-async fn pick_folder_in_process() -> Result<Option<String>, ApiError> {
-    let picked = tokio::task::spawn_blocking(|| {
-        rfd::FileDialog::new().set_title(DIALOG_TITLE).pick_folder()
-    })
-    .await
-    .map_err(|error| {
-        ApiError::new(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "fs/pick-failed",
-            error.to_string(),
-        )
-    })?;
-    Ok(picked.map(|path| path.to_string_lossy().to_string()))
+#[derive(Clone, Copy)]
+enum PickerKind {
+    Folder,
+    Files,
+}
+
+impl PickerKind {
+    fn flag(self) -> &'static str {
+        match self {
+            Self::Folder => "--pick-folder",
+            Self::Files => "--pick-files",
+        }
+    }
+
+    fn pick(self) -> Vec<String> {
+        let paths = match self {
+            Self::Folder => rfd::FileDialog::new()
+                .set_title(DIALOG_TITLE)
+                .pick_folder()
+                .into_iter()
+                .collect(),
+            Self::Files => rfd::FileDialog::new()
+                .set_title(FILES_DIALOG_TITLE)
+                .pick_files()
+                .unwrap_or_default(),
+        };
+        paths
+            .into_iter()
+            .map(|path| path.to_string_lossy().into_owned())
+            .collect()
+    }
 }
 
 #[cfg(windows)]
-async fn pick_folder_via_child() -> Result<Option<String>, ApiError> {
+async fn pick_via_child(kind: PickerKind) -> Result<Vec<String>, ApiError> {
     let exe = std::env::current_exe().map_err(|error| {
         ApiError::new(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -73,12 +124,12 @@ async fn pick_folder_via_child() -> Result<Option<String>, ApiError> {
             format!("cannot locate denia executable: {error}"),
         )
     })?;
-    let mut command = picker_command(&exe);
+    let mut command = picker_command(&exe, kind);
     let child = command.spawn().map_err(|error| {
         ApiError::new(
             StatusCode::INTERNAL_SERVER_ERROR,
             "fs/pick-failed",
-            format!("failed to start folder picker: {error}"),
+            format!("failed to start native picker: {error}"),
         )
     })?;
     if let Some(pid) = child.id() {
@@ -88,7 +139,7 @@ async fn pick_folder_via_child() -> Result<Option<String>, ApiError> {
         ApiError::new(
             StatusCode::INTERNAL_SERVER_ERROR,
             "fs/pick-failed",
-            format!("folder picker exited unexpectedly: {error}"),
+            format!("native picker exited unexpectedly: {error}"),
         )
     })?;
     if !output.status.success() {
@@ -97,22 +148,26 @@ async fn pick_folder_via_child() -> Result<Option<String>, ApiError> {
             StatusCode::INTERNAL_SERVER_ERROR,
             "fs/pick-failed",
             format!(
-                "folder picker failed (status {}): {}",
+                "native picker failed (status {}): {}",
                 output.status,
                 stderr.trim()
             ),
         ));
     }
     let stdout = String::from_utf8_lossy(&output.stdout);
-    parse_pick_folder_output(&stdout).map_err(|message| {
+    let parsed = match kind {
+        PickerKind::Folder => parse_pick_folder_output(&stdout).map(|p| p.into_iter().collect()),
+        PickerKind::Files => parse_pick_files_output(&stdout),
+    };
+    parsed.map_err(|message| {
         ApiError::new(StatusCode::INTERNAL_SERVER_ERROR, "fs/pick-failed", message)
     })
 }
 
-fn picker_command(exe: &std::path::Path) -> tokio::process::Command {
+fn picker_command(exe: &std::path::Path, kind: PickerKind) -> tokio::process::Command {
     let mut command = tokio::process::Command::new(exe);
     command
-        .arg("--pick-folder")
+        .arg(kind.flag())
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -131,26 +186,46 @@ struct PickFolderOutput {
     path: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+struct PickFilesOutput {
+    paths: Vec<String>,
+}
+
 /// Child protocol: one JSON object `{ "path": string | null }` on stdout.
 fn parse_pick_folder_output(stdout: &str) -> Result<Option<String>, String> {
+    let parsed: PickFolderOutput = parse_picker_output(stdout)?;
+    Ok(parsed.path)
+}
+
+/// 文件选择器的子进程协议：`{ "paths": [绝对路径…] }`，取消时为空数组。
+fn parse_pick_files_output(stdout: &str) -> Result<Vec<String>, String> {
+    let parsed: PickFilesOutput = parse_picker_output(stdout)?;
+    Ok(parsed.paths)
+}
+
+/// 两种选择器共用的解析：取最后一行非空 JSON。
+/// 选最后一行是因为 rfd/系统库偶尔先往 stdout 写警告。
+fn parse_picker_output<T: serde::de::DeserializeOwned>(stdout: &str) -> Result<T, String> {
     let trimmed = stdout.trim();
     if trimmed.is_empty() {
-        return Err("folder picker returned empty output".to_string());
+        return Err("native picker returned empty output".to_string());
     }
-    // Take the last non-empty line in case a library wrote a warning first.
     let line = trimmed
         .lines()
         .rev()
         .find(|line| !line.trim().is_empty())
         .unwrap();
-    let parsed: PickFolderOutput = serde_json::from_str(line.trim())
-        .map_err(|error| format!("folder picker returned unreadable output: {error}"))?;
-    Ok(parsed.path)
+    serde_json::from_str(line.trim())
+        .map_err(|error| format!("native picker returned unreadable output: {error}"))
 }
 
 /// Shared by `main` so the exclusive CLI mode is decided before tracing.
 pub fn is_pick_folder_mode(mut args: impl Iterator<Item = String>) -> bool {
-    args.any(|arg| arg == "--pick-folder")
+    args.any(|arg| arg == PickerKind::Folder.flag())
+}
+
+pub fn is_pick_files_mode(mut args: impl Iterator<Item = String>) -> bool {
+    args.any(|arg| arg == PickerKind::Files.flag())
 }
 
 #[cfg(windows)]
@@ -277,10 +352,50 @@ mod tests {
 
     #[test]
     fn picker_command_uses_exclusive_flag() {
-        let command = picker_command(std::path::Path::new("denia"));
+        let command = picker_command(std::path::Path::new("denia"), PickerKind::Folder);
         let std_cmd = command.as_std();
         let args: Vec<&std::ffi::OsStr> = std_cmd.get_args().collect();
         assert_eq!(args, ["--pick-folder"]);
+    }
+
+    #[test]
+    fn files_picker_uses_its_own_flag() {
+        let command = picker_command(std::path::Path::new("denia"), PickerKind::Files);
+        let args: Vec<&std::ffi::OsStr> = command.as_std().get_args().collect();
+        assert_eq!(args, ["--pick-files"]);
+        assert!(is_pick_files_mode(
+            ["--port", "3601", "--pick-files"]
+                .into_iter()
+                .map(str::to_string)
+        ));
+        // 两个模式不能互相误判：主进程靠它决定走哪个对话框。
+        assert!(!is_pick_folder_mode(
+            ["--pick-files"].into_iter().map(str::to_string)
+        ));
+        assert!(!is_pick_files_mode(
+            ["--pick-folder"].into_iter().map(str::to_string)
+        ));
+    }
+
+    #[test]
+    fn parse_files_keeps_every_path_in_order() {
+        let stdout = "warn\n{\"paths\":[\"D:\\\\a b\\\\x.pdf\",\"C:\\\\ws\\\\y.txt\"]}\n";
+        assert_eq!(
+            parse_pick_files_output(stdout).unwrap(),
+            [r"D:\a b\x.pdf", r"C:\ws\y.txt"]
+        );
+    }
+
+    #[test]
+    fn parse_files_cancel_is_empty_not_error() {
+        assert!(parse_pick_files_output(r#"{"paths":[]}"#).unwrap().is_empty());
+    }
+
+    #[test]
+    fn parse_files_rejects_other_shape() {
+        // 目录选择器的输出不能被当成文件列表（字段名不同）。
+        assert!(parse_pick_files_output(r#"{"path":null}"#).is_err());
+        assert!(parse_pick_files_output("not json").is_err());
     }
 
     #[test]

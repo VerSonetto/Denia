@@ -606,6 +606,34 @@ fn memory_anchored(cwd: &Path, call: &ToolCallRef, memory_root: Option<&Path>) -
         .is_some_and(|path| path.starts_with(root))
 }
 
+/// 本机附件读取豁免:仅当这次调用是 `read_file`、且路径精确命中用户显式选中
+/// 的文件时成立。
+///
+/// 不授权目录、不授权写、不授权兄弟文件。命中后返回已核验的 canonical 路径,
+/// 派发时把参数改写成它——避免"核验的是目标、实际打开的却是原来的链接"。
+fn local_file_read(cwd: &Path, call: &ToolCallRef, grants: &[PathBuf]) -> Option<String> {
+    if call.name != "read_file" || grants.is_empty() {
+        return None;
+    }
+    // 必须与 read_file 自身使用同一套参数语义(路径别名、尾部垃圾)。
+    // 这里不想为 Deserialize 新增 serde 依赖:先走 `parse_tool_args` 的
+    // 宽容入口拿到 `path` 字段,再自己取值。
+    let raw_args: serde_json::Value = denia_tools::support::parse_tool_args(&call.arguments).ok()?;
+    let path = raw_args.get("path")?.as_str()?.trim().to_string();
+    let raw = Path::new(&path);
+    let candidate = if raw.is_absolute() {
+        raw.to_path_buf()
+    } else {
+        cwd.join(raw)
+    };
+    // 失败即拒绝:不做词法回退放行(链接可能改向未授权目标)。
+    let canonical = std::fs::canonicalize(&candidate).ok()?;
+    if !canonical.is_file() || !grants.contains(&canonical) {
+        return None;
+    }
+    Some(canonical.to_string_lossy().into_owned())
+}
+
 /// 调度一次 Allow 类工具调用,返回 boxed future 供并行池使用。
 /// 取消与审批(Ask)路径在别处处理。
 fn dispatch_tool_call(
@@ -635,8 +663,32 @@ fn dispatch_tool_call(
     // 权限放行共用同一开关:预设关闭记忆时记忆目录视为不存在,不豁免。
     // 沙箱只在只读/计划档生效(见 permission::sandbox_applies):自动编辑
     // 档的区外写要走审批而不是在路径解析处被硬拦。
+    // 本机附件:精确文件级的只读豁免。只对 read_file 生效,且只对用户通过
+    // 原生选择器选中的那一份文件;目录、兄弟文件、写类工具都不享有。
+    let attachment_path = local_file_read(&cwd, &call, &state.local_files);
+    // 命中后把参数改写为已核验的 canonical 路径:核验目标与实际打开的目标
+    // 必须是同一个,否则链接一变向,授权就被带去别处。
+    let call = match &attachment_path {
+        Some(path) => {
+            let arguments = serde_json::json!({ "path": path }).to_string();
+            // read_file 的 offset/limit 等可选参数需要保留。
+            let merged = match serde_json::from_str::<serde_json::Value>(&call.arguments) {
+                Ok(mut value) if value.is_object() => {
+                    value["path"] = serde_json::Value::String(path.clone());
+                    value.to_string()
+                }
+                _ => arguments,
+            };
+            ToolCallRef {
+                arguments: merged,
+                ..call.clone()
+            }
+        }
+        None => call.clone(),
+    };
     let confined = denia_tools::permission::sandbox_applies(state.permission_mode())
         && state.session.header().sandbox
+        && attachment_path.is_none()
         && !memory_anchored(
             &cwd,
             &call,

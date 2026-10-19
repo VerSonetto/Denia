@@ -21,6 +21,8 @@ export interface ComposerContextMenuProps {
   onFile(candidate: MentionCandidate): void
   onSession(session: SessionSummary, signal: AbortSignal): Promise<void>
   onCommand(name: string): void
+  /** 远程来客没有本机文件选择器:入口隐藏（落盘时由后端再拒一次）。 */
+  canPickLocalFiles?: boolean
 }
 
 interface MenuItem {
@@ -168,15 +170,15 @@ export function ComposerContextMenu(props: ComposerContextMenuProps) {
     }
   }
 
-  const additions: MenuItem[] = [{
-    key: 'upload', kind: 'upload', label: t('uploadFile'), detail: t('contextUploadHint'), icon: <Paperclip size={20} weight="duotone" />,
+  const additions: MenuItem[] = [...(props.canPickLocalFiles === false ? [] : [{
+    key: 'upload', kind: 'upload' as const, label: t('uploadFile'), detail: t('contextUploadHint'), icon: <Paperclip size={20} weight="duotone" />,
     select: () => {
       if (!canSelect()) return
       // No await/timer before the file picker: retain the original user gesture.
       props.onUpload()
       close()
     },
-  }, ...commands.filter(command => !needle || [command.name, command.label, command.description]
+  }]), ...commands.filter(command => !needle || [command.name, command.label, command.description]
     .some(text => text.toLocaleLowerCase().includes(needle))).map(command => ({
     key: `command:${command.name}`, kind: 'command' as const, command: command.name,
     label: command.label, detail: command.description, icon: command.name === 'goal' ? <Target size={20} weight="duotone" />

@@ -13,6 +13,9 @@ fn main() {
     if native_folder_picker::is_pick_folder_mode(std::env::args().skip(1)) {
         native_folder_picker::run_as_cli();
     }
+    if native_folder_picker::is_pick_files_mode(std::env::args().skip(1)) {
+        native_folder_picker::run_files_as_cli();
+    }
 
     tracing_subscriber::fmt()
         .with_env_filter(

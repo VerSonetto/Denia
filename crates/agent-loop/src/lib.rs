@@ -1099,6 +1099,70 @@ fn close_failed_turn(
     Ok(reason)
 }
 
+/// 本机附件授权的注入通道名。
+///
+/// 与给模型看的 `file-notice` 分开:这条通道只载机器可读的规范化路径清单,
+/// 是 read_file 逐调用沙箱例外的**唯一**真值来源。不接受用自然语言解析出来
+/// 的路径——文件名可以包含换行与伪装字符。
+pub(crate) const LOCAL_FILE_ACCESS: &str = "local-file-access";
+
+/// 授权记录的日志形态。带会话 id 是为了让 fork/复制历史不会意外继承授权。
+///
+/// 手写 JSON 而不引 `serde` derive:这个 crate 本来只依赖 `serde_json`,
+/// 为两条字段新增一个编译期依赖不划算。
+fn encode_grant(session: &str, paths: &[String]) -> String {
+    serde_json::json!({ "session": session, "paths": paths }).to_string()
+}
+
+fn decode_grant(text: &str) -> Option<(String, Vec<String>)> {
+    let value: serde_json::Value = serde_json::from_str(text).ok()?;
+    let session = value.get("session")?.as_str()?.to_string();
+    let paths = value
+        .get("paths")?
+        .as_array()?
+        .iter()
+        .filter_map(|item| item.as_str().map(str::to_string))
+        .collect();
+    Some((session, paths))
+}
+
+/// 从会话日志重建本会话的可读附件集合。
+///
+/// 每次 turn 开头重算而不是增量累积:下一轮、进程重启后都能恢复,rewind
+/// 截掉授予事件后授权也随之失效。记录里的会话 id 对不上就丢弃。
+pub(crate) fn local_file_grants(session: &Session) -> Vec<PathBuf> {
+    let session_id = session.id().to_string();
+    session.with_events(|events| {
+        let mut paths: Vec<PathBuf> = Vec::new();
+        for envelope in events {
+            let SessionEvent::UserMessage {
+                channel: Some(channel),
+                text,
+                ..
+            } = &envelope.event
+            else {
+                continue;
+            };
+            if channel != LOCAL_FILE_ACCESS {
+                continue;
+            }
+            let Some((grant_session, grant_paths)) = decode_grant(text) else {
+                continue;
+            };
+            if grant_session != session_id {
+                continue;
+            }
+            for path in grant_paths {
+                let path = PathBuf::from(path);
+                if !paths.contains(&path) {
+                    paths.push(path);
+                }
+            }
+        }
+        paths
+    })
+}
+
 /// Append one event to the log, then mirror it to the live subscribers.
 /// The log is the ordering authority; emit failures are ignored (subscribers
 /// re-sync from the log snapshot on reconnect).
@@ -1193,6 +1257,12 @@ pub(crate) struct TurnState {
     /// 本轮的执行预算账本(步数 / 请求次数 / 主动执行时间;上限取本轮
     /// 开始时的快照)。turn 内所有请求路径共享同一份句柄。
     pub budget: ExecutionBudget,
+    /// 用户显式选中的本机附件(canonicalized 绝对路径)。
+    ///
+    /// 只用作 read_file 的逐调用沙箱例外(见 exec::dispatch_tool_call):
+    /// 精确文件、不授权目录、不授权写。内容来自会话日志里的专用注入通道，
+    /// 不在 turn 内临时累积——这样下一轮与冷恢复能重建、rewind 后能撤回。
+    pub local_files: Vec<PathBuf>,
 }
 
 impl TurnState {
@@ -1234,6 +1304,7 @@ impl TurnState {
             has_request_header: false,
             context_window: None,
             step_retries: 0,
+            local_files: Vec::new(),
         }
     }
 

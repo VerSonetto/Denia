@@ -176,11 +176,25 @@ export interface PastedImage {
   preview: string
 }
 
-/** 输入框中的一份待上传附件:只持 File 句柄,真正上传发生在发送那一刻。 */
+/** 输入框中的一份已选附件:只持宿主机绝对路径,不发文件内容。
+ *
+ * 旧版本用 `{ name, mime, file }` 把整个 File 塞进草稿,发送时转 base64 上传;那
+ * 条路对大文件必撞请求体上限,而且只是把磁盘上的原件又复制一份。现在存路径，
+ * 模型用 read_file 按需读。 */
 export interface PendingAttachment {
   name: string
-  mime: string
-  file: File
+  /** 宿主机绝对路径;远程连接不提供文件选择入口。 */
+  path: string
+}
+
+/** 旧草稿可能只剩 `{ name, mime, file }`(已选但尚未发送)——
+ * 没有绝对路径就拿不到原件,恢复时直接丢弃而不是静默变成"看起来能发、
+ * 发送时才报错"。 */
+export function isPendingAttachment(value: unknown): value is PendingAttachment {
+  const candidate = value as Partial<PendingAttachment> | null
+  return typeof candidate === 'object' && candidate !== null
+    && typeof candidate.name === 'string'
+    && typeof candidate.path === 'string' && candidate.path.length > 0
 }
 
 /**

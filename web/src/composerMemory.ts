@@ -1,4 +1,5 @@
 import type { PastedImage, PendingAttachment, QueuedMessage } from './types'
+import { isPendingAttachment } from './types'
 import type { TrajectoryQuote } from './trajectory'
 
 export interface ComposerSnapshot {
@@ -82,6 +83,15 @@ function validateSnapshot(snapshot: ComposerSnapshot) {
     || !Array.isArray(snapshot.images) || !Array.isArray(snapshot.attachments)
     || !Array.isArray(snapshot.quotes) || !Array.isArray(snapshot.queue)) {
     throw new Error('Invalid composer snapshot')
+  }
+  // 草稿来自 IndexedDB，旧版本存的是 File 句柄（刷新后本来也拿不到内容）。
+  // 恢复时只保留带绝对路径的附件：发出去才算数，宁可少显示也不要在发送时才失败。
+  // 队列里的排队消息带同一套载荷，同样要洗一遍。
+  snapshot.attachments = snapshot.attachments.filter(isPendingAttachment)
+  for (const message of snapshot.queue) {
+    if (Array.isArray(message.attachments)) {
+      message.attachments = message.attachments.filter(isPendingAttachment)
+    }
   }
 }
 
