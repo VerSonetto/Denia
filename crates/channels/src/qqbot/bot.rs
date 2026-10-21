@@ -26,6 +26,17 @@ use super::protocol::{ChatType, InboundMessage, MAX_MESSAGE_LENGTH};
 const DEDUP_TTL: Duration = Duration::from_secs(300);
 const MAX_IMAGES_PER_MESSAGE: usize = 4;
 
+/// 待决 ask:按钮点击与文字回答都用它结算。
+#[derive(Clone)]
+struct PendingAsk {
+    session_id: String,
+    request_id: String,
+    question: AskQuestion,
+    target: String,
+    sender: String,
+    chat_type: ChatType,
+}
+
 pub struct QqBot {
     host: Arc<dyn ChannelHost>,
     bindings: Arc<BindingStore>,
@@ -34,8 +45,8 @@ pub struct QqBot {
     /// 每个会话最近一条入站消息 id:被动回复要带。
     last_msg_ids: Mutex<HashMap<String, String>>,
     dedup: Mutex<HashMap<String, Instant>>,
-    /// 待决 ask 的问题(request_id → 问题),按钮点击按 option index 取标签。
-    pending_asks: Mutex<HashMap<String, AskQuestion>>,
+    /// 待决 ask(request_id → 提问),按钮点击与文字回答都用它结算。
+    pending_asks: Mutex<HashMap<String, PendingAsk>>,
 }
 
 impl QqBot {
@@ -94,6 +105,42 @@ impl QqBot {
         }
 
         let text = message.content.trim();
+        // 待决 ask 优先:纯文本/数字直接结算,避免被当成新一轮提交。
+        if !text.is_empty()
+            && !text.starts_with('/')
+            && let Some((request_id, pending)) = self.pending_ask_for(&message.sender)
+        {
+            if let Some(option) = option_for_answer(&pending.question, text) {
+                let reply = match self
+                    .host
+                    .answer_ask(
+                        &pending.session_id,
+                        &pending.request_id,
+                        &pending.question.id,
+                        &option,
+                    )
+                    .await
+                {
+                    Ok(true) => format!("已选择：{option}"),
+                    Ok(false) => "该提问已处理或已过期。".to_string(),
+                    Err(error) => format!("提交回答失败：{error}"),
+                };
+                self.pending_asks
+                    .lock()
+                    .unwrap_or_else(|poison| poison.into_inner())
+                    .remove(&request_id);
+                self.send_text(&message.chat_id, message.chat_type, reply)
+                    .await;
+                return;
+            }
+            self.send_text(
+                &message.chat_id,
+                message.chat_type,
+                "请先回答上面的问题（回复数字），或发送 /cancel 结束本轮。",
+            )
+            .await;
+            return;
+        }
         if text.is_empty() && images.is_empty() {
             if !message.attachments.is_empty() {
                 self.send_text(
@@ -581,6 +628,7 @@ impl QqBot {
         let notifier = {
             let this = self.clone();
             let target = target.to_string();
+            let sender = sender.to_string();
             tokio::spawn(async move {
                 while let Some(notice) = notice_rx.recv().await {
                     match notice {
@@ -606,23 +654,32 @@ impl QqBot {
                             let Some(question) = questions.first() else {
                                 continue;
                             };
+                            let mut content = format!("需要你的回答：{}", question.question);
+                            for (index, option) in question.options.iter().enumerate() {
+                                content.push_str(&format!("\n{}. {}", index + 1, option.label));
+                            }
+                            content.push_str("\n回复数字选择，或直接点按钮。");
+                            this.pending_asks
+                                .lock()
+                                .unwrap_or_else(|poison| poison.into_inner())
+                                .insert(
+                                    request_id.clone(),
+                                    PendingAsk {
+                                        session_id: session_id.clone(),
+                                        request_id: request_id.clone(),
+                                        question: question.clone(),
+                                        target: target.clone(),
+                                        sender: sender.clone(),
+                                        chat_type,
+                                    },
+                                );
                             if let Some(keyboard) =
                                 super::protocol::ask_keyboard(&session_id, &request_id, question)
                             {
-                                this.pending_asks
-                                    .lock()
-                                    .unwrap_or_else(|poison| poison.into_inner())
-                                    .insert(request_id.clone(), question.clone());
-                                let content = format!("需要你的回答：{}", question.question);
                                 this.send_with_keyboard(&target, chat_type, &content, keyboard)
                                     .await;
                             } else {
-                                let mut out = format!("需要你的回答：{}", question.question);
-                                for option in &question.options {
-                                    out.push_str(&format!("\n- {}", option.label));
-                                }
-                                out.push_str("\n（选项较多或多选，请到控制台回答）");
-                                this.send_text(&target, chat_type, out).await;
+                                this.send_text(&target, chat_type, content).await;
                             }
                         }
                     }
@@ -639,6 +696,7 @@ impl QqBot {
             .run_turn(&session_id, prompt, images, &model, &NoticeSink::new(notice_tx))
             .await;
         notifier.abort();
+        self.clear_pending_asks_for_session(&session_id);
         match result {
             Ok(reply) => {
                 let mut out = reply.text.trim().to_string();
@@ -709,7 +767,7 @@ impl QqBot {
                     .lock()
                     .unwrap_or_else(|poison| poison.into_inner())
                     .get(&request_id)
-                    .and_then(|question| question.options.get(option_index))
+                    .and_then(|pending| pending.question.options.get(option_index))
                     .map(|option| option.label.clone());
                 let Some(option) = option else {
                     self.send_text(
@@ -744,7 +802,8 @@ impl QqBot {
         }
     }
 
-    /// 发送带键盘的单条消息(审批/ask 按钮)。
+    /// 发送带键盘的单条消息(审批/ask 按钮)。失败时降级为文本并把原因写进
+    /// 状态,避免"用户什么也看不到"。
     async fn send_with_keyboard(
         &self,
         target: &str,
@@ -759,7 +818,7 @@ impl QqBot {
             .get(target)
             .cloned();
         let seq = (epoch_millis() % 65_536) as u32;
-        if let Err(error) = self
+        match self
             .client
             .send_text_with_keyboard(
                 chat_type,
@@ -771,9 +830,38 @@ impl QqBot {
             )
             .await
         {
-            tracing::warn!(%error, "QQ 键盘消息发送失败");
-            self.set_error(format!("发送消息失败：{error}"));
+            Ok(()) => self.set_action("已发送按钮消息"),
+            Err(error) => {
+                tracing::warn!(%error, "QQ 键盘消息发送失败,降级为文本");
+                self.set_action(format!("按钮消息发送失败：{error}"));
+                // 降级:去掉键盘再发一次,保证用户至少能看到问题。
+                if let Err(second) = self
+                    .client
+                    .send_text(chat_type, target, text, msg_id.as_deref(), seq)
+                    .await
+                {
+                    self.set_error(format!("发送消息失败：{second}"));
+                }
+            }
         }
+    }
+
+    fn pending_ask_for(&self, sender: &str) -> Option<(String, PendingAsk)> {
+        let pending = self
+            .pending_asks
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        pending
+            .iter()
+            .find(|(_, ask)| ask.sender == sender)
+            .map(|(request_id, ask)| (request_id.clone(), ask.clone()))
+    }
+
+    fn clear_pending_asks_for_session(&self, session_id: &str) {
+        self.pending_asks
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .retain(|_, ask| ask.session_id != session_id);
     }
 
     async fn send_text(&self, target: &str, chat_type: ChatType, text: impl AsRef<str>) {
@@ -847,6 +935,22 @@ impl QqBot {
             false
         }
     }
+}
+
+/// 把用户文本回答映射到选项:优先数字序号,其次精确匹配 label。
+fn option_for_answer(question: &AskQuestion, text: &str) -> Option<String> {
+    let text = text.trim();
+    if let Ok(index) = text.parse::<usize>()
+        && index >= 1
+        && index <= question.options.len()
+    {
+        return Some(question.options[index - 1].label.clone());
+    }
+    question
+        .options
+        .iter()
+        .find(|option| option.label.eq_ignore_ascii_case(text))
+        .map(|option| option.label.clone())
 }
 
 fn epoch_millis() -> u64 {
