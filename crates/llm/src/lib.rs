@@ -43,6 +43,7 @@ pub use protocols::{
     AnthropicStream, CompletionsStream, EventTranslator, ResponsesStream, WireProtocol,
 };
 pub use request::GenerateRequest;
+pub use wire::UsageStyle;
 mod replay;
 pub use replay::{REASONING_REJECTED, ReplayPolicy};
 pub use retry::{RetryAttempt, RetryPolicy, with_retry};

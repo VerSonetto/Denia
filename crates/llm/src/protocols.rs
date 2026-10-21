@@ -508,7 +508,13 @@ impl EventTranslator for CompletionsStream {
         }
         let wire: WireChunk =
             serde_json::from_str(trimmed).map_err(|error| malformed(error, trimmed))?;
-        Ok(self.inner.feed(&wire, self.style))
+        let chunks = self.inner.feed(&wire, self.style);
+        // 帧级 error:立即失败,不等收尾。上游常在发完正文后用 error 帧收场,
+        // 静默放过会让上层以为这是一次完整成功。
+        if let Some(failure) = self.inner.take_error() {
+            return Err(failure);
+        }
+        Ok(chunks)
     }
 
     fn finish(&mut self) -> Result<Vec<StreamChunk>, LlmFailure> {
@@ -741,7 +747,12 @@ impl EventTranslator for ResponsesStream {
                     text: delta.to_string(),
                 });
             }
-            "response.reasoning_text.delta" | "response.reasoning_summary_text.delta" => {
+            "response.reasoning_text.delta"
+            | "response.reasoning_summary_text.delta"
+            | "response.reasoning.delta" => {
+                // 三个事件名都见过:官方 Responses 用前两个,部分网关
+                // (OpenRouter 的 responses 端点实测)用第三个。语义一致:
+                // 都是推理正文的增量。
                 let Some(delta) = value["delta"].as_str() else {
                     return Ok(out);
                 };
