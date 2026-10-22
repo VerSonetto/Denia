@@ -1978,9 +1978,7 @@ export default function SessionsPage({
           data-placeholder={
             inert
               ? t('placeholderWorkspace')
-              : phase === 'hero'
-                ? t('placeholderHero')
-                : t('chatPlaceholder')
+              : t('chatPlaceholder')
           }
           spellCheck={false}
           onInput={() => {

@@ -445,6 +445,16 @@ export function IconTrash(props: IconProps) {
   )
 }
 
+/** 置顶图钉:悬浮动作与行内置顶标记共用。 */
+export function IconPin(props: IconProps) {
+  return (
+    <StrokeSvg {...props}>
+      <path d="M6 2.75h4l-.5 2.75 1.75 1.75v1H8.75V12L8 13l-.75-1V8.25H4.75v-1L6.5 5.5 6 2.75Z" />
+      <path d="M8 13v1.25" />
+    </StrokeSvg>
+  )
+}
+
 /** 树形折叠指示:默认朝右(收起),展开时由 CSS 旋转朝下。 */
 export function IconCaretRight(props: IconProps) {
   return (

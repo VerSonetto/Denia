@@ -382,6 +382,143 @@
   border-radius: 7px;
 }
 
+/* 会话筛选标签:全部任务 / 进行中任务。 */
+.sidebar-filter {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0 2px;
+}
+
+.sidebar-filter-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 26px;
+  padding: 0 10px;
+  border: none;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--label-tertiary);
+  font-size: 11.5px;
+  font-weight: 500;
+  white-space: nowrap;
+  cursor: pointer;
+  transition:
+    background 0.15s var(--ease),
+    color 0.15s var(--ease);
+}
+
+.sidebar-filter-tab:hover {
+  background: var(--hover-fill);
+  color: var(--label-primary);
+}
+
+.sidebar-filter-tab.active {
+  background: var(--active-fill);
+  color: var(--label-primary);
+}
+
+.sidebar-filter-count {
+  min-width: 1.2em;
+  text-align: right;
+  font-size: 10.5px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  color: var(--label-caption);
+}
+
+.sidebar-filter-tab.active .sidebar-filter-count {
+  color: var(--label-secondary);
+}
+
+/* 侧栏自定义右键菜单(portal 到 body,避开侧栏 overflow 裁剪)。 */
+.sidebar-context-menu {
+  position: fixed;
+  z-index: 120;
+  padding: 4px;
+  border: 1px solid var(--border-l2);
+  border-radius: 10px;
+  background: var(--bg-layer-2);
+  box-shadow: var(--shadow-float);
+  outline: none;
+  animation: sidebar-menu-in 0.12s var(--ease);
+}
+
+@keyframes sidebar-menu-in {
+  from {
+    opacity: 0;
+    transform: translateY(-2px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.sidebar-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  height: 30px;
+  padding: 0 8px;
+  border: none;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--label-primary);
+  font-size: 12.5px;
+  text-align: left;
+  cursor: pointer;
+  transition:
+    background 0.12s var(--ease),
+    color 0.12s var(--ease);
+}
+
+.sidebar-menu-item:hover {
+  background: var(--hover-fill);
+}
+
+.sidebar-menu-item.danger {
+  color: var(--error-fg);
+}
+
+.sidebar-menu-item.danger:hover {
+  background: var(--danger-soft);
+}
+
+.sidebar-menu-item:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.sidebar-menu-item:disabled:hover {
+  background: transparent;
+}
+
+.sidebar-menu-icon {
+  flex: none;
+  display: inline-flex;
+  color: var(--label-secondary);
+}
+
+.sidebar-menu-item.danger .sidebar-menu-icon {
+  color: inherit;
+}
+
+.sidebar-menu-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sidebar-context-menu {
+    animation: none;
+  }
+}
+
 .sidebar-search {
   display: flex;
   align-items: center;
@@ -581,11 +718,69 @@
   background: transparent;
 }
 
+.row-action-btn.active {
+  color: var(--label-primary);
+  background: var(--active-fill);
+}
+
+/* 删除二次确认:垃圾桶点一下换成红色圆角矩形,再点一次才真删。 */
+.confirm-delete-btn {
+  height: 22px;
+  padding: 0 9px;
+  border: none;
+  border-radius: 999px;
+  background: var(--danger);
+  color: var(--bg-base);
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background 0.15s var(--ease);
+}
+
+.confirm-delete-btn:hover {
+  background: var(--error-fg);
+}
+
+/* 置顶图钉标记:始终可见,不依赖悬停动作区。 */
+.pin-mark {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  color: var(--label-caption);
+}
+
 .ws-group-head-row {
   display: flex;
   align-items: center;
   gap: 2px;
   border-radius: 9px;
+  position: relative;
+}
+
+/* 拖动排序落点:行内上/下半各画一条插入线。 */
+.ws-group-head-row.drop-before::after,
+.ws-group-head-row.drop-after::after {
+  content: '';
+  position: absolute;
+  left: 8px;
+  right: 8px;
+  height: 2px;
+  border-radius: 1px;
+  background: var(--label-primary);
+  pointer-events: none;
+}
+
+.ws-group-head-row.drop-before::after {
+  top: -2px;
+}
+
+.ws-group-head-row.drop-after::after {
+  bottom: -2px;
+}
+
+.ws-group.dragging > .ws-group-head-row {
+  opacity: 0.45;
 }
 
 .ws-group-head-row .ws-group-head {
@@ -734,6 +929,30 @@
   align-items: center;
   min-width: 0;
   border-radius: 8px;
+}
+
+.session-row-wrap.drop-before::after,
+.session-row-wrap.drop-after::after {
+  content: '';
+  position: absolute;
+  left: calc(8px + var(--depth, 0) * 14px);
+  right: 8px;
+  height: 2px;
+  border-radius: 1px;
+  background: var(--label-primary);
+  pointer-events: none;
+}
+
+.session-row-wrap.drop-before::after {
+  top: -1px;
+}
+
+.session-row-wrap.drop-after::after {
+  bottom: -1px;
+}
+
+.session-row-wrap.dragging {
+  opacity: 0.45;
 }
 
 /* 悬停/选中底色画在整行(含折叠钮与时间列),行内元素不各画各的。 */

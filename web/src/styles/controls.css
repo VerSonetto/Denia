@@ -1184,6 +1184,23 @@ button.btn.form-action {
   word-break: break-word;
 }
 
+.confirm-input {
+  width: 100%;
+  margin-top: 12px;
+  height: 34px;
+  padding: 0 10px;
+  border: 1px solid var(--border-l2);
+  border-radius: 8px;
+  background: var(--bg-layer-2);
+  color: var(--label-primary);
+  font-size: 13px;
+  outline: none;
+}
+
+.confirm-input:focus {
+  border-color: var(--label-tertiary);
+}
+
 .rewind-file-list {
   margin-top: 12px;
   max-height: 220px;

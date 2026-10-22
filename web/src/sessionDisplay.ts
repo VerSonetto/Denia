@@ -1,9 +1,12 @@
 import { t } from './i18n'
 import { reasoningEffortLabel } from './reasoningEffort'
+import { sessionAlias } from './sessionAliases'
 import type { SessionSummary, SubagentDescriptor } from './types'
 
-/** Sidebar/header label: AI-generated title, then first-prompt excerpt, then blank. */
+/** Sidebar/header label: manual rename, then AI title, then first-prompt excerpt, then blank. */
 export function sessionDisplayTitle(session: SessionSummary): string {
+  const alias = sessionAlias(session.id)?.trim()
+  if (alias) return alias
   const title = session.title?.trim()
   if (title) return title
   const excerpt = session.excerpt?.trim()

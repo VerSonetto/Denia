@@ -759,12 +759,14 @@
   display: block;
   width: 120px;
   height: 120px;
+  padding: 0;
   border-radius: 12px;
   overflow: hidden;
   border: 1px solid var(--border-l2);
   background: var(--bg-layer-2);
   box-shadow: var(--shadow-lv2);
   flex: none;
+  cursor: zoom-in;
 }
 
 .msg-user-image img {
@@ -772,6 +774,108 @@
   width: 100%;
   height: 100%;
   object-fit: cover;
+}
+
+/* 用户消息图片放大预览:portal 到 body;点遮罩/ESC 关闭,方向键翻页。 */
+.image-lightbox {
+  position: fixed;
+  inset: 0;
+  z-index: 200;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 48px;
+  background: rgb(0 0 0 / 0.72);
+  backdrop-filter: blur(4px);
+  animation: image-lightbox-in 0.16s var(--ease);
+}
+
+@keyframes image-lightbox-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+.image-lightbox-img {
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+  border-radius: 10px;
+  box-shadow: var(--shadow-float);
+  background: var(--bg-layer-1);
+  cursor: default;
+}
+
+.image-lightbox-close {
+  position: fixed;
+  top: 16px;
+  right: 16px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: rgb(255 255 255 / 0.12);
+  color: #fff;
+  cursor: pointer;
+  transition: background 0.15s var(--ease);
+}
+
+.image-lightbox-close:hover {
+  background: rgb(255 255 255 / 0.22);
+}
+
+.image-lightbox-nav {
+  position: fixed;
+  top: 50%;
+  transform: translateY(-50%);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 38px;
+  height: 38px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: rgb(255 255 255 / 0.12);
+  color: #fff;
+  cursor: pointer;
+  transition: background 0.15s var(--ease);
+}
+
+.image-lightbox-nav:hover {
+  background: rgb(255 255 255 / 0.22);
+}
+
+.image-lightbox-nav.prev {
+  left: 16px;
+}
+
+.image-lightbox-nav.next {
+  right: 16px;
+}
+
+.image-lightbox-count {
+  position: fixed;
+  bottom: 18px;
+  left: 50%;
+  transform: translateX(-50%);
+  color: rgb(255 255 255 / 0.8);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  pointer-events: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .image-lightbox {
+    animation: none;
+  }
 }
 
 .inject-row .inject-summary {
