@@ -49,6 +49,7 @@ mod console;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use denia_server::host::{CliArgs, HostOptions, prepare, resolve_home};
 use denia_server::native_folder_picker;
@@ -63,6 +64,13 @@ const MAIN_WINDOW: &str = "main";
 
 /// 默认窗口尺寸。
 const WINDOW_SIZE: (f64, f64) = (1280.0, 860.0);
+
+/// 占位页入场动画的自然时长:约 1.1s 写完整字标,随后墨点落款约 0.7s。
+/// 服务就绪后要等它播完再导航,否则动画不是被截断就是整段跳过。
+const PLACEHOLDER_ANIMATION: Duration = Duration::from_millis(1800);
+
+/// 等占位页加载的上限。冷启动时 WebView2 初始化常要一两秒,超过就不再等。
+const PLACEHOLDER_LOAD_LIMIT: Duration = Duration::from_millis(4000);
 
 fn main() {
     // 独占模式:目录选择器子进程。**必须排在 `console::adopt()` 之前** ——
@@ -124,9 +132,9 @@ fn main() {
                 ),
             };
             let service_gate = gate.clone();
-            // 占位页是否真的画出来了。服务通常比 WebView2 初始化更快,
-            // 没有这个信号就会在页面还没加载时导航,用户看到的是白屏。
-            let page_loaded = Arc::new(AtomicBool::new(false));
+            // 占位页最近一次加载完成的时刻。服务通常比 WebView2 初始化更快,
+            // 不等这个信号就会在页面还没画出来时导航,入场动画被整段跳过。
+            let page_loaded_at = Arc::new(Mutex::new(None::<Instant>));
 
             // 服务跑在 Tauri 的异步运行时上:与壳同进程同 runtime,服务一挂
             // 窗口就没有意义了,不需要独立 runtime 的生命周期管理。
@@ -135,7 +143,7 @@ fn main() {
                 // 反过来做(先等服务再建窗口)会让启动的几百毫秒里什么都不
                 // 显示,用户看到的是"双击了没反应";而失败时也没有窗口可以
                 // 承载错误信息 —— 那正是最需要看见原因的时候。
-                if let Err(error) = open_window(&handle, size, page_loaded.clone()) {
+                if let Err(error) = open_window(&handle, size, page_loaded_at.clone()) {
                     tracing::error!(%error, "failed to create window");
                     service_gate.mark_cleaned();
                     handle.exit(1);
@@ -146,24 +154,21 @@ fn main() {
                     Ok(host) => {
                         let addr = host.addr;
                         tracing::info!(%addr, home = %home.display(), "denia desktop serving");
-                        // 服务就绪 ≠ 启动页已画出来。等占位页加载完成(最多
-                        // 600ms,WebView2 初始化通常更快),再让页面收笔,
-                        // 最后才导航 —— 顺序反了,落款动画只会被截成一帧白屏。
-                        let deadline =
-                            std::time::Instant::now() + std::time::Duration::from_millis(600);
-                        while !page_loaded.load(Ordering::SeqCst)
-                            && std::time::Instant::now() < deadline
-                        {
-                            tokio::time::sleep(std::time::Duration::from_millis(16)).await;
+                        // 服务就绪 ≠ 启动页已画出来。先等占位页加载完成(冷启动
+                        // WebView2 常晚于服务就绪),再按动画的自然时长放完,最后
+                        // 才导航 —— 否则动画要么被截断,要么整段看不到。
+                        let load_deadline = Instant::now() + PLACEHOLDER_LOAD_LIMIT;
+                        let mut loaded_at = placeholder_loaded_at(&page_loaded_at);
+                        while loaded_at.is_none() && Instant::now() < load_deadline {
+                            tokio::time::sleep(Duration::from_millis(16)).await;
+                            loaded_at = placeholder_loaded_at(&page_loaded_at);
                         }
-                        if page_loaded.load(Ordering::SeqCst) {
-                            if let Some(window) = handle.get_webview_window(MAIN_WINDOW) {
-                                let _ = window.eval(
-                                    "window.__DENIA_FINISH__ && window.__DENIA_FINISH__()",
-                                );
+                        if let Some(loaded_at) = loaded_at {
+                            let remaining = (loaded_at + PLACEHOLDER_ANIMATION)
+                                .saturating_duration_since(Instant::now());
+                            if !remaining.is_zero() {
+                                tokio::time::sleep(remaining).await;
                             }
-                            // 等收笔:页面把剩余笔画压到 ~160ms,再留一点余量。
-                            tokio::time::sleep(std::time::Duration::from_millis(320)).await;
                         }
                         if let Err(error) = navigate(&handle, addr.port()) {
                             tracing::error!(%error, "failed to load console");
@@ -217,6 +222,11 @@ fn main() {
         });
 }
 
+/// 占位页最近一次加载完成的时刻。
+fn placeholder_loaded_at(state: &Mutex<Option<Instant>>) -> Option<Instant> {
+    *state.lock().unwrap_or_else(|poison| poison.into_inner())
+}
+
 /// 建主窗口,停在**内嵌占位页**上;服务就绪后由 [`navigate`] 送到真实地址。
 ///
 /// 先建窗口再等服务的顺序很重要:启动的几百毫秒里用户应当看到东西,
@@ -224,7 +234,7 @@ fn main() {
 fn open_window(
     handle: &tauri::AppHandle,
     size: (f64, f64),
-    page_loaded: Arc<AtomicBool>,
+    page_loaded_at: Arc<Mutex<Option<Instant>>>,
 ) -> tauri::Result<()> {
     let builder =
         WebviewWindowBuilder::new(handle, MAIN_WINDOW, WebviewUrl::App("index.html".into()));
@@ -253,7 +263,11 @@ fn open_window(
                 || url.host_str() == Some("tauri.localhost")
                 || url.as_str().contains("index.html")
             {
-                page_loaded.store(true, Ordering::SeqCst);
+                // 每次加载都覆盖:占位页若被重新加载,动画从头开始,
+                // 等待锚点也应跟着后移。
+                *page_loaded_at
+                    .lock()
+                    .unwrap_or_else(|poison| poison.into_inner()) = Some(Instant::now());
             }
         })
         .on_new_window(|url, _features| {
