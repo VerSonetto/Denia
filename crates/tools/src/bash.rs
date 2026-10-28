@@ -304,7 +304,7 @@ mod tests {
         let mut context = ctx(&dir);
         context.emit_event = Some(sink(&events));
         context.call_id = Some("call-1".to_string());
-        let command = if cfg!(windows) {
+        let command = if crate::shell::shell_runtime().dialect == "powershell" {
             "Write-Output 'line1'; Write-Output 'line2'; Write-Output 'line3'"
         } else {
             "echo line1; echo line2; echo line3"
@@ -372,7 +372,7 @@ mod tests {
     async fn timeout_reports_reason_without_exit_code() {
         let dir = std::env::temp_dir();
         let tool = BashTool::new();
-        let sleeping = if cfg!(windows) {
+        let sleeping = if crate::shell::shell_runtime().dialect == "powershell" {
             r#"{"command":"ping -n 10 127.0.0.1 >nul","timeout_ms":200}"#
         } else {
             r#"{"command":"sleep 10","timeout_ms":200}"#
@@ -389,7 +389,7 @@ mod tests {
     async fn times_out_with_actionable_hint() {
         let dir = std::env::temp_dir();
         let tool = BashTool::new();
-        let sleeping = if cfg!(windows) {
+        let sleeping = if crate::shell::shell_runtime().dialect == "powershell" {
             r#"{"command":"ping -n 10 127.0.0.1 >nul","timeout_ms":200}"#
         } else {
             r#"{"command":"sleep 10","timeout_ms":200}"#
@@ -423,7 +423,7 @@ mod tests {
         let mut context = ctx(&std::env::temp_dir());
         context.output_store = Some(storage.clone());
         for streams in ["stdout", "stderr", "both"] {
-            let command = if cfg!(windows) {
+            let command = if crate::shell::shell_runtime().dialect == "powershell" {
                 let output = if streams == "stderr" {
                     "[Console]::Error"
                 } else {
@@ -501,7 +501,7 @@ mod tests {
             task_ledger: None,
             read_state: None,
         };
-        let command = if cfg!(windows) {
+        let command = if crate::shell::shell_runtime().dialect == "powershell" {
             r#"{"command":"ping -n 10 127.0.0.1 >nul"}"#
         } else {
             r#"{"command":"sleep 10"}"#

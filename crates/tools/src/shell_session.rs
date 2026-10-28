@@ -135,7 +135,10 @@ impl PersistentShell {
             }
             Dialect::Posix => {
                 // 裸起 bash:管道 stdin 会被当逐行输入,状态天然保留。
-                Command::new("bash")
+                // Windows 上这里拿到的是解析出的 Git Bash 路径,不能写 `bash`:
+                // PATH 上的 `bash.exe` 可能是 System32 的 WSL 启动器,那会是另一个
+                // 系统里的 shell,状态语义完全不同。
+                Command::new(shell::shell_executable_path())
             }
         };
         command

@@ -1,7 +1,9 @@
 //! Platform shell resolution and the foreground command kernel.
 //!
-//! Windows: PowerShell (`pwsh` or `powershell.exe`), preferring the Windows
-//! Terminal default profile when it points at a PowerShell executable.
+//! Windows: follow the Windows Terminal default profile when it points at a
+//! PowerShell executable (`pwsh`/`powershell.exe`) or Git Bash (`bash.exe`);
+//! otherwise prefer `pwsh`, then Windows PowerShell. `DENIA_SHELL` overrides the
+//! whole chain with an explicit executable path or name.
 //! Unix: `bash -c`.
 //!
 //! 本模块还持有**前台命令执行内核**([`run_command`]):spawn → stdout/stderr
@@ -26,10 +28,49 @@ use crate::output::{OutputArtifact, OutputStore, Preview};
 use crate::{ExecutionReport, SessionEventSink, end_reason};
 
 #[cfg(windows)]
-static WINDOWS_SHELL: Mutex<Option<PathBuf>> = Mutex::new(None);
+static WINDOWS_SHELL: Mutex<Option<ResolvedShell>> = Mutex::new(None);
 /// 最近一次缓存解析的生成号;spawn 失败时递增,触发下次调用重新解析。
 #[cfg(windows)]
 static SHELL_EPOCH: AtomicUsize = AtomicUsize::new(0);
+
+/// Windows 上实际参与执行的 shell 方言。它决定命令怎么传参、工具描述让模型
+/// 写哪种语法,以及常驻 shell 用哪套包装协议。
+#[cfg(windows)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ShellDialect {
+    PowerShell,
+    Bash,
+}
+
+#[cfg(windows)]
+impl ShellDialect {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::PowerShell => "powershell",
+            Self::Bash => "bash",
+        }
+    }
+
+    /// 按文件名识别方言。只认明确支持的几种,其余一律 `None`:让未知 shell
+    /// 落回降级链,而不是按某个方言猜着传参。
+    fn from_executable(path: &Path) -> Option<Self> {
+        let name = path.file_name()?.to_str()?.to_ascii_lowercase();
+        match name.as_str() {
+            "pwsh.exe" | "pwsh" | "powershell.exe" | "powershell" => Some(Self::PowerShell),
+            "bash.exe" | "bash" => Some(Self::Bash),
+            _ => None,
+        }
+    }
+}
+
+/// 一次解析的可执行文件与方言。两者必须一起缓存:只缓存路径会在路径不变、
+/// 方言判断变化时让执行参数与工具描述错位。
+#[cfg(windows)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ResolvedShell {
+    path: PathBuf,
+    dialect: ShellDialect,
+}
 
 /// Resolved shell facts for model-facing tool descriptions.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -48,17 +89,19 @@ pub struct ShellRuntime {
 
 /// Facts about the shell this process will spawn for `bash` tool calls.
 pub fn shell_runtime() -> ShellRuntime {
-    if cfg!(windows) {
-        let path = resolve_windows_shell();
-        let shell_label = powershell_label(&path);
+    #[cfg(windows)]
+    {
+        let resolved = resolved_shell();
         ShellRuntime {
             os: std::env::consts::OS,
             arch: std::env::consts::ARCH,
-            dialect: "powershell",
-            shell_label,
-            executable: path.display().to_string(),
+            dialect: resolved.dialect.as_str(),
+            shell_label: shell_label(&resolved.path, resolved.dialect),
+            executable: resolved.path.display().to_string(),
         }
-    } else {
+    }
+    #[cfg(not(windows))]
+    {
         ShellRuntime {
             os: std::env::consts::OS,
             arch: std::env::consts::ARCH,
@@ -76,7 +119,7 @@ pub fn shell_runtime() -> ShellRuntime {
 pub fn shell_executable_path() -> std::path::PathBuf {
     #[cfg(windows)]
     {
-        windows_shell_executable()
+        resolved_shell().path
     }
     #[cfg(not(windows))]
     {
@@ -118,6 +161,12 @@ fn bash_description_head(runtime: &ShellRuntime) -> String {
         (
             "git status; cargo test; Get-Process; $env:USERPROFILE",
             "bash/cmd 写法(如 export A=1、echo $A、cmd /c)",
+        )
+    } else if runtime.os == "windows" {
+        // Git Bash 的 `ps` 只列 MSYS 进程,拿它当“看进程”的示例会误导模型。
+        (
+            "git status; cargo test; echo $HOME",
+            "PowerShell 写法(如 $env:A、Get-Process、cmd /c)",
         )
     } else {
         (
@@ -163,43 +212,72 @@ pub fn shell_system_prompt_note(runtime: &ShellRuntime) -> String {
         )
     } else {
         format!(
-            "bash 工具在 {os} 上通过 bash 执行;命令请写 bash 语法,不要用 PowerShell 语法。",
+            "bash 工具在 {os} 上通过 {shell} 执行;命令请写 bash 语法,不要用 PowerShell 语法。",
             os = runtime.os,
+            shell = runtime.shell_label,
         )
     }
 }
 
 #[cfg(windows)]
-fn powershell_label(path: &Path) -> String {
-    match path
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or_default()
-        .to_ascii_lowercase()
-        .as_str()
-    {
-        "pwsh.exe" => "PowerShell 7 (pwsh)".to_string(),
-        "powershell.exe" => "Windows PowerShell 5.1".to_string(),
-        other => other.to_string(),
+fn shell_label(path: &Path, dialect: ShellDialect) -> String {
+    match dialect {
+        ShellDialect::PowerShell => match path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or_default()
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "pwsh.exe" => "PowerShell 7 (pwsh)".to_string(),
+            "powershell.exe" => "Windows PowerShell 5.1".to_string(),
+            other => other.to_string(),
+        },
+        ShellDialect::Bash => {
+            // 同一个 bash.exe 可能是 Git for Windows,也可能是用户显式指定的
+            // 其他 MSYS 发行版;标签只描述事实,不猜版本。
+            if path
+                .to_string_lossy()
+                .to_ascii_lowercase()
+                .contains(r"\git\")
+            {
+                "Git Bash (bash.exe)".to_string()
+            } else {
+                "bash (bash.exe)".to_string()
+            }
+        }
     }
 }
 
 /// Builds a process that runs one shell command in the session workspace.
 pub fn shell_command(command: &str) -> Command {
-    if cfg!(windows) {
-        let program = windows_shell_executable();
-        let mut child = Command::new(program);
-        // PowerShell 重定向输出默认走系统 OEM 代码页(中文系统为 GBK),服务端
-        // 统一按 UTF-8 解码;先注入输出编码前缀,避免中文输出整体乱码。
-        child.args([
-            "-NoLogo",
-            "-NoProfile",
-            "-NonInteractive",
-            "-Command",
-            &format!("[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; {command}"),
-        ]);
+    #[cfg(windows)]
+    {
+        let resolved = resolved_shell();
+        let mut child = Command::new(&resolved.path);
+        match resolved.dialect {
+            ShellDialect::PowerShell => {
+                // PowerShell 重定向输出默认走系统 OEM 代码页(中文系统为 GBK),服务端
+                // 统一按 UTF-8 解码;先注入输出编码前缀,避免中文输出整体乱码。
+                child.args([
+                    "-NoLogo",
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-Command",
+                    &format!("[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; {command}"),
+                ]);
+            }
+            ShellDialect::Bash => {
+                // 与 PowerShell 的 `-NoProfile` 对齐:不读用户 profile,避免其中的
+                // `cd`/`alias`/提示符让每次调用的结果不可复现。Git Bash 的
+                // `/usr/bin` 由运行时自带,不依赖 profile。
+                child.args(["--noprofile", "--norc", "-c", command]);
+            }
+        }
         child
-    } else {
+    }
+    #[cfg(not(windows))]
+    {
         let mut child = Command::new("bash");
         child.args(["-c", command]);
         child
@@ -640,44 +718,83 @@ pub fn invalidate_windows_shell_cache() {
     SHELL_EPOCH.fetch_add(1, Ordering::Release);
 }
 
+/// 当前进程要用的 shell(缓存)。缓存的是「路径 + 方言」整体,而不是单独路径:
+/// Store 版 PowerShell 更新会整体换版本目录,`bash.exe` 也可能被用户改配置换掉。
 #[cfg(windows)]
-fn windows_shell_executable() -> PathBuf {
+fn resolved_shell() -> ResolvedShell {
     let epoch = SHELL_EPOCH.load(Ordering::Acquire);
     let mut cached = WINDOWS_SHELL.lock().expect("shell cache poisoned");
-    if let Some(path) = &*cached {
+    if let Some(resolved) = &*cached {
         // 缓存代数仍一致且文件仍在 → 直接复用;文件被删除时降级重解析。
-        let still_valid = SHELL_EPOCH.load(Ordering::Acquire) == epoch && path.is_file();
+        let still_valid = SHELL_EPOCH.load(Ordering::Acquire) == epoch && resolved.path.is_file();
         if still_valid {
-            return path.clone();
+            return resolved.clone();
         }
         if SHELL_EPOCH.load(Ordering::Acquire) == epoch {
             *cached = None;
         }
     }
-    let path = resolve_windows_shell();
-    *cached = Some(path.clone());
-    path
+    let resolved = resolve_windows_shell();
+    *cached = Some(resolved.clone());
+    resolved
 }
 
+/// 解析顺序:`DENIA_SHELL` 显式覆盖 → Windows Terminal 默认 profile(仅当它是
+/// 受支持的 PowerShell 或 Git Bash)→ `pwsh` → Windows PowerShell。
+///
+/// Git Bash 只在用户**明确**把它设为默认 profile(或写了 `DENIA_SHELL`)时启用;
+/// 否则不主动抢在 pwsh 前面,保持既有部署的行为不变。
 #[cfg(windows)]
-fn resolve_windows_shell() -> PathBuf {
-    if let Some(path) = windows_terminal_default_powershell() {
-        return path;
+fn resolve_windows_shell() -> ResolvedShell {
+    if let Some(resolved) = windows_shell_override() {
+        return resolved;
+    }
+    if let Some(resolved) = windows_terminal_default_shell() {
+        return resolved;
     }
     if let Some(path) = first_existing_pwsh_candidate() {
-        return path;
+        return ResolvedShell {
+            path,
+            dialect: ShellDialect::PowerShell,
+        };
     }
-    PathBuf::from(r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe")
+    ResolvedShell {
+        path: windows_powershell_path(),
+        dialect: ShellDialect::PowerShell,
+    }
+}
+
+/// `DENIA_SHELL`:显式指定可执行文件路径或名字(`pwsh`/`powershell`/`bash`)。
+///
+/// 覆盖 Windows Terminal 设置读不到的场景(便携版、其他终端、CI)。无法识别
+/// 方言的名字一律忽略,让自动探测继续——按未知 shell 猜方言比降级更危险。
+#[cfg(windows)]
+fn windows_shell_override() -> Option<ResolvedShell> {
+    let raw = std::env::var_os("DENIA_SHELL")?;
+    let text = raw.to_string_lossy();
+    let text = text.trim();
+    if text.is_empty() {
+        return None;
+    }
+    let path = PathBuf::from(text);
+    if path.is_file() {
+        return ShellDialect::from_executable(&path).map(|dialect| ResolvedShell { path, dialect });
+    }
+    resolve_shell_name(text)
 }
 
 #[cfg(windows)]
-fn windows_terminal_default_powershell() -> Option<PathBuf> {
+fn windows_terminal_default_shell() -> Option<ResolvedShell> {
     for path in windows_terminal_settings_paths() {
-        let settings = read_json_lenient(&path)?;
-        if let Some(commandline) = default_profile_commandline(&settings)
-            && let Some(shell) = powershell_from_commandline(&commandline)
-        {
-            return Some(shell);
+        // 单个配置文件坏掉(半截 JSON、权限问题)不能阻断后面的候选路径。
+        let Some(settings) = read_json_lenient(&path) else {
+            continue;
+        };
+        let Some(commandline) = default_profile_commandline(&settings) else {
+            continue;
+        };
+        if let Some(resolved) = shell_from_commandline(&commandline) {
+            return Some(resolved);
         }
     }
     None
@@ -691,32 +808,154 @@ fn windows_terminal_settings_paths() -> Vec<PathBuf> {
     let local = PathBuf::from(local);
     vec![
         local.join("Packages/Microsoft.WindowsTerminal_8wekyb3d8bbwe/LocalState/settings.json"),
+        local.join(
+            "Packages/Microsoft.WindowsTerminalPreview_8wekyb3d8bbwe/LocalState/settings.json",
+        ),
         local.join("Microsoft/Windows Terminal/settings.json"),
+        local.join("Microsoft/Windows Terminal Preview/settings.json"),
     ]
 }
 
+/// 宽松读取 Windows Terminal 设置:先按严格 JSON 解析,失败再按 JSONC
+/// (注释 + 尾逗号)清洗一次。清洗只动字符串外的字符,`https://...` 这类值
+/// 不会被当成注释截断。
 #[cfg(windows)]
 fn read_json_lenient(path: &Path) -> Option<serde_json::Value> {
     let text = std::fs::read_to_string(path).ok()?;
-    serde_json::from_str(&text)
-        .ok()
-        .or_else(|| serde_json::from_str(&strip_json_line_comments(&text)).ok())
+    // 记事本另存为“UTF-8 with BOM”时,`serde_json` 会把 BOM 当非法字符。
+    let text = text.trim_start_matches('\u{feff}');
+    serde_json::from_str(text).ok().or_else(|| {
+        let cleaned = strip_jsonc(text);
+        serde_json::from_str(&cleaned).ok()
+    })
 }
 
 #[cfg(windows)]
-fn strip_json_line_comments(text: &str) -> String {
-    text.lines()
-        .map(|line| line.split("//").next().unwrap_or(line))
-        .collect::<Vec<_>>()
-        .join("\n")
+fn strip_jsonc(text: &str) -> String {
+    let without_comments = strip_json_comments(text.as_bytes());
+    let without_trailing = strip_trailing_commas(&without_comments);
+    String::from_utf8(without_trailing)
+        .unwrap_or_else(|error| String::from_utf8_lossy(error.as_bytes()).into_owned())
 }
 
+/// 删除字符串外的 `//` 行注释与 `/* */` 块注释。
+#[cfg(windows)]
+fn strip_json_comments(bytes: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    let mut in_string = false;
+    let mut escaped = false;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if in_string {
+            out.push(byte);
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' {
+                escaped = true;
+            } else if byte == b'"' {
+                in_string = false;
+            }
+            index += 1;
+            continue;
+        }
+        match byte {
+            b'"' => {
+                in_string = true;
+                out.push(byte);
+                index += 1;
+            }
+            b'/' if bytes.get(index + 1) == Some(&b'/') => {
+                index += 2;
+                while index < bytes.len() && bytes[index] != b'\n' {
+                    index += 1;
+                }
+            }
+            b'/' if bytes.get(index + 1) == Some(&b'*') => {
+                index += 2;
+                while index + 1 < bytes.len() && !(bytes[index] == b'*' && bytes[index + 1] == b'/')
+                {
+                    index += 1;
+                }
+                index = (index + 2).min(bytes.len());
+            }
+            _ => {
+                out.push(byte);
+                index += 1;
+            }
+        }
+    }
+    out
+}
+
+/// 删除字符串外、只被空白隔开且后面紧跟 `}`/`]` 的逗号。
+#[cfg(windows)]
+fn strip_trailing_commas(bytes: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    let mut in_string = false;
+    let mut escaped = false;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if in_string {
+            out.push(byte);
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' {
+                escaped = true;
+            } else if byte == b'"' {
+                in_string = false;
+            }
+            index += 1;
+            continue;
+        }
+        match byte {
+            b'"' => {
+                in_string = true;
+                out.push(byte);
+                index += 1;
+            }
+            b',' => {
+                let mut next = index + 1;
+                while next < bytes.len() && bytes[next].is_ascii_whitespace() {
+                    next += 1;
+                }
+                if !matches!(bytes.get(next), Some(b'}') | Some(b']')) {
+                    out.push(byte);
+                }
+                index += 1;
+            }
+            _ => {
+                out.push(byte);
+                index += 1;
+            }
+        }
+    }
+    out
+}
+
+/// 默认 profile 的 commandline。`source` 指向另一个 profile 时沿链跟随
+/// (内置 PowerShell/WSL 等 profile 用 `source` 而不是 `commandline`),
+/// 超过 8 层或出现环视为不可解析。
 #[cfg(windows)]
 fn default_profile_commandline(settings: &serde_json::Value) -> Option<String> {
-    let default = settings.get("defaultProfile")?.as_str()?;
-    let list = settings.get("profiles")?.get("list")?.as_array()?;
+    let default = settings.get("defaultProfile")?.as_str()?.trim();
+    if default.is_empty() {
+        return None;
+    }
+    let list = settings.get("profiles").and_then(|profiles| {
+        profiles
+            .get("list")
+            .and_then(|list| list.as_array())
+            .or_else(|| profiles.as_array())
+    })?;
     let mut current = normalize_guid(default);
+    let mut seen: Vec<String> = Vec::new();
     for _ in 0..8 {
+        if seen.contains(&current) {
+            return None;
+        }
+        seen.push(current.clone());
         let profile = list.iter().find(|entry| {
             entry
                 .get("guid")
@@ -730,6 +969,8 @@ fn default_profile_commandline(settings: &serde_json::Value) -> Option<String> {
         return profile
             .get("commandline")
             .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|commandline| !commandline.is_empty())
             .map(str::to_string);
     }
     None
@@ -742,58 +983,98 @@ fn normalize_guid(guid: &str) -> String {
         .to_ascii_lowercase()
 }
 
+/// 从 profile 的 commandline 解析出 shell。可执行文件必须真实存在才采用;
+/// 只写了名字(`pwsh.exe`、`bash.exe`)时按已知安装位置解析。
 #[cfg(windows)]
-fn powershell_from_commandline(commandline: &str) -> Option<PathBuf> {
+fn shell_from_commandline(commandline: &str) -> Option<ResolvedShell> {
     let expanded = expand_percent_env(commandline);
     let token = first_token(&expanded)?;
     let path = PathBuf::from(token);
-    if path.is_file() && is_powershell_name(path.file_name()?.to_str()?) {
-        return Some(path);
+    if path.is_file() {
+        return ShellDialect::from_executable(&path).map(|dialect| ResolvedShell { path, dialect });
     }
-    if is_powershell_name(token) {
-        return resolve_powershell_name(token);
-    }
-    None
+    resolve_shell_name(token)
 }
 
+/// 只展开 `%NAME%`,查环境变量走 `std::env::var`:Windows 上变量名大小写
+/// 不敏感,`%systemroot%` 与 `%SystemRoot%` 等价。
 #[cfg(windows)]
 fn expand_percent_env(text: &str) -> String {
-    let mut out = text.to_string();
-    for (key, value) in std::env::vars() {
-        out = out.replace(&format!("%{key}%"), &value);
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find('%') {
+        out.push_str(&rest[..start]);
+        let after = &rest[start + 1..];
+        if let Some(end) = after.find('%') {
+            let name = &after[..end];
+            // 变量名只由普通标识符字符组成;含路径分隔符的 `%` 是字面量。
+            let plausible = !name.is_empty()
+                && name
+                    .chars()
+                    .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '(' | ')' | '-'));
+            if plausible && let Ok(value) = std::env::var(name) {
+                out.push_str(&value);
+                rest = &after[end + 1..];
+                continue;
+            }
+        }
+        out.push('%');
+        rest = after;
     }
+    out.push_str(rest);
     out
 }
 
 #[cfg(windows)]
 fn first_token(text: &str) -> Option<&str> {
-    let text = text.trim();
+    let mut text = text.trim();
+    // PowerShell 的调用运算符:`& "C:\...\pwsh.exe" -NoLogo`。
+    while let Some(rest) = text.strip_prefix('&') {
+        text = rest.trim_start();
+    }
     if text.is_empty() {
         return None;
     }
-    if let Some(rest) = text.strip_prefix('"') {
-        let end = rest.find('"')?;
-        return Some(&rest[..end]);
+    for quote in ['"', '\''] {
+        if let Some(rest) = text.strip_prefix(quote) {
+            let end = rest.find(quote)?;
+            return Some(&rest[..end]);
+        }
     }
     text.split_whitespace().next()
 }
 
+/// 按名字解析。`bash` 只认 Git for Windows 的安装位置,不碰 PATH:
+/// `C:\Windows\System32\bash.exe` 是 WSL 启动器,自动选中它会得到另一个系统里的
+/// shell(甚至因为没有发行版直接失败)。
 #[cfg(windows)]
-fn is_powershell_name(name: &str) -> bool {
-    matches!(
-        name.to_ascii_lowercase().as_str(),
-        "pwsh.exe" | "pwsh" | "powershell.exe" | "powershell"
-    )
+fn resolve_shell_name(name: &str) -> Option<ResolvedShell> {
+    match name.to_ascii_lowercase().as_str() {
+        "pwsh.exe" | "pwsh" => first_existing_pwsh_candidate().map(|path| ResolvedShell {
+            path,
+            dialect: ShellDialect::PowerShell,
+        }),
+        "powershell.exe" | "powershell" => {
+            let path = windows_powershell_path();
+            path.is_file().then_some(ResolvedShell {
+                path,
+                dialect: ShellDialect::PowerShell,
+            })
+        }
+        "bash.exe" | "bash" => first_existing_git_bash_candidate().map(|path| ResolvedShell {
+            path,
+            dialect: ShellDialect::Bash,
+        }),
+        _ => None,
+    }
 }
 
 #[cfg(windows)]
-fn resolve_powershell_name(name: &str) -> Option<PathBuf> {
-    if name.eq_ignore_ascii_case("pwsh") || name.eq_ignore_ascii_case("pwsh.exe") {
-        return first_existing_pwsh_candidate();
-    }
-    let system_root = std::env::var_os("SystemRoot").map(PathBuf::from)?;
-    let path = system_root.join("System32/WindowsPowerShell/v1.0/powershell.exe");
-    path.is_file().then_some(path)
+fn windows_powershell_path() -> PathBuf {
+    let root = std::env::var_os("SystemRoot")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(r"C:\Windows"));
+    root.join("System32/WindowsPowerShell/v1.0/powershell.exe")
 }
 
 #[cfg(windows)]
@@ -820,9 +1101,7 @@ fn candidate_pwsh_paths() -> Vec<PathBuf> {
             }
         }
     }
-    candidates.push(PathBuf::from(
-        r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe",
-    ));
+    candidates.push(windows_powershell_path());
     candidates
 }
 
@@ -833,19 +1112,70 @@ fn first_existing_pwsh_candidate() -> Option<PathBuf> {
         .find(|candidate| candidate.is_file())
 }
 
+/// Git for Windows 的候选安装位置。Windows 上 `bash.exe` 还有 System32 的 WSL
+/// 启动器同名,所以这里只列 Git 的安装根目录,绝不扫 PATH 上的 `bash.exe`。
+#[cfg(windows)]
+fn candidate_git_bash_paths() -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    for key in ["ProgramFiles", "ProgramW6432", "ProgramFiles(x86)"] {
+        if let Ok(base) = std::env::var(key) {
+            candidates.push(PathBuf::from(base).join("Git/bin/bash.exe"));
+        }
+    }
+    if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+        candidates.push(PathBuf::from(local).join("Programs/Git/bin/bash.exe"));
+    }
+    // 从 PATH 上的 `git.exe` 反推安装根:`<root>\cmd\git.exe` 与
+    // `<root>\bin\git.exe` 都见过。
+    if let Ok(path) = std::env::var("PATH") {
+        for entry in path.split(';') {
+            let dir = Path::new(entry.trim().trim_matches('"'));
+            if dir.join("git.exe").is_file()
+                && let Some(root) = dir.parent()
+            {
+                candidates.push(root.join("bin/bash.exe"));
+                candidates.push(root.join("usr/bin/bash.exe"));
+            }
+        }
+    }
+    candidates
+}
+
+#[cfg(windows)]
+fn first_existing_git_bash_candidate() -> Option<PathBuf> {
+    candidate_git_bash_paths()
+        .into_iter()
+        .find(|candidate| candidate.is_file())
+}
+
 /// `kill_tree` 的测试脚手架:拉起「外层 shell → 内层 shell」的进程树,并观察
 /// 孙进程的生死。前台 bash 与后台任务共用同一条清理路径,脚手架也共用。
 #[cfg(all(test, windows))]
 pub(crate) mod test_tree {
-    use super::windows_shell_executable;
-    use std::path::Path;
+    use super::{first_existing_pwsh_candidate, windows_powershell_path};
+    use std::path::{Path, PathBuf};
     use std::time::{Duration, Instant};
     use tokio::process::Command;
+
+    /// 进程探针固定用 PowerShell:它只回答“PID 还在不在”,与工具的 shell
+    /// 方言无关,不能让断言随用户默认终端漂移。
+    pub(crate) fn powershell_for_tests() -> PathBuf {
+        first_existing_pwsh_candidate().unwrap_or_else(windows_powershell_path)
+    }
 
     /// 一条命令拉起这棵树:外层 shell 再拉起一个内层 shell,内层把**自己的**
     /// PID 写进 `marker` 后长睡,外层同样长睡。形状与工具跑 `cargo build` 一致
     /// ——直接子进程是 shell,真正干活的是它的后代。
     pub(crate) fn nested_sleeper_command(marker: &Path) -> String {
+        if super::shell_runtime().dialect == "bash" {
+            // 当前 shell 是 Git Bash:内层用 PowerShell 写自己的 Windows PID。
+            // `$$` 是 MSYS 内部 PID,Windows 的 taskkill/Get-Process 不认,
+            // 不能拿它当进程树的锚点。
+            let marker = marker.display().to_string().replace('\\', "/");
+            return format!(
+                "powershell.exe -NoLogo -NoProfile -NonInteractive -Command \"Set-Content -LiteralPath '{marker}' -Value \\$PID; Start-Sleep -Seconds 120\" & wait"
+            );
+        }
         let marker = marker.display();
         format!(
             "$exe = (Get-Process -Id $PID).Path; \
@@ -881,7 +1211,7 @@ pub(crate) mod test_tree {
         let script = format!(
             "if (Get-Process -Id {pid} -ErrorAction SilentlyContinue) {{ 'alive' }} else {{ 'gone' }}"
         );
-        let output = Command::new(windows_shell_executable())
+        let output = Command::new(powershell_for_tests())
             .args([
                 "-NoLogo",
                 "-NoProfile",
@@ -916,56 +1246,193 @@ pub(crate) mod test_tree {
 #[cfg(test)]
 mod tests {
     #[cfg(windows)]
-    use super::{first_token, is_powershell_name, resolve_windows_shell};
+    use super::{first_token, resolve_windows_shell};
 
     #[cfg(windows)]
     #[test]
-    fn first_token_handles_quotes() {
+    fn first_token_handles_quotes_and_call_operator() {
         assert_eq!(
             first_token(r#""C:\Program Files\pwsh.exe" -NoLogo"#),
             Some(r"C:\Program Files\pwsh.exe")
         );
-        assert_eq!(first_token("pwsh.exe"), Some("pwsh.exe"));
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn powershell_name_detection() {
-        assert!(is_powershell_name("pwsh.exe"));
-        assert!(is_powershell_name("PowerShell.exe"));
-        assert!(!is_powershell_name("cmd.exe"));
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn resolves_some_powershell_on_this_host() {
-        let shell = resolve_windows_shell();
-        let name = shell
-            .file_name()
-            .and_then(|part| part.to_str())
-            .unwrap_or_default()
-            .to_ascii_lowercase();
-        assert!(
-            name == "pwsh.exe" || name == "powershell.exe",
-            "expected PowerShell, got {}",
-            shell.display()
+        assert_eq!(
+            first_token(r#"& "C:\Program Files\Git\bin\bash.exe" -li"#),
+            Some(r"C:\Program Files\Git\bin\bash.exe")
         );
-        assert!(shell.is_file(), "{}", shell.display());
+        assert_eq!(
+            first_token("'C:\\Program Files\\Git\\bin\\bash.exe' -li"),
+            Some(r"C:\Program Files\Git\bin\bash.exe")
+        );
+        assert_eq!(first_token("pwsh.exe"), Some("pwsh.exe"));
+        assert_eq!(first_token("   "), None);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn shell_dialect_detection() {
+        use super::ShellDialect;
+        use std::path::Path;
+        assert_eq!(
+            ShellDialect::from_executable(Path::new("pwsh.exe")),
+            Some(ShellDialect::PowerShell)
+        );
+        assert_eq!(
+            ShellDialect::from_executable(Path::new("PowerShell.exe")),
+            Some(ShellDialect::PowerShell)
+        );
+        assert_eq!(
+            ShellDialect::from_executable(Path::new(r"C:\Program Files\Git\bin\bash.exe")),
+            Some(ShellDialect::Bash)
+        );
+        assert_eq!(ShellDialect::from_executable(Path::new("cmd.exe")), None);
+        assert_eq!(ShellDialect::from_executable(Path::new("wsl.exe")), None);
+    }
+
+    /// 本机解析结果必须是一个真实存在、方言可识别的 shell。不假定一定是
+    /// PowerShell:把 Git Bash 设为默认终端的机器上它应当是 bash。
+    #[cfg(windows)]
+    #[test]
+    fn resolves_an_existing_shell_on_this_host() {
+        use super::ShellDialect;
+        let shell = resolve_windows_shell();
+        assert!(shell.path.is_file(), "{}", shell.path.display());
+        assert_eq!(
+            Some(shell.dialect),
+            ShellDialect::from_executable(&shell.path),
+            "{}",
+            shell.path.display()
+        );
+    }
+
+    /// 默认 profile 的 commandline 解析:对象/数组两种 profiles 形态、`source`
+    /// 链跟随、Git Bash 与 PowerShell 两种具体命令。
+    #[cfg(windows)]
+    #[test]
+    fn default_profile_follows_source_and_accepts_legacy_list() {
+        let nested = serde_json::json!({
+            "defaultProfile": "{git}",
+            "profiles": {
+                "list": [
+                    {
+                        "guid": "{git}",
+                        "commandline": "\"C:\\Program Files\\Git\\bin\\bash.exe\" -li"
+                    }
+                ]
+            }
+        });
+        assert_eq!(
+            super::default_profile_commandline(&nested),
+            Some(r#""C:\Program Files\Git\bin\bash.exe" -li"#.to_string())
+        );
+
+        // 旧版 `profiles` 直接是数组;默认 profile 通过 `source` 指向别名。
+        let legacy = serde_json::json!({
+            "defaultProfile": "{alias}",
+            "profiles": [
+                { "guid": "{alias}", "source": "Windows.Terminal.PowershellCore" },
+                { "guid": "Windows.Terminal.PowershellCore", "commandline": "pwsh.exe -NoLogo" }
+            ]
+        });
+        assert_eq!(
+            super::default_profile_commandline(&legacy),
+            Some("pwsh.exe -NoLogo".to_string())
+        );
+
+        // 环/缺失 profile 都返回 None,不 panic。
+        let cycle = serde_json::json!({
+            "defaultProfile": "{a}",
+            "profiles": { "list": [
+                { "guid": "{a}", "source": "{b}" },
+                { "guid": "{b}", "source": "{a}" }
+            ] }
+        });
+        assert_eq!(super::default_profile_commandline(&cycle), None);
+        assert_eq!(
+            super::default_profile_commandline(&serde_json::json!({})),
+            None
+        );
+    }
+
+    /// settings.json 含 `https://` 与注释时,按字符串边界清洗后仍要能解析。
+    #[cfg(windows)]
+    #[test]
+    fn jsonc_settings_with_urls_survive_lenient_parsing() {
+        let dir = std::env::temp_dir().join(format!("denia-shell-jsonc-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("settings.json");
+        let text = r#"{
+            // 这一行是注释
+            "$help": "https://aka.ms/terminal-documentation",
+            "$schema": "https://aka.ms/terminal-profiles-schema",
+            "defaultProfile": "{git}",
+            "profiles": {
+                "list": [
+                    {
+                        "guid": "{git}",
+                        "commandline": "\"C:\\Program Files\\Git\\bin\\bash.exe\" -li",
+                    },
+                ],
+            },
+        }"#;
+        std::fs::write(&path, text).unwrap();
+        let settings = super::read_json_lenient(&path).expect("JSONC 设置应能被宽松解析");
+        assert_eq!(
+            super::default_profile_commandline(&settings),
+            Some(r#""C:\Program Files\Git\bin\bash.exe" -li"#.to_string())
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `%SystemRoot%` 的大小写不敏感展开:Windows 环境变量名本身不区分大小写,
+    /// 按字面替换会把小写写法漏掉。
+    #[cfg(windows)]
+    #[test]
+    fn percent_env_expansion_is_case_insensitive() {
+        let root = std::env::var("SystemRoot").expect("Windows 必有 SystemRoot");
+        let expanded = super::expand_percent_env("%systemroot%\\System32");
+        assert!(
+            expanded.eq_ignore_ascii_case(&format!("{root}\\System32")),
+            "{expanded}"
+        );
+    }
+
+    /// 从 commandline 解析出的 shell 必须与文件名方言一致;`cmd.exe`/`wsl.exe`
+    /// 不在支持面内,应返回 None 让调用方继续降级。
+    #[cfg(windows)]
+    #[test]
+    fn commandline_resolves_supported_shells_only() {
+        use super::ShellDialect;
+        if let Some(bash) = super::first_existing_git_bash_candidate() {
+            let commandline = format!("\"{}\" -li", bash.display());
+            let resolved = super::shell_from_commandline(&commandline).expect("Git Bash 应可解析");
+            assert_eq!(resolved.dialect, ShellDialect::Bash);
+            assert_eq!(resolved.path, bash);
+            assert!(
+                !resolved
+                    .path
+                    .to_string_lossy()
+                    .to_ascii_lowercase()
+                    .ends_with("system32\\bash.exe"),
+                "不能退化成 System32 的 WSL 启动器"
+            );
+        }
+        assert!(super::shell_from_commandline("cmd.exe /k").is_none());
+        assert!(super::shell_from_commandline("wsl.exe").is_none());
     }
 
     #[cfg(windows)]
     #[test]
     fn cache_hit_and_invalidation_reparse() {
-        // 首次解析并缓存。
-        let first = super::windows_shell_executable();
-        assert!(first.is_file());
-        // 命中缓存:同一路径。
-        let second = super::windows_shell_executable();
+        // 首次解析并缓存(路径与方言一起缓存)。
+        let first = super::resolved_shell();
+        assert!(first.path.is_file());
+        // 命中缓存:同一结果。
+        let second = super::resolved_shell();
         assert_eq!(first, second);
         // 失效后重新解析:结果仍是一个存在的可执行文件(缓存自愈)。
         super::invalidate_windows_shell_cache();
-        let third = super::windows_shell_executable();
-        assert!(third.is_file());
+        let third = super::resolved_shell();
+        assert!(third.path.is_file());
     }
 
     #[cfg(windows)]

@@ -600,8 +600,8 @@ mod tests {
         (out, validation_results(&events))
     }
 
-    /// 以指定退出码结束的短命令:Windows 走 `pwsh -Command`、Unix 走 `bash -c`,
-    /// 两边 `exit N` 都是"以 N 退出"。
+    /// 以指定退出码结束的短命令:PowerShell 与 POSIX shell 的 `exit N` 语义
+    /// 一致(Windows 上的 bash 方言由 Git Bash 提供)。
     ///
     /// 刻意不用 `cmd /C exit N`:实测经 pwsh 转发后拿到的是 1 而不是 N,拿它当
     /// 退出码来源会把"退出码决定结论"这条测试测成另一个东西。

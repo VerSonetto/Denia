@@ -475,16 +475,14 @@ mod tests {
             task_ledger: None,
             read_state: None,
         };
+        let big_output = if denia_tools::shell::shell_runtime().dialect == "bash" {
+            // Git Bash / Unix:用管道造大输出,不用 PowerShell 表达式。
+            "yes 界 | head -n 50000; sleep 0.5"
+        } else {
+            "Write-Output ('界' * 50000); Start-Sleep -Milliseconds 500"
+        };
         let job = jobs
-            .start(
-                &ctx,
-                "Write-Output ('界' * 50000); Start-Sleep -Milliseconds 500",
-                "大输出",
-                10_000,
-                1,
-                8,
-                4096,
-            )
+            .start(&ctx, big_output, "大输出", 10_000, 1, 8, 4096)
             .unwrap();
         jobs.wait(&job.id, "bounded", 1, &CancellationToken::new())
             .await
@@ -555,6 +553,15 @@ mod tests {
     /// 构建里编译,跨 crate 拿不到,这里按同一形状写一份最小等价脚手架。
     #[cfg(windows)]
     fn nested_sleeper_command(marker: &std::path::Path) -> String {
+        if denia_tools::shell::shell_runtime().dialect == "bash" {
+            // bash 方言:内层用 PowerShell 写自己的 Windows PID。`$$` 给的是
+            // MSYS 内部 PID,Windows 的 taskkill/Get-Process 不认,不能拿它
+            // 当进程树的锚点。外层 `wait` 等内层,形状与 PowerShell 版一致。
+            let marker = marker.display().to_string().replace('\\', "/");
+            return format!(
+                "powershell.exe -NoLogo -NoProfile -NonInteractive -Command \"Set-Content -LiteralPath '{marker}' -Value \\$PID; Start-Sleep -Seconds 120\" & wait"
+            );
+        }
         let marker = marker.display();
         format!(
             "$exe = (Get-Process -Id $PID).Path; \
@@ -585,13 +592,29 @@ mod tests {
         }
     }
 
+    /// 测试用的进程探针固定走 PowerShell:它只回答"PID 还在不在",与工具的
+    /// shell 方言无关,不能随用户默认终端漂移。
+    #[cfg(windows)]
+    fn powershell_for_tests() -> std::path::PathBuf {
+        for key in ["ProgramFiles", "ProgramW6432"] {
+            if let Ok(base) = std::env::var(key) {
+                let path = std::path::PathBuf::from(base).join("PowerShell/7/pwsh.exe");
+                if path.is_file() {
+                    return path;
+                }
+            }
+        }
+        let root = std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".to_string());
+        std::path::PathBuf::from(root).join("System32/WindowsPowerShell/v1.0/powershell.exe")
+    }
+
     /// 进程是否还活着。查不出来时当「活着」:失败不能伪装成通过。
     #[cfg(windows)]
     async fn process_alive(pid: u32) -> bool {
         let script = format!(
             "if (Get-Process -Id {pid} -ErrorAction SilentlyContinue) {{ 'alive' }} else {{ 'gone' }}"
         );
-        let output = tokio::process::Command::new(denia_tools::shell::shell_executable_path())
+        let output = tokio::process::Command::new(powershell_for_tests())
             .args([
                 "-NoLogo",
                 "-NoProfile",
