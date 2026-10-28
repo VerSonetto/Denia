@@ -689,6 +689,12 @@ export interface MemoryFileInfo {
   name: string
   size: number
   modifiedMs: number
+  /** 一句话摘要(frontmatter description)。 */
+  description?: string
+  /** 经验 / 事实;旧文件未标注时缺省。 */
+  kind?: 'experience' | 'fact'
+  /** active / superseded。 */
+  status?: 'active' | 'superseded'
 }
 
 export interface MemoryProject {
@@ -732,6 +738,47 @@ export function deleteMemoryFile(id: string, file: string): Promise<{ deleted: s
       .join('/')}`,
     { method: 'DELETE' },
   )
+}
+
+/** 一次检索命中(本地字面匹配,不调用模型)。 */
+export interface MemoryHit {
+  name: string
+  score: number
+  description?: string
+  kind?: 'experience' | 'fact'
+  status?: 'active' | 'superseded'
+  size: number
+  modifiedMs: number
+  /** 命中字段:name / description / body。 */
+  matched: string[]
+  excerpt: string
+}
+
+export interface MemorySearchResult {
+  query: string
+  hits: MemoryHit[]
+  scanned: number
+  skipped: number
+}
+
+/** 记忆检索(工作区内的条目文件,按字面相关性排序)。 */
+export function searchMemories(
+  id: string,
+  query: string,
+  opts?: { limit?: number; kind?: 'experience' | 'fact'; includeSuperseded?: boolean },
+): Promise<MemorySearchResult> {
+  const params = new URLSearchParams({ q: query })
+  if (opts?.limit) params.set('limit', String(opts.limit))
+  if (opts?.kind) params.set('kind', opts.kind)
+  if (opts?.includeSuperseded) params.set('include_superseded', 'true')
+  return http(`/api/memories/projects/${encodeURIComponent(id)}/search?${params.toString()}`)
+}
+
+/** 按各条 frontmatter 重建 MEMORY.md 三个分区(不改条目文件)。 */
+export function rebuildMemoryIndex(
+  id: string,
+): Promise<{ rebuilt: { experience: number; fact: number; history: number; untyped: number } }> {
+  return http(`/api/memories/projects/${encodeURIComponent(id)}/index`, { method: 'POST' })
 }
 
 export function pickerCapability(): Promise<{

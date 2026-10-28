@@ -22,9 +22,94 @@ pub fn router() -> Router<Arc<AppState>> {
             get(memory_health),
         )
         .route(
+            "/api/memories/projects/{id}/search",
+            get(search_memories),
+        )
+        .route(
+            "/api/memories/projects/{id}/index",
+            axum::routing::post(rebuild_memory_index),
+        )
+        .route(
             "/api/memories/projects/{id}/{*file}",
             get(read_memory_file).delete(delete_memory_file),
         )
+}
+
+/// 检索参数:`q` 必填,其余可选。
+#[derive(Debug, serde::Deserialize)]
+struct SearchQuery {
+    q: String,
+    #[serde(default)]
+    limit: Option<usize>,
+    /// `experience` / `fact`;缺省不限。
+    #[serde(default)]
+    kind: Option<String>,
+    /// 默认不返回已取代的历史条目。
+    #[serde(default)]
+    include_superseded: Option<bool>,
+}
+
+/// 字面相关性检索(设置页用)。纯本地计算,不调用任何模型。
+async fn search_memories(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    axum::extract::Query(params): axum::extract::Query<SearchQuery>,
+) -> Result<impl IntoResponse, ApiError> {
+    let workspace = state.workspaces.get(&id).ok_or_else(|| {
+        ApiError::new(
+            axum::http::StatusCode::NOT_FOUND,
+            "memory/workspace-not-found",
+            "workspace not found",
+        )
+    })?;
+    let root =
+        crate::project_memory::memory_root(&state.home, std::path::Path::new(&workspace.path));
+    let kind = match params.kind.as_deref() {
+        Some("experience") => Some(crate::project_memory::MemoryKind::Experience),
+        Some("fact") => Some(crate::project_memory::MemoryKind::Fact),
+        Some(other) => {
+            return Err(ApiError::bad_request(
+                "memory/bad-kind",
+                format!("kind 只接受 experience / fact:{other}"),
+            ));
+        }
+        None => None,
+    };
+    let limit = params.limit.unwrap_or(20);
+    let include_superseded = params.include_superseded.unwrap_or(false);
+    let result = tokio::task::spawn_blocking(move || {
+        crate::project_memory::retrieval::search(
+            &root,
+            &params.q,
+            limit,
+            kind,
+            include_superseded,
+        )
+    })
+    .await
+    .map_err(|e| ApiError::bad_request("memory/search-failed", e.to_string()))?;
+    Ok(Json(json!(result)))
+}
+
+/// 按 frontmatter 重建 MEMORY.md 三个分区(设置页「整理记忆」)。
+async fn rebuild_memory_index(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> Result<impl IntoResponse, ApiError> {
+    let workspace = state.workspaces.get(&id).ok_or_else(|| {
+        ApiError::new(
+            axum::http::StatusCode::NOT_FOUND,
+            "memory/workspace-not-found",
+            "workspace not found",
+        )
+    })?;
+    let root =
+        crate::project_memory::memory_root(&state.home, std::path::Path::new(&workspace.path));
+    let rebuilt = tokio::task::spawn_blocking(move || crate::project_memory::rebuild_index(&root))
+        .await
+        .map_err(|e| ApiError::bad_request("memory/rebuild-failed", e.to_string()))?
+        .map_err(|message| ApiError::bad_request("memory/rebuild-failed", message))?;
+    Ok(Json(json!({ "rebuilt": rebuilt })))
 }
 
 /// 记忆体检:断链/孤儿/重复描述/索引规模。确定性检查,不改任何文件、

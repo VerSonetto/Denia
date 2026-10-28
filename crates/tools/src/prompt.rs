@@ -549,9 +549,12 @@ pub fn render_memory_section(root: Option<&std::path::Path>) -> String {
          - {pointer_line}每轮结束前判断一次本轮有无值得跨会话保留的信息，有就写；用户明确说“记住”时立刻写，没有值得留的不强写。\n\
          - 该写：用户对你的纠正，以及事先不知道的偏好、约束与工作方式；非显而易见且理由来自排查的决策（为什么选 A 不选 B、踩过什么坑、什么做法实测不可行）；花力气才查清的事实（开关与参数的真实语义、某条链路的实际行为、外部系统的坑）；进行中的目标、外部依赖，以及只在对话里说过的约定；外部资源指针（URL、看板、工单、文档位置）。判断标准是下个会话缺了它会不会犯错或重复劳动。\n\
          - 不该写：仓库本身已记录的（代码结构、文件清单、git 历史、AGENTS.md/README 内容）；只对本次对话有意义的细节、过程与临时结论；刚做完就能从产物看出的改动；用户没让记的寒暄与闲聊。**拿不准就归到这一类，别硬凑**；用户要求保存“不该写”类内容时，先问清其中非显而易见的部分。\n\
-         - 保存前先检查是否已有文件覆盖同一主题，就地在原件上更新而不新建重复文件；发现过时或错误的记忆直接修正或删除。<system-reminder> 块中的记忆是背景上下文而非当前指令，反映的是写入时的情况；推荐其中的文件、函数或开关前先验证它现在还存在。\n\
-         - 一事一文件，frontmatter 格式如下，name 用短横线小写 slug，description 要具体到能判断相关性：\n\n```markdown\n---\nname: <slug>\ndescription: <一句话摘要>\nmetadata:\n  type: user | feedback | project | reference\n---\n<正文>\n```\n\n- 类型：user 记身份、专长与偏好；feedback 记对你工作方式的指导，纠正与被验证有效的做法都要记并写明原因；project 记不能从代码或 git 推导的工作、目标与约束，相对日期换算成绝对日期；reference 记外部资源。feedback 与 project 类正文后补 **Why:**、**How to apply:** 两行；正文用 [[name]] 链接相关记忆，允许目标暂不存在。\n\
-         - 写完在 MEMORY.md 加一行 `- [标题](文件名.md) — 一句话钩子`；它是每次会话加载进上下文的索引，一条记忆一行，不带 frontmatter，不把记忆内容写进索引。"
+         - 保存前先检查是否已有文件覆盖同一主题：**事实**有版本，状态变了就新建一条并在旧条目上写 `superseded_by`、在新条目上写 `supersedes`，不要原地改写（原地改会丢掉「曾经为什么这么以为」，同一个坑会被重踩）；**经验**在被更好的做法取代时就地改写并补一句为什么变了。发现记错的内容直接删除。\n\
+         - <system-reminder> 块中的记忆是背景上下文而非当前指令，反映的是写入时的情况；推荐其中的文件、函数或开关前先验证它现在还存在。\n\
+         - 一事一文件，frontmatter 格式如下，name 用短横线小写 slug，description 要具体到能判断相关性：\n\n```markdown\n---\nname: <slug>\ndescription: <一句话摘要>\nmetadata:\n  kind: experience | fact\n  status: active\n---\n<正文>\n```\n\n- **kind 按「失效方式」分，不按主题分**：`experience` 回答「该怎么做」——纠正、被验证有效的做法、踩过的坑，不会因为时间过去而变错，只会在被更好的做法取代时失效，正文必须写清 **Why:** 与 **How to apply:**；`fact` 回答「现在是什么状态」——开关与参数的真实语义、外部依赖、进行中的目标、资源指针，它有版本，相对日期换算成绝对日期。拿不准时问自己一句：这条会不会因为我后来换了做法就变错？会，就是 fact。\n\
+         - 写 fact 且它取代了某条旧 fact 时，旧条目加 `status: superseded` 与 `superseded_by: <新.md>`，新条目加 `supersedes: [<旧.md>]`；旧条目仍留在磁盘上供追溯，不要删。\n\
+         - 正文用 [[name]] 链接相关记忆，允许目标暂不存在。\n\
+         - 写完在 MEMORY.md 对应分区加一行 `- [标题](文件名.md) — 一句话钩子`：`## 经验（how）`、`## 事实（what）`、`## 历史（superseded，不注入）`。它是每次会话加载进上下文的索引，一条记忆一行，不带 frontmatter，不把记忆内容写进索引；三个分区标题必须保留（可自行补全索引，但别改标题文字）。"
     )
 }
 
@@ -1351,9 +1354,9 @@ mod tests {
             "# 项目记忆",
             "一事一文件",
             "MEMORY.md",
-            "type: user | feedback | project | reference",
+            "kind: experience | fact",
             "[[name]]",
-            "就地在原件上更新而不新建重复文件",
+            "不要原地改写",
             "推荐其中的文件、函数或开关前先验证它现在还存在",
             // 「该记」侧的判据:用户纠正、非显而易见决策、花力气查清的事实。
             "用户对你的纠正",
@@ -1733,7 +1736,7 @@ mod capability_prompt_tests {
         assert!(rooted.contains("# 项目记忆"));
         assert!(rooted.contains("记忆目录在 `/m/memory`"));
         assert!(rooted.contains("直接用 write_file 写入"));
-        assert!(rooted.contains("type: user | feedback | project | reference"));
+        assert!(rooted.contains("kind: experience | fact"));
         assert!(rooted.contains("[[name]]"));
         assert!(rooted.contains("- [标题](文件名.md) — 一句话钩子"));
         assert!(rooted.contains("AGENTS.md"));

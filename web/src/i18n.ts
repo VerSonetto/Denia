@@ -1118,6 +1118,16 @@ const zh = {
   memoryDeleteConfirm: '确定删除这条记忆吗？磁盘上的文件会被直接删除，该操作不可撤销。',
   memoryDeleted: '已删除',
   memoryDeleteFailed: '删除失败',
+  memoryKindFilterLabel: '按类型筛选',
+  memoryKindAll: '全部类型',
+  memoryKindExperience: '经验',
+  memoryKindFact: '事实',
+  memoryStatusSuperseded: '已取代',
+  memoryRebuild: '整理记忆',
+  memoryRebuildBusy: '整理中…',
+  memoryRebuildHint: '按每条记忆的类型与状态重建 MEMORY.md 索引（只改索引，不动记忆内容）',
+  memoryRebuildDone:
+    '索引已重建：经验 {experience} 条、事实 {fact} 条、历史 {history} 条，未标注类型 {untyped} 条',
   numberThousand: '{value}K',
   numberMillion: '{value}M',
 
@@ -2452,6 +2462,17 @@ const en: typeof zh = {
   memoryDeleteConfirm: 'Delete this memory? The file on disk will be removed immediately. This cannot be undone.',
   memoryDeleted: 'Deleted',
   memoryDeleteFailed: 'Failed to delete',
+  memoryKindFilterLabel: 'Filter by kind',
+  memoryKindAll: 'All kinds',
+  memoryKindExperience: 'Experience',
+  memoryKindFact: 'Fact',
+  memoryStatusSuperseded: 'Superseded',
+  memoryRebuild: 'Tidy up',
+  memoryRebuildBusy: 'Tidying…',
+  memoryRebuildHint:
+    'Rebuild MEMORY.md from each memory file kind and status (index only; bodies untouched)',
+  memoryRebuildDone:
+    'Index rebuilt: {experience} experience, {fact} fact, {history} history, {untyped} untyped',
   numberThousand: '{value}K',
   numberMillion: '{value}M',
 

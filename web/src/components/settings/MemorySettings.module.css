@@ -371,3 +371,63 @@
     grid-template-columns: 1fr;
   }
 }
+
+/* 类型/状态徽章:经验蓝、事实绿、superseded 灰。 */
+.badge {
+  display: inline-block;
+  margin-right: 6px;
+  padding: 0 5px;
+  border-radius: 5px;
+  font-size: 10.5px;
+  font-weight: 600;
+  line-height: 16px;
+  vertical-align: 1px;
+}
+
+.badgeExp {
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  color: var(--accent);
+}
+
+.badgeFact {
+  background: color-mix(in srgb, #2f9e63 16%, transparent);
+  color: #2f9e63;
+}
+
+.badgeMuted {
+  background: var(--input-major);
+  color: var(--label-tertiary);
+}
+
+/* 整理记忆按钮:与筛选同高,弱化但可点。 */
+.rebuild {
+  flex: none;
+  box-sizing: border-box;
+  height: 28px;
+  padding: 0 12px;
+  border: 1px solid var(--border-l1);
+  border-radius: var(--r-sm, 8px);
+  background: var(--input-major);
+  color: var(--label-primary);
+  font-size: 12.5px;
+  font-weight: 550;
+  cursor: pointer;
+}
+
+.rebuild:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.rebuild:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+
+/* 类型筛选下拉与搜索框同尺寸。 */
+select.search {
+  flex: none;
+  width: auto;
+  max-width: 120px;
+  cursor: pointer;
+}

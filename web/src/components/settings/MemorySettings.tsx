@@ -10,6 +10,8 @@ type PreviewError = {
   message: string
 }
 
+type KindFilter = 'all' | 'experience' | 'fact'
+
 /** 相对时间:分钟内"刚刚",一小时内分钟,当天内小时,其余天;再旧回退日期。 */
 function formatRelative(ms: number): string {
   if (!ms) return '—'
@@ -59,6 +61,12 @@ export function MemorySettings() {
   const [deleteError, setDeleteError] = useState('')
   // 请求序号:慢请求返回时丢弃过期结果。
   const requestSeq = useRef(0)
+  // 类型筛选(经验/事实)。
+  const [kindFilter, setKindFilter] = useState<KindFilter>('all')
+  // 整理记忆:重建索引的执行态与结果。
+  const [rebuildBusy, setRebuildBusy] = useState(false)
+  const [rebuildNote, setRebuildNote] = useState('')
+  const [rebuildError, setRebuildError] = useState('')
 
   useEffect(() => {
     let disposed = false
@@ -131,9 +139,39 @@ export function MemorySettings() {
   const visibleFiles = useMemo(() => {
     const files = selected?.files ?? []
     const needle = search.trim().toLowerCase()
-    if (!needle) return files
-    return files.filter((file) => file.name.toLowerCase().includes(needle))
-  }, [selected, search])
+    return files.filter((file) => {
+      if (kindFilter !== 'all' && file.kind !== kindFilter) return false
+      if (!needle) return true
+      return (
+        file.name.toLowerCase().includes(needle) ||
+        (file.description ?? '').toLowerCase().includes(needle)
+      )
+    })
+  }, [selected, search, kindFilter])
+
+  /** 整理记忆:服务端按 frontmatter 重建三区索引,只改 MEMORY.md。 */
+  const rebuildIndex = useCallback(async () => {
+    if (!selectedId || rebuildBusy) return
+    setRebuildBusy(true)
+    setRebuildError('')
+    setRebuildNote('')
+    try {
+      const { rebuilt } = await api.rebuildMemoryIndex(selectedId)
+      setRebuildNote(
+        t('memoryRebuildDone', {
+          experience: rebuilt.experience,
+          fact: rebuilt.fact,
+          history: rebuilt.history,
+          untyped: rebuilt.untyped,
+        }),
+      )
+      await loadProjects()
+    } catch (e) {
+      setRebuildError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setRebuildBusy(false)
+    }
+  }, [selectedId, rebuildBusy, loadProjects])
 
   const openFile = useCallback(
     async (file: api.MemoryFileInfo) => {
@@ -296,7 +334,36 @@ export function MemorySettings() {
             placeholder={t('memorySearchPlaceholder')}
             onChange={(event) => setSearch(event.target.value)}
           />
+          <select
+            className={styles.search}
+            value={kindFilter}
+            aria-label={t('memoryKindFilterLabel')}
+            onChange={(event) => setKindFilter(event.target.value as KindFilter)}
+          >
+            <option value="all">{t('memoryKindAll')}</option>
+            <option value="experience">{t('memoryKindExperience')}</option>
+            <option value="fact">{t('memoryKindFact')}</option>
+          </select>
+          <button
+            type="button"
+            className={styles.rebuild}
+            disabled={!selectedId || rebuildBusy}
+            title={t('memoryRebuildHint')}
+            onClick={() => void rebuildIndex()}
+          >
+            {rebuildBusy ? t('memoryRebuildBusy') : t('memoryRebuild')}
+          </button>
         </div>
+        {rebuildNote && (
+          <p className={styles.saved} role="status">
+            {rebuildNote}
+          </p>
+        )}
+        {rebuildError && (
+          <p className={styles.error} role="alert">
+            {rebuildError}
+          </p>
+        )}
 
         {projectsError ? (
           <p className={styles.error} role="alert">
@@ -321,10 +388,31 @@ export function MemorySettings() {
                     >
                       <span className={styles.fileRow}>
                         <span className={styles.fileText}>
-                          <span className={styles.fileName}>{file.name}</span>
+                          <span className={styles.fileName}>
+                            {file.kind && (
+                              <span
+                                className={`${styles.badge} ${
+                                  file.kind === 'experience' ? styles.badgeExp : styles.badgeFact
+                                }${file.status === 'superseded' ? ` ${styles.badgeMuted}` : ''}`}
+                              >
+                                {file.kind === 'experience'
+                                  ? t('memoryKindExperience')
+                                  : t('memoryKindFact')}
+                              </span>
+                            )}
+                            {file.status === 'superseded' && (
+                              <span className={`${styles.badge} ${styles.badgeMuted}`}>
+                                {t('memoryStatusSuperseded')}
+                              </span>
+                            )}
+                            {file.name}
+                          </span>
                           <span className={styles.fileMeta}>
                             {formatSize(file.size)} · {formatRelative(file.modifiedMs)}
                           </span>
+                          {file.description && (
+                            <span className={styles.fileMeta}>{file.description}</span>
+                          )}
                         </span>
                         <span
                           role="button"
