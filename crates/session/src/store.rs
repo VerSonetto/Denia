@@ -1,5 +1,160 @@
 //! Session indexing, paging and lifecycle.
 use super::*;
+use std::collections::VecDeque;
+use std::io::{Read, Seek, SeekFrom};
+
+#[derive(Clone, Copy)]
+struct PagePosition {
+    index: u64,
+    offset: u64,
+}
+
+struct PageScan {
+    reader: BufReader<File>,
+    header: SessionHeader,
+    start: Option<PagePosition>,
+    end_offset: u64,
+    total: u64,
+    anchors: Vec<SessionAnchor>,
+    totals: SessionTotals,
+}
+
+fn scan_page(file: File, before: Option<u64>, limit: usize) -> Result<PageScan, SessionError> {
+    let limit = limit.clamp(1, 1000);
+    let eligible = |seq: u64| before.is_none_or(|cut| seq < cut);
+    let mut reader = BufReader::new(file);
+    let mut header = None;
+    let mut line = String::new();
+    let mut line_no = 0usize;
+    let mut offset = 0u64;
+    let mut end_offset = 0u64;
+    let mut total = 0u64;
+    let mut anchors = Vec::new();
+    let mut anchor_at: Vec<PagePosition> = Vec::new();
+    let mut tail = VecDeque::with_capacity(limit);
+    let mut totals = SessionTotals::default();
+    let mut open_turn = None;
+
+    loop {
+        line.clear();
+        let read = reader.read_line(&mut line)?;
+        if read == 0 {
+            break;
+        }
+        let line_start = offset;
+        offset += read as u64;
+        line_no += 1;
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        // 与 next_log_event 一样,只有物理首行能作为 header;任意事件解码
+        // 失败(含未知 type、嵌套字段损坏)即截止,不拼接其后的合法行。
+        if line_no == 1 {
+            header = Some(
+                serde_json::from_str(trimmed)
+                    .map_err(|e| SessionError::Corrupt(format!("bad header: {e}")))?,
+            );
+            continue;
+        }
+        let Ok(envelope) = serde_json::from_str::<SessionEnvelope>(trimmed) else {
+            break;
+        };
+        totals.fold(&envelope, &mut open_turn);
+        if is_transient_event(&envelope.event) {
+            continue;
+        }
+        let position = PagePosition {
+            index: total,
+            offset: line_start,
+        };
+        if let SessionEvent::UserMessage {
+            text,
+            injected: false,
+            ..
+        } = &envelope.event
+        {
+            anchors.push(SessionAnchor {
+                seq: envelope.seq,
+                text: anchor_preview(text),
+            });
+            if eligible(envelope.seq) {
+                anchor_at.push(position);
+            }
+        }
+        if eligible(envelope.seq) {
+            if tail.len() == limit {
+                tail.pop_front();
+            }
+            tail.push_back(position);
+            total += 1;
+            end_offset = offset;
+        }
+    }
+    let header = header.ok_or_else(|| SessionError::Corrupt("missing header".into()))?;
+    let boundary = total.saturating_sub(limit as u64);
+    let start = match anchor_at.binary_search_by(|position| position.index.cmp(&boundary)) {
+        Ok(pos) => Some(anchor_at[pos]),
+        Err(0) => tail.front().copied(),
+        Err(insert) => Some(anchor_at[insert - 1]),
+    };
+    Ok(PageScan {
+        reader,
+        header,
+        start,
+        end_offset,
+        total,
+        anchors,
+        totals,
+    })
+}
+
+fn read_page_window(scan: PageScan, before: Option<u64>) -> Result<SessionPage, SessionError> {
+    let PageScan {
+        reader,
+        header,
+        start,
+        end_offset,
+        total,
+        anchors,
+        totals,
+    } = scan;
+    let mut events = Vec::new();
+    if let Some(start) = start {
+        let mut file = reader.into_inner();
+        file.seek(SeekFrom::Start(start.offset))?;
+        // 固定在第一遍最后一条 eligible 展示行的行尾。既不重读 before
+        // 之后的尾部,也不让两遍之间的新 append 超出 total/anchors/totals。
+        let mut reader = BufReader::new(file.take(end_offset - start.offset));
+        let mut line = String::new();
+        loop {
+            line.clear();
+            if reader.read_line(&mut line)? == 0 {
+                break;
+            }
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            let Ok(envelope) = serde_json::from_str::<SessionEnvelope>(trimmed) else {
+                break;
+            };
+            if !is_transient_event(&envelope.event)
+                && before.is_none_or(|cut| envelope.seq < cut)
+            {
+                events.push(envelope);
+            }
+        }
+    }
+    Ok(SessionPage {
+        header,
+        events,
+        total,
+        has_more_before: start.is_some_and(|position| position.index > 0),
+        anchors,
+        totals,
+    })
+}
 
 impl SessionStore {
     pub fn open(home: &Path) -> Result<Self, SessionError> {
@@ -243,8 +398,9 @@ impl SessionStore {
     ///   前端轮次轴渲染全部刻度。
     /// - `totals` 恒为全会话累计统计(同样不受 `before`/`limit` 限制):窗口
     ///   里没有早期轮次,前端若只从窗口折叠,刷新/翻页后状态栏数字就会缩水。
-    /// - 两遍顺序扫描:窗口起点依赖文件末尾才能确定的边界,单遍需无界缓存;
-    ///   两遍只引入一次顺序 IO,内存 O(锚点数 + 窗口)。
+    /// - 第一遍流式校验整份日志,仅保留锚点偏移和最近 `limit` 条展示事件
+    ///   的偏移;第二遍 seek 到对齐后的窗口,不再从头解码全部历史。
+    ///   内存 O(锚点数 + limit + 窗口),不缓存历史正文。
     pub fn read_page(
         &self,
         id: &str,
@@ -255,86 +411,8 @@ impl SessionStore {
         if !file.exists() {
             return Err(SessionError::NotFound(id.to_string()));
         }
-        let limit = limit.clamp(1, 1000);
-        let eligible = |seq: u64| before.is_none_or(|cut| seq < cut);
-
-        // 第一遍:统计展示事件总数、收集全会话锚点与累计统计,并记录每个
-        // eligible 锚点的展示位次(供起点回退二分)。
-        let mut reader = BufReader::new(File::open(&file)?);
-        let mut header: Option<SessionHeader> = None;
-        let mut line = String::new();
-        let mut line_no = 0usize;
-        let mut total = 0u64;
-        let mut anchors: Vec<SessionAnchor> = Vec::new();
-        // (展示位次, seq):展示位次按 eligible 展示事件序号计。
-        let mut anchor_at: Vec<(u64, u64)> = Vec::new();
-        // 累计统计:吃整份日志(不受 `before`/`limit` 与 transient 过滤影响),
-        // 前端刷新/翻页后状态栏的累计数字才不会缩水。
-        let mut totals = SessionTotals::default();
-        let mut open_turn: Option<(u32, u64)> = None;
-        while let Some(envelope) =
-            next_log_event(&mut reader, &mut header, &mut line, &mut line_no)?
-        {
-            totals.fold(&envelope, &mut open_turn);
-            if is_transient_event(&envelope.event) {
-                continue;
-            }
-            if let SessionEvent::UserMessage {
-                text,
-                injected: false,
-                ..
-            } = &envelope.event
-            {
-                anchors.push(SessionAnchor {
-                    seq: envelope.seq,
-                    text: anchor_preview(text),
-                });
-                if eligible(envelope.seq) {
-                    anchor_at.push((total, envelope.seq));
-                }
-            }
-            if eligible(envelope.seq) {
-                total += 1;
-            }
-        }
-        let header = header.ok_or_else(|| SessionError::Corrupt("missing header".into()))?;
-
-        // 窗口起点:边界回退到其前最近锚点;无锚点可用则直接用边界。
-        let boundary = total.saturating_sub(limit as u64);
-        let start_index = match anchor_at.binary_search_by(|(index, _)| index.cmp(&boundary)) {
-            Ok(pos) => anchor_at[pos].0,
-            Err(0) => boundary,
-            Err(insert) => anchor_at[insert - 1].0,
-        };
-
-        // 第二遍:收集 eligible 展示事件中位次 ≥ 起点的窗口。
-        let mut reader = BufReader::new(File::open(&file)?);
-        let mut header2: Option<SessionHeader> = None;
-        let mut line_no = 0usize;
-        let mut events: Vec<SessionEnvelope> = Vec::new();
-        let mut index = 0u64;
-        while let Some(envelope) =
-            next_log_event(&mut reader, &mut header2, &mut line, &mut line_no)?
-        {
-            if is_transient_event(&envelope.event) {
-                continue;
-            }
-            if !eligible(envelope.seq) {
-                continue;
-            }
-            if index >= start_index {
-                events.push(envelope);
-            }
-            index += 1;
-        }
-        Ok(SessionPage {
-            header,
-            events,
-            total,
-            has_more_before: start_index > 0,
-            anchors,
-            totals,
-        })
+        let scan = scan_page(File::open(&file)?, before, limit)?;
+        read_page_window(scan, before)
     }
 
     /// 登记一个被 `Arc` 持有的会话:list 优先从内存读摘要,
@@ -557,5 +635,80 @@ impl SessionStore {
             .into_iter()
             .filter(|id| self.delete(id).is_ok())
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod paging_tests {
+    use super::*;
+
+    #[test]
+    fn seek_window_stops_at_metadata_scan_cutoff_when_events_are_appended() {
+        let home = std::env::temp_dir().join(format!("denia-page-cutoff-{}", uuid::Uuid::new_v4()));
+        let store = SessionStore::open(&home).unwrap();
+        let session = store.create(&home, true).unwrap();
+        let message = |text: &str| SessionEvent::UserMessage {
+            text: text.into(),
+            injected: false,
+            channel: None,
+            images: Vec::new(),
+        };
+        session.append(message("before scan")).unwrap();
+        session.flush().unwrap();
+        let scan = scan_page(File::open(session.file()).unwrap(), None, 1).unwrap();
+        session.append(message("after scan")).unwrap();
+        session.flush().unwrap();
+        let page = read_page_window(scan, None).unwrap();
+        assert_eq!(page.total, 1);
+        assert_eq!(page.anchors.len(), 1);
+        assert_eq!(page.events.len(), 1);
+        assert_eq!(page.events[0].seq, 1);
+        let fresh = store.read_page(session.id(), None, 1).unwrap();
+        assert_eq!(fresh.total, 2);
+        assert_eq!(fresh.events[0].seq, 2);
+        drop(session);
+        drop(store);
+        std::fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn seek_window_does_not_rejoin_a_tail_repaired_after_metadata_scan() {
+        let home = std::env::temp_dir().join(format!("denia-page-repair-{}", uuid::Uuid::new_v4()));
+        let store = SessionStore::open(&home).unwrap();
+        let session = store.create(&home, true).unwrap();
+        session.append(SessionEvent::TurnStart { turn: 1 }).unwrap();
+        session.flush().unwrap();
+        let file = session.file().to_path_buf();
+        let prefix_len = std::fs::metadata(&file).unwrap().len();
+        drop(session);
+        {
+            let mut writer = OpenOptions::new().append(true).open(&file).unwrap();
+            writeln!(writer, "{{torn tail").unwrap();
+        }
+        let scan = scan_page(File::open(&file).unwrap(), None, 1).unwrap();
+        {
+            let mut writer = OpenOptions::new().write(true).open(&file).unwrap();
+            writer.set_len(prefix_len).unwrap();
+            writer.seek(SeekFrom::Start(prefix_len)).unwrap();
+            serde_json::to_writer(
+                &mut writer,
+                &SessionEnvelope {
+                    seq: 2,
+                    time: 2,
+                    event: SessionEvent::TurnEnd {
+                        turn: 1,
+                        reason: TurnEndReason::Completed,
+                    },
+                },
+            )
+            .unwrap();
+            writeln!(writer).unwrap();
+        }
+        let page = read_page_window(scan, None).unwrap();
+        assert_eq!(page.total, 1);
+        assert_eq!(page.events.len(), 1);
+        assert_eq!(page.totals.turns, 0);
+        drop(store);
+        std::fs::remove_dir_all(home).unwrap();
     }
 }

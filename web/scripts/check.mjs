@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url'
 const directory = fileURLToPath(new URL('.', import.meta.url))
 const memorySuites = new Set([
   'check-session-memory.mjs', 'check-viewport-memory.mjs', 'check-session-view-memory.mjs',
+  'check-session-streams-memory.mjs',
 ])
 const memoryOnly = process.argv.includes('--memory')
 const suites = readdirSync(directory).filter(name =>

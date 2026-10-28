@@ -171,6 +171,10 @@ const LIVE_MAX_RESIDENT_BYTES: u64 = 32 * 1024 * 1024;
 ///   无订阅者的会话,防止连续打开长会话把常驻内存撑到 O(全部历史)。
 pub struct LiveSessions {
     inner: std::sync::Mutex<HashMap<String, Arc<LiveSession>>>,
+    /// 串行化加载与卸载清理:释放 inner 后仍持有,防止旧会话的清理擦掉
+    /// 刚重载会话的新状态。回调可以读取注册表,但不能触发加载/裁剪。
+    lifecycle: std::sync::Mutex<()>,
+    on_evict: std::sync::OnceLock<Arc<dyn Fn(&str) + Send + Sync>>,
     /// 最多同时驻留的完整会话数。超出后按 LRU 淘汰非运行、无订阅者会话,
     /// 防止连续打开长会话把后端常驻内存撑到 O(全部历史)。
     max_resident: usize,
@@ -188,8 +192,27 @@ impl LiveSessions {
     pub fn new(max_resident: usize, max_resident_bytes: u64) -> Self {
         Self {
             inner: std::sync::Mutex::new(HashMap::new()),
+            lifecycle: std::sync::Mutex::new(()),
+            on_evict: std::sync::OnceLock::new(),
             max_resident: max_resident.max(1),
             max_resident_bytes,
+        }
+    }
+
+    /// 启动时安装一次,所有自动卸载路径在释放注册表锁后共用此回调。
+    pub fn set_on_evict(&self, on_evict: Arc<dyn Fn(&str) + Send + Sync>) {
+        assert!(
+            self.on_evict.set(on_evict).is_ok(),
+            "eviction callback already set"
+        );
+    }
+
+    /// 调用方仍持有 lifecycle,回调结束前不能重新加载同 id 的会话。
+    fn notify_evicted(&self, ids: &[String]) {
+        if let Some(on_evict) = self.on_evict.get() {
+            for id in ids {
+                on_evict(id);
+            }
         }
     }
 }
@@ -207,6 +230,7 @@ impl LiveSessions {
         store: &SessionStore,
         id: &str,
     ) -> Result<Arc<LiveSession>, SessionError> {
+        let _lifecycle = self.lifecycle.lock().unwrap();
         let mut map = self.inner.lock().unwrap();
         if let Some(live) = map.get(id) {
             live.last_touch
@@ -230,7 +254,9 @@ impl LiveSessions {
         map.insert(id.to_string(), live.clone());
         // 保护刚加载的这个会话:调用方(以及上面的 `live.clone()`)正持有它,
         // 计数天然 > 1,不显式排除的话它自己会被误判成"不可淘汰",裁剪白跑。
-        self.trim_capacity_locked(&mut map, Some(id));
+        let evicted = self.trim_capacity_locked(&mut map, Some(id));
+        drop(map);
+        self.notify_evicted(&evicted);
         Ok(live)
     }
 
@@ -273,12 +299,13 @@ impl LiveSessions {
         &self,
         map: &mut HashMap<String, Arc<LiveSession>>,
         protected: Option<&str>,
-    ) {
+    ) -> Vec<String> {
+        let mut evicted = Vec::new();
         let max = self.max_resident;
         let max_bytes = self.max_resident_bytes;
         let mut resident_bytes: u64 = map.values().map(|live| Self::resident_bytes_of(live)).sum();
         if map.len() <= max && resident_bytes <= max_bytes {
-            return;
+            return evicted;
         }
         let mut candidates: Vec<(String, u64)> = map
             .iter()
@@ -302,9 +329,11 @@ impl LiveSessions {
                     let live = map.remove(&id).expect("checked above");
                     resident_bytes = resident_bytes.saturating_sub(Self::resident_bytes_of(&live));
                     count -= 1;
+                    evicted.push(id);
                 }
             }
         }
+        evicted
     }
 
     /// 读取已加载的 live 会话(不触发磁盘加载)。
@@ -319,8 +348,11 @@ impl LiveSessions {
     /// 任何裁剪点。生产实例长期运行下常驻内存持续上涨,正是这条缺口:
     /// 每个被打开/发过消息的会话都留在表里,预算从未真正生效。
     fn trim_after_promotion(&self, keep: &str) {
+        let _lifecycle = self.lifecycle.lock().unwrap();
         let mut map = self.inner.lock().unwrap();
-        self.trim_capacity_locked(&mut map, Some(keep));
+        let evicted = self.trim_capacity_locked(&mut map, Some(keep));
+        drop(map);
+        self.notify_evicted(&evicted);
     }
 
     /// 升级某会话为热态,并在升级后核算驻留预算。
@@ -357,6 +389,7 @@ impl LiveSessions {
 
     /// 淘汰满足条件的空闲会话,返回被卸载的 id 列表。
     pub fn evict_idle(&self, idle_after_secs: u64) -> Vec<String> {
+        let _lifecycle = self.lifecycle.lock().unwrap();
         let now = now_millis();
         let idle_ms = idle_after_secs.saturating_mul(1000);
         let mut to_remove = Vec::new();
@@ -379,15 +412,19 @@ impl LiveSessions {
             }
         }
         let mut map = self.inner.lock().unwrap();
-        for id in &to_remove {
-            // 双检:可能已被其他路径移除。
-            if let Some(live) = map.get(id)
+        let mut evicted = Vec::new();
+        for id in to_remove {
+            // 双检:只通知确实卸载的会话,不通知已重新被持有的候选。
+            if let Some(live) = map.get(&id)
                 && Self::evictable(live)
             {
-                map.remove(id);
+                map.remove(&id);
+                evicted.push(id);
             }
         }
-        to_remove
+        drop(map);
+        self.notify_evicted(&evicted);
+        evicted
     }
 
     pub fn remove(&self, id: &str) {
@@ -670,15 +707,8 @@ impl Drop for RunningGuard {
 
 /// 后台空闲淘汰:每 `interval` 扫描一次,卸载 idle 会话。运行中永不淘汰。
 ///
-/// `on_evict` 让调用方在会话离开常驻表时一并回收按会话累积的辅助内存态
-/// (文件读取状态表、文件历史快照链)。这些表不属于 `LiveSession`,不主动
-/// 回收就会只增不减 —— 长期运行下每个用过的会话都留一份。
-pub fn spawn_live_evictor(
-    live: Arc<LiveSessions>,
-    interval_secs: u64,
-    idle_after_secs: u64,
-    on_evict: Arc<dyn Fn(&str) + Send + Sync>,
-) {
+/// 辅助内存态由 [`LiveSessions::set_on_evict`] 统一回收,与容量淘汰共用。
+pub fn spawn_live_evictor(live: Arc<LiveSessions>, interval_secs: u64, idle_after_secs: u64) {
     tokio::spawn(async move {
         let mut ticker = tokio::time::interval(std::time::Duration::from_secs(interval_secs));
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -686,9 +716,6 @@ pub fn spawn_live_evictor(
             ticker.tick().await;
             let evicted = live.evict_idle(idle_after_secs);
             if !evicted.is_empty() {
-                for id in &evicted {
-                    on_evict(id);
-                }
                 tracing::debug!(count = evicted.len(), "evicted idle live sessions");
             }
         }
@@ -873,19 +900,18 @@ pub async fn build_state(
     // 空闲阈值取 5 分钟:早先的 10 分钟意味着一个上午开过的会话全在内存里,
     // 而重新加载一个会话只要 0.5~1.7s(实测),省下的常驻内存远比这点延迟值钱。
     {
-        let driver_for_evict = driver.clone();
+        // driver 的审批桥持有 live,这里必须用弱引用,不能闭合引用环。
+        let driver_for_evict = Arc::downgrade(&driver);
         let file_history_for_evict = file_history.clone();
-        spawn_live_evictor(
-            live.clone(),
-            30,
-            300,
-            Arc::new(move |id: &str| {
-                file_history_for_evict.forget(id);
-                driver_for_evict.clear_read_state(id);
-                driver_for_evict.clear_compaction_state(id);
-                driver_for_evict.clear_mcp_loads(id);
-            }),
-        );
+        live.set_on_evict(Arc::new(move |id: &str| {
+            file_history_for_evict.forget(id);
+            if let Some(driver) = driver_for_evict.upgrade() {
+                driver.clear_read_state(id);
+                driver.clear_compaction_state(id);
+                driver.clear_mcp_loads(id);
+            }
+        }));
+        spawn_live_evictor(live.clone(), 30, 300);
     }
 
     // 工具名册注入 preset 名册:用户 preset 的 tools 白名单引用了部署没有
@@ -1179,6 +1205,41 @@ mod tests {
         dir
     }
 
+    fn eviction_recorder(live: &Arc<LiveSessions>) -> Arc<std::sync::Mutex<Vec<String>>> {
+        let evicted = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let evicted_for_callback = evicted.clone();
+        let live = Arc::downgrade(live);
+        live.upgrade().unwrap().set_on_evict(Arc::new(move |id| {
+            let live = live.upgrade().unwrap();
+            assert!(
+                live.inner.try_lock().is_ok(),
+                "callback must run outside map lock"
+            );
+            assert!(live.get(id).is_none());
+            assert!(live.running_ids().iter().all(|running| running != id));
+            evicted_for_callback.lock().unwrap().push(id.to_string());
+        }));
+        evicted
+    }
+
+    fn cache_read(
+        driver: &SessionDriver,
+        id: &str,
+        content: &str,
+    ) -> denia_tools::read_state::SharedReadState {
+        let state = driver.read_state_for(id);
+        state.lock().unwrap().record_after_write(
+            Path::new("cached.txt"),
+            content.to_string(),
+            denia_tools::read_state::FileStamp {
+                mtime_ms: None,
+                size_bytes: content.len() as u64,
+                fingerprint: None,
+            },
+        );
+        state
+    }
+
     #[test]
     fn running_guard_notifies_idle_once_after_cleanup_and_broadcast() {
         let (root, sessions, id) = ask_setup();
@@ -1208,7 +1269,13 @@ mod tests {
                 assert_eq!(session_id, live_for_idle.session.id());
                 assert!(!live_for_idle.running.load(Ordering::SeqCst));
                 assert!(live_for_idle.cancel.try_lock().unwrap().is_none());
-                assert!(live_for_idle.pending_approvals.try_lock().unwrap().is_empty());
+                assert!(
+                    live_for_idle
+                        .pending_approvals
+                        .try_lock()
+                        .unwrap()
+                        .is_empty()
+                );
                 assert!(live_for_idle.pending_asks.try_lock().unwrap().is_empty());
                 assert_eq!(
                     receiver_for_idle.lock().unwrap().try_recv().unwrap(),
@@ -1386,6 +1453,226 @@ mod tests {
     }
 
     #[test]
+    fn count_capacity_eviction_notifies_cleanup_outside_registry_lock() {
+        let root = temp_root();
+        let store = SessionStore::open(&root).unwrap();
+        let first = store.create(&root, true).unwrap();
+        let second = store.create(&root, true).unwrap();
+        let live = Arc::new(LiveSessions::new(1, u64::MAX));
+        let evicted = eviction_recorder(&live);
+        live.get_or_load(&store, first.id()).unwrap();
+        let second_live = live.get_or_load(&store, second.id()).unwrap();
+        assert_eq!(*evicted.lock().unwrap(), vec![first.id().to_string()]);
+        assert!(live.get(second.id()).is_some());
+        assert!(live.evict_idle(0).is_empty());
+        drop(second_live);
+        assert_eq!(live.evict_idle(0), vec![second.id().to_string()]);
+        assert!(live.evict_idle(0).is_empty());
+        assert_eq!(
+            *evicted.lock().unwrap(),
+            vec![first.id().to_string(), second.id().to_string()]
+        );
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn automatic_eviction_preserves_running_borrowed_and_followed_sessions() {
+        let root = temp_root();
+        let store = SessionStore::open(&root).unwrap();
+        let running = store.create(&root, true).unwrap();
+        let borrowed = store.create(&root, true).unwrap();
+        let followed = store.create(&root, true).unwrap();
+        let trigger = store.create(&root, true).unwrap();
+        let live = Arc::new(LiveSessions::new(1, u64::MAX));
+        let evicted = eviction_recorder(&live);
+        let running_live = live.get_or_load(&store, running.id()).unwrap();
+        running_live.running.store(true, Ordering::SeqCst);
+        drop(running_live);
+        let borrowed_live = live.get_or_load(&store, borrowed.id()).unwrap();
+        let followed_live = live.get_or_load(&store, followed.id()).unwrap();
+        let follower = followed_live.followers.subscribe();
+        drop(followed_live);
+        let trigger_live = live.get_or_load(&store, trigger.id()).unwrap();
+        assert!(live.evict_idle(0).is_empty());
+        assert!(evicted.lock().unwrap().is_empty());
+        live.get(running.id())
+            .unwrap()
+            .running
+            .store(false, Ordering::SeqCst);
+        drop(borrowed_live);
+        drop(follower);
+        let mut expected = vec![
+            running.id().to_string(),
+            borrowed.id().to_string(),
+            followed.id().to_string(),
+        ];
+        expected.sort();
+        let mut removed = live.evict_idle(0);
+        removed.sort();
+        assert_eq!(removed, expected);
+        assert!(live.evict_idle(0).is_empty());
+        let mut notified = evicted.lock().unwrap().clone();
+        notified.sort();
+        assert_eq!(notified, expected, "each unload must notify exactly once");
+        drop(trigger_live);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn promotion_capacity_eviction_notifies_cleanup() {
+        let root = temp_root();
+        let store = SessionStore::open(&root).unwrap();
+        let first = store.create(&root, true).unwrap();
+        let second = store.create(&root, true).unwrap();
+        for session in [&first, &second] {
+            session
+                .append(denia_core::session::SessionEvent::UserMessage {
+                    text: "preserved".into(),
+                    injected: false,
+                    channel: None,
+                    images: Vec::new(),
+                })
+                .unwrap();
+            session.flush().unwrap();
+        }
+        let live = Arc::new(LiveSessions::new(8, first.resident_bytes()));
+        let evicted = eviction_recorder(&live);
+        let first_live = live.get_or_load(&store, first.id()).unwrap();
+        live.ensure_hot(&first_live).unwrap();
+        drop(first_live);
+        let second_live = live.get_or_load(&store, second.id()).unwrap();
+        assert!(evicted.lock().unwrap().is_empty());
+        live.ensure_hot(&second_live).unwrap();
+        assert_eq!(*evicted.lock().unwrap(), vec![first.id().to_string()]);
+        assert!(live.get(first.id()).is_none());
+        assert_eq!(second_live.session.events().len(), 1);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn unload_cleanup_finishes_before_reload_starts_a_new_read_state() {
+        let root = temp_root();
+        let store = Arc::new(SessionStore::open(&root).unwrap());
+        let first = store.create(&root, true).unwrap();
+        let second = store.create(&root, true).unwrap();
+        let first_id = first.id().to_string();
+        let second_id = second.id().to_string();
+        let live = Arc::new(LiveSessions::new(1, u64::MAX));
+        let (prompt, tools) = denia_tools::default_shipped();
+        let driver = Arc::new(SessionDriver::new(
+            Arc::new(LlmRegistry::new()),
+            Arc::new(tools),
+            Arc::new(arc_swap::ArcSwap::from_pointee(prompt)),
+        ));
+        live.get_or_load(&store, &first_id).unwrap();
+        let old_read_state = cache_read(&driver, &first_id, "old body");
+        let (cleanup_started_tx, cleanup_started_rx) = std::sync::mpsc::channel();
+        let (finish_cleanup_tx, finish_cleanup_rx) = std::sync::mpsc::channel();
+        let finish_cleanup_rx = std::sync::Mutex::new(finish_cleanup_rx);
+        let cleaned = Arc::new(AtomicBool::new(false));
+        let cleaned_for_callback = cleaned.clone();
+        let driver_for_callback = Arc::downgrade(&driver);
+        let id_for_callback = first_id.clone();
+        live.set_on_evict(Arc::new(move |id| {
+            if id == id_for_callback {
+                cleanup_started_tx.send(()).unwrap();
+                finish_cleanup_rx.lock().unwrap().recv().unwrap();
+            }
+            driver_for_callback.upgrade().unwrap().clear_read_state(id);
+            cleaned_for_callback.store(true, Ordering::SeqCst);
+        }));
+        let live_for_eviction = live.clone();
+        let store_for_eviction = store.clone();
+        let eviction = std::thread::spawn(move || {
+            live_for_eviction
+                .get_or_load(&store_for_eviction, &second_id)
+                .unwrap()
+        });
+        cleanup_started_rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+        assert!(live.get(&first_id).is_none());
+        assert!(
+            live.lifecycle.try_lock().is_err(),
+            "reload must wait for cleanup"
+        );
+        let (reload_started_tx, reload_started_rx) = std::sync::mpsc::channel();
+        let live_for_reload = live.clone();
+        let store_for_reload = store.clone();
+        let driver_for_reload = driver.clone();
+        let reload = std::thread::spawn(move || {
+            reload_started_tx.send(()).unwrap();
+            let handle = live_for_reload
+                .get_or_load(&store_for_reload, &first_id)
+                .unwrap();
+            assert!(cleaned.load(Ordering::SeqCst));
+            handle.running.store(true, Ordering::SeqCst);
+            let read_state = cache_read(&driver_for_reload, &first_id, "new body");
+            (handle, read_state)
+        });
+        reload_started_rx.recv().unwrap();
+        finish_cleanup_tx.send(()).unwrap();
+        let _second_live = eviction.join().unwrap();
+        let (reloaded, new_read_state) = reload.join().unwrap();
+        assert!(old_read_state.lock().unwrap().is_empty());
+        assert!(!Arc::ptr_eq(&old_read_state, &new_read_state));
+        assert!(!new_read_state.lock().unwrap().is_empty());
+        assert!(reloaded.running.load(Ordering::SeqCst));
+        assert!(live.evict_idle(0).is_empty());
+        assert!(!new_read_state.lock().unwrap().is_empty());
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn automatic_eviction_clears_auxiliary_state_but_keeps_grants_and_history() {
+        let root = temp_root();
+        let state = build_state(&root, false, 43654).await.unwrap();
+        let first = state.sessions.create(&root, true).unwrap();
+        first
+            .append(denia_core::session::SessionEvent::UserMessage {
+                text: "preserved history".into(),
+                injected: false,
+                channel: None,
+                images: Vec::new(),
+            })
+            .unwrap();
+        first.flush().unwrap();
+        let handle = state.live.get_or_load(&state.sessions, first.id()).unwrap();
+        let old_read_state = cache_read(&state.driver, first.id(), "cached file body");
+        let backend = state.file_history.backend(first.id(), &root);
+        let old_file_history = Arc::downgrade(&backend);
+        drop(backend);
+        let class = denia_tools::permission::ActionClass::WriteOutside;
+        state.driver.grant_ask_class(first.id(), class);
+        state.driver.load_mcp_tool(first.id(), "mcp__test__tool");
+        handle.last_touch.store(0, Ordering::Relaxed);
+        drop(handle);
+        for _ in 0..LIVE_MAX_RESIDENT {
+            let session = state.sessions.create(&root, true).unwrap();
+            state
+                .live
+                .get_or_load(&state.sessions, session.id())
+                .unwrap();
+        }
+        assert!(state.live.get(first.id()).is_none());
+        assert!(old_read_state.lock().unwrap().is_empty());
+        assert!(!Arc::ptr_eq(
+            &old_read_state,
+            &state.driver.read_state_for(first.id())
+        ));
+        assert!(old_file_history.upgrade().is_none());
+        assert!(!state.driver.mcp_loaded(first.id(), "mcp__test__tool"));
+        assert!(state.driver.ask_granted(first.id(), class));
+        let reloaded = state.live.get_or_load(&state.sessions, first.id()).unwrap();
+        state.live.ensure_hot(&reloaded).unwrap();
+        assert!(matches!(
+            &reloaded.session.events()[0].event,
+            denia_core::session::SessionEvent::UserMessage { text, .. }
+                if text == "preserved history"
+        ));
+    }
+
+    #[test]
     fn byte_budget_evicts_idle_resident_sessions() {
         let root = temp_root();
         let cwd = root.join("work");
@@ -1398,7 +1685,8 @@ mod tests {
         // 预算口径是**真实驻留字节**而不是日志文件大小:只有头行的空会话
         // 驻留量确实是 0,不会被裁 —— 所以这里必须先写进一条事件,
         // 否则测的是"空会话不占预算"这条另一条语义。
-        let live = LiveSessions::new(8, 0);
+        let live = Arc::new(LiveSessions::new(8, 0));
+        let evicted = eviction_recorder(&live);
         // 持有期间即使超预算也不得淘汰(外部引用即"可能正在用")。
         let handle = live.get_or_load(&store, first.id()).unwrap();
         handle.session.ensure_hot().unwrap();
@@ -1418,6 +1706,7 @@ mod tests {
         live.get_or_load(&store, second.id()).unwrap();
         assert!(live.get(first.id()).is_none());
         assert!(live.get(second.id()).is_some());
+        assert_eq!(*evicted.lock().unwrap(), vec![first.id().to_string()]);
         std::fs::remove_dir_all(&root).unwrap();
     }
 

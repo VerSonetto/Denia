@@ -649,6 +649,7 @@ pub struct SessionPage {
     pub header: SessionHeader,
     pub events: Vec<SessionEnvelope>,
     pub total: u64,
+    #[serde(rename = "hasMoreBefore")]
     pub has_more_before: bool,
     /// 全会话非注入 user-message 锚点(与 `before` 无关,恒为全量)。
     pub anchors: Vec<SessionAnchor>,

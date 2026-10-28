@@ -79,6 +79,9 @@ interface StreamState {
   dead: boolean
   /** 是否已请求 follow:运行中才开长连接,普通浏览不加载全量后端会话。 */
   followRequested: boolean
+  /** 多个视图监听共用在途快照,不为新增监听重复扫描日志。 */
+  snapshotPending: boolean
+  snapshotReady: boolean
 }
 
 /** 初始快照只拉尾部这么多事件,避免长会话一次全量进前端。 */
@@ -106,6 +109,8 @@ function stateOf(id: string): StreamState {
       lastFrameAt: now(),
       dead: false,
       followRequested: false,
+      snapshotPending: false,
+      snapshotReady: false,
     }
     streams.set(id, state)
   }
@@ -153,6 +158,8 @@ function reconnect(id: string, state: StreamState) {
   const controller = new AbortController()
   state.controller = controller
   state.resnapshotAt = now()
+  state.snapshotPending = true
+  state.snapshotReady = false
 
   void (async () => {
     try {
@@ -171,6 +178,9 @@ function reconnect(id: string, state: StreamState) {
       for (const listener of state.listeners) {
         listener.onSnapshot(data.header, data.events, meta)
       }
+      if (gen !== state.generation || state.dead) return
+      state.snapshotPending = false
+      state.snapshotReady = true
       if (state.listeners.size === 0) {
         disposeState(state)
         return
@@ -180,6 +190,7 @@ function reconnect(id: string, state: StreamState) {
       }
     } catch (error) {
       if (gen !== state.generation || state.dead) return
+      state.snapshotPending = false
       if (isNotFound(error)) {
         state.dead = true
         state.controller = null
@@ -198,9 +209,10 @@ export function ensureFollowing(id: string): void {
   if (!state || state.dead) return
   if (state.followRequested) return
   state.followRequested = true
-  // 若当前已有监听且未建立 follow,重连一次走“快照后再 follow”。
-  if (state.listeners.size > 0) {
-    reconnect(id, state)
+  // 在途快照结束后自然接 follow;已有快照则从确认的 cursor 接续,
+  // 不为开始运行再取消请求、重拉一次整份分页统计。
+  if (state.listeners.size > 0 && state.snapshotReady && !state.snapshotPending) {
+    openFollow(id, state, state.generation)
   }
 }
 
@@ -365,7 +377,9 @@ function resnapshot(id: string, state: StreamState) {
 export function attach(id: string, listener: SessionStreamListener): () => void {
   const state = stateOf(id)
   state.listeners.add(listener)
-  reconnect(id, state)
+  // 在途响应会交付给当前全部监听者。已加载后新增监听仍需重快照,
+  // 以免缓存另一份不断增长的事件流来补发历史。
+  if (!state.snapshotPending) reconnect(id, state)
   return () => {
     if (streams.get(id) !== state) return
     state.listeners.delete(listener)
