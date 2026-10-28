@@ -1,0 +1,20 @@
+import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
+
+const read = path => readFileSync(new URL(`../src/${path}`, import.meta.url), 'utf8').replace(/\r\n/g, '\n')
+const app = read('App.tsx')
+const settings = read('components/SettingsModal.tsx')
+const logo = app.slice(app.indexOf('<div className="sidebar-logo"'), app.indexOf('<nav className="sidebar-primary"'))
+assert.ok(logo.indexOf('<UpdateBadge />') > logo.indexOf('<DeniaWordmark />'), '展开侧栏的更新徽章必须紧邻 logo')
+const rail = app.slice(app.indexOf('{railMounted && ('), app.indexOf('</aside>', app.indexOf('{railMounted && (')))
+assert.ok(rail.indexOf('<UpdateBadge collapsed />') > rail.indexOf('<IconSessionSearch size={16} />'), '收起侧栏的更新入口必须位于搜索下方')
+assert.ok(rail.indexOf('<UpdateBadge collapsed />') < rail.indexOf('rail-spacer'), '更新提示不能沉到侧栏底部')
+assert.ok(app.includes('if (!gateActive) ensureStartupUpdateCheck()'), '冷启动静默检查不能在票据登录页抢跑')
+assert.ok(app.includes("versionOpen ? '#version'"), '版本界面必须有独立路由')
+assert.ok(app.includes('if (version) {\n        setExtensionTab(null)\n        return\n      }'), '打开版本路由不应清除当前会话')
+assert.ok(app.includes('!isMobile && !extensionTab && !versionOpen'), '版本界面不应被会话侧面板挤占')
+assert.ok(app.includes('<LazyVersionPage onBack={closeVersion} />'))
+assert.ok(app.includes('<LazyUpdateDialog onOpenVersion={openVersion} />'), '检查与徽章使用同一全局弹窗')
+assert.ok(settings.includes('onClick={onOpenVersion}'), '设置必须提供独立版本入口')
+assert.ok(!settings.includes('/api/update/install'), '导航入口不能直接启动安装')
+console.log('Update navigation: cold startup, logo/rail placement, independent version route and shared dialog checked.')

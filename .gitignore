@@ -58,3 +58,18 @@
 
 # 上游 ZCode 参考克隆(嵌套 git 仓库,不入库)
 /ZCode/
+
+# 本地桌面发布产物(每次构建重新生成,不入库)
+/release/
+/denia-desktop.exe
+/denia-desktop.old.exe
+/uninstall.exe
+
+# 上游参考克隆(第三方项目源码,仅本地对照,不入库)
+/_hermes-src/
+/hermes-agent/
+
+# AI 排查临时转储与提示词快照(本地实验产物)
+/.tmp-*
+/denia-system-prompt-*.txt
+/check-prompt-v2.py
