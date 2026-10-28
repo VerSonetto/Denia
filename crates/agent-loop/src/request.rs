@@ -154,7 +154,6 @@ pub(crate) async fn dispatch_request(
         // 成功才派发;失败 fail-closed(不发出请求)。
         flush_before_dispatch(&state.session)?;
         // 请求建立期同样响应取消:网关/代理黑洞挂起时,点停止必须立刻能断。
-        let attempt_request = request.clone();
         dispatch_sequence = dispatch_sequence.saturating_add(1);
         let gate = crate::BudgetGate(state.budget.clone());
         let ticket = denia_llm::RequestTicket::new(
@@ -172,53 +171,56 @@ pub(crate) async fn dispatch_request(
                 attempt: 0,
             },
         );
-        let stream_setup = driver.registry.stream_with_replay_admitted(
-            &state.selection.provider,
-            &attempt_request,
-            retry_sink.clone(),
-            &state.replay,
-            Some(&ticket),
-        );
-        tokio::pin!(stream_setup);
-        let mut stream = tokio::select! {
-            biased;
-            _ = state.cancel.cancelled() => {
-                return close_aborted(state, step);
+        let setup_result = {
+            let stream_setup = driver.registry.stream_with_replay_admitted(
+                &state.selection.provider,
+                &request,
+                retry_sink.clone(),
+                &state.replay,
+                Some(&ticket),
+            );
+            tokio::pin!(stream_setup);
+            tokio::select! {
+                biased;
+                _ = state.cancel.cancelled() => {
+                    return close_aborted(state, step);
+                }
+                result = &mut stream_setup => result,
             }
-            result = &mut stream_setup => match result {
-                Ok(stream) => stream,
-                Err(error) => {
-                    let failure = error.failure.clone();
-                    if failure.code == denia_core::error::codes::CONTEXT_WINDOW_EXCEEDED && !context_recovered {
-                        context_recovered = true;
-                        append(&state.session, &state.emit, SessionEvent::RetryAttempt { turn: state.turn, step, attempt: 1, code: failure.code.clone(), message: "输入上下文超限，尝试本逻辑步骤唯一一次强制压缩；关闭、失败或断路时停止。".into(), delay_ms: 0 })?;
-                        if run_compaction_gate(driver, state, step, framed_system, tools, true).await {
-                            request.messages = state.session.derive_messages();
-                            continue 'attempts;
-                        }
+        };
+        let mut stream = match setup_result {
+            Ok(stream) => stream,
+            Err(error) => {
+                let failure = error.failure.clone();
+                if failure.code == denia_core::error::codes::CONTEXT_WINDOW_EXCEEDED && !context_recovered {
+                    context_recovered = true;
+                    append(&state.session, &state.emit, SessionEvent::RetryAttempt { turn: state.turn, step, attempt: 1, code: failure.code.clone(), message: "输入上下文超限，尝试本逻辑步骤唯一一次强制压缩；关闭、失败或断路时停止。".into(), delay_ms: 0 })?;
+                    if run_compaction_gate(driver, state, step, framed_system, tools, true).await {
+                        request.messages = state.session.derive_messages();
+                        continue 'attempts;
                     }
+                }
+                append(
+                    &state.session,
+                    &state.emit,
+                    SessionEvent::StepEnd { turn: state.turn, step },
+                )?;
+                if feedback_eligible(&failure.code) && state.feedback < MAX_FEEDBACK {
+                    state.feedback += 1;
                     append(
                         &state.session,
                         &state.emit,
-                        SessionEvent::StepEnd { turn: state.turn, step },
+                        SessionEvent::UserMessage {
+                            text: feedback_text(&failure),
+                            injected: true,
+                            channel: Some("feedback".into()),
+                            images: Vec::new(),
+                        },
                     )?;
-                    if feedback_eligible(&failure.code) && state.feedback < MAX_FEEDBACK {
-                        state.feedback += 1;
-                        append(
-                            &state.session,
-                            &state.emit,
-                            SessionEvent::UserMessage {
-                                text: feedback_text(&failure),
-                                injected: true,
-                                channel: Some("feedback".into()),
-                                images: Vec::new(),
-                            },
-                        )?;
-                        return Ok(RequestOutcome::RestartStep);
-                    }
-                    return Ok(RequestOutcome::TurnEnded(close_error(state, step, failure, 0)));
+                    return Ok(RequestOutcome::RestartStep);
                 }
-            },
+                return Ok(RequestOutcome::TurnEnded(close_error(state, step, failure, 0)));
+            }
         };
 
         // —— 流消费:每个 chunk 先落盘再处理 ——

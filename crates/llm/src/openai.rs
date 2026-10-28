@@ -159,6 +159,66 @@ impl OpenAiSection {
     }
 }
 
+/// 输出预算只影响线上的标量字段,不为调整它复制整份会话历史。
+fn request_body(
+    request: &GenerateRequest,
+    protocol: WireProtocol,
+    max_tokens: Option<u64>,
+) -> serde_json::Value {
+    let mut body = match protocol {
+        WireProtocol::ChatCompletions => protocols::build_openai_body(request),
+        WireProtocol::Responses => protocols::build_responses_body(request),
+        WireProtocol::AnthropicMessages => return protocols::build_anthropic_body(request, max_tokens),
+    };
+    let key = match protocol {
+        WireProtocol::Responses => "max_output_tokens",
+        _ => "max_tokens",
+    };
+    if let Some(max_tokens) = max_tokens {
+        body[key] = max_tokens.into();
+    } else if let Some(fields) = body.as_object_mut() {
+        fields.remove(key);
+    }
+    body
+}
+
+#[cfg(test)]
+mod memory_tests {
+    use super::*;
+
+    #[test]
+    fn borrowed_request_budget_matches_the_clone_based_wire_body() {
+        let request = GenerateRequest {
+            model: "fixture".into(),
+            reasoning_effort: Some("high".into()),
+            messages: vec![denia_core::message::ChatMessage::user("unchanged history")],
+            system: Some("system".into()),
+            tools: vec![],
+            temperature: Some(0.5),
+            max_tokens: Some(8192),
+            stop: vec![],
+        };
+        for protocol in [
+            WireProtocol::ChatCompletions,
+            WireProtocol::Responses,
+            WireProtocol::AnthropicMessages,
+        ] {
+            for budget in [None, Some(1), Some(4096), Some(8192)] {
+                let mut cloned = request.clone();
+                cloned.max_tokens = budget;
+                let expected = match protocol {
+                    WireProtocol::ChatCompletions => protocols::build_openai_body(&cloned),
+                    WireProtocol::Responses => protocols::build_responses_body(&cloned),
+                    WireProtocol::AnthropicMessages => protocols::build_anthropic_body(&cloned, budget),
+                };
+                assert_eq!(request_body(&request, protocol, budget), expected);
+                assert_eq!(request.max_tokens, Some(8192));
+                assert_eq!(request.messages[0].content, "unchanged history");
+            }
+        }
+    }
+}
+
 pub struct OpenAiCompatAdapter {
     settings: Arc<SettingsStore>,
     credentials: Arc<CredentialStore>,
@@ -413,7 +473,6 @@ impl LlmAdapter for OpenAiCompatAdapter {
         let api_key = self.resolve_api_key(&profile)?;
 
         let protocol = profile.protocol;
-        let mut request = request.clone();
         let limit = profile
             .models
             .iter()
@@ -423,13 +482,7 @@ impl LlmAdapter for OpenAiCompatAdapter {
             .max_tokens
             .or(profile.default_max_tokens)
             .map(|budget| budget.min(limit.unwrap_or(u64::MAX)).max(1));
-        request.max_tokens = max_tokens;
-        let request = &request;
-        let body = match protocol {
-            WireProtocol::ChatCompletions => protocols::build_openai_body(request),
-            WireProtocol::Responses => protocols::build_responses_body(request),
-            WireProtocol::AnthropicMessages => protocols::build_anthropic_body(request, max_tokens),
-        };
+        let body = request_body(request, protocol, max_tokens);
 
         let url = match protocol {
             WireProtocol::ChatCompletions => protocols::chat_completions_url(&profile.base_url),

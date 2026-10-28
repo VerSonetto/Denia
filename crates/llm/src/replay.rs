@@ -1,5 +1,6 @@
 use crate::GenerateRequest;
 use denia_core::error::LlmFailure;
+use std::borrow::Cow;
 use std::sync::Mutex;
 
 pub const REASONING_REJECTED: &str = "HISTORY_REASONING_REJECTED";
@@ -71,7 +72,7 @@ pub struct ReplayPolicy {
 }
 
 impl ReplayPolicy {
-    pub fn prepare(&self, route: &str, request: &GenerateRequest) -> GenerateRequest {
+    pub fn prepare<'a>(&self, route: &str, request: &'a GenerateRequest) -> Cow<'a, GenerateRequest> {
         let mut state = self
             .state
             .lock()
@@ -79,19 +80,21 @@ impl ReplayPolicy {
         if state.0 != route {
             *state = (route.to_string(), false);
         }
-        let mut request = request.clone();
-        if state.1 {
-            for message in &mut request.messages {
-                message.reasoning_content = None;
-                message.reasoning_replay.clear();
-            }
-            request.messages.retain(|message| {
-                message.role != denia_core::message::ChatRole::Assistant
-                    || !message.content.is_empty()
-                    || !message.tool_calls.is_empty()
-            });
+        if !state.1 {
+            return Cow::Borrowed(request);
         }
-        request
+        drop(state);
+        let mut request = request.clone();
+        for message in &mut request.messages {
+            message.reasoning_content = None;
+            message.reasoning_replay.clear();
+        }
+        request.messages.retain(|message| {
+            message.role != denia_core::message::ChatRole::Assistant
+                || !message.content.is_empty()
+                || !message.tool_calls.is_empty()
+        });
+        Cow::Owned(request)
     }
 
     pub fn downgrade(&self, route: &str, request: &GenerateRequest, failure: &LlmFailure) -> bool {
@@ -186,14 +189,18 @@ mod tests {
         assert!(policy.downgrade("route", &request, &failure));
         assert!(!policy.downgrade("route", &request, &failure));
         let prepared = policy.prepare("route", &request);
+        assert!(matches!(prepared, Cow::Owned(_)));
         assert!(prepared.messages[0].reasoning_content.is_none());
         assert_eq!(prepared.messages[0].content, "answer");
         assert_eq!(
             request.messages[0].reasoning_content.as_deref(),
             Some("reason")
         );
+        let unchanged = policy.prepare("other-protocol", &request);
+        assert!(matches!(unchanged, Cow::Borrowed(_)));
+        assert!(std::ptr::eq(unchanged.as_ref(), &request));
         assert!(
-            policy.prepare("other-protocol", &request).messages[0]
+            unchanged.messages[0]
                 .reasoning_content
                 .is_some()
         );
