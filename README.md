@@ -30,11 +30,15 @@ OS lock on its data directory. Use a separate `--home` / `DESKTOP_HOME` when
 running an additional development or desktop instance; multiple browser clients
 can use one server normally.
 
-Console compaction, microcompaction and tool concurrency settings are resolved
-when each turn begins. An active turn keeps a consistent configuration snapshot;
-the next turn reads saved changes immediately. Compaction circuit breakers belong
-to their session and are released when that session leaves the runtime cache.
-Settings writes publish their value and revision only after persistence succeeds.
+Console compaction, microcompaction, prompt-cache warming and tool concurrency
+settings are resolved when each turn begins. An active turn keeps a consistent
+configuration snapshot; the next turn reads saved changes immediately. Cache
+warming is off by default: `console.cacheWarming` selects `off`, `streaming`
+(only while a turn runs) or `idle` (also after it settles), and
+`console.cacheWarmTtlSeconds` sets the provider lifetime it targets. Compaction
+circuit breakers belong to their session and are released when that session
+leaves the runtime cache. Settings writes publish their value and revision only
+after persistence succeeds.
 
 Sessions are append-only JSONL logs under `sessions/<id>/session.jsonl`. Loading
 repairs partial tails and closes orphaned turns. After an I/O failure the log

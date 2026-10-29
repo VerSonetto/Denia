@@ -51,6 +51,7 @@ fn long_and_parallel_request_preparation_borrows_history() {
         temperature: None,
         max_tokens: Some(4096),
         stop: vec![],
+        cache_key: None,
     };
     for parallel in [1, 8] {
         let before = LIVE_BYTES.load(Ordering::Relaxed);

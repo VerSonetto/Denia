@@ -90,6 +90,20 @@ pub struct ImageData {
     pub path: Option<String>,
 }
 
+/// Prompt-cache provenance for one message.
+///
+/// Runtime-only: never serialized to the wire, never persisted, and never
+/// exposed to the UI. It tells the provider encoder which messages can anchor
+/// a reusable prefix, so a rebuild-per-request block is not mistaken for
+/// history.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct MessageCache {
+    /// Rebuilt for every request; a prefix spanning it cannot match next turn.
+    pub per_call: bool,
+    /// A real user turn, not an injected reminder/context block.
+    pub conversational_user: bool,
+}
+
 /// One wire-adjacent chat message.
 ///
 /// `tool_calls` is assistant-only and `tool_call_id` is tool-role-only; the
@@ -101,6 +115,10 @@ pub struct ImageData {
 pub struct ChatMessage {
     pub role: ChatRole,
     pub content: String,
+    /// Prompt-cache provenance (runtime-only, never serialized).
+    #[serde(skip)]
+    #[cfg_attr(feature = "bindings", ts(skip))]
+    pub cache: MessageCache,
     /// Inline images for vision-capable models (user-role only).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub images: Vec<ImageData>,
@@ -122,6 +140,7 @@ impl ChatMessage {
         Self {
             role: ChatRole::User,
             content: content.into(),
+            cache: MessageCache::default(),
             images: Vec::new(),
             reasoning_content: None,
             reasoning_replay: Vec::new(),
@@ -134,6 +153,7 @@ impl ChatMessage {
         Self {
             role: ChatRole::User,
             content: content.into(),
+            cache: MessageCache::default(),
             images,
             reasoning_content: None,
             reasoning_replay: Vec::new(),
@@ -150,6 +170,7 @@ impl ChatMessage {
         Self {
             role: ChatRole::Assistant,
             content: content.into(),
+            cache: MessageCache::default(),
             images: Vec::new(),
             reasoning_content,
             reasoning_replay: Vec::new(),
@@ -162,6 +183,7 @@ impl ChatMessage {
         Self {
             role: ChatRole::Tool,
             content: content.into(),
+            cache: MessageCache::default(),
             images: Vec::new(),
             reasoning_content: None,
             reasoning_replay: Vec::new(),

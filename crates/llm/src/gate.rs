@@ -268,6 +268,7 @@ mod tests {
             temperature: None,
             max_tokens: Some(64),
             stop: Vec::new(),
+            cache_key: None,
         }
     }
 

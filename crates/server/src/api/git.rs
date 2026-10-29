@@ -756,6 +756,7 @@ async fn commit_message(
         max_tokens: Some(512),
         stop: Vec::new(),
         tools: Vec::new(),
+        cache_key: None,
     };
 
     let mut chunks = state

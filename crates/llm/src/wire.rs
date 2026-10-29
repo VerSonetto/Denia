@@ -331,7 +331,15 @@ pub fn map_usage(wire: &WireUsage, style: UsageStyle) -> TokenUsage {
         UsageStyle::OpenAi => wire
             .prompt_tokens_details
             .as_ref()
-            .and_then(|details| details.cached_tokens),
+            .and_then(|details| details.cached_tokens)
+            // DeepSeek-compatible endpoints on the generic route still report
+            // native cache fields; parsing them is wire compatibility, not a
+            // dedicated adapter.
+            .or(wire.prompt_cache_hit_tokens)
+            .or_else(|| {
+                wire.prompt_cache_miss_tokens
+                    .map(|miss| prompt.saturating_sub(miss))
+            }),
     };
     // 两种风格都要减:`prompt_tokens` 报的是**含缓存的总 prompt**。
     // 不减的后果是 `input_tokens` 变成总 prompt,而下游(core 的契约、
@@ -1291,6 +1299,7 @@ mod tests {
             temperature: None,
             max_tokens: None,
             stop: Vec::new(),
+            cache_key: None,
         };
         let messages = build_wire_messages(&request);
         let json = serde_json::to_value(&messages).unwrap();
@@ -1329,6 +1338,7 @@ mod tests {
             temperature: None,
             max_tokens: Some(64),
             stop: Vec::new(),
+            cache_key: None,
         };
         let body = crate::protocols::build_openai_body(&request);
         assert!(body.get("thinking").is_none());
@@ -1349,6 +1359,7 @@ mod tests {
             temperature: None,
             max_tokens: None,
             stop: Vec::new(),
+            cache_key: None,
         };
         let body = crate::protocols::build_openai_body(&request);
         assert!(body.get("thinking").is_none());
@@ -1481,6 +1492,7 @@ mod wire_tests {
             temperature: None,
             max_tokens: None,
             stop: Vec::new(),
+            cache_key: None,
         };
         let messages = build_wire_messages(&request);
         assert_eq!(messages.len(), 1);
@@ -1504,6 +1516,7 @@ mod wire_tests {
             temperature: None,
             max_tokens: None,
             stop: Vec::new(),
+            cache_key: None,
         };
         let messages = build_wire_messages(&request);
         assert_eq!(messages[0].content.as_ref().unwrap(), "plain");

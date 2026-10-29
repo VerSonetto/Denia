@@ -19,6 +19,10 @@ impl denia_agent_loop::DriverSettingsSource for ConsoleDriverSettingsSource {
             parallel: denia_agent_loop::ParallelSettings {
                 max_parallel_tool_calls: console.max_parallel_tool_calls,
             },
+            cache_warming: denia_agent_loop::CacheWarmingSettings {
+                mode: console.cache_warming,
+                ttl_seconds: console.cache_warm_ttl_seconds,
+            },
         }
     }
 }
@@ -46,6 +50,12 @@ pub struct ConsoleSettings {
     /// 一次 step 内模型返回的多个工具调用并发执行,受此上限约束。
     #[serde(default = "default_max_parallel_tool_calls")]
     pub max_parallel_tool_calls: usize,
+    /// Prompt-cache warming: `off` | `streaming` | `idle`.
+    #[serde(default)]
+    pub cache_warming: denia_agent_loop::CacheWarmingMode,
+    /// Provider cache lifetime the warmer targets (seconds).
+    #[serde(default = "default_cache_warm_ttl_seconds")]
+    pub cache_warm_ttl_seconds: u64,
     /// 新建会话的默认权限模式(四档,但不含 plan —— 计划模式是用户
     /// 在某次会话里显式进入的临时档位,不适合当全局默认值)。
     #[serde(default = "default_permission_mode")]
@@ -54,6 +64,10 @@ pub struct ConsoleSettings {
 
 fn default_max_parallel_tool_calls() -> usize {
     10
+}
+
+fn default_cache_warm_ttl_seconds() -> u64 {
+    300
 }
 
 /// 出厂默认权限模式:自动编辑(与会话日志的初始档位一致)。
@@ -116,6 +130,13 @@ pub struct ConsoleMicrocompactSettings {
     pub microcompact_min_savings: u64,
     /// 可清理的工具白名单。
     pub microcompact_tools: Vec<String>,
+    /// 单次改写允许重写的后缀 token 预算:超过它的旧结果已经在热缓存
+    /// 前缀里,改写会迫使 provider 重写整段后缀,留给压缩处理。
+    /// `0` 关闭该守卫(旧行为)。
+    pub microcompact_cache_warm_suffix_tokens: u64,
+    /// Provider prompt-cache lookback (wire positions). Results older than
+    /// this window are left for compaction. `0` disables the bound.
+    pub microcompact_cache_lookback_positions: usize,
 }
 
 impl Default for ConsoleMicrocompactSettings {
@@ -126,6 +147,8 @@ impl Default for ConsoleMicrocompactSettings {
             microcompact_idle_threshold_minutes: 60,
             microcompact_min_savings: 256,
             microcompact_tools: denia_agent_loop::microcompact::default_compactable_tools(),
+            microcompact_cache_warm_suffix_tokens: 8_000,
+            microcompact_cache_lookback_positions: 20,
         }
     }
 }
@@ -155,7 +178,9 @@ pub fn microcompact_settings_from(
         idle_threshold_minutes: c.microcompact_idle_threshold_minutes,
         min_savings: c.microcompact_min_savings,
         compactable_tools: c.microcompact_tools.clone(),
+        cache_warm_suffix_tokens: c.microcompact_cache_warm_suffix_tokens,
         clear_error_results: false,
+        cache_lookback_positions: c.microcompact_cache_lookback_positions,
     }
 }
 
@@ -230,6 +255,8 @@ pub fn console_settings(settings: &SettingsStore) -> ConsoleSettings {
             compaction: ConsoleCompactionSettings::default(),
             microcompact: ConsoleMicrocompactSettings::default(),
             max_parallel_tool_calls: 10,
+            cache_warming: denia_agent_loop::CacheWarmingMode::Off,
+            cache_warm_ttl_seconds: default_cache_warm_ttl_seconds(),
             default_permission_mode: default_permission_mode(),
         })
 }

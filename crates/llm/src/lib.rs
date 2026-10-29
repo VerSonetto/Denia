@@ -6,7 +6,6 @@
 //! transport layer folds into a terminal `finish` chunk.
 
 pub mod catalog;
-mod deepseek;
 mod gate;
 mod http;
 mod openai;
@@ -29,10 +28,6 @@ pub use catalog::{
     CatalogModel, ConfigurableProvider, DiscoveredModel, LlmModelInfo, LlmResolvedModelInfo,
     ModelCatalog, ModelCatalogFailure, ModelProviderGroup, ProviderInfo, ReasoningEffortInfo,
     ReasoningInfo, build_model_catalog,
-};
-pub use deepseek::{
-    DEEPSEEK_PROVIDER, DEEPSEEK_SETTINGS_NS, DeepSeekAdapter, DeepSeekCatalogModel,
-    DeepSeekSection, ReasoningEffort, ThinkingMode,
 };
 pub use gate::{AdmissionRefusal, RequestAdmission, RequestCall, RequestKind, RequestTicket};
 pub use openai::{

@@ -15,7 +15,6 @@ metadata:
 - 密钥只进 `PUT /api/credentials/{引用名}`，绝不写进 settings、不贴进聊天记录、不回显明文。`describe` 接口永远不回传明文，只说有无。
 - 字段名照抄（含大小写，`baseURL` 不是 `baseUrl`）：provider/MCP 的未知键会被静默忽略，拼错等于没配。
 - 删提供商/preset/MCP 服务器前先确认；写操作 409（revision 冲突）就重读再写一次。
-- 当前只有 `llm-openai` 路由是活的：别配 `llm-deepseek`（代码里有、服务端没注册，写了也不生效）。
 
 ## 读写入口
 

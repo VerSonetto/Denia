@@ -456,6 +456,7 @@ impl crate::SessionDriver {
                 temperature: Some(0.0),
                 max_tokens: Some(settings.summary_max_tokens),
                 stop: Vec::new(),
+                cache_key: Some(session.id().to_string()),
             };
             let retry_sink: denia_llm::RetrySink = std::sync::Arc::new({
                 let session = session.clone();

@@ -16,4 +16,8 @@ pub struct GenerateRequest {
     pub temperature: Option<f32>,
     pub max_tokens: Option<u64>,
     pub stop: Vec<String>,
+    /// Stable provider cache identity (session-scoped), used where the wire
+    /// accepts `prompt_cache_key`. `None` leaves the provider's automatic
+    /// prefix cache without an explicit affinity hint.
+    pub cache_key: Option<String>,
 }

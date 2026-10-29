@@ -5,8 +5,8 @@
 //! Routes live in the `llm-openai` settings section's `providers` map; the
 //! server syncs registry routes from it on every settings change.
 
-use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -72,6 +72,30 @@ pub struct OpenAiProfile {
     /// 只有确实内联推理的网关才需要,否则会给正常流式首字带来缓冲延迟。
     #[serde(default)]
     pub inline_think_tags: bool,
+    /// Enable OpenAI Responses `previous_response_id` chaining. Defaults to
+    /// true only for the official `api.openai.com` endpoint; gateways that
+    /// reject stored responses must leave it off.
+    #[serde(default)]
+    pub stateful_responses: Option<bool>,
+    /// Request the provider's long cache tier: Anthropic `ttl: "1h"` (with
+    /// the extended-cache-ttl beta) and OpenAI `prompt_cache_retention: "24h"`.
+    #[serde(default)]
+    pub long_cache: bool,
+    /// Whether the route accepts OpenAI's `prompt_cache_key` body field.
+    /// Strict gateways that reject unknown fields can turn it off.
+    #[serde(default = "default_true")]
+    pub supports_prompt_cache_key: bool,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+impl OpenAiProfile {
+    fn stateful_responses_enabled(&self) -> bool {
+        self.stateful_responses
+            .unwrap_or_else(|| self.base_url.contains("api.openai.com"))
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -164,11 +188,14 @@ fn request_body(
     request: &GenerateRequest,
     protocol: WireProtocol,
     max_tokens: Option<u64>,
+    long_cache: bool,
 ) -> serde_json::Value {
     let mut body = match protocol {
         WireProtocol::ChatCompletions => protocols::build_openai_body(request),
         WireProtocol::Responses => protocols::build_responses_body(request),
-        WireProtocol::AnthropicMessages => return protocols::build_anthropic_body(request, max_tokens),
+        WireProtocol::AnthropicMessages => {
+            protocols::build_anthropic_body(request, max_tokens, long_cache)
+        }
     };
     let key = match protocol {
         WireProtocol::Responses => "max_output_tokens",
@@ -178,6 +205,9 @@ fn request_body(
         body[key] = max_tokens.into();
     } else if let Some(fields) = body.as_object_mut() {
         fields.remove(key);
+    }
+    if long_cache && protocol == WireProtocol::Responses {
+        body["prompt_cache_retention"] = serde_json::json!("24h");
     }
     body
 }
@@ -197,6 +227,7 @@ mod memory_tests {
             temperature: Some(0.5),
             max_tokens: Some(8192),
             stop: vec![],
+            cache_key: None,
         };
         for protocol in [
             WireProtocol::ChatCompletions,
@@ -209,20 +240,186 @@ mod memory_tests {
                 let expected = match protocol {
                     WireProtocol::ChatCompletions => protocols::build_openai_body(&cloned),
                     WireProtocol::Responses => protocols::build_responses_body(&cloned),
-                    WireProtocol::AnthropicMessages => protocols::build_anthropic_body(&cloned, budget),
+                    WireProtocol::AnthropicMessages => {
+                        protocols::build_anthropic_body(&cloned, budget, false)
+                    }
                 };
-                assert_eq!(request_body(&request, protocol, budget), expected);
+                assert_eq!(request_body(&request, protocol, budget, false), expected);
                 assert_eq!(request.max_tokens, Some(8192));
                 assert_eq!(request.messages[0].content, "unchanged history");
             }
         }
     }
+
+    #[test]
+    fn responses_delta_input_reuses_the_canonical_prefix() {
+        let previous = serde_json::json!({
+            "input": [{"role": "user", "content": [{"type": "input_text", "text": "hi"}]}]
+        });
+        let output = vec![serde_json::json!({
+            "type": "message",
+            "id": "m1",
+            "status": "completed",
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": "hello"}],
+        })];
+        let current = vec![
+            serde_json::json!({
+                "role": "user",
+                "content": [{"type": "input_text", "text": "hi"}],
+            }),
+            serde_json::json!({
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "hello"}],
+            }),
+            serde_json::json!({
+                "type": "function_call_output",
+                "call_id": "c1",
+                "output": "ok",
+            }),
+        ];
+        let delta = responses_delta_input(&previous, &current, &output).expect("prefix matches");
+        assert_eq!(delta, vec![current[2].clone()]);
+    }
+
+    #[test]
+    fn responses_chain_rejects_a_changed_tool_surface() {
+        let previous = serde_json::json!({"instructions": "s", "tools": [{"name": "a"}]});
+        let current = serde_json::json!({"instructions": "s", "tools": [{"name": "b"}]});
+        assert!(!responses_prefix_compatible(&previous, &current));
+        assert!(responses_prefix_compatible(&previous, &previous));
+    }
+}
+
+/// Each entry holds a full request body, so the cap is deliberately small:
+/// 64 live conversations bound the retained JSON without churning an active
+/// session's chain.
+const RESPONSES_CHAIN_CAP: usize = 64;
+
+/// One conversation's last successful Responses exchange. `body` is the full
+/// request sent (never the delta), so the next turn can prove its own history
+/// extends it before appending.
+#[derive(Clone)]
+struct ResponsesChain {
+    body: serde_json::Value,
+    output: Vec<serde_json::Value>,
+    response_id: String,
+}
+
+#[derive(Default)]
+struct ResponsesChainState {
+    entries: HashMap<String, ResponsesChain>,
+    order: VecDeque<String>,
+}
+
+impl ResponsesChainState {
+    fn insert(&mut self, key: String, chain: ResponsesChain) {
+        self.entries.insert(key.clone(), chain);
+        self.order.retain(|existing| existing != &key);
+        self.order.push_back(key);
+        while self.order.len() > RESPONSES_CHAIN_CAP {
+            if let Some(evicted) = self.order.pop_front() {
+                self.entries.remove(&evicted);
+            }
+        }
+    }
+
+    fn remove(&mut self, key: &str) {
+        self.entries.remove(key);
+        self.order.retain(|existing| existing != key);
+    }
+}
+
+fn responses_chain_key(base_url: &str, model: &str, cache_key: &str) -> String {
+    format!("{base_url}\u{0}{model}\u{0}{cache_key}")
+}
+
+/// Server output items carry lifecycle fields (`id`, `status`) that the next
+/// request reconstructs from the local transcript. Strip them before the
+/// prefix comparison; everything else must match byte for byte.
+fn canonical_responses_item(item: &serde_json::Value) -> serde_json::Value {
+    let mut item = item.clone();
+    if let Some(object) = item.as_object_mut() {
+        object.remove("id");
+        object.remove("status");
+    }
+    item
+}
+
+fn responses_delta_input(
+    previous: &serde_json::Value,
+    current: &[serde_json::Value],
+    output: &[serde_json::Value],
+) -> Option<Vec<serde_json::Value>> {
+    let previous_input = previous.get("input")?.as_array()?;
+    let baseline_len = previous_input.len() + output.len();
+    if current.len() <= baseline_len {
+        return None;
+    }
+    for (index, item) in previous_input.iter().enumerate() {
+        if canonical_responses_item(item) != canonical_responses_item(&current[index]) {
+            return None;
+        }
+    }
+    for (offset, item) in output.iter().enumerate() {
+        let index = previous_input.len() + offset;
+        if canonical_responses_item(item) != canonical_responses_item(&current[index]) {
+            return None;
+        }
+    }
+    Some(current[baseline_len..].to_vec())
+}
+
+/// The server stores instructions, tools and sampling controls with the
+/// response. A difference in any of them makes the old response unusable as a
+/// prefix, so the caller must replay in full.
+fn responses_prefix_compatible(previous: &serde_json::Value, current: &serde_json::Value) -> bool {
+    const IGNORED: [&str; 6] = [
+        "input",
+        "store",
+        "previous_response_id",
+        "prompt_cache_key",
+        "stream",
+        "stream_options",
+    ];
+    let (Some(previous), Some(current)) = (previous.as_object(), current.as_object()) else {
+        return false;
+    };
+    for (key, value) in previous {
+        if IGNORED.contains(&key.as_str()) {
+            continue;
+        }
+        if current.get(key) != Some(value) {
+            return false;
+        }
+    }
+    for key in current.keys() {
+        if IGNORED.contains(&key.as_str()) {
+            continue;
+        }
+        if !previous.contains_key(key) {
+            return false;
+        }
+    }
+    true
+}
+
+fn is_stale_responses_error(error: &LlmError) -> bool {
+    let text = format!("{} {}", error.code, error.message).to_ascii_lowercase();
+    (text.contains("previous_response") || text.contains("previous response"))
+        && (text.contains("not found")
+            || text.contains("invalid")
+            || text.contains("expired")
+            || text.contains("stale")
+            || text.contains("unsupported"))
 }
 
 pub struct OpenAiCompatAdapter {
     settings: Arc<SettingsStore>,
     credentials: Arc<CredentialStore>,
     http: reqwest::Client,
+    responses_chains: Arc<Mutex<ResponsesChainState>>,
 }
 
 impl OpenAiCompatAdapter {
@@ -235,7 +432,76 @@ impl OpenAiCompatAdapter {
             settings,
             credentials,
             http,
+            responses_chains: Arc::new(Mutex::new(ResponsesChainState::default())),
         }
+    }
+
+    async fn send_request(
+        &self,
+        profile: &OpenAiProfile,
+        api_key: &Option<String>,
+        url: &str,
+        body: &serde_json::Value,
+    ) -> Result<reqwest::Response, LlmError> {
+        let mut builder = self
+            .http
+            .post(url)
+            .header("content-type", "application/json")
+            .header("accept", "text/event-stream")
+            .header("user-agent", USER_AGENT);
+        match profile.protocol {
+            WireProtocol::AnthropicMessages => {
+                if let Some(api_key) = api_key {
+                    builder = builder.header("x-api-key", api_key);
+                }
+                builder = builder.header("anthropic-version", protocols::ANTHROPIC_VERSION);
+            }
+            _ => {
+                if let Some(api_key) = api_key {
+                    builder = builder.header("authorization", format!("Bearer {api_key}"));
+                }
+            }
+        }
+        // 自定义头最后应用:可覆盖同名内置头(含 authorization,支持自定义认证网关)。
+        let mut custom_headers = resolve_profile_headers(&profile.headers, &self.credentials)?;
+        if profile.long_cache && profile.protocol == WireProtocol::AnthropicMessages {
+            // `ttl: "1h"` needs the extended-cache-ttl beta on API-key
+            // requests. Merge with a caller-supplied beta list instead of
+            // overwriting it.
+            const BETA: &str = "extended-cache-ttl-2025-04-11";
+            let existing = custom_headers
+                .get("anthropic-beta")
+                .and_then(|value| value.to_str().ok())
+                .unwrap_or("");
+            let merged = if existing.is_empty() {
+                BETA.to_string()
+            } else if existing.contains(BETA) {
+                existing.to_string()
+            } else {
+                format!("{existing},{BETA}")
+            };
+            if let Ok(value) = reqwest::header::HeaderValue::from_str(&merged) {
+                custom_headers.insert("anthropic-beta", value);
+            }
+        }
+        builder = builder.headers(custom_headers);
+        // 超时纪律:连接阶段由 client 的 connect_timeout 负责;这里只给
+        // 「发出请求 → 响应头返回」设 TTFB 超时——大体量 + 深度思考请求
+        // 超时按 TIMEOUT 计、由 RetryPolicy 自动重发(实测 200K 字符
+        // payload 的正常 TTFB 曾到 21.8s,30s 的余量并不宽裕)。
+        // 流式体不设任何 denia 侧超时:上游不报错就一直流
+        // (reqwest 的 .timeout() 是覆盖响应体读完的总超时,会把长思考
+        // 模型在流中途掐死,绝不能挂)。
+        let response = send_sse(builder.json(body), crate::http::TTFB_TIMEOUT).await?;
+        if !response.status().is_success() {
+            let status = response.status();
+            let headers = response.headers().clone();
+            let body_text = response.text().await.unwrap_or_default();
+            return Err(LlmError::from_failure(http_error_failure(
+                status, &body_text, &headers,
+            )));
+        }
+        Ok(response)
     }
 
     fn profile(&self, provider: &str) -> Result<OpenAiProfile, LlmError> {
@@ -464,6 +730,7 @@ impl LlmAdapter for OpenAiCompatAdapter {
             .map(|budget| budget.min(limit.unwrap_or(u64::MAX)).max(1)))
     }
 
+
     async fn stream(
         &self,
         provider: &str,
@@ -482,58 +749,107 @@ impl LlmAdapter for OpenAiCompatAdapter {
             .max_tokens
             .or(profile.default_max_tokens)
             .map(|budget| budget.min(limit.unwrap_or(u64::MAX)).max(1));
-        let body = request_body(request, protocol, max_tokens);
+        let mut body = request_body(request, protocol, max_tokens, profile.long_cache);
+        let mut full_body = body.clone();
+        if !profile.supports_prompt_cache_key {
+            for value in [&mut body, &mut full_body] {
+                if let Some(object) = value.as_object_mut() {
+                    object.remove("prompt_cache_key");
+                }
+            }
+        }
+        let mut chain_key: Option<String> = None;
+        let mut used_chain = false;
+        if protocol == WireProtocol::Responses && profile.stateful_responses_enabled() {
+            if let Some(cache_key) = request.cache_key.as_deref() {
+                let key = responses_chain_key(&profile.base_url, &request.model, cache_key);
+                chain_key = Some(key.clone());
+                let chain = {
+                    let state = self
+                        .responses_chains
+                        .lock()
+                        .unwrap_or_else(|poison| poison.into_inner());
+                    state.entries.get(&key).cloned()
+                };
+                match chain {
+                    Some(chain) if responses_prefix_compatible(&chain.body, &body) => {
+                        let current = body
+                            .get("input")
+                            .and_then(|value| value.as_array())
+                            .cloned()
+                            .unwrap_or_default();
+                        if let Some(delta) =
+                            responses_delta_input(&chain.body, &current, &chain.output)
+                        {
+                            body["input"] = serde_json::Value::Array(delta);
+                            body["previous_response_id"] =
+                                serde_json::json!(chain.response_id);
+                            used_chain = true;
+                        }
+                        body["store"] = serde_json::json!(true);
+                    }
+                    Some(_) => {
+                        self.responses_chains
+                            .lock()
+                            .unwrap_or_else(|poison| poison.into_inner())
+                            .remove(&key);
+                        body["store"] = serde_json::json!(true);
+                    }
+                    None => body["store"] = serde_json::json!(true),
+                }
+                full_body["store"] = serde_json::json!(true);
+            }
+        }
 
         let url = match protocol {
             WireProtocol::ChatCompletions => protocols::chat_completions_url(&profile.base_url),
             WireProtocol::Responses => protocols::responses_url(&profile.base_url),
             WireProtocol::AnthropicMessages => protocols::anthropic_messages_url(&profile.base_url),
         };
-        let mut builder = self
-            .http
-            .post(&url)
-            .header("content-type", "application/json")
-            .header("accept", "text/event-stream")
-            .header("user-agent", USER_AGENT);
-        match protocol {
-            WireProtocol::AnthropicMessages => {
-                if let Some(api_key) = &api_key {
-                    builder = builder.header("x-api-key", api_key);
+        let response = match self.send_request(&profile, &api_key, &url, &body).await {
+            Ok(response) => response,
+            Err(error) if used_chain && is_stale_responses_error(&error) => {
+                if let Some(key) = chain_key.as_deref() {
+                    self.responses_chains
+                        .lock()
+                        .unwrap_or_else(|poison| poison.into_inner())
+                        .remove(key);
                 }
-                builder = builder.header("anthropic-version", protocols::ANTHROPIC_VERSION);
+                self.send_request(&profile, &api_key, &url, &full_body)
+                    .await?
             }
-            _ => {
-                if let Some(api_key) = &api_key {
-                    builder = builder.header("authorization", format!("Bearer {api_key}"));
-                }
-            }
-        }
-        // 自定义头最后应用:可覆盖同名内置头(含 authorization,支持自定义认证网关)。
-        let custom_headers = resolve_profile_headers(&profile.headers, &self.credentials)?;
-        builder = builder.headers(custom_headers);
-        // 超时纪律:连接阶段由 client 的 connect_timeout 负责;这里只给
-        // 「发出请求 → 响应头返回」设 TTFB 超时——大体量 + 深度思考请求
-        // 超时按 TIMEOUT 计、由 RetryPolicy 自动重发(实测 200K 字符
-        // payload 的正常 TTFB 曾到 21.8s,30s 的余量并不宽裕)。
-        // 流式体不设任何 denia 侧超时:上游不报错就一直流
-        // (reqwest 的 .timeout() 是覆盖响应体读完的总超时,会把长思考
-        // 模型在流中途掐死,绝不能挂)。
-        let response = send_sse(builder.json(&body), crate::http::TTFB_TIMEOUT).await?;
+            Err(error) => return Err(error),
+        };
 
-        if !response.status().is_success() {
-            let status = response.status();
-            let headers = response.headers().clone();
-            let body_text = response.text().await.unwrap_or_default();
-            return Err(LlmError::from_failure(http_error_failure(
-                status, &body_text, &headers,
-            )));
-        }
+        let on_terminal: Option<Box<dyn FnMut(&serde_json::Value) + Send>> =
+            chain_key.map(|key| {
+                let chains = Arc::clone(&self.responses_chains);
+                let body = full_body.clone();
+                Box::new(move |response: &serde_json::Value| {
+                    let Some(response_id) = response["id"].as_str().filter(|id| !id.is_empty())
+                    else {
+                        return;
+                    };
+                    let output = response["output"].as_array().cloned().unwrap_or_default();
+                    let mut state = chains
+                        .lock()
+                        .unwrap_or_else(|poison| poison.into_inner());
+                    state.insert(
+                        key.clone(),
+                        ResponsesChain {
+                            body: body.clone(),
+                            output,
+                            response_id: response_id.to_string(),
+                        },
+                    );
+                }) as Box<dyn FnMut(&serde_json::Value) + Send>
+            });
         let translator: Box<dyn EventTranslator> = match protocol {
             WireProtocol::ChatCompletions => Box::new(CompletionsStream::with_inline_think_tags(
                 UsageStyle::OpenAi,
                 profile.inline_think_tags,
             )),
-            WireProtocol::Responses => Box::new(ResponsesStream::default()),
+            WireProtocol::Responses => Box::new(ResponsesStream::with_terminal(on_terminal)),
             WireProtocol::AnthropicMessages => Box::new(AnthropicStream::default()),
         };
         Ok(sse_chunk_stream(response, translator))

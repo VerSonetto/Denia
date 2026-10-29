@@ -52,6 +52,7 @@ async fn live_gateway_streams_reasoning_deltas() {
         messages: vec![ChatMessage {
             role: ChatRole::User,
             content: "用一个字回答:鹈鹕会游泳吗?先想一想再答。".to_string(),
+            cache: denia_core::message::MessageCache::default(),
             images: Vec::new(),
             tool_calls: Vec::new(),
             tool_call_id: None,
@@ -63,6 +64,7 @@ async fn live_gateway_streams_reasoning_deltas() {
         temperature: None,
         max_tokens: None,
         stop: Vec::new(),
+        cache_key: None,
     };
 
     let started = Instant::now();

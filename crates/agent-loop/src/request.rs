@@ -11,6 +11,7 @@
 use std::sync::Arc;
 
 use denia_core::error::LlmFailure;
+use denia_core::message::ChatRole;
 use denia_core::session::{AbortCause, RequestHeaderReason, SessionEvent, TurnEndReason};
 use denia_core::stream::{ContentBlock, FinishReason, StreamChunk, TokenUsage};
 use denia_core::tool::ToolSchema;
@@ -88,6 +89,9 @@ pub(crate) async fn dispatch_request(
     framed_system: &str,
     tools: &[ToolSchema],
 ) -> Result<RequestOutcome, LlmFailure> {
+    // A request in flight refreshes the cache itself; drop any timer armed by
+    // the previous step so it cannot race this one.
+    driver.cancel_cache_warm(state.session.id());
     state.output_budget = driver
         .registry
         .output_budget(&state.selection.provider, &state.selection.model, None)
@@ -100,16 +104,32 @@ pub(crate) async fn dispatch_request(
     run_microcompact_gate(driver, state, step).await;
     run_compaction_gate(driver, state, step, framed_system, tools, false).await;
 
+    // Cache provenance must be decided while the surface still carries its
+    // injection channel: the wire encoder cannot tell a real user turn from a
+    // reminder by text alone. Both vectors are built from one snapshot so the
+    // indices stay aligned even when compaction rewrote the history.
+    let surface = state.session.derive_surface();
+    let messages = surface
+        .iter()
+        .map(|item| {
+            let mut message = item.message.clone();
+            message.cache.conversational_user =
+                message.role == ChatRole::User && item.channel.is_none();
+            message
+        })
+        .collect();
     let mut request = GenerateRequest {
         model: state.selection.model.clone(),
         reasoning_effort: state.selection.reasoning_effort.clone(),
-        messages: state.session.derive_messages(),
+        messages,
         system: Some(framed_system.to_string()),
         tools: tools.to_vec(),
         temperature: None,
         max_tokens: state.output_budget,
         stop: Vec::new(),
+        cache_key: Some(state.session.id().to_string()),
     };
+    driver.remember_cache_request(state.session.id(), &state.selection.provider, &request);
     let retry_sink: Option<denia_llm::RetrySink> = Some(Arc::new({
         let session = state.session.clone();
         let emit = state.emit.clone();
@@ -197,6 +217,11 @@ pub(crate) async fn dispatch_request(
                     append(&state.session, &state.emit, SessionEvent::RetryAttempt { turn: state.turn, step, attempt: 1, code: failure.code.clone(), message: "输入上下文超限，尝试本逻辑步骤唯一一次强制压缩；关闭、失败或断路时停止。".into(), delay_ms: 0 })?;
                     if run_compaction_gate(driver, state, step, framed_system, tools, true).await {
                         request.messages = state.session.derive_messages();
+                        driver.remember_cache_request(
+                            state.session.id(),
+                            &state.selection.provider,
+                            &request,
+                        );
                         continue 'attempts;
                     }
                 }
@@ -336,6 +361,11 @@ pub(crate) async fn dispatch_request(
                 )?;
                 if run_compaction_gate(driver, state, step, framed_system, tools, true).await {
                     request.messages = state.session.derive_messages();
+                    driver.remember_cache_request(
+                        state.session.id(),
+                        &state.selection.provider,
+                        &request,
+                    );
                     continue 'attempts;
                 }
             }
@@ -859,6 +889,7 @@ async fn run_compaction_gate(
             {
                 return false;
             }
+            driver.cancel_cache_warm(state.session.id());
             let refills = state
                 .compaction_state
                 .record_success(RAPID_REFILL_TOOL_TURN_THRESHOLD);

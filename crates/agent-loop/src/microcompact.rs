@@ -45,6 +45,16 @@ pub struct MicrocompactSettings {
     pub min_savings: u64,
     /// 可清理的工具白名单。
     pub compactable_tools: Vec<String>,
+    /// Rewrite budget: a candidate whose all-message suffix exceeds this is
+    /// part of the warm, already-sent prefix. Rewriting it would force the
+    /// provider to re-write the whole suffix, so it is left for compaction.
+    /// `0` disables the guard (legacy behaviour).
+    pub cache_warm_suffix_tokens: u64,
+    /// Provider prompt-cache lookback in wire positions. A result older than
+    /// this window cannot be rewritten without the next lookup falling back to
+    /// an older checkpoint and re-billing the whole conversation, so it is
+    /// left for compaction. `0` disables the bound.
+    pub cache_lookback_positions: usize,
     /// 是否也清理错误结果(默认否)。
     pub clear_error_results: bool,
 }
@@ -60,6 +70,8 @@ impl Default for MicrocompactSettings {
             // 省不到 256 token 不动手:小改动会扰动前缀缓存,得不偿失。
             min_savings: 256,
             compactable_tools: default_compactable_tools(),
+            cache_warm_suffix_tokens: 8_000,
+            cache_lookback_positions: 20,
             clear_error_results: false,
         }
     }
@@ -112,6 +124,8 @@ pub enum MicrocompactDecision {
 struct Candidate {
     /// surface 中的 seq(落盘 `replaces` 的定位符)。
     seq: u64,
+    /// surface 中的下标,用于估算"改到它要重写多少后缀"。
+    index: usize,
     tool_call_id: String,
 }
 
@@ -146,7 +160,7 @@ fn collect_candidates(
     let mut groups: Vec<Vec<Candidate>> = Vec::new();
     let mut current: Option<Vec<Candidate>> = None;
 
-    for item in surface {
+    for (index, item) in surface.iter().enumerate() {
         let message = &item.message;
         match message.role {
             // 新的 assistant 轮次:收束上一组,开启新组。
@@ -184,6 +198,7 @@ fn collect_candidates(
                 }
                 let candidate = Candidate {
                     seq: item.seq,
+                    index,
                     tool_call_id: call_id.to_string(),
                 };
                 match current.as_mut() {
@@ -210,6 +225,17 @@ fn tool_name_for<'a>(surface: &'a [SurfaceMessage], call_id: &str) -> Option<&'a
         .flat_map(|item| item.message.tool_calls.iter())
         .find(|call| call.id == call_id)
         .map(|call| call.name.as_str())
+}
+
+/// Tokens after `index`: the suffix a rewrite at `index` would force the
+/// provider to re-bill. Content-only and conservative: a breakpoint caches
+/// every wire block after the rewrite, and tool-call arguments only add to it.
+fn suffix_tokens(surface: &[SurfaceMessage], index: usize) -> u64 {
+    surface
+        .iter()
+        .skip(index + 1)
+        .map(|item| rough_tokens(&item.message.content))
+        .sum()
 }
 
 /// 规划一次微压缩:返回待清理项与节省估算。
@@ -249,18 +275,48 @@ pub fn plan(
         return MicrocompactDecision::NotTriggered("no_candidates");
     }
 
-    // 保留最近 N 组,清理其余(从最老的开始)。
+    // Keep the newest N groups. Among the older groups, rewrite from the
+    // newest backwards while the suffix a rewrite would re-bill stays inside
+    // the budget. Older groups have a larger suffix, so the first group that
+    // exceeds the budget ends the scan and is left for compaction.
     let keep = settings.keep_recent_groups.max(1);
     let clear_count = groups.len().saturating_sub(keep);
     if clear_count == 0 {
         return MicrocompactDecision::NotTriggered("nothing_to_clear");
     }
-
-    let to_clear: Vec<Candidate> = groups[..clear_count].iter().flatten().cloned().collect();
-    let to_keep: Vec<Candidate> = groups[clear_count..].iter().flatten().cloned().collect();
-    if to_clear.is_empty() {
-        return MicrocompactDecision::NotTriggered("nothing_to_clear");
+    let mut to_clear: Vec<Candidate> = Vec::new();
+    let mut selected: HashSet<String> = HashSet::new();
+    for group in groups[..clear_count].iter().rev() {
+        let Some(first) = group.iter().map(|candidate| candidate.index).min() else {
+            continue;
+        };
+        if settings.cache_lookback_positions > 0
+            && surface.len().saturating_sub(first) + 6 > settings.cache_lookback_positions
+        {
+            break;
+        }
+        if settings.cache_warm_suffix_tokens > 0
+            && suffix_tokens(surface, first) > settings.cache_warm_suffix_tokens
+        {
+            break;
+        }
+        for candidate in group {
+            selected.insert(candidate.tool_call_id.clone());
+            to_clear.push(candidate.clone());
+        }
     }
+    if to_clear.is_empty() {
+        return MicrocompactDecision::NotTriggered("warm_prefix");
+    }
+    let to_keep: Vec<Candidate> = groups
+        .iter()
+        .flatten()
+        .filter(|candidate| !selected.contains(&candidate.tool_call_id))
+        .cloned()
+        .collect();
+    // Selection walks newest-first to minimize the rewrite suffix; report in
+    // chronological order so logs and `replaces` consumers stay deterministic.
+    to_clear.sort_by_key(|candidate| candidate.index);
 
     // 估算节省:被清理项当前内容的 token 数,减去占位符的 token 数。
     let cleared_ids: HashSet<&str> = to_clear.iter().map(|c| c.tool_call_id.as_str()).collect();
@@ -331,6 +387,8 @@ mod tests {
     fn settings() -> MicrocompactSettings {
         MicrocompactSettings {
             min_savings: 0,
+            cache_warm_suffix_tokens: 0,
+            cache_lookback_positions: 0,
             ..Default::default()
         }
     }
@@ -356,6 +414,54 @@ mod tests {
         }
     }
 
+    #[test]
+    fn warm_suffix_guard_leaves_old_results_for_compaction() {
+        let surface = surface_with_rounds(10, &"x".repeat(2000));
+        let cfg = MicrocompactSettings {
+            min_savings: 0,
+            cache_warm_suffix_tokens: 3_000,
+            ..Default::default()
+        };
+        match plan(&surface, &cfg, None, Some(1000), Some(500)) {
+            MicrocompactDecision::Applied { cleared, .. } => {
+                assert!(
+                    cleared.contains(&"call_4".to_string()),
+                    "newest eligible group has the smallest rewrite suffix"
+                );
+                assert!(
+                    !cleared.contains(&"call_0".to_string()),
+                    "oldest group is past the warm-suffix budget"
+                );
+            }
+            other => panic!("应当触发清理,实际 {other:?}"),
+        }
+    }
+
+
+    #[test]
+    fn lookback_guard_leaves_ancient_results_for_compaction() {
+        let surface = surface_with_rounds(20, &"x".repeat(2000));
+        let cfg = MicrocompactSettings {
+            keep_recent_groups: 1,
+            min_savings: 0,
+            cache_warm_suffix_tokens: 0,
+            cache_lookback_positions: 20,
+            ..Default::default()
+        };
+        match plan(&surface, &cfg, None, Some(9999), Some(1)) {
+            MicrocompactDecision::Applied { cleared, .. } => {
+                assert!(
+                    cleared.contains(&"call_18".to_string()),
+                    "newest eligible group is inside the lookback window"
+                );
+                assert!(
+                    !cleared.contains(&"call_0".to_string()),
+                    "ancient group is outside the lookback window"
+                );
+            }
+            other => panic!("应当触发清理,实际 {other:?}"),
+        }
+    }
     #[test]
     fn not_triggered_without_pressure() {
         let surface = surface_with_rounds(10, "small");

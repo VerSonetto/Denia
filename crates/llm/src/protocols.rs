@@ -117,9 +117,9 @@ pub fn listing_is_anthropic(protocol: WireProtocol) -> bool {
 /// The chat-completions request body for one OpenAI-compatible route.
 ///
 /// OpenAI-family gateways accept `reasoning_effort` when they support thinking
-/// levels. The DeepSeek `thinking: { type }` switch is DeepSeek-direct wire
-/// vocabulary only (`build_deepseek_body`); sending it here breaks gateways
-/// such as MiniMax that reject unknown parameters.
+/// levels. Provider-specific `thinking` switches are not part of the generic
+/// chat-completions shape; sending them here breaks gateways such as MiniMax
+/// that reject unknown parameters.
 pub(crate) fn build_openai_body(request: &GenerateRequest) -> serde_json::Value {
     let mut body = serde_json::json!({
         "model": request.model,
@@ -146,6 +146,13 @@ pub(crate) fn build_openai_body(request: &GenerateRequest) -> serde_json::Value 
     let tools = build_wire_tools(&request.tools);
     if !tools.is_empty() {
         body["tools"] = serde_json::Value::Array(tools);
+    }
+    if let Some(key) = request
+        .cache_key
+        .as_deref()
+        .and_then(normalize_prompt_cache_key)
+    {
+        body["prompt_cache_key"] = serde_json::json!(key);
     }
     body
 }
@@ -256,6 +263,13 @@ pub(crate) fn build_responses_body(request: &GenerateRequest) -> serde_json::Val
             .collect();
         body["tools"] = serde_json::Value::Array(tools);
     }
+    if let Some(key) = request
+        .cache_key
+        .as_deref()
+        .and_then(normalize_prompt_cache_key)
+    {
+        body["prompt_cache_key"] = serde_json::json!(key);
+    }
     body
 }
 
@@ -271,23 +285,212 @@ fn thinking_budget(effort: &str) -> Option<u64> {
     }
 }
 
+/// Normalize a prompt-cache identity to the 64-character limit OpenAI
+/// accepts. Session UUIDs fit verbatim; longer identities get a stable
+/// FNV-1a digest so restarts do not remint the key.
+pub(crate) fn normalize_prompt_cache_key(value: &str) -> Option<String> {
+    let value = value.trim();
+    if value.is_empty() {
+        return None;
+    }
+    if value.chars().count() <= 64 {
+        return Some(value.to_string());
+    }
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in value.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    Some(format!("pc_{hash:016x}"))
+}
+
+const ANTHROPIC_MAX_BREAKPOINTS: usize = 4;
+const ANTHROPIC_DECIMATION_INTERVAL: usize = 15;
+
+/// Prompt-cache provenance carried alongside one wire message.
+#[derive(Clone, Copy, Default)]
+struct WireCacheMeta {
+    per_call: bool,
+    conversational_user: bool,
+}
+
+impl WireCacheMeta {
+    fn merge(&mut self, other: Self) {
+        self.per_call |= other.per_call;
+        self.conversational_user |= other.conversational_user;
+    }
+}
+
+/// Anthropic rejects `cache_control` on generated reasoning, fallback
+/// boundaries, and mid-conversation tool-control blocks.
+fn is_uncacheable_anthropic_block(block: &serde_json::Value) -> bool {
+    matches!(
+        block.get("type").and_then(|value| value.as_str()),
+        Some("thinking" | "redacted_thinking" | "fallback" | "tool_addition" | "tool_removal")
+    )
+}
+
+/// Put an ephemeral breakpoint on the last eligible block of one wire message.
+///
+/// Returns false when the message has no eligible block or already carries a
+/// breakpoint, so the caller can spend the slot somewhere else.
+fn apply_anthropic_cache_control(
+    message: &mut serde_json::Value,
+    cache_control: &serde_json::Value,
+) -> bool {
+    let Some(blocks) = message
+        .get_mut("content")
+        .and_then(|value| value.as_array_mut())
+    else {
+        return false;
+    };
+    for block in blocks.iter_mut().rev() {
+        if is_uncacheable_anthropic_block(block) {
+            continue;
+        }
+        let Some(object) = block.as_object_mut() else {
+            continue;
+        };
+        if object.contains_key("cache_control") {
+            return false;
+        }
+        object.insert("cache_control".to_string(), cache_control.clone());
+        return true;
+    }
+    false
+}
+
+/// Spend the remaining Anthropic breakpoint budget on the message tail and
+/// periodic historical checkpoints.
+///
+/// Priority mirrors the first-party client: newest reusable tail, then a
+/// checkpoint every 15 conversational user turns, then the newest message
+/// before the first per-call block, then a second tail candidate. Only
+/// successful decorations consume budget.
+fn apply_anthropic_message_caching(
+    messages: &mut [serde_json::Value],
+    metas: &[WireCacheMeta],
+    head_breakpoints: usize,
+    cache_control: &serde_json::Value,
+) {
+    let budget = ANTHROPIC_MAX_BREAKPOINTS.saturating_sub(head_breakpoints);
+    if budget == 0 || messages.is_empty() || metas.len() != messages.len() {
+        return;
+    }
+    let end = messages.len() - 1;
+    let mut mark_index: Option<usize> = None;
+    let mut stable_user_turns = 0usize;
+    let mut trailing: Vec<usize> = Vec::with_capacity(2);
+    for index in (0..=end).rev() {
+        let meta = metas[index];
+        if meta.per_call {
+            // Rebuilt for the next request: a prefix spanning it cannot match.
+            // It is the reusable-prefix boundary, not an anchor.
+            mark_index = Some(index);
+            stable_user_turns = 0;
+            continue;
+        }
+        if trailing.len() < 2 {
+            trailing.push(index);
+        }
+        if meta.conversational_user {
+            stable_user_turns += 1;
+        }
+    }
+    let stable_end = match mark_index {
+        Some(0) => None,
+        Some(index) => Some(index - 1),
+        None => Some(end),
+    };
+    let mut applied = 0usize;
+    if let Some(&index) = trailing.first() {
+        if apply_anthropic_cache_control(&mut messages[index], cache_control) {
+            applied += 1;
+        }
+    }
+    if stable_user_turns >= ANTHROPIC_DECIMATION_INTERVAL {
+        if let Some(stable_end) = stable_end {
+            // Newest checkpoint sits `stable_user_turns % 15` turns back from
+            // the stable prefix end; every 15th turn follows it.
+            let mut turns_since_checkpoint = stable_user_turns % ANTHROPIC_DECIMATION_INTERVAL;
+            for index in (0..=stable_end).rev() {
+                if applied >= budget {
+                    break;
+                }
+                if !metas[index].conversational_user {
+                    continue;
+                }
+                if turns_since_checkpoint > 0 {
+                    turns_since_checkpoint -= 1;
+                    continue;
+                }
+                turns_since_checkpoint = ANTHROPIC_DECIMATION_INTERVAL - 1;
+                if apply_anthropic_cache_control(&mut messages[index], cache_control) {
+                    applied += 1;
+                }
+            }
+        }
+    }
+    if applied < budget {
+        if let Some(stable_end) = stable_end {
+            if stable_end < end
+                && apply_anthropic_cache_control(&mut messages[stable_end], cache_control)
+            {
+                applied += 1;
+            }
+        }
+    }
+    if applied < budget {
+        if let Some(&index) = trailing.get(1) {
+            if apply_anthropic_cache_control(&mut messages[index], cache_control) {
+                applied += 1;
+            }
+        }
+    }
+    debug_assert!(
+        applied <= budget,
+        "anthropic breakpoint budget exceeded: {applied} > {budget}"
+    );
+}
+
 /// The Messages request body: system as a top-level field, tool results as
 /// `tool_result` blocks inside user messages, adjacent same-role messages
 /// merged (Anthropic requires alternating roles).
 pub(crate) fn build_anthropic_body(
     request: &GenerateRequest,
     max_tokens: Option<u64>,
+    long_cache: bool,
 ) -> serde_json::Value {
+    let cache_control = if long_cache {
+        serde_json::json!({ "type": "ephemeral", "ttl": "1h" })
+    } else {
+        serde_json::json!({ "type": "ephemeral" })
+    };
     let mut messages: Vec<(ChatRole, Vec<serde_json::Value>)> = Vec::new();
+    let mut metas: Vec<WireCacheMeta> = Vec::new();
     let push_block = |role: ChatRole,
                       block: serde_json::Value,
-                      messages: &mut Vec<(ChatRole, Vec<serde_json::Value>)>| {
+                      meta: WireCacheMeta,
+                      messages: &mut Vec<(ChatRole, Vec<serde_json::Value>)>,
+                      metas: &mut Vec<WireCacheMeta>| {
         match messages.last_mut() {
-            Some((last_role, blocks)) if *last_role == role => blocks.push(block),
-            _ => messages.push((role, vec![block])),
+            Some((last_role, blocks)) if *last_role == role => {
+                blocks.push(block);
+                if let Some(last_meta) = metas.last_mut() {
+                    last_meta.merge(meta);
+                }
+            }
+            _ => {
+                messages.push((role, vec![block]));
+                metas.push(meta);
+            }
         }
     };
     for message in &request.messages {
+        let meta = WireCacheMeta {
+            per_call: message.cache.per_call,
+            conversational_user: message.cache.conversational_user,
+        };
         match message.role {
             // 系统提示走顶层 system 字段。
             ChatRole::System => {}
@@ -296,7 +499,9 @@ pub(crate) fn build_anthropic_body(
                     push_block(
                         ChatRole::User,
                         serde_json::json!({ "type": "text", "text": message.content }),
+                        meta,
                         &mut messages,
+                        &mut metas,
                     );
                 }
                 for image in &message.images {
@@ -310,7 +515,9 @@ pub(crate) fn build_anthropic_body(
                                 "data": image.data,
                             },
                         }),
+                        meta,
                         &mut messages,
+                        &mut metas,
                     );
                 }
             }
@@ -330,14 +537,22 @@ pub(crate) fn build_anthropic_body(
                         _ => false,
                     };
                     if replay.protocol == "anthropic-messages" && valid {
-                        push_block(ChatRole::Assistant, payload.clone(), &mut messages);
+                        push_block(
+                            ChatRole::Assistant,
+                            payload.clone(),
+                            meta,
+                            &mut messages,
+                            &mut metas,
+                        );
                     }
                 }
                 if !message.content.is_empty() {
                     push_block(
                         ChatRole::Assistant,
                         serde_json::json!({ "type": "text", "text": message.content }),
+                        meta,
                         &mut messages,
+                        &mut metas,
                     );
                 }
                 for call in &message.tool_calls {
@@ -349,7 +564,9 @@ pub(crate) fn build_anthropic_body(
                             "name": call.name,
                             "input": json_arguments(&call.arguments),
                         }),
+                        meta,
                         &mut messages,
+                        &mut metas,
                     );
                 }
             }
@@ -365,7 +582,11 @@ pub(crate) fn build_anthropic_body(
                         "tool_use_id": call_id,
                         "content": message.content,
                     }),
+                    // A tool result is not a conversational user turn; if it
+                    // merges into a real user message, `merge` keeps that flag.
+                    WireCacheMeta::default(),
                     &mut messages,
+                    &mut metas,
                 );
             }
         }
@@ -382,22 +603,45 @@ pub(crate) fn build_anthropic_body(
         })
         .collect();
 
-    // 显式缓存断点(对话尾部):给最后一条消息的最后一个块打 ephemeral 标记,
-    // 配合 system 上的断点,让 provider 的前缀缓存跨请求命中。总断点数保持
-    // 在 2 个(provider 上限为 4),不与工具声明侧争额度。OpenAI 兼容协议
-    // 靠自动前缀缓存,不需要这类标记。
-    if let Some(last) = wire_messages.last_mut()
-        && let Some(blocks) = last
-            .get_mut("content")
-            .and_then(|value| value.as_array_mut())
-        && let Some(block) = blocks.last_mut()
-        && let Some(object) = block.as_object_mut()
-    {
-        object.insert(
-            "cache_control".to_string(),
-            serde_json::json!({ "type": "ephemeral" }),
-        );
-    }
+    // Head anchors: the tool definitions and the system block. A breakpoint on
+    // the last tool keeps the tools cached even when the system text changes;
+    // the system breakpoint caches tools + system in canonical wire order.
+    let system_json = request
+        .system
+        .as_deref()
+        .filter(|system| !system.is_empty())
+        .map(|system| {
+            serde_json::json!([{
+                "type": "text",
+                "text": system,
+                "cache_control": cache_control.clone(),
+            }])
+        });
+    let tools_json = (!request.tools.is_empty()).then(|| {
+        let mut tools: Vec<serde_json::Value> = request
+            .tools
+            .iter()
+            .map(|tool| {
+                serde_json::json!({
+                    "name": tool.name,
+                    "description": tool.description,
+                    "input_schema": tool.parameters,
+                })
+            })
+            .collect();
+        if let Some(last) = tools.last_mut().and_then(|tool| tool.as_object_mut()) {
+            last.insert("cache_control".to_string(), cache_control.clone());
+        }
+        serde_json::Value::Array(tools)
+    });
+    let head_breakpoints =
+        usize::from(tools_json.is_some()) + usize::from(system_json.is_some());
+    apply_anthropic_message_caching(
+        &mut wire_messages,
+        &metas,
+        head_breakpoints,
+        &cache_control,
+    );
 
     // thinking 开启时 Anthropic 要求 temperature = 1,干脆不带 temperature。
     let effort = request
@@ -416,14 +660,8 @@ pub(crate) fn build_anthropic_body(
     if let Some(max_tokens) = max_tokens {
         body["max_tokens"] = serde_json::json!(max_tokens);
     }
-    if let Some(system) = request.system.as_deref().filter(|s| !s.is_empty()) {
-        // 数组块形态才能携带 cache_control:system 是跨请求不变的前缀,
-        // 一个断点即缓存 tools + system 全部内容。
-        body["system"] = serde_json::json!([{
-            "type": "text",
-            "text": system,
-            "cache_control": { "type": "ephemeral" },
-        }]);
+    if let Some(system) = system_json {
+        body["system"] = system;
     }
     if let Some(budget) = effort {
         let budget_tokens = match max_tokens {
@@ -438,19 +676,8 @@ pub(crate) fn build_anthropic_body(
     if !request.stop.is_empty() {
         body["stop_sequences"] = serde_json::json!(request.stop);
     }
-    if !request.tools.is_empty() {
-        let tools: Vec<serde_json::Value> = request
-            .tools
-            .iter()
-            .map(|tool| {
-                serde_json::json!({
-                    "name": tool.name,
-                    "description": tool.description,
-                    "input_schema": tool.parameters,
-                })
-            })
-            .collect();
-        body["tools"] = serde_json::Value::Array(tools);
+    if let Some(tools) = tools_json {
+        body["tools"] = tools;
     }
     body
 }
@@ -606,7 +833,6 @@ fn payload_preview(raw: &str) -> String {
 /// OpenAI Responses SSE → chunks. Text/reasoning blocks stream via delta
 /// events and close on their item's `done`; function calls open on item
 /// `added`, accumulate arguments, and close calibrated to the done item.
-#[derive(Debug, Default)]
 pub struct ResponsesStream {
     next_index: u32,
     text: Option<OpenBlock>,
@@ -620,9 +846,40 @@ pub struct ResponsesStream {
     /// chat-completions 的 finish_reason 语义对齐)。
     had_tool_call: bool,
     completed: bool,
+    /// Called with the terminal `response` object so a stateful caller can
+    /// record `response.id` and replayable output items for `previous_response_id`.
+    on_terminal: Option<Box<dyn FnMut(&serde_json::Value) + Send>>,
+}
+
+impl Default for ResponsesStream {
+    fn default() -> Self {
+        Self {
+            next_index: 0,
+            text: None,
+            reasoning: None,
+            reasoning_replay: None,
+            calls: BTreeMap::new(),
+            usage: None,
+            finish: None,
+            saw_block: false,
+            had_tool_call: false,
+            completed: false,
+            on_terminal: None,
+        }
+    }
 }
 
 impl ResponsesStream {
+    /// Build a translator that reports the terminal response object.
+    pub fn with_terminal(
+        on_terminal: Option<Box<dyn FnMut(&serde_json::Value) + Send>>,
+    ) -> Self {
+        Self {
+            on_terminal,
+            ..Self::default()
+        }
+    }
+
     fn take_index(&mut self) -> u32 {
         let index = self.next_index;
         self.next_index += 1;
@@ -868,6 +1125,9 @@ impl EventTranslator for ResponsesStream {
                     _ => FinishReason::Stop,
                 };
                 self.finish = Some(finish);
+                if let Some(on_terminal) = self.on_terminal.as_mut() {
+                    on_terminal(response);
+                }
             }
             "response.failed" => {
                 self.completed = true;
@@ -1235,7 +1495,8 @@ impl EventTranslator for AnthropicStream {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use denia_core::message::{ChatMessage, ImageData, ToolCallRef};
+    use denia_core::message::{ChatMessage, ImageData, MessageCache, ToolCallRef};
+    use denia_core::stream::ReasoningReplay;
     use denia_core::tool::ToolSchema;
 
     fn feed_all(translator: &mut dyn EventTranslator, frames: &[&str]) -> Vec<StreamChunk> {
@@ -1274,8 +1535,57 @@ mod tests {
             temperature: None,
             max_tokens: None,
             stop: Vec::new(),
+            cache_key: None,
         }
     }
+
+    fn message_breakpoint_count(message: &serde_json::Value) -> usize {
+        message
+            .get("content")
+            .and_then(|value| value.as_array())
+            .map(|blocks| {
+                blocks
+                    .iter()
+                    .filter(|block| block.get("cache_control").is_some())
+                    .count()
+            })
+            .unwrap_or(0)
+    }
+
+    fn cache_breakpoints(body: &serde_json::Value) -> usize {
+        let tools = body
+            .get("tools")
+            .and_then(|value| value.as_array())
+            .map(|tools| {
+                tools
+                    .iter()
+                    .filter(|tool| tool.get("cache_control").is_some())
+                    .count()
+            })
+            .unwrap_or(0);
+        let system = body
+            .get("system")
+            .and_then(|value| value.as_array())
+            .map(|blocks| {
+                blocks
+                    .iter()
+                    .filter(|block| block.get("cache_control").is_some())
+                    .count()
+            })
+            .unwrap_or(0);
+        let messages = body
+            .get("messages")
+            .and_then(|value| value.as_array())
+            .map(|messages| {
+                messages
+                    .iter()
+                    .map(message_breakpoint_count)
+                    .sum::<usize>()
+            })
+            .unwrap_or(0);
+        tools + system + messages
+    }
+
 
     #[test]
     fn responses_body_replays_conversation() {
@@ -1329,8 +1639,27 @@ mod tests {
     }
 
     #[test]
+    fn openai_bodies_carry_normalized_prompt_cache_key() {
+        let mut request = request();
+        request.cache_key = Some("session-1".to_string());
+        assert_eq!(build_openai_body(&request)["prompt_cache_key"], "session-1");
+        assert_eq!(
+            build_responses_body(&request)["prompt_cache_key"],
+            "session-1"
+        );
+
+        request.cache_key = Some("x".repeat(80));
+        let key = build_openai_body(&request)["prompt_cache_key"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(key.starts_with("pc_"));
+        assert_eq!(key.len(), 19);
+    }
+
+    #[test]
     fn anthropic_body_merges_roles_and_uses_tool_result_blocks() {
-        let body = build_anthropic_body(&request(), Some(8_192));
+        let body = build_anthropic_body(&request(), Some(8_192), false);
         assert_eq!(body["system"][0]["text"], "系统提示");
         assert_eq!(body["system"][0]["cache_control"]["type"], "ephemeral");
         assert_eq!(body["max_tokens"], 8_192);
@@ -1350,7 +1679,93 @@ mod tests {
         assert_eq!(body["tools"][0]["name"], "bash");
         assert_eq!(body["tools"][0]["input_schema"]["type"], "object");
         // 无 effort:不带 thinking,可带 temperature。
+        assert_eq!(body["tools"][0]["cache_control"]["type"], "ephemeral");
+        assert_eq!(cache_breakpoints(&body), 4);
         assert!(body.get("thinking").is_none());
+    }
+
+    #[test]
+    fn anthropic_body_spends_head_and_message_breakpoints() {
+        let body = build_anthropic_body(&request(), Some(8_192), false);
+        assert_eq!(body["tools"][0]["cache_control"]["type"], "ephemeral");
+        assert_eq!(cache_breakpoints(&body), 4);
+        let messages = body["messages"].as_array().unwrap();
+        // Newest tail message and the second tail candidate.
+        assert_eq!(message_breakpoint_count(&messages[1]), 1);
+        assert_eq!(message_breakpoint_count(&messages[2]), 1);
+    }
+
+    #[test]
+    fn anthropic_body_skips_per_call_tail() {
+        let mut request = request();
+        request
+            .messages
+            .push(ChatMessage::assistant("a2", None, Vec::new()));
+        let mut volatile = ChatMessage::user("volatile");
+        volatile.cache = MessageCache {
+            per_call: true,
+            ..MessageCache::default()
+        };
+        request.messages.push(volatile);
+        let body = build_anthropic_body(&request, None, false);
+        let messages = body["messages"].as_array().unwrap();
+        assert_eq!(message_breakpoint_count(messages.last().unwrap()), 0);
+        // The reusable prefix behind the mark and the second tail candidate.
+        assert_eq!(message_breakpoint_count(&messages[messages.len() - 2]), 1);
+        assert!(cache_breakpoints(&body) <= 4);
+    }
+
+    #[test]
+    fn anthropic_body_decimates_every_fifteen_user_turns() {
+        let mut request = request();
+        request.messages.clear();
+        for turn in 0..20 {
+            let mut user = ChatMessage::user(format!("u{turn}"));
+            user.cache.conversational_user = true;
+            request.messages.push(user);
+            request
+                .messages
+                .push(ChatMessage::assistant(format!("a{turn}"), None, Vec::new()));
+        }
+        let body = build_anthropic_body(&request, None, false);
+        assert_eq!(cache_breakpoints(&body), 4);
+        let messages = body["messages"].as_array().unwrap();
+        // 20 conversational turns: the newest checkpoint is the 15th turn.
+        assert_eq!(message_breakpoint_count(&messages[28]), 1);
+        assert_eq!(message_breakpoint_count(&messages[39]), 1);
+    }
+
+    #[test]
+    fn anthropic_body_never_anchors_thinking_only_tail() {
+        let mut request = request();
+        let mut assistant = ChatMessage::assistant("", Some("thought".into()), Vec::new());
+        assistant.reasoning_replay = vec![ReasoningReplay {
+            protocol: "anthropic-messages".into(),
+            payload: serde_json::json!({
+                "type": "thinking",
+                "thinking": "thought",
+                "signature": "sig",
+            }),
+        }];
+        request.messages = vec![ChatMessage::user("u"), assistant];
+        let body = build_anthropic_body(&request, None, false);
+        let messages = body["messages"].as_array().unwrap();
+        let last_content = messages.last().unwrap()["content"].as_array().unwrap();
+        assert!(
+            last_content
+                .iter()
+                .all(|block| block.get("cache_control").is_none())
+        );
+        // Falls back to the previous stable user message.
+        assert_eq!(message_breakpoint_count(&messages[0]), 1);
+    }
+
+    #[test]
+    fn anthropic_body_uses_one_hour_ttl_when_requested() {
+        let body = build_anthropic_body(&request(), Some(8_192), true);
+        assert_eq!(body["system"][0]["cache_control"]["ttl"], "1h");
+        assert_eq!(body["tools"][0]["cache_control"]["ttl"], "1h");
+        assert_eq!(cache_breakpoints(&body), 4);
     }
 
     #[test]
@@ -1358,7 +1773,7 @@ mod tests {
         let mut request = request();
         request.reasoning_effort = Some("high".to_string());
         request.temperature = Some(0.7);
-        let body = build_anthropic_body(&request, Some(8_192));
+        let body = build_anthropic_body(&request, Some(8_192), false);
         assert_eq!(body["thinking"]["type"], "enabled");
         assert_eq!(body["thinking"]["budget_tokens"], 8_191);
         // 思考预算必须在已解析输出上限以内，不擅自抬高输出预算。
@@ -1461,6 +1876,24 @@ mod tests {
         assert_eq!(usage.input_tokens, 6);
         assert_eq!(usage.cache_read_tokens, Some(4));
         assert_eq!(usage.reasoning_tokens, Some(2));
+    }
+
+    #[test]
+    fn responses_stream_reports_terminal_response() {
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let sink = std::sync::Arc::clone(&seen);
+        let mut translator = ResponsesStream::with_terminal(Some(Box::new(move |value| {
+            *sink.lock().unwrap() = Some(value.clone());
+        })));
+        let _chunks = feed_all(
+            &mut translator,
+            &[
+                r#"{"type":"response.completed","response":{"id":"resp_1","status":"completed","output":[{"type":"message","id":"m1"}],"usage":{"input_tokens":1,"output_tokens":1}}}"#,
+            ],
+        );
+        let value = seen.lock().unwrap().clone().expect("terminal response");
+        assert_eq!(value["id"], "resp_1");
+        assert_eq!(value["output"][0]["id"], "m1");
     }
 
     #[test]
@@ -1842,18 +2275,18 @@ mod tests {
             responses["include"],
             serde_json::json!(["reasoning.encrypted_content"])
         );
-        let anthropic = build_anthropic_body(&req, Some(4096));
-        // 对话尾部的缓存断点落在最后一个块上(这里恰是 redacted)。
-        let mut redacted_with_marker = redacted.clone();
-        redacted_with_marker["cache_control"] = serde_json::json!({ "type": "ephemeral" });
+        let anthropic = build_anthropic_body(&req, Some(4096), false);
+        // Generated reasoning is not a legal `cache_control` anchor: the
+        // scheduler leaves both thinking blocks untouched and spends its
+        // message budget nowhere (this is the only message).
         assert_eq!(
             anthropic["messages"][0]["content"],
-            serde_json::json!([thinking, redacted_with_marker])
+            serde_json::json!([thinking, redacted])
         );
         req.messages[0].reasoning_replay.clear();
         assert_eq!(build_responses_body(&req)["input"], serde_json::json!([]));
         assert_eq!(
-            build_anthropic_body(&req, Some(4096))["messages"],
+            build_anthropic_body(&req, Some(4096), false)["messages"],
             serde_json::json!([])
         );
     }

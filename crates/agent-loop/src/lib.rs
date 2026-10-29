@@ -18,6 +18,7 @@
 //! - [`compact`] — LLM 总结压缩(压力驱动);
 //! - [`microcompact`] — 工具结果微压缩(占位符替换,摘要前的廉价清理)。
 
+pub mod cache_warm;
 mod compact;
 mod compaction_state;
 mod driver_settings;
@@ -41,7 +42,7 @@ use async_trait::async_trait;
 use denia_core::config::{LlmCallConfig, ModelSelection};
 use denia_core::error::{LlmFailure, codes};
 use denia_core::session::{RequestHeaderSnapshot, SessionEnvelope, SessionEvent, TurnEndReason};
-use denia_llm::LlmRegistry;
+use denia_llm::{GenerateRequest, LlmRegistry};
 use denia_session::Session;
 use denia_system_prompt::SystemPrompt;
 use denia_tools::{FileHistoryBackend, ToolRegistry};
@@ -51,6 +52,7 @@ pub use denia_token_meter::{
 use denia_token_meter::{RequestCall as LedgerRequestCall, RequestSource};
 use tokio_util::sync::CancellationToken;
 
+pub use cache_warm::{CacheWarmingMode, CacheWarmingSettings};
 pub use compact::{CompactOutcome, CompactionSettings};
 pub use driver_settings::{DriverSettings, DriverSettingsSource};
 pub use injections::GOAL_CHANNEL;
@@ -298,6 +300,8 @@ pub struct SessionDriver {
     budget_policy: std::sync::RwLock<BudgetPolicy>,
     /// 按会话登记的当前 turn 账本(审批/提问等待期间暂停计时)。
     turn_budgets: TurnBudgets,
+    /// 提示词缓存保温:每会话最后请求 + 待触发刷新任务。
+    cache_warmer: crate::cache_warm::CacheWarmer,
 }
 
 impl SessionDriver {
@@ -323,6 +327,7 @@ impl SessionDriver {
             mcp_loads: std::sync::Mutex::new(std::collections::HashMap::new()),
             budget_policy: std::sync::RwLock::new(BudgetPolicy::default()),
             turn_budgets: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            cache_warmer: crate::cache_warm::CacheWarmer::default(),
         }
     }
 
@@ -388,6 +393,36 @@ impl SessionDriver {
                 .as_ref()
                 .map_or_else(|| self.settings.clone(), |source| source.settings()),
         )
+    }
+
+    /// Record the request shape a cache refresh should replay.
+    pub fn remember_cache_request(
+        &self,
+        session: &str,
+        provider: &str,
+        request: &GenerateRequest,
+    ) {
+        self.cache_warmer.remember(session, provider, request);
+    }
+
+    /// Drop a pending refresh (new turn, compaction, or a mode change).
+    pub fn cancel_cache_warm(&self, session: &str) {
+        self.cache_warmer.cancel(session);
+    }
+
+    /// Arm a refresh for the session's last request.
+    pub fn schedule_cache_warm(
+        &self,
+        session: &str,
+        phase: crate::cache_warm::WarmPhase,
+    ) {
+        let settings = self.driver_settings();
+        self.cache_warmer.schedule(
+            session,
+            phase,
+            &self.registry,
+            &settings.cache_warming,
+        );
     }
 
     fn compaction_state_for(&self, id: &str) -> Arc<compaction_state::CompactionState> {
@@ -651,6 +686,7 @@ impl SessionDriver {
         session: &Arc<Session>,
         cancel: CancellationToken,
     ) -> Result<Option<CompactOutcome>, LlmFailure> {
+        self.cancel_cache_warm(session.id());
         if !self.features_for(session).compaction {
             return Err(LlmFailure::new(
                 codes::UNKNOWN,
@@ -749,7 +785,9 @@ impl SessionDriver {
                 .await
                 .ok();
         let started_after = session.with_events(injections::last_seq);
+        self.cancel_cache_warm(session.id());
         let result = turn::run_turn_inner(self, &mut state, prompt, images, files, quoted).await;
+        self.schedule_cache_warm(session.id(), crate::cache_warm::WarmPhase::Idle);
         // 轮的账本随轮撤下:下一轮重新建(预算按轮重新获得;轮与轮之间的
         // 等待——goal paused、等用户下一条消息——根本不在任何账本区间内)。
         self.end_turn_budget(session.id());

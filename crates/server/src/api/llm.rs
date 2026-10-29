@@ -168,6 +168,7 @@ async fn chat(
         max_tokens: body.max_tokens,
         stop: Vec::new(),
         tools: Vec::new(),
+        cache_key: None,
     };
 
     let stream: SseStream = match state.registry.stream(&provider, &request, None).await {

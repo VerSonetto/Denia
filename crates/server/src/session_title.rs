@@ -23,7 +23,7 @@ const MAX_TITLE_BYTES: usize = 80;
 /// 端到端生成时限(60 秒)。
 const TIMEOUT: Duration = Duration::from_secs(60);
 
-/// 思考档位从低到高的已知顺序(对齐 deepseek `ReasoningEffort` 枚举)。
+/// 思考档位从低到高的已知顺序(provider effort ladder)。
 const EFFORT_ORDER_LOW_TO_HIGH: [&str; 6] = ["off", "low", "medium", "high", "xhigh", "max"];
 
 /// 标题生成系统提示:中文措辞。
@@ -101,6 +101,7 @@ async fn generate(
         // 刻意不设 max_tokens:思考型模型的思考过程会被截断,标题反而不完整。
         max_tokens: None,
         stop: Vec::new(),
+        cache_key: None,
     };
     let text = tokio::time::timeout(
         TIMEOUT,

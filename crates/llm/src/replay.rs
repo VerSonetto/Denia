@@ -180,6 +180,7 @@ mod tests {
             temperature: None,
             max_tokens: None,
             stop: vec![],
+            cache_key: None,
         };
         let failure = LlmFailure::new(
             codes::INVALID_REQUEST,

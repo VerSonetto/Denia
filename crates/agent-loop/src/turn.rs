@@ -317,6 +317,10 @@ pub(crate) async fn run_turn_inner(
             crate::request::RequestOutcome::TurnEnded(reason) => return Ok(reason),
             crate::request::RequestOutcome::RestartStep => continue 'step_loop,
             crate::request::RequestOutcome::Step { blocks, finish } => {
+                driver.schedule_cache_warm(
+                    state.session.id(),
+                    crate::cache_warm::WarmPhase::Streaming,
+                );
                 let mut calls = denia_core::message::assistant_from_blocks(&blocks)
                     .map(|message| message.tool_calls)
                     .unwrap_or_default();
