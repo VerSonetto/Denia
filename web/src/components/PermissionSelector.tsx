@@ -87,6 +87,7 @@ export function PermissionSelector({
 
   const active = levelMeta(value)
   const ActiveIcon = active.icon
+  const activeLabel = t(active.nameKey)
 
   return (
     <div className={`permission-selector${open ? ' open' : ''}`} ref={selectorRef}>
@@ -96,7 +97,8 @@ export function PermissionSelector({
         aria-expanded={open}
         aria-haspopup="menu"
         disabled={disabled}
-        title={t('permissionLabel')}
+        title={activeLabel}
+        aria-label={`${t('permissionLabel')}: ${activeLabel}`}
         onClick={() => setOpen(!open)}
       >
         <span className="permission-chip-icon">

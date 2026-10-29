@@ -625,20 +625,35 @@
   white-space: nowrap;
 }
 
+/* 侧栏展开把会话列压进紧凑档时,权限 chip 收成纯图标:左组(+ / 权限)
+   从 126px 收到 62px,发送链才不会被挤到第二行。名称仍由 title /
+   aria-label 暴露,点开菜单也能看到当前档位的勾选。
+   手机上不套用(820px 以下侧栏是抽屉,不占列宽,左组有位置显示文字)。 */
+@media (min-width: 821px) {
+  .session-layout[data-compact] .permission-chip {
+    width: 32px;
+    padding: 0;
+    gap: 0;
+    justify-content: center;
+  }
+  /* 箭头带内联 display:block(icons.tsx),只能 !important 盖掉。 */
+  .session-layout[data-compact] .permission-chip-name,
+  .session-layout[data-compact] .permission-chip > svg {
+    display: none !important;
+  }
+}
+
 /* 只收「公共轴」变量:编辑区文字与控件架一起收 2px,两者仍然同轴。 */
 .session-layout[data-compact] .prompt-panel {
   --composer-inset: 8px;
 }
 
-/* 极窄:与 820px 断点同样的两行布局 —— 左组(+ / 权限)一行,发送链整条
-   换到第二行靠右;模型组吃满剩余宽度,发送键永远留在卡片内。 */
+/* 极窄:左组(+ / 图标权限)已收窄,一行放得下就保持单行;真的放不下时
+   .prompt-bar 的 flex-wrap 会把发送链整组换到第二行靠右,发送键仍在卡片内。
+   不再用 flex-basis:100% 强行分成两行 —— 那会在 560px 左右把
+   "+ / 权限"孤零零留在第一行。 */
 .session-layout[data-tight] .composer-left {
   flex: 1 1 auto;
-}
-
-.session-layout[data-tight] .composer-right {
-  flex: 1 1 100%;
-  justify-content: flex-end;
 }
 
 .session-layout[data-tight] .composer-model-group {
