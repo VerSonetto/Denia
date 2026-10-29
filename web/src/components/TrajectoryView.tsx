@@ -16,9 +16,9 @@ import { IconChevron, IconSearch } from './icons'
 import { formatDuration } from './transcript'
 
 /**
- * Trajectory 视图(抄 dsh ui-trajectory 交互形态,可读性增强):
+ * Trajectory 视图(可读性增强):
  *
- * dsh 原版只给裸数字列与相对耗时;本版在其上增加——
+ * 在裸数字列与相对耗时之上,本版增加——
  * - 行内耗时微条:时间分布一眼可见,无需脑补 "+Ns" 的相对大小;
  * - 绝对时刻列:与概览条/inspector 对读;
  * - 概览条 ↔ 台账行双向 hover 联动,Assistant span 分 TTFT/生成两段,
@@ -291,7 +291,7 @@ export function TrajectoryView({
   )
 }
 
-/* ---- 时间概览条(dsh TrajectoryTimeline + 联动/刻度) ---- */
+/* ---- 时间概览条(联动/刻度) ---- */
 
 function TimelineBar({
   layout,
@@ -404,7 +404,7 @@ function TimelineBar({
           const drag = dragRef.current
           dragRef.current = null
           if (event.button === 2) {
-            // 右键单击(未拖动)清除聚焦并复位视窗(dsh 语义)。
+            // 右键单击(未拖动)清除聚焦并复位视窗。
             if (Math.abs(event.clientX - (drag?.kind === 'pan' ? drag.startX : event.clientX)) < 3) {
               setViewport(null)
               onInterval(null)
@@ -727,7 +727,7 @@ function RecordInspector({
     setTab(inspectorTabs(record)[0])
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [record])
-  // Esc 关闭面板(dsh 本地 inspector 同款快捷键)。
+  // Esc 关闭面板。
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
       if (event.key === 'Escape') onClose()

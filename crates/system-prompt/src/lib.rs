@@ -1,4 +1,4 @@
-//! System-prompt assembly for model requests (mirrors `@deepseek-ai/dsh-system-prompt`).
+//! System-prompt assembly for model requests.
 //!
 //! Plugins contribute ordered [`PromptSection`]s, dynamic [`PromptContext`]s,
 //! tool-schema providers, and named variables. The loop calls [`SystemPrompt::assemble`]
@@ -23,7 +23,7 @@ pub const PERSONA_SECTION: &str = "deployment:persona";
 /// Reserved rest marker for explicit [`SystemPromptConfig::tool_order`].
 pub const TOOL_ORDER_REST: &str = "<unlisted-tools>";
 
-/// Prefix for a materialized runtime-context snapshot (DSH-compatible prose).
+/// Prefix for a materialized runtime-context snapshot.
 pub const RUNTIME_CONTEXT_HEADER: &str =
     "Current runtime context. This snapshot supersedes earlier runtime-context snapshots.";
 
@@ -33,7 +33,7 @@ pub const RUNTIME_CONTEXT_CLEARED: &str =
 
 /// Centrally allocated section positions (subset for the shipped tool set).
 ///
-/// 缓存前缀策略(对齐 dsh system-prompt 的位置纪律):**全部段落在会话内
+/// 缓存前缀策略:**全部段落在会话内
 /// 字节稳定**——权限模式等运行状态不得增删段落或工具 schema,语义变化由
 /// `harness:permission` 运行时快照(注入追加)与 agent-loop 的 system
 /// 冻结 + in-history 追加机制承担,系统提示正文一经发出不再改写。
@@ -64,7 +64,7 @@ pub enum SectionOrder {
     ToolGlob,
     /// 全文搜索(grep)的纪律段。
     ToolGrep,
-    /// 用户消息中 `@路径` 文件引用说明(对照 dsh FILE_REFERENCE 段)。
+    /// 用户消息中 `@路径` 文件引用说明。
     FileReference,
     ToolRead,
     ToolWrite,

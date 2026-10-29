@@ -1,8 +1,8 @@
 //! Rust 原生子代理编排；复用 SessionDriver，只有一份会话日志与运行状态。
 use crate::{
     jobs::Jobs,
-    state::{LiveSessions, RunningGuard, ServerEvent},
-    subagents::delivery::{Delivery, Notice},
+    lifecycle::{Completion, CompletionQueue},
+    state::{LiveSessions, ModelActivity, RunningGuard, ServerEvent},
 };
 use async_trait::async_trait;
 use denia_core::{
@@ -34,7 +34,7 @@ pub struct RuntimeConfig {
     pub workspace_instructions_max_bytes: u64,
     /// 单个 AGENTS.md 的读取上限（字节）；超限整份跳过。
     pub workspace_instructions_max_source_bytes: u64,
-    /// 技能目录里单条描述的最大字符数（对齐 dsh catalogDescriptionMaxLength）。
+    /// 技能目录里单条描述的最大字符数。
     pub skill_catalog_description_max_chars: usize,
     /// 子代理派遣目录的渲染预算（字节）：超限按 UTF-8 边界截断并明示。
     /// 与工作区指令预算分开：目录是每步注入的固定义务，不能挤占指令预算。
@@ -85,19 +85,16 @@ pub fn validate_config(value: Value) -> Result<Value, String> {
     serde_json::to_value(c).map_err(|e| e.to_string())
 }
 
-/// goals 模式配置(工作逻辑对照 codex `[goals]`;轮数上限对齐 dsh
-/// `maxGoalRounds`)。
+/// goals 模式配置。
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(default, rename_all = "camelCase", deny_unknown_fields)]
 pub struct GoalsConfig {
-    /// 全局 token 预算上限:设置目标预算时超过此值被拒绝(codex
-    /// `max_goal_token_budget`)。
+    /// 全局 token 预算上限:设置目标预算时超过此值被拒绝。
     pub max_goal_token_budget: u64,
     /// 每个目标的续跑轮数上限;耗尽后停止自动续跑(状态保持 active,
-    /// resume 被拒),对齐 dsh 256 轮语义。
+    /// resume 被拒)。
     pub max_rounds: u32,
     /// 连续执行失败(Error/LoopDetected)达到该次数即标记 blocked
-    /// (codex `stop_active_goal_after_repeated_execution_failures`)。
     pub max_consecutive_failures: u32,
     /// 执行预算:一个 turn 内允许的模型步骤上限(0 = 不限,默认不限)。
     ///
@@ -197,7 +194,7 @@ struct Inner {
     /// drain 失败）时，用它回到普通唤醒上限，避免“完成通知不受
     /// 上限约束”退化成无界自旋。
     completion_marks: Mutex<HashMap<String, u64>>,
-    delivery: Arc<Delivery>,
+    delivery: Arc<CompletionQueue>,
     paused: Mutex<HashSet<String>>,
     /// 统一准入:创建、终态 child 恢复、消息唤醒共用同一份槽位账。
     admission: crate::subagents::policy::Admission,
@@ -273,7 +270,7 @@ impl Runtime {
                 wakes: Mutex::new(HashMap::new()),
                 deferred_wakes: Mutex::new(HashSet::new()),
                 completion_marks: Mutex::new(HashMap::new()),
-                delivery: Arc::new(Delivery::default()),
+                delivery: Arc::new(CompletionQueue::default()),
                 paused: Mutex::new(HashSet::new()),
                 admission: crate::subagents::policy::Admission::new(),
                 goal_failures: Mutex::new(HashMap::new()),
@@ -303,18 +300,30 @@ impl Runtime {
             loop {
                 match done.recv().await {
                     Ok(job) => {
-                        if let Some(result) = runtime.inner.jobs.claim_notice(&job.id, &job.owner)
-                            && let Err(e) = runtime
-                                .enqueue(
-                                    &job.owner,
-                                    format!("job:{}", job.id),
-                                    format!("[后台任务完成]\n{result}"),
-                                    "job-completed".into(),
-                                )
-                                .await
-                        {
-                            runtime.inner.jobs.release_notice(&job.id, &job.owner);
-                            tracing::error!(error=%e,"任务通知投递失败");
+                        // 结果先进入统一生命周期队列；是否立刻交给模型由
+                        // 队列按“模型是否正在输出/执行工具”裁决。
+                        if let Some(result) = runtime.inner.jobs.claim_notice(&job.id, &job.owner) {
+                            let max = runtime.config().output_bytes * 2;
+                            let mut text = format!("[后台任务完成]\n{result}");
+                            if text.len() > max {
+                                let suffix =
+                                    "\n（后台任务结果已截断，完整输出请用 job_output 读取。）";
+                                let cut = truncate_utf8(&text, max.saturating_sub(suffix.len()))
+                                    .to_string();
+                                text = format!("{cut}{suffix}");
+                            }
+                            let id = format!("job:{}", job.id);
+                            runtime.inner.delivery.push(
+                                Completion {
+                                    child: job.owner.clone(),
+                                    target: job.owner.clone(),
+                                    id: id.clone(),
+                                    legacy_id: id,
+                                    text,
+                                    source: "job-completed".into(),
+                                },
+                                false,
+                            );
                         }
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
@@ -708,7 +717,10 @@ impl Runtime {
             Self::sync_inbox(inbox, &live.session);
             (
                 !inbox.pending.is_empty(),
-                inbox.pending.values().any(|(_, _, source)| source == "subagent-settled"),
+                inbox
+                    .pending
+                    .values()
+                    .any(|(_, _, source)| crate::lifecycle::is_completion_source(source)),
                 inbox.pending.keys().next_back().copied(),
             )
         };
@@ -823,6 +835,7 @@ impl Runtime {
         let runtime = self.clone();
         let session_id = id.to_string();
         let emit: Arc<dyn Fn(&SessionEnvelope) + Send + Sync> = Arc::new(move |e| {
+            runtime.observe_activity(&session_id, &e.event);
             if matches!(e.event, SessionEvent::TurnEnd { .. }) {
                 runtime.capture_completion(&session_id);
             }
@@ -909,8 +922,7 @@ impl Runtime {
     }
 
     /// goal 续跑入口:turn 结束(idle)或状态恢复后调用。目标 active 且
-    /// 预算/轮次/失败护栏都放行时,自动发起新的 goal 轮(对照 codex
-    /// `continue_active_goal_for_idle_thread`);与 inbox 唤醒通过 running
+    /// 预算/轮次/失败护栏都放行时,自动发起新的 goal 轮;与 inbox 唤醒通过 running
     /// CAS 自然互斥,后到者放弃,等下一轮 on_idle 收敛。
     pub fn continue_goal(&self, id: &str) {
         let runtime = self.clone();
@@ -998,7 +1010,7 @@ impl Runtime {
         if wrapup {
             Self::publish_goal(&live, GoalOp::BudgetLimit).await?;
         } else if goal.rounds_started >= config.max_rounds {
-            // 轮次耗尽:状态保持 active,不再续跑(dsh 语义:resume 被拒)。
+            // 轮次耗尽:状态保持 active,不再续跑(resume 被拒)。
             return Ok(());
         }
 
@@ -1073,6 +1085,7 @@ impl Runtime {
         let runtime = self.clone();
         let session_id = id.to_string();
         let emit: Arc<dyn Fn(&SessionEnvelope) + Send + Sync> = Arc::new(move |e| {
+            runtime.observe_activity(&session_id, &e.event);
             if matches!(e.event, SessionEvent::TurnEnd { .. }) {
                 runtime.capture_completion(&session_id);
             }
@@ -1096,6 +1109,12 @@ impl Runtime {
     }
 
     pub fn on_idle(&self, id: &str) {
+        // 轮次收尾是最后一道动作边界:即使某个异常路径漏了 StepEnd，
+        // 这里也必须把模型判回空闲，否则完成结果会被永久留在等待队列。
+        if let Some(live) = self.inner.live.get(id) {
+            live.set_activity(ModelActivity::Idle);
+            live.running.store(false, Ordering::SeqCst);
+        }
         self.capture_completion(id);
         self.inner.admission.release(id);
         let aborted = self.inner.live.get(id).is_some_and(|l| {
@@ -2307,7 +2326,7 @@ impl AgentRuntime for Runtime {
                     .map_err(|e| e.to_string())?
                 }
                 SkillCommand::Load { name } => {
-                    // dsh 对齐:SKILL.md 全文直接随工具结果返回,一次性进历史;
+                    // SKILL.md 全文直接随工具结果返回,一次性进历史;
                     // load 前经 skills::load 校验 model_invocable(user=false),
                     // disable-model-invocation 技能只能走用户 /name 手势。
                     self.load_skill(ctx.cwd.clone(), name, false).await
@@ -2437,7 +2456,7 @@ impl AgentRuntime for Runtime {
     ) -> Result<Option<(String, String)>, String> {
         let _ = session;
         // load(user=true) 校验 user_invocable;找不到/不允许/解析失败一律 None,
-        // 手势降级为普通文本(dsh:未知名字不是这条边界认识的声明)。
+        // 手势降级为普通文本(未知名字不是这条边界认识的声明)。
         match self
             .load_skill(cwd.to_path_buf(), name.to_string(), true)
             .await
@@ -2738,7 +2757,7 @@ fn turn_end_label(reason: &denia_core::session::TurnEndReason) -> String {
     }
 }
 
-include!("agent_runtime_delivery.rs");
+include!("agent_runtime_lifecycle.rs");
 
 #[cfg(test)]
 mod tests {
@@ -3309,10 +3328,10 @@ mod tests {
         state
             .runtime
             .human_turn(owner, ctx.selection.as_ref().unwrap());
-        let command = if cfg!(windows) {
-            "Start-Sleep -Seconds 2; Write-Output background-job-result"
-        } else {
+        let command = if denia_tools::shell::shell_runtime().dialect == "bash" {
             "sleep 2; printf background-job-result"
+        } else {
+            "Start-Sleep -Seconds 2; Write-Output background-job-result"
         };
         let started = state
             .runtime
@@ -5316,7 +5335,7 @@ mod tests {
                 .iter()
                 .any(|s| s["name"] == "runtime-test")
         );
-        // dsh 对齐：skill load 的 SKILL.md 全文直接随工具结果返回（一次进历史），
+        // skill load 的 SKILL.md 全文直接随工具结果返回（一次进历史），
         // 能力上下文不再携带已加载正文。
         let live = state.live.get(id).unwrap();
         let events = live.session.events();
@@ -6029,6 +6048,193 @@ mod tests {
         panic!("父代理未在期限内收到包含 {needle:?} 的子代理完成通知");
     }
 
+    fn completion_is_in_inbox(live: &crate::state::LiveSession, id: &str) -> bool {
+        live.session.events().iter().any(|event| {
+            matches!(&event.event, SessionEvent::AgentInbox { id: delivered, .. } if delivered == id)
+        })
+    }
+
+    fn completion_is_delivered(live: &crate::state::LiveSession, id: &str) -> bool {
+        live.session.events().iter().any(|event| {
+            matches!(
+                &event.event,
+                SessionEvent::AgentInbox { id: delivered, .. }
+                    | SessionEvent::AgentDelivery { id: delivered, .. }
+                    if delivered == id
+            )
+        })
+    }
+
+    /// 模型正在输出或执行工具时，完成结果必须停在队列里；动作收尾后
+    /// 才能进入收件箱——不能把结果插进正在进行的动作里。
+    #[tokio::test]
+    async fn completion_waits_for_streaming_and_tool_actions() {
+        let (state, ctx) = setup().await;
+        let parent = ctx.session_id.clone().unwrap();
+        let live = state.live.get(&parent).unwrap();
+        let runtime = state.runtime.clone();
+        let id = "action-boundary".to_string();
+        runtime.inner.delivery.push(
+            Completion {
+                child: parent.clone(),
+                target: parent.clone(),
+                id: id.clone(),
+                legacy_id: id.clone(),
+                text: "[后台任务完成] 结果".into(),
+                source: "job-completed".into(),
+            },
+            false,
+        );
+
+        let busy = [
+            SessionEvent::AssistantChunk {
+                turn: 1,
+                step: 1,
+                chunk: StreamChunk::TextDelta {
+                    index: 0,
+                    text: "生成中".into(),
+                },
+            },
+            SessionEvent::AssistantMessage {
+                turn: 1,
+                step: 1,
+                blocks: vec![ContentBlock::ToolCall {
+                    id: "call".into(),
+                    name: "bash".into(),
+                    arguments: "{}".into(),
+                    incomplete: false,
+                }],
+                usage: None,
+                interrupted: false,
+                source_event_seqs: Vec::new(),
+                first_token_time: None,
+            },
+            SessionEvent::ToolCall {
+                turn: 1,
+                step: 1,
+                call_id: "call".into(),
+                name: "bash".into(),
+                arguments: "{}".into(),
+            },
+        ];
+        for event in busy {
+            runtime.observe_activity(&parent, &event);
+            runtime.inner.delivery.expedite(&parent);
+            runtime.retry_deliveries().await;
+            assert!(
+                !completion_is_in_inbox(&live, &id),
+                "模型动作进行中不得投递完成结果"
+            );
+        }
+
+        runtime.observe_activity(&parent, &SessionEvent::StepEnd { turn: 1, step: 1 });
+        for _ in 0..200 {
+            if completion_is_in_inbox(&live, &id) {
+                break;
+            }
+            runtime.retry_deliveries().await;
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert!(
+            completion_is_in_inbox(&live, &id),
+            "动作结束后完成结果必须立刻投递"
+        );
+    }
+
+    /// 模型不在运行时(空闲/未响应)不等待任何动作边界：结果立刻入队并唤醒。
+    #[tokio::test]
+    async fn completion_delivers_immediately_when_model_is_unresponsive() {
+        let (state, ctx) = setup().await;
+        let parent = ctx.session_id.clone().unwrap();
+        let live = state.live.get(&parent).unwrap();
+        live.running.store(false, Ordering::SeqCst);
+        let runtime = state.runtime.clone();
+        runtime
+            .inner
+            .selections
+            .lock()
+            .unwrap()
+            .insert(parent.clone(), ctx.selection.clone().unwrap());
+        let id = "idle-delivery".to_string();
+        runtime.inner.delivery.push(
+            Completion {
+                child: parent.clone(),
+                target: parent.clone(),
+                id: id.clone(),
+                legacy_id: id.clone(),
+                text: "[子代理执行结束] 空闲投递".into(),
+                source: "subagent-settled".into(),
+            },
+            false,
+        );
+        runtime.retry_deliveries().await;
+        for _ in 0..200 {
+            if completion_is_delivered(&live, &id) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert!(
+            completion_is_delivered(&live, &id),
+            "未响应的模型必须立刻收到完成结果"
+        );
+    }
+
+    /// 后台任务走同一条队列：任务结束时模型正在输出/执行工具，结果必须
+    /// 等动作收尾；旧路径绕过队列直接 enqueue 会在动作中途插队。
+    #[tokio::test]
+    async fn job_completion_respects_the_model_action_boundary() {
+        let (state, ctx) = setup().await;
+        let parent = ctx.session_id.clone().unwrap();
+        let live = state.live.get(&parent).unwrap();
+        let runtime = state.runtime.clone();
+        runtime.observe_activity(
+            &parent,
+            &SessionEvent::AssistantChunk {
+                turn: 1,
+                step: 1,
+                chunk: StreamChunk::TextDelta {
+                    index: 0,
+                    text: "执行中".into(),
+                },
+            },
+        );
+        let started = runtime
+            .execute("job_start", json!({"command":"echo job-boundary"}), &ctx)
+            .await
+            .unwrap();
+        let job_id = started["id"].as_str().unwrap().to_string();
+        for _ in 0..500 {
+            let jobs = runtime.execute("job_list", json!({}), &ctx).await.unwrap();
+            if jobs.as_array().is_some_and(|rows| {
+                rows.iter()
+                    .any(|row| row["id"] == job_id && !row["finishedAt"].is_null())
+            }) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        let notice_id = format!("job:{job_id}");
+        assert!(
+            !completion_is_in_inbox(&live, &notice_id),
+            "模型动作进行中不得投递后台任务结果"
+        );
+
+        runtime.observe_activity(&parent, &SessionEvent::StepEnd { turn: 1, step: 1 });
+        for _ in 0..200 {
+            if completion_is_in_inbox(&live, &notice_id) {
+                break;
+            }
+            runtime.retry_deliveries().await;
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert!(
+            completion_is_in_inbox(&live, &notice_id),
+            "动作结束后后台任务结果必须投递"
+        );
+    }
+
     /// 完成通知不受普通消息"连续唤醒上限"的限制:额度耗尽也必须把结果
     /// 送给主代理。
     ///
@@ -6072,12 +6278,13 @@ mod tests {
         let child_id = child.id().to_string();
         let notice_id = format!("settled:{child_id}:turn:1:seq:9");
         runtime.inner.delivery.push(
-            Notice {
+            Completion {
                 child: child_id.clone(),
-                parent: parent.clone(),
+                target: parent.clone(),
                 id: notice_id.clone(),
                 legacy_id: format!("settled:{child_id}:2"),
                 text: "[子代理执行结束] 分批完成".into(),
+                source: "subagent-settled".into(),
             },
             false,
         );
@@ -6163,7 +6370,7 @@ mod tests {
             .unwrap()
             .insert(parent.clone(), runtime.config().max_consecutive_wakes);
         runtime
-            .enqueue(&parent, "m1".into(), "普通消息".into(), "job-completed".into())
+            .enqueue(&parent, "m1".into(), "普通消息".into(), "session-note".into())
             .await
             .unwrap();
         tokio::time::sleep(std::time::Duration::from_millis(300)).await;
@@ -6206,12 +6413,13 @@ mod tests {
         let notice_id = format!("settled:{child_id}:turn:1:seq:5");
         runtime.set_test_fault("completion-enqueue");
         runtime.inner.delivery.push(
-            Notice {
+            Completion {
                 child: child_id.clone(),
-                parent: parent.clone(),
+                target: parent.clone(),
                 id: notice_id.clone(),
                 legacy_id: format!("settled:{child_id}:2"),
                 text: format!("[子代理执行结束] {child_id}"),
+                source: "subagent-settled".into(),
             },
             false,
         );

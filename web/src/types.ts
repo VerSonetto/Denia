@@ -293,7 +293,7 @@ export interface WorkspaceEntry {
   name?: string
 }
 
-/** 工作区注册表记录(抄 dsh workspace 实体)。 */
+/** 工作区注册表记录。 */
 export interface WorkspaceRecord {
   id: string
   path: string

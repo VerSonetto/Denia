@@ -1,4 +1,4 @@
-//! 工作区端点:列表/幂等创建/删除(抄 dsh workspace registry 语义)。
+//! 工作区端点:列表/幂等创建/删除。
 
 use std::sync::Arc;
 

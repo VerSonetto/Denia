@@ -1,20 +1,19 @@
 /**
  * 右侧面板的标签模型(纯函数,无 React)。
  *
- * 抄 ZCode 的 `sidePaneState` 形态:
+ * 标签状态形状:
  * ```
  * { tabs: SidePaneTab[], activeTabId: string }
  * ```
- * 但它比 ZCode 简化了一处:ZCode 把**所有工作区/任务**的标签放在同一个
- * 数组里,渲染时按 owner 过滤(见其 `Qu()`),于是每次切换都要遍历全表。
- * denia 这里直接**按 scope 分桶**存,每个 scope 一份独立的 `{tabs,activeTabId}`,
+ * 这里直接**按 scope 分桶**存,每个 scope 一份独立的 `{tabs,activeTabId}`,
+ * 而不是把所有工作区/任务的标签塞进同一个数组再按 owner 过滤,于是
  * 切会话就是换一个桶 —— O(1) 且天然不会串台。
  *
  * 这一层必须是纯函数:标签栏的拖拽/关闭/重排逻辑最容易写错,放在纯函数里
  * 才能用 `check-side-pane.mjs` 直接断言(见 web/scripts)。
  */
 
-/** 面板里能放的东西。与 ZCode 的 tab type 一一对应(取其子集)。 */
+/** 面板里能放的东西(标签类型的子集)。 */
 export type SidePaneTabType =
   /** 审查:Git 状态与 Diff。单例。 */
   | 'review'
@@ -70,7 +69,7 @@ export interface SidePaneState {
 /** 空状态:没有标签。 */
 export const EMPTY_SIDE_PANE: SidePaneState = { tabs: [], activeTabId: '' }
 
-/** 最近关闭标签的保留上限(抄 ZCode 的 `Ffe = 8`)。 */
+/** 最近关闭标签的保留上限。 */
 export const RECENT_CLOSED_LIMIT = 8
 
 export interface ClosedTab {
@@ -138,7 +137,7 @@ export function activateTab(state: SidePaneState | null, id: string): SidePaneSt
 /**
  * 关闭一个标签,并选出下一个激活项。
  *
- * 选择顺序(抄 ZCode 的 `od()` 语义):优先激活**右边**那个 ——
+ * 选择顺序:优先激活**右边**那个 ——
  * 关掉中间标签时焦点前移比后退更符合直觉(与浏览器一致);
  * 右边没有才回退到左边;都没有就清空。
  */
@@ -205,7 +204,7 @@ export function pushClosed(
  *
  * 浏览器标签**必须换新 id**:它的 id 绑定了内嵌浏览器的实例身份,旧实例
  * 已经销毁,复用 id 会让前端去认领一个不存在的会话(表现为"重开后空白且
- * 无法导航")。ZCode 在 `Te()` 里做了同样的事(`browser:${新随机}`)。
+ * 无法导航")。
  */
 export function reviveClosed(tab: SidePaneTab, newId: string): SidePaneTab {
   if (tab.type === 'browser') {
@@ -316,9 +315,9 @@ export function closeFile(state: SidePaneState | null, path: string): SidePaneSt
 /**
  * 面板状态的归属键。
  *
- * 抄 ZCode 的 `(workspaceKey, ownerTaskId)` 双元组,但 denia 的会话已经
- * 隐含了工作区(cwd 不可变),所以直接用 `sessionId`;没有活跃会话(空白态)
- * 时用 `__draft__` 桶 —— 这样"还没发第一条消息"时也能开终端看目录。
+ * 直接取 `sessionId`:会话已经隐含了工作区(cwd 不可变),所以不需要
+ * 单独的 workspaceKey;没有活跃会话(空白态)时用 `__draft__` 桶 ——
+ * 这样"还没发第一条消息"时也能开终端看目录。
  */
 export const DRAFT_SCOPE = '__draft__'
 

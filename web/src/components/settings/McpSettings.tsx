@@ -6,10 +6,10 @@ import { ConfirmDialog } from '../ConfirmDialog'
 import { Badge, Button, Field, TextInput } from '../llm/atoms/form'
 import styles from './McpSettings.module.css'
 
-/** 表单 / JSON 双模;JSON 模式用于直接粘贴一段 dsh 风格配置。 */
+/** 表单 / JSON 双模;JSON 模式用于直接粘贴一段配置。 */
 type EditorMode = 'form' | 'json'
 
-/** 作用范围:与 dsh UI 对齐;本期只接入 user(全局),project 字段已存,
+/** 作用范围:本期只接入 user(全局),project 字段已存,
  * 后端按 user 同样处理以避免半成品行为(UI 提示用户当前生效范围)。 */
 type ScopeValue = 'user' | 'project'
 
@@ -144,9 +144,9 @@ function formatEnvLines(env: Record<string, string>): string {
 }
 
 /**
- * 把"一段 dsh 风格的 JSON 配置"解析为单个服务器草稿。
+ * 把"一段 JSON 配置"解析为单个服务器草稿。
  *
- * 支持两种顶层形态(对齐 dsh UI 文案):
+ * 支持两种顶层形态:
  * - `{ "my-mcp-server": { "type": "stdio", "command": "...", "args": [...] } }`
  * - `{ "mcpServers": { "server-name": { ... } } }`
  *
@@ -261,7 +261,7 @@ function emptyDraftFromJson(): api.McpServerDraft {
   }
 }
 
-/** 把 draft 序列化成 dsh 风格的 JSON 文本(用作 JSON 模式的初值)。 */
+/** 把 draft 序列化成 JSON 文本(用作 JSON 模式的初值)。 */
 function draftToJson(draft: ServerDraft): string {
   const def: Record<string, unknown> = {
     type: draft.transport,

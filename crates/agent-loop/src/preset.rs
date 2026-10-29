@@ -298,7 +298,7 @@ mod tests {
             "personaComplete 档丢了语言纪律:{}",
             assembly.sections[0].text
         );
-        // 工具 schema 保留:工具仍可用,只是没有指引(dsh complete 语义)。
+        // 工具 schema 保留:工具仍可用,只是没有指引。
         assert_eq!(assembly.tools.len(), 6);
     }
 

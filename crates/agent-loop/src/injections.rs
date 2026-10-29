@@ -1,4 +1,4 @@
-//! 每 step 的背景注入管线(抄 dsh agent-instructions / tool-skill 语义)。
+//! 每 step 的背景注入管线。
 //!
 //! 四条独立幂等的注入通道(文本即身份,通道字段 `channel` 优先、旧日志
 //! 文本前缀 fallback):工作区指令(AGENTS.md)、能力上下文、技能目录、
@@ -27,7 +27,7 @@ const WORKSPACE_CHANNEL: &str = "workspace-instructions";
 const SKILL_CHANNEL: &str = "skill-catalog";
 
 /// 系统提示更新通道:system 字节冻结后,变化的新提示词全文经此通道
-/// 追加到已缓存历史之后(对齐 dsh `systemPromptUpdate: 'in-history'`)。
+/// 追加到已缓存历史之后。
 pub const SYSTEM_UPDATE_CHANNEL: &str = "system-prompt-update";
 
 /// 项目记忆索引注入通道名(MEMORY.md 全文,记忆启用时主会话可见)。
@@ -191,8 +191,7 @@ pub(crate) async fn refresh_background_injections(
 
     // ① 工作区指令(AGENTS.md):发现/预算/替换语义在 runtime 侧;
     // restore 的旧文本作为 previous 传入,由正文比较决定幂等与"取代"引导语。
-    // 预设关闭 AGENTS.md 注入时整条通道跳过(对齐 dsh:不带 agent-instructions
-    // 行的预设完全不注入)。
+    // 预设关闭 AGENTS.md 注入时整条通道跳过(完全不注入)。
     if preset_features.agents_md {
         match runtime
             .workspace_instructions(

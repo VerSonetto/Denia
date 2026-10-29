@@ -1,6 +1,6 @@
 //! 扫码登录状态机。
 //!
-//! 与 hermes 相同:先取二维码,再每秒轮询状态;`scaned_but_redirect` 时把
+//! 先取二维码,再每秒轮询状态;`scaned_but_redirect` 时把
 //! 轮询地址切到重定向主机;`expired` 自动刷新(最多 3 次);`confirmed`
 //! 落盘凭据并结束。
 

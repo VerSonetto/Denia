@@ -9,12 +9,12 @@
 //! 那些脚手架全是模型为了在"一次机会"里拿到可观测性而自己撑出来的。
 //!
 //! 持久 shell 让 `cd`、变量、函数跨调用保留,模型就能分步试、分步看,不必赌。
-//! 这是 dsh 的默认形态(`tool-bash-persistent`:state persists across calls),
-//! denia 之前只抄了一次性的那个变体。
+//! 持久化是默认形态(state persists across calls),
+//! denia 之前只做了一次性的那个变体。
 //!
 //! ## 协议
 //!
-//! 命令包在一条**物理单行**里,两端套随机 nonce 标记(抄 dsh):
+//! 命令包在一条**物理单行**里,两端套随机 nonce 标记:
 //!
 //! - PowerShell:`Write-Output '<START>'; <命令>; Write-Output ('<END>' + $__s)`
 //! - POSIX:`printf '%s\n' '<START>'; eval '<命令>'; printf '%s%s\n' '<END>' "$__s"`
@@ -189,7 +189,7 @@ impl PersistentShell {
         let line = match self.dialect {
             // 标记由常驻循环生成;这里只给 `<nonce>\t<命令>`。
             Dialect::PowerShell => format!("{tag}\t{}", escape_powershell(command)),
-            // bash 自己就把管道 stdin 当逐行输入,标记直接写在命令里(抄 dsh)。
+            // bash 自己就把管道 stdin 当逐行输入,标记直接写在命令里。
             Dialect::Posix => wrap_posix(command, &start, &end),
         };
         {
@@ -309,7 +309,7 @@ impl ShellHub {
 
 /// 后台泵线程:把子进程的 stdout/stderr 累积进共享缓冲并唤醒等待者。
 ///
-/// 两个流合并进同一份缓冲(与 dsh 的 PTY 单流一致):模型看到的是"命令的输出",
+/// 两个流合并进同一份缓冲:模型看到的是"命令的输出",
 /// 不需要自己判断哪一行来自 stderr。
 fn pump<R: Read + Send + 'static>(reader: R, shared: Arc<(Mutex<Shared>, Condvar)>) {
     let mut reader = reader;

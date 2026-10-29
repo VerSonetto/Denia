@@ -1,6 +1,5 @@
 //! iLink HTTP 客户端:拉取、发送、typing 与扫码登录接口。
 //!
-//! 与 hermes 的实现保持同一套线上语义:
 //! - 长轮询超时按"空更新"处理(服务端挂起是正常状态);
 //! - 每个 POST 都带 `base_info.channel_version`;
 //! - 请求头里的 `X-WECHAT-UIN` 每次随机生成。
@@ -192,7 +191,7 @@ fn qr_request(url: String) -> Result<reqwest::RequestBuilder, String> {
         .timeout(QR_TIMEOUT))
 }
 
-/// 取登录二维码。`bot_type=3` 是 hermes 使用的个人微信 bot 类型。
+/// 取登录二维码。`bot_type=3` 是个人微信 bot 类型。
 pub async fn fetch_qr(base_url: &str) -> Result<QrTicket, String> {
     let url = format!(
         "{}/{}?bot_type=3",

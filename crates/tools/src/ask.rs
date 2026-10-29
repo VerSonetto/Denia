@@ -1,7 +1,6 @@
 //! `ask` 工具:模型向用户提问并阻塞等待结构化回答。
 //!
-//! 对照 dsh `ask_user_question`(packages/interaction/tool-ask-user),本实现
-//! 在协议与体验上做了几处补强(dsh 的不足见工具 description 与 README):
+//! 本实现在协议与体验上做了几处补强:
 //! 超时预算、结局区分、推荐选项结构化、跳过与"允许自定义"分列、子代理可问
 //! (以父会话为应答方)。
 //!
@@ -16,7 +15,7 @@ use serde::Deserialize;
 use crate::support::{parse_tool_args, tool_error};
 use crate::{Tool, ToolContext, ToolOutput};
 
-/// 默认等待预算:5 分钟。dsh 无超时,工具会永久挂起(见不足分析);
+/// 默认等待预算:5 分钟。不给预算时工具会永久挂起;
 /// 这里给模型可调的有限预算,到点按 `TimedOut` 结算,循环永不空转。
 pub const DEFAULT_TIMEOUT_MS: u64 = 300_000;
 /// 等待预算上限:30 分钟。再长就该拆分任务而不是干等。
@@ -147,7 +146,7 @@ fn to_questions(raw: Vec<AskArg>) -> Result<Vec<AskQuestion>, String> {
 
 /// 把结局渲染成模型可见文本。
 ///
-/// dsh 只用一句 `Error: …` 概括全部失败;这里按结局给出可执行的下一步,
+/// 失败不只用一句 `Error: …` 概括;这里按结局给出可执行的下一步,
 /// 并把已收到的部分答案一并回传(超时/取消时用户可能已答了一部分)。
 fn render_resolution(resolution: &AskResolution) -> (String, bool) {
     let mut text = String::new();
@@ -316,7 +315,7 @@ impl Tool for AskTool {
             .clamp(1_000, MAX_TIMEOUT_MS);
 
         let Some(bridge) = &ctx.ask else {
-            // 无通道时按 dsh 的 fail-loud 结算,但给出可执行出路而不是纯报错。
+            // 无通道时按 fail-loud 结算,但给出可执行出路而不是纯报错。
             let resolution = AskResolution {
                 outcome: AskOutcome::Unavailable,
                 answers: Vec::new(),
@@ -342,8 +341,8 @@ impl Tool for AskTool {
                 ..Default::default()
             };
         };
-        // request_id 与 call_id 分离:dsh 用同一 id 承担两者,重试时旧请求
-        // 的应答可能误配到新请求(见不足分析)。这里 request_id 唯一标识
+        // request_id 与 call_id 分离:用同一 id 承担两者时,重试后旧请求
+        // 的应答可能误配到新请求。这里 request_id 唯一标识
         // 本次挂起,call_id 供 UI 把卡片挂到对应工具行。
         let request_id = format!("ask-{}", uuid::Uuid::new_v4());
         let call_id = ctx.call_id.clone().unwrap_or_default();

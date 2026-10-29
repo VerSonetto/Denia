@@ -3,7 +3,7 @@ import type { SessionEnvelope, SessionTotals, TokenUsage } from './types'
 
 /**
  * 会话级统计:从 transcript 节点折叠出的展示总量。
- * 抄 dsh StatsLine 的 deriveStats —— 字段名对齐,方便后续接 projection。
+ * 字段名与 usage 投影对齐,方便后续接 projection。
  */
 export interface SessionStats {
   /** 已关闭的轮次数(有 turn-end 的 turn)。 */

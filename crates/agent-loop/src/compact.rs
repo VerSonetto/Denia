@@ -1,11 +1,10 @@
-//! LLM 总结压缩(学 dsh 压力驱动 + Claude Code compact 设计)。
+//! LLM 总结压缩(压力驱动)。
 //!
 //! 两层策略(压力递增):
 //! 1. **低压力**:什么都不做 —— 派生历史与日志逐字一致,provider 前缀缓存持续命中;
 //! 2. **高压力**(≥ `compact_ratio`):LLM 总结压缩 —— 把旧事件区间折叠成
 //!    一条摘要消息(compaction-summary 事件),保留窗口从尾部按
 //!    min/max tokens 选取,工具对完整性由 [`select_keep_start`] 保证
-//!    (对齐 Claude Code `adjustIndexToPreserveAPIInvariants`)。
 //!
 //! 摘要请求复用主请求的 system + tools + 消息前缀(fork 同前缀思路):
 //! 前缀不变则 provider 缓存命中,压缩调用的成本几乎是纯增量。
@@ -22,7 +21,7 @@ use denia_token_meter::{ContextPressure, estimate_message};
 use futures::StreamExt;
 use tokio_util::sync::CancellationToken;
 
-/// 压缩配置。默认值对齐 Claude Code auto-compact 的缓冲语义
+/// 压缩配置。默认值采用 auto-compact 的缓冲语义
 /// (有效窗口 = 窗口 - 输出预留 - buffer,200K 窗口 ≈ 180K 触发 ≈ 0.9)。
 #[derive(Debug, Clone, PartialEq)]
 pub struct CompactionSettings {
@@ -57,7 +56,7 @@ impl Default for CompactionSettings {
 }
 
 /// 压力占比 = 投影压力 / 上下文窗口;缺窗口或缺 usage 锚点时不判断
-/// (对齐 dsh:没有 usage 样本就没有 pressureTokens,不做启发式兜底)。
+/// (没有 usage 样本就没有 pressureTokens,不做启发式兜底)。
 fn pressure_ratio(pressure: &ContextPressure) -> Option<f64> {
     let window = pressure.context_window?;
     if window == 0 {
@@ -67,9 +66,8 @@ fn pressure_ratio(pressure: &ContextPressure) -> Option<f64> {
     Some(projected as f64 / window as f64)
 }
 
-/// 硬上限:投影压力已触及/越过上下文窗口(对齐 codex `token_limit_reached`
-/// 的硬触发语义)——此时无论软阈值 ratio 如何都必须压缩,否则下一次请求
-/// 必然 PTL/被拒。
+/// 硬上限:投影压力已触及/越过上下文窗口(硬触发语义)——此时无论软阈值
+/// ratio 如何都必须压缩,否则下一次请求必然 PTL/被拒。
 fn pressure_at_hard_limit(pressure: &ContextPressure) -> bool {
     match (pressure.context_window, pressure.projected_tokens) {
         (Some(window), Some(projected)) if window > 0 => projected >= window,
@@ -79,7 +77,7 @@ fn pressure_at_hard_limit(pressure: &ContextPressure) -> bool {
 
 /// 高压力闸门:是否触发 LLM 总结压缩。
 ///
-/// 两级触发(学 codex `run_pre_sampling_compact` + `run_auto_compact`):
+/// 两级触发:
 /// 1. **硬上限**:投影压力 ≥ 上下文窗口 → 强制压缩(避免下一次请求 PTL);
 /// 2. **软阈值**:压力占比 ≥ `compact_ratio` → 提前压缩(缓冲语义)。
 pub fn should_compact(pressure: &ContextPressure, settings: &CompactionSettings) -> bool {
@@ -99,8 +97,7 @@ pub fn rough_tokens(message: &ChatMessage) -> u64 {
 /// 选择保留窗口起点(消息下标):从尾部(最新)向前累计 token,直到满足
 /// 下限(min_keep_tokens 且 min_text_messages)或命中上限(max_keep_tokens),
 /// 然后修正工具对完整性 —— 保留窗口第一条若是 tool_result,向前扫描把
-/// 其 tool_call 所在的 assistant 消息也纳入窗口(对齐 Claude Code
-/// `adjustIndexToPreserveAPIInvariants`:API 要求 tool_use/tool_result 成对,
+/// 其 tool_call 所在的 assistant 消息也纳入窗口(API 要求 tool_use/tool_result 成对,
 /// 切在 tool_result 处会导致请求被拒)。
 ///
 /// 返回保留窗口起点下标;起点之前的消息将被压缩。无可压缩区间时返回 `None`。
@@ -120,7 +117,7 @@ pub fn select_keep_start(
         let message = &surface[start].message;
         total = total.saturating_add(rough_tokens(message));
         // 文本消息 = 有内容文本(user)或有正文的 assistant(纯 tool_call 的
-        // assistant 不算,对齐 Claude Code `hasTextBlocks`)。
+        // assistant 不算)。
         let has_text = matches!(message.role, ChatRole::User)
             || (matches!(message.role, ChatRole::Assistant) && !message.content.trim().is_empty());
         if has_text {
@@ -241,8 +238,8 @@ pub fn build_post_compact_read_state(
     out
 }
 
-/// 摘要输入的消息裁剪:图片/文档在摘要请求里不值得占 token(学 Claude Code
-/// `stripImagesFromMessages`:图片替换为文本标记,防止摘要请求自己 PTL)。
+/// 摘要输入的消息裁剪:图片/文档在摘要请求里不值得占 token:
+/// 图片替换为文本标记,防止摘要请求自己 PTL。
 fn strip_images(message: &mut ChatMessage) {
     if message.images.is_empty() {
         return;
@@ -255,8 +252,8 @@ fn strip_images(message: &mut ChatMessage) {
     }
 }
 
-/// 组装摘要请求的消息序列:被压缩区间的消息(剥图)+ 摘要指令(学 Claude Code
-/// `getCompactPrompt` 的九段结构与 no-tools 前置)。
+/// 组装摘要请求的消息序列:被压缩区间的消息(剥图)+ 摘要指令(九段结构,
+/// no-tools 前置)。
 pub fn build_summary_messages(
     compressed: &[SurfaceMessage],
     custom_instructions: &str,
@@ -275,8 +272,8 @@ pub fn build_summary_messages(
     messages
 }
 
-/// 摘要指令(译自 Claude Code `getCompactPrompt` 的核心结构;no-tools 前置
-/// 防止摘要轮浪费在工具调用上,`<analysis>` 草稿块在落盘前被剥掉)。
+/// 摘要指令:no-tools 前置防止摘要轮浪费在工具调用上,
+/// `<analysis>` 草稿块在落盘前被剥掉。
 pub const SUMMARY_PROMPT: &str = r#"CRITICAL: Respond with TEXT ONLY. Do NOT call any tools.
 
 Your task is to create a detailed summary of the conversation so far, paying close attention to the user's explicit requests and your previous actions.
@@ -302,7 +299,7 @@ Please provide your summary based on the conversation so far, following this str
 
 REMINDER: Do NOT call any tools. Respond with plain text only — an <analysis> block followed by a <summary> block."#;
 
-/// 摘要请求 PTL/失败时的截断重试(学 Claude Code `truncateHeadForPTLRetry`):
+/// 摘要请求 PTL/失败时的截断重试:
 /// 丢最老约 20% 的消息(至少一条),保留尾部给摘要;返回截断后的消息序列,
 /// 以及**实际丢掉**的条数(0 表示没丢)。
 ///
@@ -343,8 +340,7 @@ pub fn uncovered_note(uncovered: &[SurfaceMessage]) -> String {
     )
 }
 
-/// 剥掉 `<analysis>` 草稿块,提取 `<summary>` 正文(学 Claude Code
-/// `formatCompactSummary`);没有标签时原样返回。
+/// 剥掉 `<analysis>` 草稿块,提取 `<summary>` 正文;没有标签时原样返回。
 pub fn format_summary(summary: &str) -> String {
     let mut formatted = summary.to_string();
     // 剥 analysis 草稿(非贪婪跨行)。
@@ -395,13 +391,12 @@ fn truncate_head_accounted(
 
 /// —— SessionDriver 的压缩实现(自动路径,由 request 模块的闸门调用)——
 impl crate::SessionDriver {
-    /// LLM 总结压缩(学 Claude Code compact):把 surface 中旧事件区间
-    /// 折叠成一条摘要。摘要请求复用主请求的 system + tools + 消息前缀
-    /// (学 `tengu_compact_cache_prefix` / `runForkedAgent`:前缀不变则
-    /// provider 缓存命中,压缩成本几乎只是增量)。
+    /// LLM 总结压缩:把 surface 中旧事件区间折叠成一条摘要。摘要请求复用
+    /// 主请求的 system + tools + 消息前缀(前缀不变则 provider 缓存命中,
+    /// 压缩成本几乎只是增量)。
     ///
-    /// 失败(PTL 等)时按 Claude Code `truncateHeadForPTLRetry` 丢最老约
-    /// 20% 消息重试,最多 `max_attempts` 次;仍失败返回 `Err`(调用方熔断)。
+    /// 失败(PTL 等)时丢最老约 20% 消息重试,最多 `max_attempts` 次;
+    /// 仍失败返回 `Err`(调用方熔断)。
     ///
     /// 重试裁剪只影响**送进摘要模型的输入**,不影响折叠区间:被压区间照旧
     /// 整段退出模型面(`replaces_from..=replaces_to` 不缩水),代价是丢掉的

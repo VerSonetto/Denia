@@ -1,6 +1,5 @@
 //! 微信 iLink Bot API 的线上协议(常量、请求头、消息结构)。
 //!
-//! 依据 hermes-agent 的 `plugins/platforms/weixin/adapter.py`:
 //! - 长轮询 `ilink/bot/getupdates` 驱动入站;
 //! - 发送 `ilink/bot/sendmessage`，每条回复必须回显该用户最新的 `context_token`;
 //! - 扫码登录 `ilink/bot/get_bot_qrcode` + `ilink/bot/get_qrcode_status`。

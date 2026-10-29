@@ -82,8 +82,8 @@ pub fn register_shipped_prompt(
         complete: false,
         audience: SectionAudience::Model,
     })?;
-    // 对照 dsh context/file-reference 的 FILE_REFERENCE_PROMPT。dsh 原文对目录只写
-    // "list it"(工具无关,因为它没有列目录工具);denia 有 ls,所以这里点名 ls——
+    // 参考 prompt 原文对目录只写
+    // "list it"(工具无关,因为没有列目录工具);denia 有 ls,所以这里点名 ls——
     // 但要留神别再退回"用 bash 列目录":这条段落在工具纪律段之前注入,点名 bash
     // 等于抢在收口段前面给模型授权。
     prompt.section(PromptSection {

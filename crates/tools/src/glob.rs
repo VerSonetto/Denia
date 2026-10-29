@@ -1,11 +1,11 @@
 //! The `glob` tool: discover files by glob pattern.
 //!
-//! 走 `ignore` 的 gitignore 语法 overrides(dsh 同款语义):
+//! 走 `ignore` 的 gitignore 语法 overrides:
 //! - `path` 接受绝对路径与相对路径(相对路径锚定会话工作区),统一走
 //!   [`resolve_within`],沙箱开启时越界即拒绝;
 //! - 无 "/" 的模式按 basename 匹配**任意深度**(`*.rs` ≈ `**/*.rs`);
 //! - 结果只含文件、不含目录;按修改时间降序(新鲜优先);
-//! - 默认包含隐藏与忽略文件(VCS 元数据目录除外),与 dsh glob 契约一致;
+//! - 默认包含隐藏与忽略文件(VCS 元数据目录除外);
 //! - 并行遍历;每线程只保留 top-N(mtime 最新),归并出全局 top-N,
 //!   命中总量只计数不收集路径——扫几十万文件的目录树内存恒定、零额外 syscall。
 
@@ -203,7 +203,7 @@ impl Tool for GlobTool {
             let mut builder = WalkBuilder::new(&root);
             builder
                 // 注意极性:`hidden` 是"过滤器开关",true = 把隐藏条目滤掉。
-                // 这里要包含隐藏文件(dsh glob 契约:/--hidden/),所以传 false;
+                // 这里要包含隐藏文件(`--hidden`),所以传 false;
                 // VCS 元数据目录不走这条,在 visitor 里按 basename 单独剪枝。
                 .hidden(false)
                 .parents(false)

@@ -3,7 +3,7 @@
 //! 目标状态以 `goal` 操作事件落会话日志(事件源折叠);本模块只做:
 //! 参数与状态转换校验(fail loud)、写事件并广播给 follow 订阅者、
 //! 触发续跑检查。运行中的轮次照常执行,不因目标操作中断——唯一例外
-//! 是 pause(dsh 语义:暂停中止运行中的轮次)。
+//! 是 pause(暂停中止运行中的轮次)。
 
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -237,7 +237,7 @@ async fn goal_action(
     let _ = live.followers.send(envelope);
     let _ = state.events.send(ServerEvent::SessionsUpdated);
 
-    // pause 的 dsh 语义:运行中暂停会中止当前轮次(用户显式停,不是悄悄删队列)。
+    // pause 语义:运行中暂停会中止当前轮次(用户显式停,不是悄悄删队列)。
     if action == "pause"
         && live.running.load(Ordering::SeqCst)
         && let Some(token) = live.cancel.lock().unwrap().as_ref()

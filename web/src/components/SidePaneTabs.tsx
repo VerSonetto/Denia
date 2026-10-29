@@ -1,16 +1,15 @@
 /**
  * 面板标签栏:标签总览 + 标签列表 + 新增菜单。
  *
- * # 抄 ZCode 的四处关键交互
+ * # 四处关键交互
  *
- * 1. **关闭按钮常驻 + 右侧渐隐带**。ZCode 的标签里,关闭按钮**始终渲染**
+ * 1. **关闭按钮常驻 + 右侧渐隐带**。标签里关闭按钮**始终渲染**
  *    (不是 hover 才出现),配合一条 8px 的 `transparent → 标签底色` 渐变带,
- *    让长标题从右向左淡出而不是硬截断。这里用同样的结构:按钮常驻 →
+ *    让长标题从右向左淡出而不是硬截断。按钮常驻 →
  *    标签宽度不随 hover 变化(无布局抖动);渐变带取 `--tab-bg` 变量 →
  *    激活/非激活两态下都无缝。
  *
- * 2. **拖拽用 HTML5 DnD 而不是引 dnd-kit**。ZCode 用 dnd-kit(带
- *    `activationConstraint: distance 4`)。denia 不引 UI 库是硬约束,而
+ * 2. **拖拽用 HTML5 DnD 而不是引 dnd-kit**。denia 不引 UI 库是硬约束,而
  *    HTML5 拖拽的"移动 4px 才启动"由浏览器自己保证(draggable 元素要
  *    真正开始拖动才触发 dragstart),天然满足同一个需求。
  *
@@ -44,9 +43,9 @@ import {
 } from './icons'
 import { PanePopover } from './PanePopover'
 
-/** 单个标签的宽度基准:与 ZCode 的 `flex-[1_1_9.75rem]` 对齐(156px)。 */
+/** 单个标签的宽度基准:156px。 */
 const TAB_BASE_WIDTH = 156
-/** 标签间距:与 ZCode 的 `gap-2` 一致(8px)。 */
+/** 标签间距:8px。 */
 const TAB_GAP = 8
 /** `+` 按钮占宽(含与标签的间距)。与 `.pane-add` 的 CSS 定宽保持一致。 */
 const ADD_BUTTON_WIDTH = 26 + TAB_GAP
@@ -93,7 +92,7 @@ function relativeTime(at: number): string {
 }
 
 /**
- * 模糊搜索评分(抄 ZCode 的 `XAt` 分层加权)。
+ * 模糊搜索评分(分层加权)。
  *
  * 分层而不是简单的 `includes`:标题前缀命中(120)远强于类型名命中(20),
  * 所以搜 "term" 时"终端"面板会排在只是类型名含 term 的项前面。

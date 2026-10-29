@@ -12,7 +12,7 @@ use denia_core::error::{LlmFailure, codes};
 /// 反馈注入的适用范围(模型输出/请求形态问题,模型自纠有意义):
 /// 提供方抖动(TRANSPORT/TIMEOUT/SERVER/RATE_LIMIT 等)与配置/凭据问题
 /// (AUTH/MISSING_CREDENTIAL 等)不在此列——前者由退避重试处理,后者
-/// 直接 error 终止(dsh 语义),都不浪费注入配额。
+/// 直接 error 终止,都不浪费注入配额。
 pub(crate) fn feedback_eligible(code: &str) -> bool {
     matches!(
         code,

@@ -5,7 +5,7 @@ import { markCompacting, useCompactingFor } from '../appStore'
 import { t } from '../i18n'
 
 /** 从压力投影解析有界展示占用;分子或容量缺任一项即返回 null(不渲染)。
- * 对齐 dsh `contextOccupancy`:分子取 `projectedTokens ?? pressureTokens`。 */
+ * 分子取 `projectedTokens ?? pressureTokens`。 */
 export interface ContextOccupancy {
   percent: number
   usedTokens: number
@@ -45,7 +45,7 @@ function formatTokens(value: number): string {
 }
 
 /**
- * 输入框发送键旁的上下文占用圆环(dsh `ContextMeter` 同款交互):
+ * 输入框发送键旁的上下文占用圆环:
  * 14px 圆环显示 provider 口径占用百分比,点击弹出启发式拆分面板
  * (系统提示词 / 工具 / 对话消息)。provider 未报数或无路由容量时不渲染。
  */

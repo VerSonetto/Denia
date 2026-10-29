@@ -1,6 +1,5 @@
 //! 微信入站图片:CDN 下载、AES-128-ECB 解密与 MIME 识别。
 //!
-//! 与 hermes 的实现对齐:
 //! - 优先用 `media.encrypt_query_param` 构造 CDN 下载地址;否则用 `full_url`;
 //! - `image_item.aeskey` 是 hex,`media.aes_key` 是 base64(可能是 16 字节原始 key,
 //!   也可能是 hex 文本);
@@ -12,7 +11,7 @@ use base64::Engine;
 
 use super::protocol::ImageItem;
 
-/// 微信 CDN 的基础地址(与 hermes 的 `WEIXIN_CDN_BASE_URL` 一致)。
+/// 微信 CDN 的基础地址。
 pub const CDN_BASE_URL: &str = "https://novac2c.cdn.weixin.qq.com/c2c";
 
 /// 允许下载的 CDN 主机(防止服务端被诱导去访问任意 URL)。

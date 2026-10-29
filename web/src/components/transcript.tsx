@@ -138,7 +138,7 @@ export function Transcript({
   // previous render),异常冒泡到根 →整页白屏。
   const workStartedAt = useMemo(() => openTurnStartedAt(nodes), [nodes])
   // 每个已完成轮次的最后一条助手消息挂复制/分支按钮;运行中/中间 step 不显示。
-  // dsh 语义:任意已完成轮次都可分支,不再限制"仅 transcript 尾部"。
+  // 任意已完成轮次都可分支,不再限制"仅 transcript 尾部"。
   const turnIndex = useMemo(() => {
     const lastStep = new Map<number, number>()
     const ended = new Set<number>()
@@ -331,7 +331,7 @@ const NodeView = memo(function NodeView({
 })
 
 /**
- * LLM 总结压缩的边界标记(学 Claude Code compact boundary):显示摘要、
+ * LLM 总结压缩的边界标记:显示摘要、
  * 被压缩的事件区间与 token 前后对比。摘要内部折叠,点击展开。
  */
 /**
@@ -411,7 +411,7 @@ function AssistantNode({
   onFork,
 }: {
   node: Extract<TranscriptNode, { kind: 'assistant' }>
-  /** 已结束轮次的最后一条助手消息显示图标簇(dsh 语义:每个已完成轮次都可分支)。 */
+  /** 已结束轮次的最后一条助手消息显示图标簇(每个已完成轮次都可分支)。 */
   showActions: boolean
   onFork?: (seq: number) => void
 }) {

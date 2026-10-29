@@ -1,5 +1,5 @@
 /**
- * `/` 斜杠命令/技能的纯函数核心(对照 dsh input-trigger 的 detect + command grammar)。
+ * `/` 斜杠命令/技能的纯函数核心。
  * 零 React/DOM 依赖,便于单测。触发、装饰、发送收集共用同一套 token 词法,
  * 保证「弹层里选的、输入框里亮的、发送时注入的」是同一个东西。
  */
@@ -105,7 +105,7 @@ export interface LeadingCommand {
 }
 
 /**
- * 解析首行开头的内置命令(命令优先于技能,对齐 dsh matchEnter 的行认领):
+ * 解析首行开头的内置命令(命令优先于技能):
  * `/plan`、`/compact`、`/goal` 位于文本最前,后随空白或结尾才算;`/plans`、
  * 正文中的 `/plan` 不算。仅前导空白被容忍。
  */

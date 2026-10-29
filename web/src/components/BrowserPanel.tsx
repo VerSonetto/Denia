@@ -64,8 +64,8 @@ export default function BrowserPanel({
    *
    * 切到别的标签时它是 false。用途只有一个:不再消费画面帧 —— 帧是整条
    * 广播通道里最重的负载(每帧一张 JPEG),不可见的标签继续收帧纯属浪费。
-   * 这与 ZCode 的 `residency: suspended` 是同一个思路,只是 denia 的浏览器
-   * 是单实例,不必真挂起进程,停止消费即可(订阅断开,服务端自然不再推)。
+   * denia 的浏览器是单实例,不必真挂起进程,停止消费即可
+   * (订阅断开,服务端自然不再推)。
    */
   visible?: boolean
 }) {

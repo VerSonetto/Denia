@@ -300,7 +300,7 @@ impl Tool for EditTool {
             }
         };
 
-        // CRLF 容错(对齐 dsh fs-e2b):内容与 old/new 都在 LF 视图上精确匹配,
+        // CRLF 容错:内容与 old/new 都在 LF 视图上精确匹配,
         // 写回时按原文件主导换行风格还原,避免 Windows 文件被搞成混合换行。
         let crlf = detect_crlf(&text);
         // edits 按顺序应用:后一项匹配的是前一项改完后的内容。任何一处失败
@@ -579,12 +579,12 @@ fn trailing_whitespace_candidates(view: &str, old: &str) -> Vec<usize> {
     candidates
 }
 
-/// 把 CRLF 统一成 LF(对齐 dsh `normalizeLineEndings`)。
+/// 把 CRLF 统一成 LF。
 fn normalize_line_endings(value: &str) -> String {
     value.replace("\r\n", "\n")
 }
 
-/// 采样前 4096 个字符,判断文件主导换行风格是否为 CRLF(对齐 dsh `detectsCrlf`)。
+/// 采样前 4096 个字符,判断文件主导换行风格是否为 CRLF。
 fn detect_crlf(value: &str) -> bool {
     let sample: String = value.chars().take(4096).collect();
     let crlf = sample.matches("\r\n").count();
@@ -593,7 +593,7 @@ fn detect_crlf(value: &str) -> bool {
     crlf > lf
 }
 
-/// 按原文件主导风格还原换行:CRLF 文件把 LF 视图写回 `\r\n`(对齐 dsh `restoreLineEndings`)。
+/// 按原文件主导风格还原换行:CRLF 文件把 LF 视图写回 `\r\n`。
 fn restore_line_endings(value: &str, crlf: bool) -> String {
     if crlf {
         normalize_line_endings(value).replace('\n', "\r\n")

@@ -86,9 +86,9 @@ fn error_message(body: &str) -> String {
     chars.into_iter().collect()
 }
 
-/// Parses `Retry-After` as delta seconds or an HTTP date(对齐 dsh:
-/// 秒数与 IMF-fixdate 都支持;其他 HTTP-date 变体(generic date 等)
-/// 实际不会由网关产生,解析失败即 None)。
+/// Parses `Retry-After` as delta seconds or an HTTP date(秒数与 IMF-fixdate
+/// 都支持;其他 HTTP-date 变体(generic date 等)实际不会由网关产生,
+/// 解析失败即 None)。
 fn retry_after_ms(headers: &HeaderMap) -> Option<u64> {
     let value = headers.get(RETRY_AFTER)?.to_str().ok()?.trim();
     if let Ok(seconds) = value.parse::<u64>() {

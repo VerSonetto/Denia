@@ -1,12 +1,5 @@
 //! 审查面板 API:Git 状态与文件 Diff。
 //!
-//! # 与 ZCode 的对应关系
-//!
-//! ZCode 的审查面板有四个「来源」(source):
-//! `unstaged` / `staged` / `branch` / `last-turn`。这里实现前三个 ——
-//! `last-turn` 在 ZCode 里由**会话轮次快照**派生(不是 git 概念),
-//! denia 的对应物是 `file_history`/checkpoints,走另一条 API,不混进来。
-//!
 //! # 为什么不用 libgit2 / git2-rs
 //!
 //! 直接调 `git` 可执行文件有三个实际好处:
@@ -43,7 +36,7 @@ const GIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// Diff 内容上限:超过就只回摘要(前端降级为"已裁剪"提示)。
 ///
-/// 与 ZCode 的 `mOt = 180_000` 同量级:大文件全量塞进 JSON 会让前端
+/// 大文件全量塞进 JSON 会让前端
 /// 序列化/渲染卡住,不如让前端知道"太大了,只给你摘要"。
 const DIFF_CHAR_LIMIT: usize = 180_000;
 
@@ -263,7 +256,7 @@ struct DiffQuery {
 
 /// GET /api/git/diff?path=...&file=...&source=... — 单文件 Diff。
 ///
-/// 返回结构与 ZCode 的 `GitDiffState` 对齐:
+/// 返回结构:
 /// `{ availability, patch, beforeContent, afterContent, summary }`,
 /// `availability` ∈ `patch | binary | truncated | unavailable`。
 /// 前端据此三级降级(富文本 diff → 纯文本行 → 仅提示)。

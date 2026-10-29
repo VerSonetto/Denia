@@ -1,8 +1,8 @@
 //! Agent preset 名册:随部署提供的预设 + 用户目录里的自定义预设。
 //!
-//! 与 dsh 的 `agent-presets` 同构,但 denia 的 preset 是**声明式**的:一份
-//! `preset.yml` 说明该预设给会话哪些工具、用什么 persona(denia 没有 Cordis
-//! 插件子树可挂)。名册合并两个根:
+//! denia 的 preset 是**声明式**的:一份
+//! `preset.yml` 说明该预设给会话哪些工具、用什么 persona(denia 没有插件
+//! 子树可挂)。名册合并两个根:
 //!
 //! - 随附集合(内置代码,`trust: shipped`,不可写、不可删);
 //! - 用户根 `<denia home>/agent-presets/<id>/preset.yml`(可创建、可编辑、可删)。
@@ -190,8 +190,8 @@ impl PresetStore {
     /// 部署默认 preset id:读用户设置,校验它仍是一个健康行;否则回退
     /// 随附默认值。默认值在每次解析时读取,绝不缓存成快照——否则用户在
     /// 设置里改完默认,已存在的空白会话会与新会话各说各话。
-    /// 模式选择关闭时忽略用户保存的 default、回落部署默认(对齐 dsh
-    /// selectionPolicy:选择面被隐藏时,不该有用户无法看见的默认在治下)。
+    /// 模式选择关闭时忽略用户保存的 default、回落部署默认(选择面被隐藏
+    /// 时,不该有用户无法看见的默认在治下)。
     pub fn default_id(&self) -> String {
         if !self.mode_selection_enabled() {
             return DEFAULT_PRESET_ID.to_string();

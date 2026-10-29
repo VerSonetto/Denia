@@ -1,9 +1,8 @@
 //! 工具执行:并行滚动池 + 策略门控(Allow/Ask/Deny)+ 结果兜底截断。
 //!
-//! - 一次 step 内模型返回的多个工具调用并发执行(学 codex
-//!   `ToolCallRuntime` + `FuturesOrdered` 滚动池),受 `max_parallel_tool_calls`
-//!   约束;结果按 model-order 提交,每个 call 恰好一条 `ToolResult` 事件
-//!   (事件源不变量)。
+//! - 一次 step 内模型返回的多个工具调用并发执行(`FuturesOrdered` 滚动池),
+//!   受 `max_parallel_tool_calls` 约束;结果按 model-order 提交,每个 call
+//!   恰好一条 `ToolResult` 事件(事件源不变量)。
 //! - 策略门控统一在派发处(见 `denia_tools::permission::decide`):
 //!   Deny 直接合成错误结果,Ask(越界写文件、计划提交)串行化走审批——
 //!   审批是交互式阻塞,并发弹窗会交错事件。工具内部不再自行判权。

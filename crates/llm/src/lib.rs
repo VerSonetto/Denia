@@ -229,7 +229,7 @@ impl LlmRegistry {
 
     /// One streaming attempt against one route, retried per its policy.
     /// Setup errors retry; mid-stream chunk errors do not. Every retry
-    /// attempt is reported through `retry_sink` (对齐 dsh llm-retry 事件化)。
+    /// attempt is reported through `retry_sink`.
     ///
     /// 本入口**不接准入** —— 旁路调用(会话标题、`/api/llm` 连通测试、git
     /// 摘要)走这里,它们不是用户任务的执行成本,也不该被用户预算拦住。

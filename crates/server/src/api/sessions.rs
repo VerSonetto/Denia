@@ -93,7 +93,7 @@ async fn list_sessions(State(state): State<Arc<AppState>>) -> Result<impl IntoRe
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct CreateBody {
-    /// 目标工作区;与 cwd 互斥(抄 dsh:二者同时给 → bad-request)。
+    /// 目标工作区;与 cwd 互斥(二者同时给 → bad-request)。
     #[serde(default)]
     workspace_id: Option<String>,
     /// 直接指定目录;不挂任何工作区(落"未分组")。
@@ -122,7 +122,7 @@ async fn create_session(
     }
     // 会话运行的预设必须在创建时就定下来并写进日志:preset 决定模型看到的
     // 工具 schema 与 persona,恢复会话时必须还原同一份预设。未指定则取
-    // 设置里的部署默认值(与 dsh 一致:header 记录生效值,不记"未指定")。
+    // 设置里的部署默认值(header 记录生效值,不记"未指定")。
     let preset_id = match body
         .agent_preset
         .as_deref()
@@ -685,7 +685,7 @@ struct ForkBody {
     at_seq: Option<u64>,
 }
 
-/// 从源会话某个已完成轮次边界分支出一个全新会话(抄 dsh `session.fork`):
+/// 从源会话某个已完成轮次边界分支出一个全新会话:
 /// 种子 = 源日志前缀原样回放(seq 重排、时间戳保留),血缘写进子会话头,
 /// 并挂到源会话所在工作区。源会话本身不动——分支非破坏性,与回退互补。
 async fn fork_session(

@@ -31,13 +31,13 @@ function goalStatusLabel(status: GoalState['status']): string {
 }
 
 /**
- * 会话目标指示条(对照 dsh GoalBar):输入框上方的 36px 圆角横条,
+ * 会话目标指示条:输入框上方的 36px 圆角横条,
  * 图标 + 状态标签 + 截断的目标文本 + 预算胶囊 + 操作按钮。
  *
- * 交互对齐 dsh:编辑是条内内联表单(Enter 保存 / Esc 取消,只有成功才
+ * 交互:编辑是条内内联表单(Enter 保存 / Esc 取消,只有成功才
  * 关表单);暂停/恢复/清除直接执行无确认弹窗;single-flight 防重复提交;
  * complete 的目标整条不渲染("completed goal is history, not chrome")。
- * 预算胶囊是 denia 融合扩展(codex token budget 记账)。
+ * 预算胶囊是 denia 的扩展(基于 token budget 记账)。
  */
 export function GoalBar({
   sessionId,

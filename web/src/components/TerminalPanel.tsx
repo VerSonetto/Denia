@@ -1,7 +1,7 @@
 /**
  * 终端面板:一个 xterm 实例 + 与后端 PTY 的 WebSocket 连接。
  *
- * # 关键设计(逐条对齐 ZCode 的实测结论)
+ * # 关键设计
  *
  * 1. **创建前先 fit**:xterm 挂进 DOM 后立刻 `fit()` 拿到真实 `cols/rows`,
  *    再用它调 `createTerminal`。PTY 一开始就是正确宽度 —— 否则 shell 会
@@ -31,7 +31,7 @@ import {
 import { t } from '../i18n'
 import './TerminalPanel.css'
 
-/** 终端字体:与 ZCode 同一套候选,优先等宽且含 Nerd Font 回退。 */
+/** 终端字体:优先等宽且含 Nerd Font 回退。 */
 const TERMINAL_FONT =
   "'SF Mono', 'JetBrains Mono', 'Cascadia Code', Consolas, 'MesloLGS NF', 'Hack Nerd Font', monospace"
 

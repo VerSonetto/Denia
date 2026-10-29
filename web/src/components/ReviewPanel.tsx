@@ -1,26 +1,16 @@
 /**
  * 审查面板:Git 来源切换 + 改动文件列表 + 展开看 Diff。
  *
- * # 与 ZCode 的对应
+ * 这里有两处**有意的简化**:
  *
- * ZCode 的审查面板结构(`MOt`):
- * ```
- * section
- * ├─ header: 来源下拉(Select) + 刷新按钮
- * └─ body:   虚拟列表(行高 32px,overscan 14) 或 空态
- *     └─ 行: 折叠头(文件路径 + ±行数 + chevron)+ 展开后 Diff
- * ```
- * 这里保持同样的信息层级,但做了两处**有意的简化**:
- *
- * 1. **不做虚拟列表**。ZCode 用 `@tanstack/react-virtual` 是因为它要扛
- *    超大改动集;denia 的定位是单机单仓库,一次几百个文件已是极端情况,
+ * 1. **不做虚拟列表**。denia 的定位是单机单仓库,一次几百个文件已是极端情况,
  *    而虚拟列表会带来"展开状态与虚拟窗口不同步"的一类 bug。先做朴素列表,
  *    真遇到性能问题再换 —— 数据结构已经按"按需懒加载 diff"设计好了。
  * 2. **Diff 用 `<pre>` + 行着色**,不引 diff 渲染库。patch 本身已经是
  *    带 `+`/`-`/` ` 前缀的文本,按前缀上色就够读;引库会带来主题适配、
  *    大文件卡顿、包体积三个负担。
  *
- * Diff 的三级降级(抄 ZCode 的 `SOt`)保持不变:
+ * Diff 的三级降级保持不变:
  *   patch(有 patch 文本) → 全文对比(有前后内容) → 提示(二进制/过大/不可用)
  */
 
@@ -639,7 +629,7 @@ function statusLabel(entry: GitEntry): string {
 /**
  * Diff 正文:三级降级。
  *
- * 顺序与 ZCode 的 `SOt` 一致 —— 有 patch 就渲染 patch(信息最全);
+ * 顺序:有 patch 就渲染 patch(信息最全);
  * 否则用前后全文自建对比;都没有就按 `availability` 给一句可读的说明。
  */
 function DiffBody({ diff }: { diff: GitDiff }) {

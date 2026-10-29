@@ -5,7 +5,7 @@
 //! 在 [`crate::client::McpClient`] 里只有一份,三种传输共享——新增传输不
 //! 需要复制一遍协议逻辑。
 //!
-//! 语义对照(学 dsh 的 transport 分类,与 MCP 规范一致):
+//! 语义对照(与 MCP 规范一致):
 //! - **stdio**:本地子进程,stdin/stdout 承载 newline-delimited JSON;
 //! - **http**:Streamable HTTP,POST 一个 JSON-RPC 请求,响应是 JSON
 //!   (或 `text/event-stream`,规范允许二者),服务端可无状态;

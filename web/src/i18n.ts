@@ -1131,7 +1131,7 @@ const zh = {
   numberThousand: '{value}K',
   numberMillion: '{value}M',
 
-  /* ---- 右侧面板(ZCode 式多标签工作区) ---- */
+  /* ---- 右侧面板(多标签工作区) ---- */
 
   sidePaneReview: '审查',
   sidePaneTerminal: '终端',
@@ -2476,7 +2476,7 @@ const en: typeof zh = {
   numberThousand: '{value}K',
   numberMillion: '{value}M',
 
-  /* ---- Side pane (ZCode-style multi-tab workspace) ---- */
+  /* ---- Side pane (multi-tab workspace) ---- */
 
   sidePaneReview: 'Review',
   sidePaneTerminal: 'Terminal',
@@ -2702,7 +2702,7 @@ type LocaleId = 'zh' | 'en'
 
 const dictionaries: Record<LocaleId, typeof zh> = { zh, en }
 
-// zh 是源语言(学 dsh 的 i18n 约定);语言由设置驱动,不靠浏览器猜。
+// zh 是源语言;语言由设置驱动,不靠浏览器猜。
 let active: LocaleId = 'zh'
 let revision = 0
 

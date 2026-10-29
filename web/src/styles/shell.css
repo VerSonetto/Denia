@@ -83,17 +83,17 @@
   }
 }
 
-/* ---------- shell: sidebar + center column (dsh AppFrame) ---------- */.shell {
+/* ---------- shell: sidebar + center column ---------- */.shell {
   display: grid;
   flex: 1;
   min-height: 0;
   grid-template-columns: var(--sidebar-w) minmax(0, 1fr);
   background: var(--bg-base);
-  /* 列宽滑动过渡:收起/展开共用(dsh 侧栏曲线);拖拽/无动画偏好下由下述规则关闭 */
+  /* 列宽滑动过渡:收起/展开共用同一曲线;拖拽/无动画偏好下由下述规则关闭 */
   transition: grid-template-columns 260ms var(--ease);
 }
 
-/* 收起态固定 56px 控制栏(dsh SIDEBAR_COLLAPSED),不把宽度全让给主列 */
+/* 收起态固定 56px 控制栏,不把宽度全让给主列 */
 .shell[data-collapsed] {
   grid-template-columns: 56px minmax(0, 1fr);
 }

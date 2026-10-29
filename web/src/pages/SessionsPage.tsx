@@ -203,7 +203,7 @@ export default function SessionsPage({
   const [goalView, setGoalView] = useState<api.GoalView | null>(null)
   // 消息队列:AI 运行中输入的新消息,等本轮结束后自动发送。
   const [queuedMessages, setQueuedMessages] = useState<QueuedMessage[]>([])
-  // 会话内容视图(dsh conversation.view 环):对话 / 轨迹。组件按
+  // 会话内容视图:对话 / 轨迹。组件按
   // activeId 重挂(key),视图状态随会话切换自然复位。
   const [view, setView] = useState<'chat' | 'trajectory'>('chat')
   // 导出菜单状态:exportOpen 控制下拉显隐,exportBusy 阻及双击。
@@ -216,7 +216,7 @@ export default function SessionsPage({
   const composerPanelRef = useRef<HTMLDivElement | null>(null)
   const scrollRef = useRef<HTMLDivElement | null>(null)
   // 对话内容列:增长(工具卡展开/图片加载/markdown 回流)不一定伴随 nodes 变化,
-  // ResizeObserver 观察它才能兜住所有内容增高路径(同 dsh columnRef)。
+  // ResizeObserver 观察它才能兜住所有内容增高路径。
   const viewRef = useRef<HTMLDivElement | null>(null)
   const seatRef = useRef<HTMLDivElement | null>(null)
   // 布局根:回底按钮等多处需要读/写挂在共同祖先上的尺寸变量。
@@ -1008,7 +1008,7 @@ export default function SessionsPage({
     planReview,
   ])
 
-  // dsh: composer seat / 内容列 / 滚动口尺寸变化时,贴底读者保持视野。
+  // composer seat / 内容列 / 滚动口尺寸变化时,贴底读者保持视野。
   // 内容列观察兜住不伴随 nodes 变化的增高(展开工具卡、图片加载等)。
   //
   // 依赖必须带上 view:轨迹视图下输入区整体卸载,切回对话时拿到的是**另一个**
@@ -1111,7 +1111,7 @@ export default function SessionsPage({
     }
   }, [activeId, transcriptNodes, rewindBusy])
 
-  /* ---- 分支(抄 dsh forkAt):从收尾消息分叉出全新会话并立即切换 ---- */
+  /* ---- 分支:从收尾消息分叉出全新会话并立即切换 ---- */
 
   const forkBusyRef = useRef(false)
 
@@ -1121,7 +1121,7 @@ export default function SessionsPage({
       forkBusyRef.current = true
       try {
         const { session } = await api.forkSession(activeId, seq)
-        // 子会话挂同一工作区(dsh:fork 后立即 open 子会话)。
+        // 子会话挂同一工作区(fork 后立即 open 子会话)。
         addSessionLocal({ ...session, cwd_alive: true }, activeWs?.id)
         go(session.id, activeWs?.id ?? null)
         void refreshList()
@@ -1486,7 +1486,7 @@ export default function SessionsPage({
         await api.setSessionAgentPreset(id, agentPresetChoice)
       }
       // 斜杠命令裁定(单一发送咽喉:手动发送/队列自动发送/立即发送共用);
-      // 命令优先于技能(对齐 dsh matchEnter 的行认领)。
+      // 命令优先于技能(行认领)。
       const command = parseLeadingCommand(text)
       // 命令裁定看原文(占位文案不该被当成命令);实际发往模型的正文用
       // outgoingText —— 无正文时它已经兜底成图片/附件/引用的可读摘要。
@@ -1519,7 +1519,7 @@ export default function SessionsPage({
         ok = true
         return true // 裸 /compact:直接压缩,不发消息
       } else if (command?.kind === 'goal') {
-        // /goal [<objective>|edit <objective>|pause|resume|clear](对照 dsh /goal 命令语法)
+        // /goal [<objective>|edit <objective>|pause|resume|clear]
         // 命令原文随请求落 command-run 事件:回显按真实 seq 排进对话流。
         const rest = (command.rest ?? '').trim()
         const sub = rest.split(/\s+/u, 1)[0] ?? ''
@@ -2301,7 +2301,7 @@ export default function SessionsPage({
           <OpenInApp
             cwd={activeSession?.cwd_alive === false ? null : activeSession?.cwd ?? null}
           />
-          {/* 右侧面板开关:与 ZCode 的工作区头部按钮同位置(最右、紧邻导出)。 */}
+          {/* 右侧面板开关:工作区头部最右、紧邻导出。 */}
           {onToggleSidePane && (
             <button
               type="button"

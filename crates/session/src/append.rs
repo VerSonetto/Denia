@@ -12,11 +12,10 @@ impl Session {
         self.append_with_time(event, now_millis())
     }
 
-    /// 把缓冲的日志前缀刷到磁盘(对齐 dsh checkpoint-policy 的
-    /// "模型请求前"检查点):agent-loop 在模型请求 dispatched 之前调用,
-    /// 保证请求前缀(step-start/system-prompt/request-header/context)已
-    /// 落盘,崩溃后能完整重建请求上下文;fail-closed——flush 失败则
-    /// 不派发请求。
+    /// 把缓冲的日志前缀刷到磁盘("模型请求前"检查点):agent-loop 在模型
+    /// 请求 dispatched 之前调用,保证请求前缀(step-start/system-prompt/
+    /// request-header/context)已落盘,崩溃后能完整重建请求上下文;
+    /// fail-closed——flush 失败则不派发请求。
     pub fn flush(&self) -> Result<(), SessionError> {
         let mut inner = self
             .inner

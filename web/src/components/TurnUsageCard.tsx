@@ -5,12 +5,12 @@ import type { TokenUsage } from '../types'
 import { billedInputTokens, cacheHitPercent, formatTokens } from '../stats'
 
 /**
- * 轮次用量明细卡片(抄 dsh TurnUsagePanel:行内触发 + 点开明细)。
+ * 轮次用量明细卡片(行内触发 + 点开明细)。
  *
  * denia 原先把 `输入12.3k ·输出4.5k` 做成一个死 tooltip —— 有精确值却看不全,
  * 缓存读与推理更是完全没有出口。这里把它变成可点开的明细。
  *
- * **必须走 portal 到 body**(与 dsh 同款)。会话行 `.turn-chrome` 带着
+ * **必须走 portal 到 body**。会话行 `.turn-chrome` 带着
  * `content-visibility: auto`(长会话性能优化),它带来 paint containment:
  * 绝对定位在锚点内的浮层会被整块裁掉 —— 卡片渲染了却一个像素都画不出来,
  * 只在行内留下一圈被裁的边框残影。portal 到 body 后浮层不再有裁剪祖先。

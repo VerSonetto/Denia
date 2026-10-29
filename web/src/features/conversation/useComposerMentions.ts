@@ -11,7 +11,7 @@ interface Options {
   syncPromptHeight: () => void
 }
 export function useComposerMentions({ mentionCwd, promptRef, onDraftChange, syncPromptHeight }: Options) {
-  /* ---- 输入框 @ 文件/文件夹提及(对照 dsh file-reference:候选只含路径,内容留在 read 工具) ---- */
+  /* ---- 输入框 @ 文件/文件夹提及(候选只含路径,内容留在 read 工具) ---- */
 
   const [mentionOpen, setMentionOpen] = useState(false)
   const [mentionItems, setMentionItems] = useState<MentionCandidate[]>([])

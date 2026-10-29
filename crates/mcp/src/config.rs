@@ -46,7 +46,7 @@ pub struct McpServerConfig {
     pub call_timeout_ms: Option<u64>,
 }
 
-/// 作用范围:对齐 dsh UI 的「用户 / 项目」下拉。
+/// 作用范围:「用户 / 项目」下拉。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum McpServerScope {

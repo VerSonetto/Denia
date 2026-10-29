@@ -1,4 +1,4 @@
-//! Durable projection state for dynamic runtime context (DSH-compatible).
+//! Durable projection state for dynamic runtime context.
 
 use std::sync::{Arc, Weak};
 

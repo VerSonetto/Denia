@@ -3,7 +3,7 @@ import type { TodoItem } from '../types'
 import { t } from '../i18n'
 
 /**
- * The session's todo list, docked above the composer (dsh TodoPanel pattern).
+ * The session's todo list, docked above the composer.
  * Collapsed by default: header shows a per-status progress summary; expanding
  * reveals the full list. Empty list renders nothing.
  */

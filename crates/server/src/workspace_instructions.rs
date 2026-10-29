@@ -1,9 +1,9 @@
-//! 工作区指令（AGENTS.md）的发现与预算渲染；对齐 dsh agent-instructions 语义：
+//! 工作区指令（AGENTS.md）的发现与预算渲染：
 //! 注入式 user 消息、字节预算内 UTF-8 边界截断、整块基线替换（不重写冻结历史）。
 //!
 //! 作用域（从宽到窄）：用户全局（`$DENIA_HOME/AGENTS.md`）→ 项目根到会话 cwd
 //! 的祖先链每层 → 工具触碰文件落进 cwd 之下的后代目录链。候选文件只认
-//! `AGENTS.md`；同目录单候选，无需 dsh 的多候选内容去重。
+//! `AGENTS.md`；同目录单候选，无需多候选内容去重。
 use std::path::{Path, PathBuf};
 
 /// 指令文件的来源作用域。
@@ -28,7 +28,7 @@ pub struct InstructionFile {
     pub source_path: PathBuf,
 }
 
-/// 渲染预算之外的单文件读取上限；超过即整份跳过（对齐 dsh readBounded）。
+/// 渲染预算之外的单文件读取上限；超过即整份跳过。
 ///
 /// `scope` 决定是否把用户全局目录纳入候选。即便 home 恰好位于项目祖先链上
 /// （或通过 junction/符号链接别名出现在链上），同一个全局规则文件也**不会**
@@ -61,7 +61,7 @@ pub fn discover(
     for dir in ancestor_chain(&project_root, &cwd) {
         push_dir(&mut dirs, dir);
     }
-    // 触碰文件的后代目录链：cwd 之下、从浅到深（dsh descendantDirsBetween）。
+    // 触碰文件的后代目录链：cwd 之下、从浅到深。
     for path in touched {
         for dir in descendant_dirs(&cwd, path) {
             push_dir(&mut dirs, dir);
@@ -233,7 +233,7 @@ pub fn render(
     }
 }
 
-/// UTF-8 边界截断：预算切进多字节序列时回退到首个被排除字节的 lead byte（dsh truncateUtf8）。
+/// UTF-8 边界截断：预算切进多字节序列时回退到首个被排除字节的 lead byte。
 fn truncate_utf8(value: &str, max_bytes: usize) -> String {
     if value.len() <= max_bytes {
         return value.to_string();

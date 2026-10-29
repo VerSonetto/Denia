@@ -872,7 +872,7 @@ async fn tool_call_continues_to_second_step() {
     );
 }
 
-/// 系统提示变更 in-history 追加(dsh `systemPromptUpdate: 'in-history'` 对齐):
+/// 系统提示变更 in-history 追加:
 /// 已发过请求的会话里,system 字节冻结在最后一次发出的值,提示词变化以
 /// 注入消息全文追加(声明取代旧版),内容不变不重发。请求首条消息字节
 /// 稳定,提供方前缀缓存不因提示词变化从第 0 个 token 失效。

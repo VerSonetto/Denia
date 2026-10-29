@@ -61,7 +61,7 @@ pub const HISTORY_PROJECTION_FILE: &str = "history-projection.json";
 const SUMMARY_SCAN_LIMIT: usize = 64 * 1024;
 
 /// 崩溃孤儿轮闭合时,给"已落库但未答复"的工具调用补的合成结果
-/// (对齐 dsh `TOOL_OUTCOME_UNKNOWN` 文案:结果未知,谨慎重试,不盲目重放)。
+/// (结果未知,谨慎重试,不盲目重放)。
 pub const ORPHAN_TOOL_RESULT: &str = "该工具调用在落库后被中断,没有持久化的结果记录,其结果未知。\
     请从工具语义判断是否重试:仅当操作只读或幂等时才重试;如果可能产生副作用,\
     先核实外部状态或询问用户。不要盲目重试。";
@@ -483,7 +483,7 @@ pub struct SessionSummary {
     /// dead cwd refuse new prompts.
     pub cwd_alive: bool,
     /// 分支血缘:父会话 id(非分支会话为 `None`)。侧栏据此把子会话
-    /// 嵌套在源会话之下(抄 dsh parentSessionId)。
+    /// 嵌套在源会话之下。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub parent_session: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

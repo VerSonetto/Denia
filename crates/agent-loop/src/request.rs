@@ -1,7 +1,7 @@
 //! 请求派发:attempt 重试环 + 失败分流 + 请求头落盘 + 压缩闸门。
 //!
 //! 一次 step 的模型请求全流程:
-//! 1. 请求头/路由元数据按需落盘(快照相等则跳过,dsh 对齐);
+//! 1. 请求头/路由元数据按需落盘(快照相等则跳过);
 //! 2. 压缩闸门:高压力时 LLM 总结压缩(失败熔断,不阻断主流程);
 //! 3. flush 检查点(fail-closed:请求前缀没落盘就不发请求);
 //! 4. attempt 循环:建流(select 包裹,取消即刻断)→ 流消费(逐 chunk
@@ -115,7 +115,7 @@ pub(crate) async fn dispatch_request(
         let emit = state.emit.clone();
         let turn = state.turn;
         move |attempt: &denia_llm::RetryAttempt| {
-            // 重试轨迹落盘(对齐 dsh llm-retry 事件化):失败不阻断主流程。
+            // 重试轨迹落盘(事件化):失败不阻断主流程。
             if let Err(error) = append(
                 &session,
                 &emit,
@@ -137,10 +137,10 @@ pub(crate) async fn dispatch_request(
         }
     }));
 
-    // —— attempt 循环:dsh 对齐的 step 内重试 ——
+    // —— attempt 循环:step 内重试 ——
     // setup 失败:registry 内部已按 RetryPolicy 退避重试(maxRetries=5),
     // 耗尽后分流——模型输出问题注入自纠反馈;提供方/配置问题直接 error
-    // 终止(dsh 语义:setup 失败不进重试环)。
+    // 终止(setup 失败不进重试环)。
     // finish 错误(可重试码、预算内、未取消)→ 同 step 内退避重试。
     let retry_policy = denia_llm::RetryPolicy::default();
     let mut step_retries: u32 = 0;
@@ -150,7 +150,7 @@ pub(crate) async fn dispatch_request(
     // 去重键带上它,才不会把重发误判成“重复调用”。
     let mut dispatch_sequence: u32 = 0;
     'attempts: loop {
-        // 请求前检查点(对齐 dsh checkpoint-policy):请求前缀刷盘
+        // 请求前检查点:请求前缀刷盘
         // 成功才派发;失败 fail-closed(不发出请求)。
         flush_before_dispatch(&state.session)?;
         // 请求建立期同样响应取消:网关/代理黑洞挂起时,点停止必须立刻能断。
@@ -340,7 +340,7 @@ pub(crate) async fn dispatch_request(
                 }
             }
             let has_chunks = !source_event_seqs.is_empty();
-            // 可重试:finish 错误与流错误都重试(dsh:llm-retry 丢弃失败
+            // 可重试:finish 错误与流错误都重试(丢弃失败
             // 尝试的 chunk)。重放 LLM 请求无副作用:半成品 chunk 留在日志
             // 但不进派生历史,工具尚未执行;失败尝试的部分输出由新 attempt
             // 的 blocks 整体取代。曾限制"仅无输出时重试",实测被网关断流
@@ -369,7 +369,7 @@ pub(crate) async fn dispatch_request(
                 let sleep = tokio::time::sleep(std::time::Duration::from_millis(delay));
                 tokio::select! {
                     biased;
-                    // 取消压倒重试(dsh:signal.abort 优先于 retry)。
+                    // 取消压倒重试(取消信号优先于 retry)。
                     _ = state.cancel.cancelled() => {}
                     _ = sleep => {}
                 }
@@ -404,7 +404,7 @@ pub(crate) async fn dispatch_request(
                     "provider retry-after exceeds max delay; giving up retry"
                 );
             }
-            // 不可重试/预算耗尽:失败尝试不产出终稿消息(dsh:流错误
+            // 不可重试/预算耗尽:失败尝试不产出终稿消息(流错误
             // rethrow 不终稿;已落盘的 chunk 保留在日志),分流终止。
             append(
                 &state.session,
@@ -763,7 +763,7 @@ pub const RAPID_REFILL_MAX_CONSECUTIVE: u32 = 3;
 /// 计一次 rapid-refill。
 pub const RAPID_REFILL_TOOL_TURN_THRESHOLD: u32 = 3;
 
-/// —— 层叠上下文管理(学 dsh 压力驱动 + Claude Code compact)——
+/// —— 层叠上下文管理 ——
 /// 1. 低压力:什么都不做 —— 请求内容与日志逐字一致,provider 前缀缓存
 ///    持续命中;
 /// 2. 高压力:LLM 总结压缩,把旧事件区间折叠成摘要(落盘

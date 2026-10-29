@@ -1,6 +1,6 @@
 /* 右侧面板:标签栏 + 内容区 + 空态引导页。
  *
- * 尺寸与间距抄 ZCode 的实测值(标签 h-7=28px、基准宽 156px、间距 8px),
+ * 尺寸与间距取实测值(标签高 28px、基准宽 156px、间距 8px),
  * 颜色走 denia 自己的语义 token。
  *
  * # 展开 / 收起的过渡
@@ -366,7 +366,7 @@
   display: none;
 }
 
-/* 三态渐隐 mask:提示两侧还有内容(抄 ZCode 的 mask-image 方案)。 */
+/* 三态渐隐 mask:提示两侧还有内容(mask-image 方案)。 */
 .pane-tab-viewport.mask-both {
   mask-image: linear-gradient(
     to right,
@@ -402,7 +402,7 @@
   flex: 0 0 auto;
   align-items: center;
   gap: 6px;
-  /* 基准宽 156px(ZCode 的 9.75rem),窄到 60px、宽到 156px。 */
+  /* 基准宽 156px,窄到 60px、宽到 156px。 */
   width: 156px;
   min-width: 60px;
   max-width: 156px;

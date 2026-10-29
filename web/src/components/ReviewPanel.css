@@ -1,7 +1,7 @@
 /* 审查面板:来源切换 + 文件列表 + Diff 正文。
  *
- * 信息层级抄 ZCode 的 `MOt`:头部(来源 + 刷新)→ 元信息(分支)→
- * 列表(分组 + 行 + 展开的 Diff)。视觉用 denia 自己的 token,不搬 ZCode 的
+ * 信息层级:头部(来源 + 刷新)→ 元信息(分支)→
+ * 列表(分组 + 行 + 展开的 Diff)。视觉用 denia 自己的 token,不混用
  * Tailwind 类 —— 两套 token 体系混用会让暗/亮主题下出现不协调的灰阶。 */
 
 .review-panel {
@@ -194,7 +194,7 @@
   align-items: center;
   gap: 8px;
   width: 100%;
-  /* 行高 28px:比 ZCode 的 32px 略紧,因为 denia 的面板默认更窄。 */
+  /* 行高 28px:略紧一些,因为 denia 的面板默认更窄。 */
   min-height: 28px;
   padding: 0 12px;
   border: none;

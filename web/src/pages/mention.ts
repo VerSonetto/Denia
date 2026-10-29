@@ -1,5 +1,5 @@
 /**
- * `@` 文件/文件夹提及的纯函数核心(对照 dsh file-reference grammar)。
+ * `@` 文件/文件夹提及的纯函数核心。
  * 零 React/DOM 依赖,便于单测。
  */
 
@@ -9,7 +9,7 @@ export interface MentionCandidate {
   kind: 'file' | 'directory'
 }
 
-/** 光标处活跃的 `@` token(对照 dsh `ActiveAtToken`)。 */
+/** 光标处活跃的 `@` token。 */
 export interface ActiveAtToken {
   /** 从行首/空白处到光标前的完整 token,选中候选时整段替换。 */
   prefix: string
@@ -36,7 +36,7 @@ export function activeAtToken(draft: string, caret: number): ActiveAtToken | und
 }
 
 /**
- * 把选中的候选格式化为插入文本(对照 dsh `formatFileMention`):
+ * 把选中的候选格式化为插入文本:
  * 目录尾补 `/`;路径含空白或原本就在 `@"` 里时用闭合引号形式;
  * 无法安全表示的路径返回 undefined。
  */

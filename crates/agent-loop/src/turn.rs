@@ -186,8 +186,8 @@ pub(crate) async fn run_turn_inner(
         let prompt_assembly = match assemble_step(driver, state, assembly.subagent.as_ref()) {
             Ok(assembly) => assembly,
             Err(error) => {
-                // 日志平衡:step 已开,补 step-end + turn-end(对齐 dsh 的
-                // finally 配对语义;不再让轮次裸开等 load 合成)。
+                // 日志平衡:step 已开,补 step-end + turn-end(finally 配对语义;
+                // 不再让轮次裸开等 load 合成)。
                 let failure = LlmFailure::new(codes::UNKNOWN, error);
                 append(
                     &state.session,
@@ -245,7 +245,7 @@ pub(crate) async fn run_turn_inner(
         // 注释):框架那句「优先于你的默认角色」只该对工具纪律说,不该把
         // persona 也标成被注入的覆盖指令。
         let framed_current = render_model_system(&prompt_assembly);
-        // —— 系统提示变更 in-history 追加(对齐 dsh `systemPromptUpdate: 'in-history'`)——
+        // —— 系统提示变更 in-history 追加 ——
         // wire 层把 system 序列化为请求首条消息:已发过请求的会话里改写它,
         // 等于从第 0 个 token 打碎提供方前缀缓存。因此 system 字节冻结在
         // 最后一次发出的值;提示词变化(权限模式段位进退 / SYSTEM.md 热更新 /
@@ -290,7 +290,7 @@ pub(crate) async fn run_turn_inner(
             .set_system_tokens(estimate_system_tokens(&framed_system));
 
         // 用户 /技能名 手势的正文:全部背景注入之后,最贴近模型的回答
-        // (dsh material-last 顺序);只发一次(第一个 step)。
+        // (material-last 顺序);只发一次(第一个 step)。
         if let Some((name, source, body)) = assembly.gesture_skill.take() {
             append(
                 &state.session,

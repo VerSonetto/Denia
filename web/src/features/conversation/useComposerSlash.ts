@@ -20,7 +20,7 @@ interface Options {
 }
 export function useComposerSlash({ activeId, inert, prompt, promptRef, setPrompt, setOptimizedPrompt,
   originalPromptRef, syncPromptHeight, closeMention, refreshMentions, composingRef }: Options) {
-  /* ---- 输入框 `/` 斜杠命令/技能(对照 dsh input-trigger:命令认领行,技能直调注入) ---- */
+  /* ---- 输入框 `/` 斜杠命令/技能(命令认领行,技能直调注入) ---- */
 
   /** 弹层候选(命令/技能统一结构,description 为已翻译文案)。 */
   interface SlashCandidate {

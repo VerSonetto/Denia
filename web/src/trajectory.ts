@@ -1,9 +1,9 @@
 /**
- * Trajectory 布局投影(抄 dsh ui-trajectory 的 `deriveTrajectoryLayout`,
- * 裁剪掉本仓没有的 Code Mode subtool / compaction / Request 节点):
+ * Trajectory 布局投影(裁剪掉本仓没有的 Code Mode subtool / compaction /
+ * Request 节点):
  *
  * - 事件流折叠为三类表面记录:User / Message / Tool;reasoning 块跳过
- *   (无块级时钟,dsh 决策:与其显示 — 不如省略该行)。
+ *   (无块级时钟,与其显示 — 不如省略该行)。
  * - 每对 `tool-call` + `tool-result` 按 callId 折成一行 Tool;
  *   result 未到 → 运行中,Time 为 —。
  * - User 行自身耗时 +0s;Message = assistant-message 时间 − 上一表面时间
@@ -32,7 +32,7 @@ export interface TrajectoryRecord {
   seq: number
   /** 开始时间(epoch ms)。 */
   time: number
-  /** 自身耗时;运行中缺省(dsh:Time —,不伪造)。 */
+  /** 自身耗时;运行中缺省(Time —,不伪造)。 */
   durationMs?: number
   /* ---- user ---- */
   text?: string
@@ -100,8 +100,8 @@ export function deriveTrajectory(events: SessionEnvelope[]): TrajectoryLayout {
   const firstTokens = new Map<string, number>()
   // callId → tool 记录(配对 tool-result)。
   const toolByCall = new Map<string, TrajectoryRecord>()
-  // 先于 turn-start 落库的用户消息(本仓驱动器布局):按 dsh 规则
-  // 归入下一个 turn 组;到日志结束仍无 turn → "轮次之间"。
+  // 先于 turn-start 落库的用户消息(本仓驱动器布局):归入下一个 turn 组;
+  // 到日志结束仍无 turn → "轮次之间"。
   const pendingUsers: TrajectoryRecord[] = []
 
   const startGroup = (turn: number | null, time: number, open: boolean): TrajectoryGroup => {
@@ -129,7 +129,7 @@ export function deriveTrajectory(events: SessionEnvelope[]): TrajectoryLayout {
     if (group) group.records.push(record)
   }
   /**
-   * 闭合组的统计(dsh 组描述语义):
+   * 闭合组的统计:
    * - 墙钟跨度 = 组内最早 → 最晚绝对时间;只有 Tool 贡献"起点 + 自身耗时"
    *   终点,Message 的 durationMs 是"距上一表面"的间隔,不得叠加进时间轴。
    * - 工具直方图此处统一重算(tool-result 的耗时是事后回填,增量聚合
@@ -169,7 +169,7 @@ export function deriveTrajectory(events: SessionEnvelope[]): TrajectoryLayout {
         endGroup()
         ctx.turn = event.turn
         const group = startGroup(event.turn, event.time, true)
-        // 先于本轮落库的用户消息归入本组(dsh 规则;已在扁平表,不重复 push)。
+        // 先于本轮落库的用户消息归入本组(已在扁平表,不重复 push)。
         for (const pending of pendingUsers) group.records.push(pending)
         pendingUsers.length = 0
         break
@@ -200,7 +200,7 @@ export function deriveTrajectory(events: SessionEnvelope[]): TrajectoryLayout {
           imageCount: event.images?.length,
         }
         if (ctx.turn === null) {
-          // 先于任何 turn:等下一个 turn-start 归组(dsh 规则)。
+          // 先于任何 turn:等下一个 turn-start 归组。
           pendingUsers.push(record)
           records.push(record)
         } else {
@@ -210,7 +210,7 @@ export function deriveTrajectory(events: SessionEnvelope[]): TrajectoryLayout {
         break
       }
       case 'system-prompt': {
-        // context 节点不产出记录,但推进 Message 耗时游标(dsh 语义)。
+        // context 节点不产出记录,但推进 Message 耗时游标。
         ctx.lastSurface = event.time
         break
       }

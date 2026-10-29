@@ -2,7 +2,7 @@
 //!
 //! `read_file` 读取图片文件时(魔数识别 png/jpeg/gif/webp/bmp)不返回乱码,
 //! 而是把图片作为视觉输入注入会话(需要当前模型标记为可识图),
-//! 与 DSH 的"读图工具"一致 —— 只是这里复用 read_file 一个入口。
+//! 读图能力复用 read_file 一个入口。
 //!
 //! 性能与容错约定(见 [`crate::support`]):
 //! - 阻塞 fs 调用全部走 `spawn_blocking`,不挡异步运行时;
@@ -279,7 +279,7 @@ impl Tool for ReadFileTool {
                     // 这条本来就是从文件读出来的,路径回填后模型无需再猜。
                     path: Some(path.to_string_lossy().into_owned()),
                 };
-                // 注入视觉输入(下一条模型请求即可见),与 dsh read-image 的语义一致。
+                // 注入视觉输入(下一条模型请求即可见)。
                 if let Some(sink) = &ctx.emit_event {
                     sink(denia_core::session::SessionEvent::UserMessage {
                         text: format!("[harness] 读取图片:{}({})", args.path, mime),

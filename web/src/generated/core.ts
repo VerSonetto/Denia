@@ -50,7 +50,7 @@ export type PresetTrust = "shipped" | "user";
 
 export type PresetFeatures = { 
 /**
- * AGENTS.md 工作区指令注入通道(对齐 dsh `agent-instructions` 行)。
+ * AGENTS.md 工作区指令注入通道。
  */
 agentsMd: boolean, 
 /**
@@ -155,7 +155,7 @@ export type SessionHeader = { type: SessionHeaderKind, version: number, id: stri
  */
 sandbox: boolean, 
 /**
- * 分支来源:本会话由哪个父会话 fork 而来(dsh parentSession 血缘)。
+ * 分支来源:本会话由哪个父会话 fork 而来(父会话血缘)。
  * 旧日志/普通会话无此字段。
  */
 parent_session?: string, subagent?: SubagentDescriptor, };
@@ -307,8 +307,8 @@ label: string,
  */
 description?: string, 
 /**
- * 模型推荐的选项。结构化字段,不靠标签后缀约定(对照 dsh 的
- * "(Recommended)" 字符串约定:多语言/全半角括号都会失配)。
+ * 模型推荐的选项。结构化字段,不靠"(Recommended)" 标签后缀约定
+ * (多语言/全半角括号都会失配)。
  */
 recommended?: boolean, };
 
@@ -526,7 +526,7 @@ channel?: string,
  */
 images?: Array<ImageData>, } | { "type": "system-prompt", turn: number, step: number, text: string, } | { "type": "assistant-chunk", turn: number, step: number, chunk: StreamChunk, } | { "type": "assistant-message", turn: number, step: number, blocks: Array<ContentBlock>, usage?: TokenUsage, interrupted?: boolean, 
 /**
- * 构建本条消息的 chunk 事件 seq 引用(对齐 dsh `sourceEventSeqs`)。
+ * 构建本条消息的 chunk 事件 seq 引用。
  * 空流(无任何 chunk)时为缺省,不记录。
  */
 source_event_seqs?: Array<number>, 
@@ -537,11 +537,11 @@ source_event_seqs?: Array<number>,
  */
 first_token_time?: number, } | { "type": "tool-call", turn: number, step: number, call_id: string, name: string, arguments: string, } | { "type": "tool-result", turn: number, step: number, call_id: string, content: string, is_error: boolean, error?: string, 
 /**
- * 工具内部失败身份(对齐 dsh `tool/result.error{name,code}`);None = 无内部标识。
+ * 工具内部失败身份;None = 无内部标识。
  */
 error_identity?: ToolFailureIdentity, 
 /**
- * 工具私有展示载荷(对齐 dsh `tool/result.meta`);核心不解释其形状。
+ * 工具私有展示载荷;核心不解释其形状。
  */
 meta?: unknown, 
 /**
@@ -550,8 +550,7 @@ meta?: unknown,
 truncation?: TruncationInfo, 
 /**
  * 工具结果剪枝替换:本事件是对旧 `ToolResult` 事件(seq)的 surface
- * 替换,旧节点不再进入模型历史与 token-meter 表面(对齐 dsh
- * `tool/result` 的 `surfaceOp.replace`)。None = 普通追加。
+ * 替换,旧节点不再进入模型历史与 token-meter 表面。None = 普通追加。
  */
 replaces?: number, } | { "type": "tool-output-chunk", 
 /**
@@ -628,7 +627,7 @@ channel?: string,
  */
 images?: Array<ImageData>, } | { "type": "system-prompt", turn: number, step: number, text: string, } | { "type": "assistant-chunk", turn: number, step: number, chunk: StreamChunk, } | { "type": "assistant-message", turn: number, step: number, blocks: Array<ContentBlock>, usage?: TokenUsage, interrupted?: boolean, 
 /**
- * 构建本条消息的 chunk 事件 seq 引用(对齐 dsh `sourceEventSeqs`)。
+ * 构建本条消息的 chunk 事件 seq 引用。
  * 空流(无任何 chunk)时为缺省,不记录。
  */
 source_event_seqs?: Array<number>, 
@@ -639,11 +638,11 @@ source_event_seqs?: Array<number>,
  */
 first_token_time?: number, } | { "type": "tool-call", turn: number, step: number, call_id: string, name: string, arguments: string, } | { "type": "tool-result", turn: number, step: number, call_id: string, content: string, is_error: boolean, error?: string, 
 /**
- * 工具内部失败身份(对齐 dsh `tool/result.error{name,code}`);None = 无内部标识。
+ * 工具内部失败身份;None = 无内部标识。
  */
 error_identity?: ToolFailureIdentity, 
 /**
- * 工具私有展示载荷(对齐 dsh `tool/result.meta`);核心不解释其形状。
+ * 工具私有展示载荷;核心不解释其形状。
  */
 meta?: unknown, 
 /**
@@ -652,8 +651,7 @@ meta?: unknown,
 truncation?: TruncationInfo, 
 /**
  * 工具结果剪枝替换:本事件是对旧 `ToolResult` 事件(seq)的 surface
- * 替换,旧节点不再进入模型历史与 token-meter 表面(对齐 dsh
- * `tool/result` 的 `surfaceOp.replace`)。None = 普通追加。
+ * 替换,旧节点不再进入模型历史与 token-meter 表面。None = 普通追加。
  */
 replaces?: number, } | { "type": "tool-output-chunk", 
 /**

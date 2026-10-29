@@ -30,10 +30,10 @@ pub struct ConsoleSettings {
     /// `system` | `light` | `dark`.
     #[serde(default = "default_theme")]
     pub theme: String,
-    /// `zh` | `en`;zh 是源语言(学 dsh 的 i18n 约定)。
+    /// `zh` | `en`;zh 是源语言。
     #[serde(default = "default_locale")]
     pub locale: String,
-    /// 层叠上下文管理(学 dsh 压力驱动 + Claude Code compact):
+    /// 层叠上下文管理(压力驱动):
     /// 低压力不动(前缀缓存稳定),高压力 LLM 总结压缩。
     /// 全部字段带默认值;见 `ConsoleCompactionSettings`。
     #[serde(default)]
@@ -42,7 +42,7 @@ pub struct ConsoleSettings {
     /// 全部字段带默认值;见 `ConsoleMicrocompactSettings`。
     #[serde(default)]
     pub microcompact: ConsoleMicrocompactSettings,
-    /// 工具并行执行上限(学 codex `ToolCallRuntime` + dsh `maxParallelToolCalls`)。
+    /// 工具并行执行上限。
     /// 一次 step 内模型返回的多个工具调用并发执行,受此上限约束。
     #[serde(default = "default_max_parallel_tool_calls")]
     pub max_parallel_tool_calls: usize,
@@ -64,8 +64,8 @@ pub fn default_permission_mode() -> String {
 /// 设置里可选的新建会话默认档位(剔除 plan,见字段注释)。
 pub const SELECTABLE_DEFAULT_PERMISSION_MODES: [&str; 3] = ["read-only", "auto-edit", "full"];
 
-/// `console.compaction` 段(层叠上下文管理配置,默认对齐 Claude Code
-/// auto-compact 缓冲语义)。
+/// `console.compaction` 段(层叠上下文管理配置,默认带自动压缩缓冲
+/// 语义)。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct ConsoleCompactionSettings {

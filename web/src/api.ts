@@ -970,7 +970,7 @@ export function deleteSession(id: string): Promise<unknown> {
   return http(`/api/sessions/${encodeURIComponent(id)}`, { method: 'DELETE' })
 }
 
-/** 从某个已完成轮次边界分支出全新会话(dsh session.fork)。 */
+/** 从某个已完成轮次边界分支出全新会话。 */
 export function forkSession(
   id: string,
   atSeq?: number,
@@ -1004,7 +1004,7 @@ export function postPrompt(
   })
 }
 
-/** 切换当前会话权限预设(抄 dsh /permission 写路径)。 */
+/** 切换当前会话权限预设。 */
 export function setSessionPermission(
   id: string,
   mode: PermissionMode,
@@ -1088,7 +1088,7 @@ export interface ContextBreakdown {
   messageTokens: number
 }
 
-/** 上下文压力投影(对齐 dsh `contextPressure`:字段各自 last-wins,可缺省)。 */
+/** 上下文压力投影(字段各自 last-wins,可缺省)。 */
 export interface ContextPressure {
   /** 路由容量(最新 request/context 记录的上下文窗口)。 */
   contextWindow?: number
@@ -1098,7 +1098,7 @@ export interface ContextPressure {
   projectedTokens?: number
 }
 
-/** 精确 usage 累计(对齐 dsh `TurnTokenUsage`)。 */
+/** 精确 usage 累计。 */
 export interface TurnTokenUsage {
   uncachedInputTokens: number
   outputTokens: number

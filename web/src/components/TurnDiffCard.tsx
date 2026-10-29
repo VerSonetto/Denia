@@ -2,7 +2,7 @@
  * 收尾轮次的变更卡片。
  *
  * 轮次结束那一刻,对话流需要把"这轮改了什么"讲清楚 —— 这是唯一一处
- * 用户不点任何东西就能拿到的总结。形态取自 Codex 的 turn-diff 卡片:
+ * 用户不点任何东西就能拿到的总结。卡片形态:
  * 标题(改了几个/哪个文件) + ±行数 + 可展开的文件列表 + 悬停看 diff。
  *
  * 三处点击区各司其职,不合并:
@@ -45,7 +45,7 @@ function pathBasename(path: string): string {
  *  展开才看得全,不如让"改了很多"这件事更显眼。 */
 const TURN_DIFF_SHOWN_LIMIT = 3
 
-/** 图片扩展名:产物 chip 用图片 glyph(对齐 dsh 的链接图标分类)。 */
+/** 图片扩展名:产物 chip 用图片 glyph。 */
 const IMAGE_EXTS = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'ico', 'bmp', 'avif'])
 
 /** 代码/配置扩展名:产物 chip 用代码 glyph;其余扩展名走纸张文件 glyph。 */
@@ -190,7 +190,7 @@ function TurnDiffPreview({
  * (可展开的文件列表)、**具体改了什么**(行内 diff,单文件直接摊开)。
  *
  * 副标题有两态:默认是 ±行数(事实),悬停换成「查看变更」(可点的意图)——
- * 与 Codex 的 turn-diff 卡片同一套做法。用户悬停时想的是"我要看哪里",
+ * 用户悬停时想的是"我要看哪里",
  * 而不是"它加了几行"。
  *
  * 头部整行可点 → 打开审查面板(工作区全量改动的权威视图);文件行可点 →
@@ -279,7 +279,7 @@ export function TurnDiffCard({
           <span className="turn-diff-title" title={single?.path}>
             {title}
             {/* 中断轮次:这半句挂在标题末尾而不是单独一行 —— 结局与变更
-                本是一件事的两面(见 Codex 的 noDiff.reverted 文案),但
+               本是一件事的两面,但
                 各占一行会被读成两条并列信息。 */}
             {interrupted === true && (
               <span className="turn-diff-partial" title={t('turnDiffPartialHint')}>

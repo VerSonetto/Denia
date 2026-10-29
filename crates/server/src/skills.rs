@@ -1,4 +1,4 @@
-//! dsh 式分层技能发现：项目 > 自定义 > 用户；正文只在调用时读取。
+//! 分层技能发现：项目 > 自定义 > 用户；正文只在调用时读取。
 use serde::{Deserialize, Serialize};
 
 pub mod management;
@@ -153,7 +153,7 @@ fn builtin_skills() -> Vec<Skill> {
         .collect()
 }
 
-/// 按字符数截断描述（技能目录用；对齐 dsh catalogDescriptionMaxLength 语义）。
+/// 按字符数截断描述（技能目录用）。
 pub fn truncate_chars(text: &str, max: usize) -> String {
     if text.chars().count() <= max {
         return text.to_string();

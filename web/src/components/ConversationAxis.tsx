@@ -5,7 +5,7 @@ import type { TranscriptNode } from '../fold'
 import { t } from '../i18n'
 
 /**
- * 对话轴(对齐 Codex AppThreadUserMessageNavigationRail):聊天区左侧一条
+ * 对话轴:聊天区左侧一条
  * 浮轨,每条用户消息一个短横线。少于 4 条不出现。刻度来自后端全量锚点,
  * 不受分页窗口限制;点击未加载的刻度由视图向上翻页覆盖后再定位。
  *
@@ -219,8 +219,7 @@ export function ConversationAxis({
     return () => cancelAnimationFrame(frame)
   }, [items, locate, nodes, scrollRef])
 
-  // 当前刻度 = 视口顶缘之下第一条用户消息(Codex 的 IntersectionObserver
-  // rootMargin `-16px`)。量不到的历史刻度保持上一次的结果。
+  // 当前刻度 = 视口顶缘之下第一条用户消息。量不到的历史刻度保持上一次的结果。
   useEffect(() => {
     const scroller = scrollRef.current
     if (!scroller || items.length === 0) return

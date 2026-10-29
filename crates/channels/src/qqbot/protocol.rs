@@ -1,6 +1,5 @@
 //! QQ Bot API v2 协议:常量、事件解析与请求体构造。
 //!
-//! 与 hermes 的 qqbot 适配器对齐:
 //! - 网关事件走 `C2C_MESSAGE_CREATE`(私聊)与 `GROUP_AT_MESSAGE_CREATE`(群 @);
 //! - 被动回复必须带用户消息的 `msg_id`,否则会触发主动消息配额;
 //! - 群消息正文开头带 `@机器人`,入站时剥掉。
@@ -11,7 +10,7 @@ use serde_json::{Value, json};
 pub const API_BASE: &str = "https://api.sgroup.qq.com";
 pub const TOKEN_URL: &str = "https://bots.qq.com/app/getAppAccessToken";
 pub const GATEWAY_PATH: &str = "/gateway";
-/// 与 hermes 一致:群 @、私聊、频道私信与互动的 intent 组合。
+/// 群 @、私聊、频道私信与互动的 intent 组合。
 pub const INTENTS: u64 = (1 << 25) | (1 << 30) | (1 << 12) | (1 << 26);
 pub const MAX_MESSAGE_LENGTH: usize = 4000;
 pub const MSG_TYPE_TEXT: i64 = 0;

@@ -249,7 +249,7 @@
   color: var(--accent);
 }
 
-/* ===================== 轨迹(dsh 形态 + 可读性增强) ===================== */
+/* ===================== 轨迹(可读性增强) ===================== */
 
 /* 类型三色系(与 ContextRing 面板同源:琥珀=用户,蓝=消息,绿=工具) */
 .traj-pane {
@@ -502,7 +502,7 @@
   border-top: 2px solid var(--border-l);
 }
 
-/* 组头:与台账行同栅格(dsh 同款,列标签与数据列几何对齐) */
+/* 组头:与台账行同栅格(列标签与数据列几何对齐) */
 .traj-turn-head {
   position: sticky;
   top: 0;
@@ -805,7 +805,7 @@
   color: var(--label-tertiary);
 }
 
-/* ---- inspector:右侧常驻面板(dsh 本地 inspector 形态) ---- */
+/* ---- inspector:右侧常驻面板 ---- */
 
 .traj-inspector {
   width: 344px;

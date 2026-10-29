@@ -1,4 +1,4 @@
-//! 会话标题生成(抄 dsh `session-title` + `session-title-first-prompt-llm`):
+//! 会话标题生成:
 //! 第一轮用户消息发出后,后台用同路由模型生成一行标题,落 `session-title`
 //! 事件(latest-wins,仅日志,不进模型历史)。
 //!
@@ -16,17 +16,17 @@ use futures::StreamExt;
 
 use crate::state::{LiveSession, ServerEvent};
 
-/// 单条标题输入的 UTF-8 字节上限(dsh `maxInputBytes`):超出从头部截断。
+/// 单条标题输入的 UTF-8 字节上限:超出从头部截断。
 const MAX_INPUT_BYTES: usize = 4096;
-/// 单条标题的 UTF-8 字节上限(dsh `maxTitleBytes`):防御模型超长输出。
+/// 单条标题的 UTF-8 字节上限:防御模型超长输出。
 const MAX_TITLE_BYTES: usize = 80;
-/// 端到端生成时限(dsh `timeoutMs: 60000`)。
+/// 端到端生成时限(60 秒)。
 const TIMEOUT: Duration = Duration::from_secs(60);
 
 /// 思考档位从低到高的已知顺序(对齐 deepseek `ReasoningEffort` 枚举)。
 const EFFORT_ORDER_LOW_TO_HIGH: [&str; 6] = ["off", "low", "medium", "high", "xhigh", "max"];
 
-/// 标题生成系统提示:语义对齐 dsh `systemPrompt()`,中文措辞。
+/// 标题生成系统提示:中文措辞。
 const SYSTEM_PROMPT: &str = "为一次 AI 编码助手会话起一个简洁标题,依据提供的人类消息。\n\
 只返回一行标题:纯自然语言文本,不带引号、前缀、解释、Markdown、XML 或终端控制字符;不允许代码。\n\
 使用消息的语言。\n\
@@ -148,15 +148,15 @@ fn lowest_effort(efforts: &[denia_llm::ReasoningEffortInfo]) -> Option<String> {
         .or_else(|| efforts.first().map(|effort| effort.id.clone()))
 }
 
-/// dsh `frameMessages`:消息按 JSON 数组框定,用户文本破坏不了结构分隔符。
+/// 消息按 JSON 数组框定,用户文本破坏不了结构分隔符。
 fn frame_input(prompt: &str) -> String {
-    // 超长输入从头部截断(dsh 超限报错;标题取开头足够,best-effort 不打回)。
+    // 超长输入从头部截断(标题取开头足够,best-effort 不打回)。
     let text = truncate_utf8(prompt.trim(), MAX_INPUT_BYTES);
     let messages = serde_json::json!([{ "seq": 1, "text": text }]);
     format!("根据以下 JSON 数组中的人类消息生成会话标题:\n{messages}")
 }
 
-/// 标题归一化(抄 dsh `normalizeSessionTitle`):剥终端转义序列与控制字符、
+/// 标题归一化:剥终端转义序列与控制字符、
 /// 空白归一、UTF-8 字节预算内截断,产出单行安全标题(可能为空)。
 fn normalize_title(input: &str, max_bytes: usize) -> String {
     let stripped = strip_escape_sequences(input);
@@ -188,7 +188,7 @@ fn consumes_csi_sequence(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) {
     }
 }
 
-/// 剥离 OSC/CSI/两字节 ESC 转义序列(对齐 dsh 三条正则的语义)。
+/// 剥离 OSC/CSI/两字节 ESC 转义序列。
 fn strip_escape_sequences(input: &str) -> String {
     let mut out = String::with_capacity(input.len());
     let mut chars = input.chars().peekable();
@@ -218,7 +218,7 @@ fn strip_escape_sequences(input: &str) -> String {
     out
 }
 
-/// dsh `CONTROL_CHARACTER` + `DIRECTIONAL_CONTROL`:除 \t\n\r(空白归一
+/// 除 \t\n\r(空白归一
 /// 阶段处理)外的 C0/C1 控制字符,以及方向性/零宽不可见字符。
 fn is_stripped_control(c: char) -> bool {
     matches!(c,
@@ -228,8 +228,7 @@ fn is_stripped_control(c: char) -> bool {
         | '\u{2066}'..='\u{206f}' | '\u{feff}')
 }
 
-/// UTF-8 边界安全截断:返回不超过 `max_bytes` 的最长码点前缀(dsh
-/// `truncateTitleUtf8`)。
+/// UTF-8 边界安全截断:返回不超过 `max_bytes` 的最长码点前缀。
 fn truncate_utf8(input: &str, max_bytes: usize) -> String {
     if input.len() <= max_bytes {
         return input.to_string();

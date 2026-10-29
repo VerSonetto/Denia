@@ -126,12 +126,6 @@ impl Jobs {
         let r = Self::owned(&mut records, id, owner)?;
         Ok(serde_json::json!({"job":r.snapshot,"output":r.output,"outputArtifact":r.artifact}))
     }
-    pub fn release_notice(&self, id: &str, owner: &str) {
-        let mut records = self.records.lock().unwrap();
-        if let Ok(r) = Self::owned(&mut records, id, owner) {
-            r.snapshot.reported = false;
-        }
-    }
     pub fn claim_notice(&self, id: &str, owner: &str) -> Option<serde_json::Value> {
         let mut records = self.records.lock().unwrap();
         let r = Self::owned(&mut records, id, owner).ok()?;

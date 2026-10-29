@@ -34,7 +34,7 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/api/fs/preview/{root}/{*file}", get(preview_asset))
 }
 
-/// 目录选择器 seam 的能力决策(抄 dsh directory-picker-auto):
+/// 目录选择器 seam 的能力决策:
 /// 远程绑定/SSH/远程连接来客 → browse;win/mac → native;linux 有显示+zenity
 /// → native;其余 → browse(到处能用)。消费端遇到未知 kind 的默认行为是隐藏入口。
 async fn capability(
@@ -75,7 +75,7 @@ fn which(tool: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// browse 能力的建文件夹原语(抄 dsh browse seam 的 createDirectory)。
+/// browse 能力的建文件夹原语。
 async fn mkdir(Json(body): Json<MkdirBody>) -> Result<impl IntoResponse, ApiError> {
     let parent = std::path::PathBuf::from(body.path.trim());
     let name = body.name.trim();
@@ -204,16 +204,16 @@ fn browse_impl(path: Option<String>) -> Result<impl IntoResponse, ApiError> {
     })))
 }
 
-/* ---- 输入框 `@` 文件/文件夹提及候选(对照 dsh file-reference-local) ----
+/* ---- 输入框 `@` 文件/文件夹提及候选 ----
  * 候选只含路径,选中值保持普通提示词文本;文件内容始终留在模型侧的
  * read 类工具后面。前端只传已存活会话 cwd;path 不是目录直接 400(fail loud)。 */
 
 /// 索引收录上限(防爆):深度优先遍历下覆盖主模块整条深链 + 多个并列模块。
 /// 大项目(数万目录)无法全树收录,预算内优先保证"深路径文件"可达。
 const MENTION_MAX_ENTRIES: usize = 10_000;
-/// 单次查询返回上限(对照 dsh DEFAULT_FILE_SEARCH_MAX_RESULTS)。
+/// 单次查询返回上限。
 const MENTION_MAX_RESULTS: usize = 50;
-/// 永不遍历/收录的目录 basename(对照 dsh DEFAULT_FILE_SEARCH_EXCLUDED_DIRECTORIES)。
+/// 永不遍历/收录的目录 basename。
 const MENTION_EXCLUDED_DIRS: &[&str] = &[
     ".git",
     "node_modules",
@@ -377,7 +377,7 @@ fn root_mtime(root: &Path) -> Option<SystemTime> {
         .and_then(|meta| meta.modified().ok())
 }
 
-/// 全树深度优先扫描(对照 dsh scanWorkspace,但用 DFS 替代 BFS):
+/// 全树深度优先扫描(用 DFS 而非 BFS):
 /// 大项目目录数远超预算,DFS 沿 read_dir 顺序的第一条链扎到底,保证
 /// `app/src/main/java/.../feature/launcher` 这类深路径文件在预算内可达;
 /// 排除默认排除集 + 全部隐藏目录;类型用 dirent 的 file_type 判定免 stat。
@@ -412,7 +412,7 @@ fn scan_mention_index(root: &Path) -> Vec<IndexedMention> {
             } else if file_type.is_file() {
                 indexed.push(IndexedMention::new(child_rel, "file"));
             }
-            // 符号链接等其他类型不收录(dsh 同样不 follow)。
+            // 符号链接等其他类型不收录(不 follow)。
         }
         // 逆序入栈:栈顶保持 read_dir 顺序的第一个子目录,先沿第一条链深入。
         stack.extend(subdirs.into_iter().rev());

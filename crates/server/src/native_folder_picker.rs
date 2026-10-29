@@ -4,7 +4,7 @@
 //! the browser (Win32 foreground lock). Showing `IFileOpenDialog` in-process
 //! therefore lands the picker on the taskbar instead of in front of the user.
 //!
-//! The fix matches dsh: spawn a short-lived copy of this binary (`--pick-folder`)
+//! The fix: spawn a short-lived copy of this binary (`--pick-folder`)
 //! so the dialog is that process's first window, then force it above other
 //! windows. Other platforms keep the in-process rfd call.
 

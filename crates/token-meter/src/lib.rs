@@ -1,4 +1,4 @@
-//! dsh `@deepseek-ai/dsh-token-meter` 三层投影的 Rust 镜像。
+//! 三层投影的 Rust 实现。
 //!
 //! 1. `ContextBreakdown` —— **字符类别密度的启发式拆分** system / tools /
 //!    message 三行,并在存在 provider 锚点时**校准**:固定成本行(系统 /
@@ -6,13 +6,12 @@
 //!    三数整数和恒等于 `context_pressure` 的 projected 值 —— 面板不会再
 //!    出现"明细加不出总数",也不会让不变的工具行随缩放漂移。
 //! 2. `TurnTokenUsage` —— **精确**,provider 上报的 usage 累加。`usage`
-//!    缺失或 lifecycle 缺段的轮次不进总和(同 dsh `deriveTurnTokenUsage`:
-//!    任何不完整则整个 Turn 跳过)。
-//! 3. `ContextPressure` —— **锚点 + 表面增量**(wire 形状对齐 dsh)。最近
+//!    缺失或 lifecycle 缺段的轮次不进总和(任何不完整则整个 Turn 跳过)。
+//! 3. `ContextPressure` —— **锚点 + 表面增量**。最近
 //!    一次 provider usage 提供精确的 prompt 侧锚点;锚点之后消息的启发式
 //!    增量叠加出 `projectedTokens`(回答下一次请求的 prompt 规模);路由
 //!    容量来自 `request/context` 记录。没有 usage 样本就没有锚点,不做
-//!    启发式兜底 —— provider 没报数就不显示占用,同 dsh。
+//!    启发式兜底 —— provider 没报数就不显示占用。
 
 use std::collections::HashMap;
 
@@ -53,7 +52,7 @@ pub struct ContextBreakdown {
     pub message_tokens: u64,
 }
 
-/// 一个 Turn 上累加的精确 usage(同 dsh `TurnTokenUsage`)。
+/// 一个 Turn 上累加的精确 usage。
 #[derive(Debug, Default, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TurnTokenUsage {
@@ -75,13 +74,13 @@ impl TurnTokenUsage {
     }
 }
 
-/// 上下文压力投影(对齐 dsh `contextPressure` 的 wire 形状,字段各自
+/// 上下文压力投影(字段各自
 /// last-wins、可缺省,None 时不序列化)。
 ///
 /// - `contextWindow`:最新 `request/context` 记录的路由容量。
 /// - `pressureTokens`:最近一次 provider usage 的 prompt 侧总量
 ///   (input + cache_read + cache_write,不含输出);没有 usage 样本就没有
-///   该字段 —— dsh 语义:provider 没报数就不显示占用,不做启发式兜底。
+///   该字段 —— provider 没报数就不显示占用,不做启发式兜底。
 /// - `projectedTokens`:锚点加上锚点之后表面的启发式增量,回答"下一次
 ///   请求的 prompt 有多大",而不是"上一次有多大"。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -239,7 +238,7 @@ fn add_sample(acc: &mut TurnTokenUsage, sample: &TokenUsage) {
     }
 }
 
-/// 用 dsh `deriveTurnTokenUsage` 思路 fold 一个 turn 的精确 usage。
+/// fold 一个 turn 的精确 usage。
 ///
 /// 接受一个 turn 起止区间内的所有 envelope(turn-start 到 turn-end),把每个
 /// step 上出现的**所有** usage 样本累加:同一个 step 里流中断后重发过的那次
@@ -360,7 +359,7 @@ impl TokenUsageExt for TokenUsage {
 ///
 /// 增量 fold:维护 `ContextBreakdown`(纯估算)+ `TurnTokenUsage`(精确)+ `ContextPressure`(锚点 + 表面增量)。
 ///
-/// 口径完全对齐 dsh `contextPressure` / `contextBreakdown` 投影:
+/// 投影口径:
 /// - 表面总量(`surface_tokens`)对所有模型可见消息持续累加,不因锚点重置;
 /// - 每个 usage 样本(AssistantMessage.usage)都重设锚点,且在**该消息加入
 ///   表面之前**盖章 —— 样本对应的请求不包含它自己的回复,锚点必须对着
@@ -370,10 +369,10 @@ impl TokenUsageExt for TokenUsage {
 pub struct ContextMeter {
     system_tokens: u64,
     tools_tokens: u64,
-    /// 模型可见消息的启发式运行总量(对齐 dsh `surfaceTokens`)。
+    /// 模型可见消息的启发式运行总量。
     surface_tokens: u64,
     /// 每个 surface 节点(事件 seq)的启发式 token 数;替换剪枝时据此扣减
-    /// 旧节点(对齐 dsh shadow-price 的净效果;内存版不需要落 shadow 事件)。
+    /// 旧节点(内存版不需要落 shadow 事件)。
     surface_nodes: HashMap<u64, u64>,
     /// 基线注入通道 → 它在表面上的当前节点 seq。同通道新版本入表时靠它
     /// 定位要撤下的旧节点(对齐 `derive_surface` 的按通道折叠)。
@@ -573,7 +572,7 @@ impl ContextMeter {
     pub fn apply_one_projected(&mut self, envelope: &SessionEnvelope, model_visible: bool) {
         match &envelope.event {
             SessionEvent::RequestContext { context_window, .. } => {
-                // 路由容量 last-wins;未通告时移除(dsh 同语义)。
+                // 路由容量 last-wins;未通告时移除。
                 self.context_window = *context_window;
                 return;
             }
@@ -802,7 +801,7 @@ impl ContextMeter {
                 ..
             } => {
                 // LLM 总结压缩:被压缩区间的事件不再占据表面,摘要消息
-                // 代替它们计价(对齐 Claude Code compact:日志保留旧事件,
+                // 代替它们计价(日志保留旧事件,
                 // 表面只投影新形态)。
                 let mut removed = 0u64;
                 self.surface_nodes.retain(|seq, tokens| {
@@ -1363,7 +1362,7 @@ mod tests {
         ];
         meter.fold(&events);
         // 锚点 = input + cache_read = 120;锚点在本消息入表前盖章,所以
-        // projected = 120 + 本消息启发式(dsh 语义:回答下一次请求规模)。
+        // projected = 120 + 本消息启发式(回答下一次请求规模)。
         // breakdown 三数按锚点校准后,整数和恒等于 projected。
         let p = meter.context_pressure();
         assert_eq!(p.pressure_tokens, Some(120));
@@ -1509,8 +1508,8 @@ mod tests {
 
     #[test]
     fn pressure_without_anchor_has_no_fallback() {
-        // 无 usage 样本:没有 pressureTokens,不做启发式兜底(dsh 语义,
-        // provider 没报数就不显示占用)。
+        // 无 usage 样本:没有 pressureTokens,不做启发式兜底
+        // (provider 没报数就不显示占用)。
         let mut meter = ContextMeter::new();
         meter.set_system_tokens(100);
         meter.set_tools_tokens(50);
@@ -1549,7 +1548,7 @@ mod tests {
             },
         ));
         assert_eq!(meter.context_pressure().context_window, Some(128_000));
-        // 未通告的新记录移除容量(dsh 同语义)。
+        // 未通告的新记录移除容量。
         meter.apply_one(&envelope(
             2,
             SessionEvent::RequestContext {

@@ -4,7 +4,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 
 use async_trait::async_trait;
 use denia_agent_loop::{ApprovalBridge, SessionDriver};
@@ -118,6 +118,24 @@ pub enum ServerEvent {
     },
 }
 
+/// 主模型当前是否处在一个不可打断的动作里。
+///
+/// 完成结果(后台任务/子代理)只能在这个值为 [`ModelActivity::Idle`] 时
+/// 进入收件箱。`Busy` 覆盖模型输出与工具执行两段：输出从首个
+/// `AssistantChunk` 到 `AssistantMessage`，工具从 `ToolCall` 到 `StepEnd`。
+/// 等待用户审批/回答不算输出或工具，模型此刻没有在产出，投递不会打断任何
+/// 动作；是否开启新一轮仍由 `running` + 自动唤醒预算裁决。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ModelActivity {
+    Idle,
+    Busy,
+}
+impl ModelActivity {
+    pub fn is_mid_action(self) -> bool {
+        matches!(self, Self::Busy)
+    }
+}
+
 /// One materialized session: durable log plus live fan-out. `session` is an
 /// internally synchronized log, so readers never wait behind a running turn.
 pub struct LiveSession {
@@ -134,11 +152,38 @@ pub struct LiveSession {
     >,
     /// 等待用户作答的提问请求(request_id → oneshot)。
     ///
-    /// 与审批分表:dsh 用同一 id 空间承担两种交互,重试/多问题批次时
-    /// 应答可能误配;这里按 request_id 严格隔离,且答题是一次性原子结算。
+    /// 与审批分表:重试/多问题批次时,同一 id 空间应答可能误配;这里按
+    /// request_id 严格隔离,且答题是一次性原子结算。
     pub pending_asks: std::sync::Mutex<
         HashMap<String, tokio::sync::oneshot::Sender<denia_core::session::AskResolution>>,
     >,
+    /// 主模型是否正在输出或执行工具。完成结果据此等待动作边界。
+    activity: AtomicU8,
+}
+
+impl LiveSession {
+    /// 当前模型动作状态。
+    pub fn activity(&self) -> ModelActivity {
+        match self.activity.load(Ordering::SeqCst) {
+            1 => ModelActivity::Busy,
+            _ => ModelActivity::Idle,
+        }
+    }
+
+    /// 更新动作状态；返回是否发生了状态迁移(调用方据此在 Busy → Idle
+    /// 时立即催办完成队列，而不是等下一轮轮询)。
+    pub fn set_activity(&self, next: ModelActivity) -> bool {
+        let next = match next {
+            ModelActivity::Busy => 1,
+            ModelActivity::Idle => 0,
+        };
+        self.activity.swap(next, Ordering::SeqCst) != next
+    }
+
+    /// 模型是否正在一个不可打断的动作里。
+    pub fn mid_action(&self) -> bool {
+        self.running.load(Ordering::SeqCst) && self.activity().is_mid_action()
+    }
 }
 
 /// 驻留会话数上限。超出后按 LRU 淘汰非运行、无订阅者会话。
@@ -250,6 +295,7 @@ impl LiveSessions {
             cancel: std::sync::Mutex::new(None),
             pending_approvals: std::sync::Mutex::new(HashMap::new()),
             pending_asks: std::sync::Mutex::new(HashMap::new()),
+            activity: AtomicU8::new(0),
         });
         map.insert(id.to_string(), live.clone());
         // 保护刚加载的这个会话:调用方(以及上面的 `live.clone()`)正持有它,
@@ -503,7 +549,7 @@ impl ApprovalBridge for ServerApprovalBridge {
 /// 服务端提问桥:把 `ask` 工具的提问挂到 LiveSession 的 pending 表,
 /// 落 `ask-requested` 事件(刷新页面可恢复挂起卡片),等待 REST 应答。
 ///
-/// 与 dsh 的差异(见 `docs/ask-tool.md` 不足分析):
+/// 关键差异(见 `docs/ask-tool.md` 不足分析):
 /// - **有超时**:`timeout_ms` 到点按 `TimedOut` 结算,工具不会永久挂起;
 /// - **结局区分**:超时/取消/无通道各有独立语义,模型知道下一步怎么办;
 /// - **先落盘再等待**:请求进日志后即使前端断线重连也能重建挂起态;
@@ -691,6 +737,7 @@ impl Drop for RunningGuard {
             }
         }
         {
+            self.live.set_activity(ModelActivity::Idle);
             let mut cancel = self.live.cancel.lock().unwrap_or_else(|p| p.into_inner());
             *cancel = None;
             self.live.running.store(false, Ordering::SeqCst);

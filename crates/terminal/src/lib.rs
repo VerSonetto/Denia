@@ -10,10 +10,8 @@
 //!
 //! 所以这里用 [`portable-pty`] 起真伪终端,而不是复用 [`denia_tools::shell`]。
 //!
-//! # 与 ZCode 的对应关系
+//! # 会话语义
 //!
-//! ZCode 用 Electron + node-pty 实现同一件事(`resources/app.asar.unpacked/
-//! node_modules/node-pty`)。这里保持同样的**会话语义**:
 //! - 每个终端是一个独立 PTY 进程 + 独立 id;
 //! - 尺寸(`cols`/`rows`)由前端 `fit()` 算好后下发,**创建时就带上**,
 //!   避免 PTY 先用 80×24 起步再纠正造成首屏重排闪烁;

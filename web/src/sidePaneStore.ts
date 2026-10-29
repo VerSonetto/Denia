@@ -13,12 +13,11 @@
  * # 持久化策略
  *
  * - **标签集合**:localStorage(跨刷新、跨重启保留),按 scope 分桶;
- * - **折叠态**:localStorage,按 scope 分桶(抄 ZCode 的
- *   `sidePaneCollapsedByOwner`);
+ * - **折叠态**:localStorage,按 scope 分桶;
  * - **展开宽度**:localStorage,全局一份(不按会话分 —— 用户对面板宽度的
  *   预期是"我调过一次就一直这样",按会话分反而要在每个会话重调)。
  *
- * 分桶表本身也做上限:ZCode 用 LRU 50(`dd` Map)。这里同样限 50 个 scope,
+ * 分桶表本身也做上限:最多 50 个 scope(LRU),
  * 防止长期使用后 localStorage 无限增长(每个会话都开过终端的话)。
  */
 
@@ -38,10 +37,10 @@ const COLLAPSED_KEY = 'denia.sidePane.collapsed'
 const WIDTH_KEY = 'denia.sidePane.width'
 const RECENT_KEY = 'denia.sidePane.recentClosed'
 
-/** 分桶上限(抄 ZCode 的 50)。 */
+/** 分桶上限。 */
 const SCOPE_LIMIT = 50
 
-/** 展开宽度默认值:父容器的 45%(抄 ZCode 的 `kjt = 0.45`)。 */
+/** 展开宽度默认值:父容器的 45%。 */
 export const DEFAULT_PANE_RATIO = 0.45
 /** 面板最小宽度:低于此值标签栏放不下,不如折叠。 */
 export const MIN_PANE_WIDTH = 240

@@ -29,7 +29,7 @@ pub struct SessionHeader {
     /// Confines file tools to `cwd`; orthogonal to the directory choice.
     #[serde(default = "default_true")]
     pub sandbox: bool,
-    /// 分支来源:本会话由哪个父会话 fork 而来(dsh parentSession 血缘)。
+    /// 分支来源:本会话由哪个父会话 fork 而来(父会话血缘)。
     /// 旧日志/普通会话无此字段。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "bindings", ts(optional))]
@@ -228,7 +228,7 @@ pub enum SessionHeaderKind {
 #[serde(tag = "kind", rename_all = "kebab-case")]
 pub enum TurnEndReason {
     Completed,
-    /// 取消中断(对齐 dsh `aborted` + `AgentCancelCause`);cause 缺失 = 旧日志。
+    /// 取消中断;cause 缺失 = 旧日志。
     Aborted {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[cfg_attr(feature = "bindings", ts(optional))]
@@ -243,11 +243,11 @@ pub enum TurnEndReason {
     LoopDetected {
         repeats: u32,
     },
-    /// 崩溃孤儿轮次的合成闭合(对齐 dsh `interrupted`;仅加载时生成,loop 不发射)。
+    /// 崩溃孤儿轮次的合成闭合(仅加载时生成,loop 不发射)。
     Interrupted,
 }
 
-/// 取消的发起方(对齐 dsh `AgentCancelCause`;`Legacy` 兼容旧日志无 cause 记录)。
+/// 取消的发起方(`Legacy` 兼容旧日志无 cause 记录)。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "bindings", derive(ts_rs::TS))]
 #[serde(tag = "kind", rename_all = "kebab-case")]
@@ -331,7 +331,7 @@ impl ApprovalPolicy {
     }
 }
 
-/// 一次审批请求的闭合结果(抄 dsh ApprovalOutcome)。
+/// 一次审批请求的闭合结果。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "bindings", derive(ts_rs::TS))]
 #[serde(rename_all = "kebab-case")]
@@ -371,7 +371,7 @@ pub struct PlanReviewDecision {
     pub feedback: Option<String>,
 }
 
-/// 向用户提问时可选项(denia `ask` 工具,对照 dsh `AskUserQuestionOption`)。
+/// 向用户提问时可选项(denia `ask` 工具)。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "bindings", derive(ts_rs::TS))]
 #[serde(rename_all = "camelCase")]
@@ -382,8 +382,8 @@ pub struct AskOption {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "bindings", ts(optional))]
     pub description: Option<String>,
-    /// 模型推荐的选项。结构化字段,不靠标签后缀约定(对照 dsh 的
-    /// "(Recommended)" 字符串约定:多语言/全半角括号都会失配)。
+    /// 模型推荐的选项。结构化字段,不靠"(Recommended)" 标签后缀约定
+    /// (多语言/全半角括号都会失配)。
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub recommended: bool,
 }
@@ -435,8 +435,8 @@ pub struct AskAnswer {
     pub skipped: bool,
 }
 
-/// 一次提问的结局(denia 扩展:dsh 只有 answered/cancelled 两种,
-/// 无超时、无"通道不可用",模型无法区分"没人答"和"答了空")。
+/// 一次提问的结局(denia 扩展:超时与"通道不可用"是独立结局,
+/// 模型能区分"没人答"和"答了空")。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "bindings", derive(ts_rs::TS))]
 #[serde(rename_all = "kebab-case")]
@@ -490,8 +490,8 @@ pub enum TodoStatus {
     Completed,
 }
 
-/// 会话目标的生命周期状态(工作逻辑对照 codex thread goals;codex 的
-/// `usage_limited` 是账号配额概念,denia 走 API key 无此反馈,不设)。
+/// 会话目标的生命周期状态(不设账号配额概念的 `usage_limited` 状态:
+/// denia 走 API key,无此反馈)。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[cfg_attr(feature = "bindings", derive(ts_rs::TS))]
 #[serde(rename_all = "kebab-case")]
@@ -728,7 +728,7 @@ pub fn apply_goal_op(
     }
 }
 
-/// 为何写入 `request-header` 快照(对齐 dsh `RequestHeaderReason`)。
+/// 为何写入 `request-header` 快照。
 ///
 /// - `initial` — 日志里第一条 header(全新会话的第一次请求);
 /// - `resume` — 日志已有 header,本次 loop 实例的第一次请求(重启/续开/fork 种子);
@@ -744,7 +744,7 @@ pub enum RequestHeaderReason {
     Series,
 }
 
-/// 一次模型请求的完整头部快照(对齐 dsh `EpochHeader`):调用配置 +
+/// 一次模型请求的完整头部快照:调用配置 +
 /// 模型实际收到的系统提示 + 工具 schema。日志专用,不进入派生历史;
 /// 最近的快照即可重建一次请求的形态。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -761,7 +761,7 @@ pub struct RequestHeaderSnapshot {
     pub tools: Vec<ToolSchema>,
 }
 
-/// 工具调用的内部失败身份(对齐 dsh `tool/result.error { name, code }`)。
+/// 工具调用的内部失败身份。
 /// 与 `ToolResult.error`(模型可见错误文本)互补:这里记的是工具内部的
 /// 失败种类与码,供诊断聚合,不进入派生历史。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -850,7 +850,7 @@ pub enum SessionEvent {
         usage: Option<TokenUsage>,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         interrupted: bool,
-        /// 构建本条消息的 chunk 事件 seq 引用(对齐 dsh `sourceEventSeqs`)。
+        /// 构建本条消息的 chunk 事件 seq 引用。
         /// 空流(无任何 chunk)时为缺省,不记录。
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         source_event_seqs: Vec<u64>,
@@ -877,11 +877,11 @@ pub enum SessionEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[cfg_attr(feature = "bindings", ts(optional))]
         error: Option<String>,
-        /// 工具内部失败身份(对齐 dsh `tool/result.error{name,code}`);None = 无内部标识。
+        /// 工具内部失败身份;None = 无内部标识。
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[cfg_attr(feature = "bindings", ts(optional))]
         error_identity: Option<ToolFailureIdentity>,
-        /// 工具私有展示载荷(对齐 dsh `tool/result.meta`);核心不解释其形状。
+        /// 工具私有展示载荷;核心不解释其形状。
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[cfg_attr(feature = "bindings", ts(optional))]
         #[cfg_attr(feature = "bindings", ts(type = "unknown"))]
@@ -891,8 +891,7 @@ pub enum SessionEvent {
         #[cfg_attr(feature = "bindings", ts(optional))]
         truncation: Option<TruncationInfo>,
         /// 工具结果剪枝替换:本事件是对旧 `ToolResult` 事件(seq)的 surface
-        /// 替换,旧节点不再进入模型历史与 token-meter 表面(对齐 dsh
-        /// `tool/result` 的 `surfaceOp.replace`)。None = 普通追加。
+        /// 替换,旧节点不再进入模型历史与 token-meter 表面。None = 普通追加。
         #[serde(default, skip_serializing_if = "Option::is_none")]
         #[cfg_attr(feature = "bindings", ts(optional))]
         replaces: Option<u64>,
@@ -930,7 +929,7 @@ pub enum SessionEvent {
         call_id: String,
         placeholder: String,
     },
-    /// LLM 总结压缩(对齐 Claude Code compact 设计):把 `replaces_from..=
+    /// LLM 总结压缩:把 `replaces_from..=
     /// replaces_to` 的事件区间折叠成一条摘要消息,保留窗口从 `keep_from`
     /// 开始。日志保持 append-only:区间内旧事件仍在磁盘上,只是不再进入
     /// 派生历史与 token-meter 表面。
@@ -979,18 +978,18 @@ pub enum SessionEvent {
         /// 用户输入的完整原文(含 `/name` 前缀)。
         text: String,
     },
-    /// 会话权限模式切换(抄 dsh sandbox/mode):日志持久、可回放,
+    /// 会话权限模式切换:日志持久、可回放,
     /// 不进入模型历史;driver 读 fold 后的当前值做策略判断。
     PermissionMode {
         mode: PermissionMode,
     },
-    /// 会话标题快照(抄 dsh `session/title`):latest-wins、仅日志持久,
+    /// 会话标题快照:latest-wins、仅日志持久,
     /// 不进入模型历史与 token-meter 表面;第一轮用户消息发出后由服务端
     /// 后台生成,列表摘要与侧栏展示读取。
     SessionTitle {
         title: String,
     },
-    /// 会话运行用的 agent preset(抄 dsh `agent-preset/selected`):决定
+    /// 会话运行用的 agent preset:决定
     /// 模型看到的工具 schema 与 persona,因此属于会话事实而非运行时状态。
     /// 创建会话时写入;只有尚未产出内容的会话可以改选(切换会换掉工具面,
     /// 事后改会让已记录的工具调用无工具可执行)。latest-wins、仅日志持久,
@@ -1003,7 +1002,7 @@ pub enum SessionEvent {
     ApprovalPolicy {
         policy: ApprovalPolicy,
     },
-    /// 一次待审批的工具调用(抄 dsh approval/asked):driver 阻塞等待
+    /// 一次待审批的工具调用:driver 阻塞等待
     /// 用户通过 REST 决策,审批期间 UI 依据该事件弹窗。
     ApprovalAsked {
         request_id: String,
@@ -1014,7 +1013,7 @@ pub enum SessionEvent {
         #[cfg_attr(feature = "bindings", ts(optional))]
         reason: Option<String>,
     },
-    /// 一次审批请求的闭合结果(抄 dsh approval/decided)。
+    /// 一次审批请求的闭合结果。
     ApprovalDecided {
         request_id: String,
         outcome: ApprovalOutcome,
@@ -1034,9 +1033,9 @@ pub enum SessionEvent {
         request_id: String,
         resolution: AskResolution,
     },
-    /// 下一个模型请求的完整头部快照(对齐 dsh `request/header`),在其 step
+    /// 下一个模型请求的完整头部快照,在其 step
     /// 内、请求 dispatch 之前落盘。仅日志;最近的快照重建请求形态。
-    /// 按 dsh 语义按需写入:日志无 header 时写 `initial`,loop 恢复时写
+    /// 按需写入:日志无 header 时写 `initial`,loop 恢复时写
     /// `resume`,header 与上次不同时写 `change`(带 `starts_series`),
     /// 相同则不重复写。
     RequestHeader {
@@ -1047,7 +1046,7 @@ pub enum SessionEvent {
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         starts_series: bool,
     },
-    /// 下一个请求的路由元数据(对齐 dsh `request/context`):仅在路由或
+    /// 下一个请求的路由元数据:仅在路由或
     /// 容量(上下文窗口)变化时记录;不参与请求重建与 header 相等性判断。
     RequestContext {
         turn: u32,
@@ -1059,7 +1058,7 @@ pub enum SessionEvent {
         #[cfg_attr(feature = "bindings", ts(optional))]
         context_window: Option<u64>,
     },
-    /// 一次模型请求重试尝试的轨迹(对齐 dsh llm-retry 的事件化重试):
+    /// 一次模型请求重试尝试的轨迹(事件化重试):
     /// 提供方抖动时 harness 按退避重发,每次尝试失败落一条。仅日志,
     /// 不进入模型历史;`delay_ms` 是本次失败后的退避(下一次尝试前等待)。
     RetryAttempt {
@@ -1088,7 +1087,7 @@ pub struct SessionEnvelope {
 /// answered (aborts, crashes) so the derived wire history stays valid.
 pub const INTERRUPTED_TOOL_RESULT: &str = "[tool execution was interrupted]";
 
-/// 会话分支(抄 dsh `session.fork` 的边界切割语义)在日志前缀上的纯函数:
+/// 会话分支(边界切割语义)在日志前缀上的纯函数:
 /// 返回种子事件数量(切片右端,不含)。
 ///
 /// - `at_seq` 给定且未越过日志末尾:锚定到第一个 `seq >= at_seq` 的
@@ -1096,7 +1095,7 @@ pub const INTERRUPTED_TOOL_RESULT: &str = "[tool execution was interrupted]";
 /// - `at_seq` 未给或越过末尾:锚定到最后一个 `turn-end`。
 /// - 找不到边界(尚无任何已完成轮次)→ `None`,调用方报 fork-unavailable。
 ///
-/// 与 dsh 的差异:dsh 的 turn/end 后可能残留属于该轮的冻结节点(需要
+/// 差异:turn/end 后可能残留属于该轮的冻结节点(需要
 /// 延伸到下一个 turn/start);本仓驱动器把下一轮的用户消息写在 turn-end
 /// 与下一轮 turn-start 之间,那些事件属于下一轮,必须排除——切点严格
 /// 落在 `turn-end` 之后。
@@ -1123,7 +1122,7 @@ pub fn fork_cut_index(events: &[SessionEnvelope], at_seq: Option<u64>) -> Option
 ///
 /// Tool-result pruning replacements (`tool-result` with `replaces`) fold the
 /// surface: the replacement takes the original node's position and the old
-/// content no longer reaches the model (对齐 dsh `surfaceOp.replace`)。
+/// content no longer reaches the model.
 pub fn derive_messages(events: &[SessionEnvelope]) -> Vec<ChatMessage> {
     derive_surface(events)
         .into_iter()
@@ -2842,7 +2841,7 @@ mod tests {
             ),
         ];
         assert_eq!(fork_cut_index(&events, None), None);
-        // 锚点在未完成轮次内且不越过末尾:无边界 → None(dsh fork-unavailable)。
+        // 锚点在未完成轮次内且不越过末尾:无边界 → None(fork-unavailable)。
         assert_eq!(fork_cut_index(&events, Some(2)), None);
         // 锚点越过末尾:回退到最后一个 turn-end,仍没有 → None。
         assert_eq!(fork_cut_index(&events, Some(99)), None);

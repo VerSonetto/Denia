@@ -1,8 +1,7 @@
 //! Agent preset 词汇:决定一个会话"是什么 agent"的那份声明。
 //!
-//! denia 没有 dsh 那样的 Cordis 插件组装,dsh 用"组合里某一行存在与否"表达
-//! 功能开关(没有 tool-jobs 行,agent 就没有后台任务);denia 的等价物是一份
-//! 声明式清单:
+//! 功能开关不用"插件组合里某一行存在与否"表达(没有 tool-jobs 行,agent
+//! 就没有后台任务);denia 的等价物是一份声明式清单:
 //!
 //! - `tools: None` 表示出厂全量工具集(随部署新增工具自动跟进);
 //! - `tools: Some([...])` 是白名单,纪律段与工具同进退(段名到工具的映射
@@ -68,7 +67,7 @@ impl PresetTrust {
 #[cfg_attr(feature = "bindings", derive(ts_rs::TS))]
 #[serde(rename_all = "camelCase", deny_unknown_fields, default)]
 pub struct PresetFeatures {
-    /// AGENTS.md 工作区指令注入通道(对齐 dsh `agent-instructions` 行)。
+    /// AGENTS.md 工作区指令注入通道。
     pub agents_md: bool,
     /// 项目记忆:`tool:memory` 段、MEMORY.md 索引注入与 MemoryWrite 放行。
     pub memory: bool,
@@ -155,7 +154,7 @@ impl PresetFeatures {
     }
 
     /// 关闭的功能对应的工具名:装配时从工具面摘除,纪律段经段↔工具映射
-    /// 联动消失(对齐 dsh"没有 tool-goal 行,goal 工具与指引一起不存在")。
+    /// 联动消失(没有 tool-goal 行,goal 工具与指引一起不存在)。
     /// 列出部署不存在的名字无害——摘除是按交集收窄。
     pub fn excluded_tools(&self) -> Vec<&'static str> {
         let mut out: Vec<&'static str> = Vec::new();
@@ -243,9 +242,9 @@ pub const CREATOR_PERSONA: &str = "\
 
 /// 随部署提供的 preset 集合(按展示顺序)。
 ///
-/// 与 dsh 的随附集合同构:`standard` 是全量预设,`minimal` 是极简预设——
-/// persona 一句话独占、功能全关、只留 shell(对齐 dsh minimal 的
-/// `complete: true` + 持久 shell 形态);`creator` 让 Agent 引导用户创作
+/// 随附集合:`standard` 是全量预设,`minimal` 是极简预设——
+/// persona 一句话独占、功能全关、只留 shell(持久 shell 形态);
+/// `creator` 让 Agent 引导用户创作
 /// 新 preset(ask 收集 + create_preset 落盘)。
 pub fn builtin_presets() -> Vec<AgentPreset> {
     vec![
@@ -329,7 +328,7 @@ mod tests {
         assert!(is_valid_preset_id("minimal"));
         assert!(is_valid_preset_id("a-1-b"));
         assert!(is_valid_preset_id("1st"));
-        // 与 dsh 的 id 规则一致:只约束首字符与字符集合,尾随连字符合法。
+        // 只约束首字符与字符集合,尾随连字符合法。
         assert!(is_valid_preset_id("trail-"));
         assert!(!is_valid_preset_id(""));
         assert!(!is_valid_preset_id("Standard"));
@@ -371,7 +370,7 @@ mod tests {
             .find(|preset| preset.id == "minimal")
             .expect("minimal preset is shipped");
         assert!(minimal.restricts_tools());
-        // 极简 = persona 独占 + 功能全关 + 只留 shell(对齐 dsh minimal)。
+        // 极简 = persona 独占 + 功能全关 + 只留 shell。
         assert!(minimal.persona_complete);
         assert_eq!(minimal.features, PresetFeatures::all_off());
         assert_eq!(minimal.tools.as_deref(), Some(&["bash".to_string()][..]));

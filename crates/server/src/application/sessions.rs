@@ -344,8 +344,8 @@ impl<'a> SessionCommands<'a> {
         *live.cancel.lock().unwrap() = Some(token.clone());
 
         // 会话标题:第一轮用户消息(本会话还没有任何用户消息、非分支会话)
-        // 发出后,后台用同路由模型生成;dsh `first-prompt` 节奏的对齐——
-        // 分支会话沿用源会话标题,子代理有 label,都不生成。
+        // 发出后,后台用同路由模型生成;分支会话沿用源会话标题,子代理有
+        // label,都不生成。
         if live.session.header().parent_session.is_none()
             && live.session.first_prompt_excerpt(1).is_none()
         {
@@ -361,11 +361,16 @@ impl<'a> SessionCommands<'a> {
         let followers_for_turn = live.followers.clone();
         let driver = self.services.driver.clone();
         let session = live.session.clone();
+        let runtime_for_activity = self.services.runtime.clone();
+        let activity_id = id.clone();
         tokio::spawn(async move {
             // RAII:任务结束(含 panic)自动复位 running + 清 cancel + 广播结束。
             let _guard = admission;
             let emit: Arc<dyn Fn(&SessionEnvelope) + Send + Sync> =
                 Arc::new(move |envelope: &SessionEnvelope| {
+                    // 活动状态必须先于“无人订阅”的短路更新:完成结果的投递
+                    // 时机取决于模型是正在输出还是已经空闲。
+                    runtime_for_activity.observe_activity(&activity_id, &envelope.event);
                     // 无人订阅时不克隆:流式期间每秒几十条 chunk,每条都克隆一份
                     // 只为了喂给一个空的广播队列,纯属浪费。
                     if followers_for_turn.receiver_count() == 0 {

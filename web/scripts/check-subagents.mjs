@@ -350,7 +350,7 @@ assert('停止 child 时清理其 tab', runtimeForBrowser.includes('close_owned_
 assert(
   '结束 child 时清理其 tab',
   runtimeForBrowser.includes('async fn close_owned_tabs')
-    && read('crates/server/src/agent_runtime_delivery.rs').includes('close_owned_tabs(&child)'),
+    && read('crates/server/src/agent_runtime_lifecycle.rs').includes('close_owned_tabs(&child)'),
 )
 assert('删除会话时清理其 tab', runtimeForBrowser.includes('close_owned_tabs(&child.id)'))
 assert('装配处挂载浏览器中枢', read('crates/server/src/state.rs').includes('attach_browser'))

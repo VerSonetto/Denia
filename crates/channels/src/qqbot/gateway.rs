@@ -1,6 +1,5 @@
 //! QQ Bot WebSocket 网关:Hello/Identify/Heartbeat/Resume 与重连。
 //!
-//! 与 hermes 一致的处理:
 //! - Hello(op 10) 之后发 Identify 或 Resume(有 session 时);
 //! - 心跳间隔按服务端 `heartbeat_interval` 的 80%;
 //! - op 7(服务端要求重连)与 op 9(会话失效)都断开重连;

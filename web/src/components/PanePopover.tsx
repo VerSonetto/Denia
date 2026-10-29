@@ -8,8 +8,8 @@
  * 触发按钮旁边,就会被这两层 overflow 裁掉 —— 而且是**从下方内容处被截断**,
  * 不是被挡住:`overflow` 裁切发生在合成之前,`z-index` 再高也没用。
  *
- * 这正是实测踩到的 bug。ZCode 用 Radix 的 Popover/DropdownMenu,它们默认
- * portal 到 body,所以没有这个问题;denia 不引 UI 库,就自己实现这一步。
+ * 这正是实测踩到的 bug。denia 不引 UI 库,所以自己实现 portal 到 body
+ * 这一步。
  *
  * # 定位方式:先量后摆
  *

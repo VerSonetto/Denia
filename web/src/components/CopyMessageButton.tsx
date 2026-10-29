@@ -38,8 +38,8 @@ export function CopyMessageButton({ text }: { text: string }) {
 }
 
 /**
- * 轮次收尾消息的分支按钮(抄 dsh MessageIconActions 的 branch 位):
- * dsh 原版每个已完成轮次的 turn-tail 都挂分支,不再限制"仅 transcript
+ * 轮次收尾消息的分支按钮(挂在 turn-tail 位):
+ * 每个已完成轮次的 turn-tail 都挂分支,不再限制"仅 transcript
  * 尾部"——这样从任何已完成轮次都可以开新分支继续对话。
  */
 export function BranchMessageButton({

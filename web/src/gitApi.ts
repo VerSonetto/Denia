@@ -42,7 +42,7 @@ export interface GitDiff {
   summary: string | null
 }
 
-/** 审查面板的「来源」:与 ZCode 的四个 source 对齐(去掉 last-turn)。 */
+/** 审查面板的「来源」:四个 source,不含 last-turn。 */
 export type GitSource = 'unstaged' | 'staged' | 'branch'
 
 export const GIT_SOURCES: GitSource[] = ['unstaged', 'staged', 'branch']

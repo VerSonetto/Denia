@@ -1,4 +1,4 @@
-/* ---------- session main layout (dsh ConversationRoot 语义,Forge 视觉) ---------- */
+/* ---------- session main layout (布局语义 + 自有黑白视觉) ---------- */
 
 .session-layout {
   flex: 1;
@@ -132,7 +132,7 @@
   flex-direction: column;
 }
 
-/* ---- 对话轴:对齐 Codex floating navigation rail ---- */
+/* ---- 对话轴:左侧浮动导航轨道 ---- */
 
 /* 零高 sticky 槽:轨道浮在滚动口左侧,不撑高 scrollHeight。 */
 .conversation-axis {
@@ -343,7 +343,7 @@
 
 .session-layout[data-phase='hero'] .conversation-scroll {
   justify-content: center;
-  /* dsh HeroGlow:一团 #6187D8 8% 的柔光椭圆,安静垫在输入卡后面。 */
+  /* hero 柔光:一团 #6187D8 8% 的柔光椭圆,安静垫在输入卡后面。 */
   background:
     radial-gradient(
       ellipse 52% 30% at 50% 58%,
@@ -620,7 +620,7 @@
   color: var(--label-secondary);
 }
 
-/* ---- hero(新会话欢迎屏,抄 dsh HeroShell):logo + 标题一行,别的一概不要 ---- */
+/* ---- hero(新会话欢迎屏):logo + 标题一行,别的一概不要 ---- */
 
 .session-hero {
   display: flex;
@@ -645,7 +645,7 @@
   white-space: nowrap;
 }
 
-/* ---------- transcript turns (dsh MessageItem + DisclosureRow) ---------- */
+/* ---------- transcript turns ---------- */
 
 .user-row {
   display: flex;
@@ -1795,7 +1795,7 @@
   text-decoration-color: var(--accent);
 }
 
-/* LLM 总结压缩的边界标记(学 Claude Code compact boundary):整行按钮
+/* LLM 总结压缩的边界标记:整行按钮
    折叠摘要,meta 行展示 token 前后对比(超长时省略号截断)。 */
 .compaction-row {
   align-self: stretch;

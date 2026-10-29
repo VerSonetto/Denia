@@ -153,7 +153,7 @@ export default function App() {
   // 把"用户手动收起浏览器"这个意图转达给 hook(停止 AI 自动重开)。
   const { userClose: closeBrowserSidebar } = useBrowserSidebar(activeId)
 
-  /* ---- 右侧面板(ZCode 式多标签工作区) ---- */
+  /* ---- 右侧面板(多标签工作区) ---- */
 
   // 面板归属:当前会话的工作区路径。会话头 cwd 不可变,所以直接取。
   const activeSessionForPane = activeId
@@ -230,7 +230,7 @@ export default function App() {
   )
   useEffect(() => registerOpenReview(openReviewPanel), [openReviewPanel])
 
-  /** 终端进程退出:抄 ZCode 的 `lMt` —— 最后一个终端退出时连带收起面板。 */
+  /** 终端进程退出:最后一个终端退出时连带收起面板。 */
   const handleTerminalExit = useCallback(
     (tabId: string, _exitCode: number) => {
       // 不自动关标签:用户可能还要看退出前的输出。只在最后一个终端退出
@@ -289,7 +289,7 @@ export default function App() {
   const [sidebarExpandAllTick, setSidebarExpandAllTick] = useState(0)
   const [sidebarAllExpanded, setSidebarAllExpanded] = useState(false)
 
-  /* ---- 侧栏收起(dsh 折叠控制栏) ---- */
+  /* ---- 侧栏收起(折叠控制栏) ---- */
 
   // 收起态是 56px 图标控制栏而不是零宽:常驻开关/新建/添加/搜索/设置,
   // 与展开态各行顺序一一对应。偏好进 localStorage(纯 UI 态,不进 console 配置)。
@@ -310,7 +310,7 @@ export default function App() {
 
   // 交叉过渡编排:收起时宽内容原地淡出(列宽滑动由 CSS 裁切,内容冻结宽度
   // 不重排),落位后卸载宽态、控制栏淡入;展开时控制栏让位、宽内容淡入。
-  // 首次渲染即收起时不播放入场动画(dsh 语义);reduced-motion 直接切换。
+  // 首次渲染即收起时不播放入场动画;reduced-motion 直接切换。
   const [wideMounted, setWideMounted] = useState(!sidebarCollapsed)
   const [railMounted, setRailMounted] = useState(sidebarCollapsed)
   const [wideFadeOut, setWideFadeOut] = useState(false)
@@ -348,7 +348,7 @@ export default function App() {
     setWideEnter(true)
   }, [sidebarCollapsed])
 
-  // 滑动落位后再弹搜索框并聚焦,过渡中聚焦会被移动的输入框甩开(dsh 同款时序)。
+  // 滑动落位后再弹搜索框并聚焦,过渡中聚焦会被移动的输入框甩开。
   const expandSidebarWithSearch = useCallback(() => {
     setSidebarCollapsed(false)
     window.setTimeout(() => setSidebarSearchOpen(true), SIDEBAR_TRANSITION_MS + 20)
@@ -577,7 +577,7 @@ export default function App() {
     setActiveId(sessionId, wsId ?? null)
   }, [])
 
-  /* ---- 启动自动导航(dsh watchNavigation) ---- */
+  /* ---- 启动自动导航 ---- */
 
   const recentWorkspace = useCallback((): WorkspaceRecord | null => {
     let best: WorkspaceRecord | null = null
@@ -963,7 +963,7 @@ export default function App() {
 
   /* ---- 会话窗格渲染 ---- */
 
-  /** 主窗格的工作区切换(发消息前可切;已发消息后锁定,dsh 语义)。 */
+  /** 主窗格的工作区切换(发消息前可切;已发消息后锁定)。 */
   const selectWorkspaceForPane = (ws: WorkspaceRecord) => {
     if (locked) {
       notify('err', t('lockedWorkspace'))
@@ -1398,7 +1398,7 @@ export default function App() {
   )
 }
 
-/* ---- 侧栏工作区树(抄 dsh WorkspaceBrowser 交互形态) ---- */
+/* ---- 侧栏工作区树 ---- */
 
 const UNGROUPED_KEY = 'ungrouped'
 const COLLAPSED_LIMIT = 5
@@ -1421,7 +1421,7 @@ function placementFromPointer(event: { currentTarget: HTMLElement; clientY: numb
 }
 
 /**
- * 血缘嵌套排序(抄 dsh parentSessionId 列表嵌套):子会话紧跟其父会话
+ * 血缘嵌套排序:子会话紧跟其父会话
  * 之后(先序遍历);父不在本组(跨组/已删)的子会话留在顶层。
  * `hideSubtreeOf` 里的会话只渲染自身,其整棵后代子树不进列表(折叠)。
  */

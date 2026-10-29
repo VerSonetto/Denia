@@ -300,7 +300,7 @@ impl Session {
     }
 
     /// Crash recovery: a `turn-start` without `turn/end` gets a synthetic
-    /// interrupted close(对齐 dsh `interruptedTurnClosers`):先为已落库但
+    /// interrupted close:先为已落库但
     /// 未答复的工具调用补合成错误结果,再补 `step/end`,最后补
     /// `turn/end { interrupted }`;时间戳复用最后真实事件时间戳(确定性,
     /// 不发明未来时间)。用户取消的 `aborted` 与崩溃闭合区分开。

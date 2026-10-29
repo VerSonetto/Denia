@@ -2,7 +2,7 @@
 
 import type { WireProtocol } from './types'
 
-/** 可选网关协议(UI 顺序 = most-used first),标签即 dsh 的三协议叫法。 */
+/** 可选网关协议(UI 顺序 = most-used first)。 */
 export const WIRE_PROTOCOLS: readonly {
   id: WireProtocol
   label: string

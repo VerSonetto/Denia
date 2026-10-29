@@ -57,14 +57,14 @@ pub use injections::GOAL_CHANNEL;
 pub use loop_guard::LOOP_THRESHOLD;
 pub use preset::AgentPresetSource;
 
-/// 工具并行执行配置(学 codex `ToolCallRuntime` + dsh `maxParallelToolCalls`)。
+/// 工具并行执行配置。
 ///
 /// 一次 step 内模型返回的多个工具调用并发执行,受滚动池上限约束;结果仍按
 /// model-order 提交,保证每个 call 恰好一条 `ToolResult` 事件(事件源不变量)。
 /// 需要审批的调用(升权)串行化——审批是交互式阻塞,并发弹窗会交错事件。
 #[derive(Debug, Clone, PartialEq)]
 pub struct ParallelSettings {
-    /// 同时执行的工具调用上限(对齐 dsh `maxParallelToolCalls=10`)。
+    /// 同时执行的工具调用上限。
     pub max_parallel_tool_calls: usize,
 }
 
@@ -269,7 +269,7 @@ pub struct SessionDriver {
     /// agent preset 名册:按会话记录中的 preset 收窄工具面与 persona。
     /// `None` 时所有会话都运行出厂全量预设(无 preset 的部署)。
     presets: Option<Arc<dyn AgentPresetSource>>,
-    /// 层叠上下文管理:LLM 总结压缩(学 dsh 压力驱动 + Claude Code compact)。
+    /// 层叠上下文管理:LLM 总结压缩。
     settings: DriverSettings,
     settings_source: Option<Arc<dyn DriverSettingsSource>>,
     compaction_states:
@@ -412,7 +412,7 @@ impl SessionDriver {
         self
     }
 
-    /// 启用审批通道(抄 dsh ctx.approval);无通道时升权请求 fail-closed。
+    /// 启用审批通道;无通道时升权请求 fail-closed。
     ///
     /// 桥外面包一层等待守卫:审批期间用户在思考,那段时间不算主动执行时间。
     pub fn with_approval(mut self, bridge: Arc<dyn ApprovalBridge>) -> Self {
@@ -424,7 +424,7 @@ impl SessionDriver {
     }
 
     /// 启用提问通道(`ask` 工具);无通道时该工具按 `unavailable` 结算,
-    /// 模型仍能自行决策继续(不像 dsh 那样把整次调用变成硬错误)。
+    /// 模型仍能自行决策继续(不会把整次调用变成硬错误)。
     pub fn with_ask(mut self, bridge: Arc<dyn denia_tools::AskBridge>) -> Self {
         self.ask = Some(Arc::new(PausingAskBridge {
             inner: bridge,
@@ -1190,7 +1190,7 @@ fn should_log_system_prompt(session: &Session, step: u32, text: &str) -> bool {
     session.last_system_prompt().as_deref() != Some(text)
 }
 
-/// 请求前的日志刷盘检查点(对齐 dsh checkpoint-policy):请求前缀落盘
+/// 请求前的日志刷盘检查点:请求前缀落盘
 /// 成功才派发;失败 fail-closed(不发出请求)。
 pub(crate) fn flush_before_dispatch(session: &Session) -> Result<(), LlmFailure> {
     session.flush().map_err(|error| {
@@ -1242,7 +1242,7 @@ pub(crate) struct TurnState {
     pub output_budget: Option<u64>,
     pub continuations: u32,
     pub last_real_input: u64,
-    /// dsh 对齐:请求头按需落盘的基准(最近快照即重建)。
+    /// 请求头按需落盘的基准(最近快照即重建)。
     pub last_header: Option<RequestHeaderSnapshot>,
     /// 路由元数据(仅在变化时写 request-context)。
     pub last_context: Option<(String, String, Option<u64>)>,

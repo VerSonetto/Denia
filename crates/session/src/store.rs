@@ -389,8 +389,8 @@ impl SessionStore {
     /// - `before = None`:取日志尾部最近 `limit` 条。
     /// - `before = Some(seq)`:取 `seq` 之前最近 `limit` 条(供前端向上翻页)。
     /// - 分页单位是展示事件:流式 `assistant-chunk` 不计入 `total` 也不进入
-    ///   窗口——历史重建只依赖结算的 `assistant-message`(dsh 语义:失败
-    ///   尝试不进派生历史),否则 chunk 洪流会让窗口在两三个轮次内触底。
+    ///   窗口——历史重建只依赖结算的 `assistant-message`(失败尝试不进派生
+    ///   历史),否则 chunk 洪流会让窗口在两三个轮次内触底。
     /// - 窗口起点对齐轮次组:展示边界(total-limit)回退到其前最近一条非
     ///   注入 user-message——保证窗口内第一个轮次完整,前端折叠概览依赖
     ///   成对的 turn-start/turn-end;边界落在首条锚点之前时直接用边界。
