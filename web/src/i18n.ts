@@ -609,8 +609,8 @@ const zh = {
   'llm.provider.count': '{n} 个网关',
 
   'llm.field.baseURLHint': '接口根路径,以 /v1 或域名结尾,按网关文档填写。',
-  'llm.field.routeIdHint': '网关的稳定标识,失焦后即创建;创建后不可修改。',
-  'llm.field.routeIdLocked': '路由 ID 已创建,不可修改;要换标识请新建一个网关。',
+  'llm.field.routeIdHint': '网关的稳定标识,失焦后即创建;之后仍可修改。',
+  'llm.field.routeIdRenameHint': '可修改:保存时把网关从旧 ID 原子迁移到新 ID;已绑定旧 ID 的会话/预设需要重新选择模型。密钥引用名保持不变。',
   'llm.field.displayNameHint': '选择器里显示的名字,留空使用路由 ID。',
   'llm.field.maxTokensLabel': '最大输出 tokens',
   'llm.field.maxTokensHint': '每次请求允许的输出上限；留空则不带该字段，由服务端按模型自身上限处理。',
@@ -1962,8 +1962,8 @@ const en: typeof zh = {
   'llm.provider.count': '{n} gateways',
 
   'llm.field.baseURLHint': 'API root path ending in /v1 or the domain; follow the gateway docs.',
-  'llm.field.routeIdHint': 'Stable identifier for the gateway; created on blur and immutable afterwards.',
-  'llm.field.routeIdLocked': 'Route ID already created and immutable; add a new gateway to use another one.',
+  'llm.field.routeIdHint': 'Stable identifier for the gateway; created on blur, editable afterwards.',
+  'llm.field.routeIdRenameHint': 'Editable: saving moves the gateway from the old ID to the new one atomically. Sessions and presets pinned to the old ID must pick a model again; the credential reference is kept.',
   'llm.field.displayNameHint': 'Name shown in the picker; falls back to the route ID.',
   'llm.field.maxTokensLabel': 'Max output tokens',
   'llm.field.maxTokensHint': 'Output cap per request; leave empty to omit the field and let the server use the model limit.',

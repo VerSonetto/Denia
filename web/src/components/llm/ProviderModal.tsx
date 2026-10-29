@@ -1,8 +1,8 @@
 /**
  * 提供方编辑弹窗(居中模态):全自动保存,**没有保存按钮**。
  * - 表单快照随时按 payload 比对,变化后停笔约 0.8s 自动落盘;没变化不重复写。
- * - 新增的路由 ID 以失焦为「开工」信号:在此之前不落盘,避免半途碎片建出孤儿网关;
- *   建出来之后 ID 锁死(改名 = 新网关,不做原地重命名)。
+ * - 新增的路由 ID 以失焦为「开工」信号:在此之前不落盘,避免半途碎片建出孤儿网关。
+ * - 已存在的路由 ID 仍可修改:失焦/关窗时把旧键与新键放在同一个 PUT 里原子迁移。
  * - 密钥值是显式提交点(失焦才写凭据存储),不参与 debounce。
  * - 校验就地即时跑;不合法的字段保持上一次的已存值,不把坏 URL 推给在跑的路由。
  * Esc / 遮罩双击 / 「完成」都先 flush 在途改动再关窗。
@@ -127,17 +127,23 @@ export function ProviderModal({
   /** 新增时:路由 ID 失焦过 = 允许建网关。 */
   const [routeIdTouched, setRouteIdTouched] = useState(route !== null)
   const [closing, setClosing] = useState(false)
+  /**
+   * 密钥引用名跟随「第一次创建时的路由 id」而不是当前 id:改名只迁移
+   * providers 的键,不改凭据存储的引用名,否则用户已配好的密钥会被孤儿化。
+   */
+  const [keyRoot, setKeyRoot] = useState<string | null>(route)
   const keySectionRef = useRef<HTMLDivElement | null>(null)
   const timerRef = useRef<number | null>(null)
   /** 最近一次已落盘/已在途的 payload 指纹,用来跳过「没变化」的写入。 */
   const writtenRef = useRef<string | null>(null)
   const inFlightRef = useRef<Promise<boolean> | null>(null)
+  /** 改名在途:暂停字段 autosave,避免旧 id 的迟到写入把旧键重新建出来。 */
+  const renamingRef = useRef(false)
   // autosave 对象每次渲染都是新的;解构出身份稳定的回调再进依赖数组。
-  const { write, has } = autosave
+  const { write, rename, flush, has } = autosave
 
-  // 编辑沿用已存引用(不丢已配密钥);新建在网关落地那一刻按 id 派生。
   const effectiveKeyRef =
-    initial?.apiKeyEnv ?? (createdId ? deriveKeyRef(createdId) : '')
+    initial?.apiKeyEnv ?? (keyRoot ? deriveKeyRef(keyRoot) : '')
   const credentialForRef = credentials[effectiveKeyRef]
   const keyConfigured = keyValue.trim().length > 0 || credentialForRef?.configured === true
 
@@ -184,8 +190,9 @@ export function ProviderModal({
   const blocking = useMemo(() => {
     const next: FormErrors = {}
     const id = routeId.trim()
+    const current = createdId ?? ''
     if (!id) next.routeId = t('routeIdRequired')
-    else if (isFresh && autosave.has(id)) next.routeId = t('llm.error.routeIdExists', { id })
+    else if (id !== current && has(id)) next.routeId = t('llm.error.routeIdExists', { id })
     const url = baseURL.trim()
     if (!url) next.baseURL = t('baseURLRequired')
     else if (!BASE_URL_PATTERN.test(url)) next.baseURL = t('llm.error.baseURLFormat')
@@ -200,7 +207,7 @@ export function ProviderModal({
     const modelsErr = modelsErrorOf(models)
     if (modelsErr) next.models = modelsErr
     return next
-  }, [routeId, baseURL, headers, ctxWindow, maxTokens, models, isFresh, has])
+  }, [routeId, createdId, baseURL, headers, ctxWindow, maxTokens, models, has])
 
   const hasBlocking = Object.keys(blocking).length > 0
 
@@ -223,17 +230,23 @@ export function ProviderModal({
   const push = useCallback(
     async (target: Payload): Promise<boolean> => {
       const ok = await write(target.id, target.profile)
-      if (ok) setCreatedId((prev) => (prev === null ? target.id : prev))
+      if (ok) {
+        setCreatedId((prev) => (prev === null ? target.id : prev))
+        // 密钥引用名锚定第一次创建时的 id:后续改名不搬凭据。
+        setKeyRoot((prev) => prev ?? target.id)
+      }
       return ok
     },
     [write],
   )
 
   /**
-   * 唯一的写入触发点:payload 指纹变了就 debounce 写一次。
-   * 新增在路由 ID 失焦前不写(不建半成品网关)。
+   * 唯一的字段写入触发点:payload 指纹变了就 debounce 写一次。
+   * 新增在路由 ID 失焦前不写(不建半成品网关);改名在途时先暂停,
+   * 避免用旧 id 的迟到写入把旧键重新建出来。
    */
   useEffect(() => {
+    if (renamingRef.current) return
     if (!payload || !fingerprint) return
     if (hasBlocking) return
     if (isFresh && !routeIdTouched) return
@@ -242,6 +255,7 @@ export function ProviderModal({
     const target = payload
     timerRef.current = window.setTimeout(() => {
       timerRef.current = null
+      if (renamingRef.current) return
       writtenRef.current = fingerprint
       inFlightRef.current = push(target).then((ok) => {
         if (!ok) writtenRef.current = null
@@ -256,8 +270,8 @@ export function ProviderModal({
     }
   }, [payload, fingerprint, hasBlocking, isFresh, routeIdTouched, push])
 
-  /** 立刻落盘(跳过 debounce),用于失焦与关窗。 */
-  const flushNow = useCallback(async (): Promise<boolean> => {
+  /** 落盘字段改动(跳过 debounce);路由 id 的迁移不在这里。 */
+  const flushProfile = useCallback(async (): Promise<boolean> => {
     if (timerRef.current !== null) {
       window.clearTimeout(timerRef.current)
       timerRef.current = null
@@ -280,6 +294,43 @@ export function ProviderModal({
     if (!ok) writtenRef.current = null
     return ok
   }, [payload, fingerprint, hasBlocking, push])
+
+  /**
+   * 改名:先等在途字段写入落定,再让 autosave 用同一个 PUT 迁移旧键 → 新键。
+   * 不合法(重名/URL/模型等)时不写,错误由表单就地展示。
+   */
+  const renameNow = useCallback(async (): Promise<boolean> => {
+    const from = createdId
+    const to = routeId.trim()
+    if (!from || !to || to === from) return flushProfile()
+    if (hasBlocking) return true
+    renamingRef.current = true
+    try {
+      if (timerRef.current !== null) {
+        window.clearTimeout(timerRef.current)
+        timerRef.current = null
+      }
+      const pending = inFlightRef.current
+      if (pending) await pending
+      inFlightRef.current = null
+      await flush()
+      if (!payload) return false
+      const ok = await rename(from, to, payload.profile)
+      if (ok) {
+        setCreatedId(to)
+        writtenRef.current = `${to}\u0000${JSON.stringify(payload.profile)}`
+      }
+      return ok
+    } finally {
+      renamingRef.current = false
+    }
+  }, [createdId, routeId, hasBlocking, flushProfile, flush, payload, rename])
+
+  /** 立刻落盘(跳过 debounce),用于失焦与关窗;有改名意图时先迁移键。 */
+  const flushNow = useCallback(async (): Promise<boolean> => {
+    if (createdId && routeId.trim() !== createdId) return renameNow()
+    return flushProfile()
+  }, [createdId, routeId, renameNow, flushProfile])
 
   useEffect(() => {
     return () => {
@@ -307,7 +358,9 @@ export function ProviderModal({
   const requestClose = useCallback(async () => {
     if (closing) return
     setClosing(true)
-    const dirty = payload !== null && fingerprint !== null && fingerprint !== writtenRef.current
+    const dirtyId = createdId !== null && routeId.trim() !== createdId
+    const dirty =
+      dirtyId || (payload !== null && fingerprint !== null && fingerprint !== writtenRef.current)
     const ok = await flushNow()
     if (!ok) {
       setClosing(false)
@@ -317,7 +370,7 @@ export function ProviderModal({
       notify('err', t('llm.autosave.dropped'))
     }
     onClose()
-  }, [closing, payload, fingerprint, hasBlocking, flushNow, notify, onClose])
+  }, [closing, createdId, routeId, payload, fingerprint, hasBlocking, flushNow, notify, onClose])
 
   /* ---- 键盘:Esc 关窗(preventDefault 阻断设置弹窗同关) ---- */
 
@@ -404,14 +457,13 @@ export function ProviderModal({
               <div className={styles.gridTwo}>
                 <Field
                   label={t('routeIdLabel')}
-                  hint={t(isFresh && !createdId ? 'llm.field.routeIdHint' : 'llm.field.routeIdLocked')}
+                  hint={t(isFresh && !createdId ? 'llm.field.routeIdHint' : 'llm.field.routeIdRenameHint')}
                   error={errors.routeId}
                 >
                   <TextInput
                     mono
                     placeholder={t('routeIdPlaceholder')}
                     value={routeId}
-                    disabled={createdId !== null}
                     onChange={setRouteId}
                     onCommit={() => {
                       setRouteIdTouched(true)

@@ -15,15 +15,14 @@ import { useCallback, useRef, useState } from 'react'
 import * as api from '../../api'
 import { t } from '../../i18n'
 import { asRecord, namespaceOf, OPENAI_NS } from './providerSettings'
+import { applyRouteChange, type RouteChange } from './providerRename'
 import type { Notify } from '../../App'
 
 export type AutosaveStatus = 'idle' | 'saving' | 'saved' | 'error'
 
 /** 一条待落盘的改动;profile 为 null 表示删除该路由。 */
-interface QueueItem {
-  route: string
-  profile: Record<string, unknown> | null
-  /** 这一条改动的等待者;同路由合并后一起结算,不会说谎报成功。 */
+interface QueueItem extends RouteChange {
+  /** 这一条改动的等待者;同一路线合并后一起结算,不会说谎报成功。 */
   resolvers: Array<(ok: boolean) => void>
 }
 
@@ -41,6 +40,12 @@ export interface ProviderAutosave {
   has: (route: string) => boolean
   /** 排队落盘一个路由;null = 删除。resolve 这条改动是否成功。 */
   write: (route: string, profile: Record<string, unknown> | null) => Promise<boolean>
+  /** 把一条路由改名(旧键 → 新键,profile 一并迁移)。 */
+  rename: (
+    from: string,
+    to: string,
+    profile: Record<string, unknown>,
+  ) => Promise<boolean>
   /** 等所有在途与排队的写入落定;返回是否全部成功。 */
   flush: () => Promise<boolean>
   /** 重放最后一条失败的改动。 */
@@ -131,12 +136,11 @@ export function useProviderAutosave({
   }, [])
 
   /** 把一条改动套进给定的全表,返回新表。 */
-  const apply = useCallback((base: Record<string, unknown>, item: QueueItem) => {
-    const next: Record<string, unknown> = { ...base }
-    if (item.profile === null) delete next[item.route]
-    else next[item.route] = item.profile
-    return next
-  }, [])
+  const apply = useCallback(
+    (base: Record<string, unknown>, item: QueueItem) =>
+      applyRouteChange(base, item),
+    [],
+  )
 
   const put = useCallback(
     async (providers: Record<string, unknown>, revision: number) => {
@@ -157,6 +161,11 @@ export function useProviderAutosave({
       const succeed = (providers: Record<string, unknown>, revision: number) => {
         providersRef.current = providers
         revisionRef.current = revision
+        const previous = item.previousRoute
+        if (previous && previous !== item.route) {
+          ownedRef.current.set(previous, null)
+          markRecent(previous, false)
+        }
         ownedRef.current.set(item.route, item.profile)
         failedRef.current = null
         setStatus('saved')
@@ -213,17 +222,21 @@ export function useProviderAutosave({
     chainOkRef.current = true
   }, [commit])
 
-  /** 入队一条改动;同路由还在队列里时就地合并(只保留最新内容)。 */
+  /** 入队一条改动;同路线(含同一旧 id 的改名)还在队列里时就地合并。 */
   const enqueue = useCallback(
-    (route: string, profile: Record<string, unknown> | null): Promise<boolean> => {
+    (change: RouteChange): Promise<boolean> => {
       const waiter = new Promise<boolean>((resolve) => {
-        const pending = queueRef.current.find((item) => item.route === route)
+        const pending = queueRef.current.find(
+          (item) =>
+            item.route === change.route &&
+            item.previousRoute === change.previousRoute,
+        )
         if (pending) {
-          pending.profile = profile
+          pending.profile = change.profile
           pending.resolvers.push(resolve)
           return
         }
-        queueRef.current.push({ route, profile, resolvers: [resolve] })
+        queueRef.current.push({ ...change, resolvers: [resolve] })
       })
       if (!runningRef.current) {
         runningRef.current = true
@@ -264,9 +277,42 @@ export function useProviderAutosave({
       if (profile !== null && profileEquals(providersRef.current[route], profile)) {
         return Promise.resolve(true)
       }
-      return enqueue(route, profile)
+      return enqueue({ route, profile })
     },
     [enqueue],
+  )
+
+  /**
+   * 改名:旧键与新键在同一个整表 PUT 里迁移,不经过「先建新、再删旧」的
+   * 两步窗口。目标已存在时拒绝,避免悄悄覆盖另一个网关。
+   */
+  const rename = useCallback(
+    (
+      from: string,
+      to: string,
+      profile: Record<string, unknown>,
+    ): Promise<boolean> => {
+      if (!primedRef.current) {
+        notifyRef.current('err', t('llm.autosave.notReady'))
+        return Promise.resolve(false)
+      }
+      if (from === to) return write(from, profile)
+      if (to in providersRef.current) {
+        // 外面重试/上一次延迟响应已经完成迁移:同一 profile 落在新键上即幂等成功。
+        if (!(from in providersRef.current) && profileEquals(providersRef.current[to], profile)) {
+          return Promise.resolve(true)
+        }
+        notifyRef.current('err', t('llm.error.routeIdExists', { id: to }))
+        return Promise.resolve(false)
+      }
+      // 同一路线此前失败的改动已被这次改名取代;保留它会让重试重新建出旧键。
+      const failed = failedRef.current
+      if (failed && (failed.route === from || failed.previousRoute === from)) {
+        failedRef.current = null
+      }
+      return enqueue({ route: to, previousRoute: from, profile })
+    },
+    [enqueue, write],
   )
 
   const flush = useCallback(() => allSettledRef.current, [])
@@ -276,8 +322,12 @@ export function useProviderAutosave({
     if (!item) return allSettledRef.current
     failedRef.current = null
     setError(null)
-    return enqueue(item.route, item.profile)
+    return enqueue({
+      route: item.route,
+      previousRoute: item.previousRoute,
+      profile: item.profile,
+    })
   }, [enqueue])
 
-  return { status, savedAt, error, recent, prime, has, write, flush, retry }
+  return { status, savedAt, error, recent, prime, has, write, rename, flush, retry }
 }
