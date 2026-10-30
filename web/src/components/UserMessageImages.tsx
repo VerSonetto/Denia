@@ -9,8 +9,15 @@ import { IconArrowLeft, IconArrowRight, IconClose, IconRewind } from './icons'
 /** 用户消息中的内联图片缩略图网格;点击缩略图打开大图预览。 */
 export function UserMessageImages({
   images,
+  variant = 'bubble',
 }: {
   images: UserMessageImage[]
+  /**
+   * bubble:用户气泡里的方形裁切缩略图。
+   * visual:视觉注入行里的原比例预览 —— 截图/图片要能看出内容,
+   * 不能按正方形裁掉边缘。
+   */
+  variant?: 'bubble' | 'visual'
 }) {
   const [previewIndex, setPreviewIndex] = useState<number | null>(null)
   const closeRef = useRef<HTMLButtonElement>(null)
@@ -54,7 +61,7 @@ export function UserMessageImages({
 
   return (
     <>
-      <div className="msg-user-images">
+      <div className={`msg-user-images${variant === 'visual' ? ' visual' : ''}`}>
         {images.map((image, index) => (
           <button
             key={index}
@@ -138,6 +145,21 @@ export function UserMessageImages({
   )
 }
 
+/**
+ * 超长用户消息的折叠阈值(字符):整段日志/大文件直接粘贴进对话很常见,
+ * 一个 1MB 文本节点会被浏览器拆成上万个行盒,滚动合成与内存都按行数涨。
+ * 先渲染前段,展开是显式动作;复制/回退仍用完整原文。
+ */
+const USER_MESSAGE_PREVIEW_CHARS = 4000
+
+/** 按码元截断且不切开代理对(emoji/生僻字是 2 个码元,拆开会显示 \uFFFD)。 */
+function previewText(text: string, limit: number): string {
+  if (text.length <= limit) return text
+  const cut = text.slice(0, limit)
+  const last = cut.charCodeAt(cut.length - 1)
+  return last >= 0xd800 && last <= 0xdbff ? cut.slice(0, -1) : cut
+}
+
 /** 用户消息:图片悬浮在气泡上方,文本在气泡内。 */
 export function UserMessageBubble({
   text,
@@ -156,11 +178,24 @@ export function UserMessageBubble({
 }) {
   const hasImages = !!images && images.length > 0
   const showText = text.trim().length > 0
+  const [expanded, setExpanded] = useState(false)
+  const collapsible = text.length > USER_MESSAGE_PREVIEW_CHARS
+  const shownText = collapsible && !expanded ? previewText(text, USER_MESSAGE_PREVIEW_CHARS) : text
   if (!showText && !hasImages) return null
   return (
     <div className={`user-message-stack${pending ? ' pending' : ' msg-copy-anchor'}`}>
       {hasImages && <UserMessageImages images={images} />}
-      {showText && <div className="msg-user">{text}</div>}
+      {showText && <div className="msg-user">{shownText}</div>}
+      {showText && collapsible && (
+        <button
+          type="button"
+          className="msg-user-fold"
+          aria-expanded={expanded}
+          onClick={() => setExpanded((value) => !value)}
+        >
+          {expanded ? t('userMessageCollapse') : t('userMessageExpand', { n: text.length })}
+        </button>
+      )}
       {!pending && showText && (
         <div className="message-actions">
           <CopyMessageButton text={text} />

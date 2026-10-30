@@ -50,7 +50,7 @@ pub fn router() -> Router<Arc<AppState>> {
 }
 
 fn error(message: String) -> ApiError {
-    ApiError::bad_request("git/operation-failed", message)
+    super::operation_failed("git", message)
 }
 
 #[derive(Deserialize)]

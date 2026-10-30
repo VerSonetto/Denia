@@ -1,4 +1,5 @@
 import { getLocale } from '../../i18n'
+import { splitByteSize } from '../../lib/bytes'
 import packageInfo from '../../../package.json'
 import type { UpdateSource } from '../../updateApi'
 
@@ -150,15 +151,9 @@ export function updateText() {
 
 export function formatUpdateBytes(bytes: number): string {
   if (!Number.isFinite(bytes) || bytes < 0) return '—'
-  if (bytes < 1024) return `${Math.floor(bytes)} B`
-  const units = ['KB', 'MB', 'GB', 'TB']
-  let value = bytes / 1024
-  let index = 0
-  while (value >= 1024 && index < units.length - 1) {
-    value /= 1024
-    index += 1
-  }
-  return `${new Intl.NumberFormat(getLocale() === 'en' ? 'en-US' : 'zh-CN', { maximumFractionDigits: 1 }).format(value)} ${units[index]}`
+  const { value, unit } = splitByteSize(bytes)
+  if (unit === 'B') return `${Math.floor(value)} B`
+  return `${new Intl.NumberFormat(getLocale() === 'en' ? 'en-US' : 'zh-CN', { maximumFractionDigits: 1 }).format(value)} ${unit}`
 }
 
 export function formatUpdateSource(source: UpdateSource): string {

@@ -183,10 +183,10 @@ impl CompletionQueue {
     /// 检查后续请求与释放所有权必须原子完成，否则空闲边沿会丢失。
     pub fn finish_wake(&self, id: &str) -> bool {
         let mut state = self.state.lock().unwrap_or_else(|p| p.into_inner());
-        if let Some(pending) = state.waking.get_mut(id) {
-            if std::mem::take(pending) {
-                return true;
-            }
+        if let Some(pending) = state.waking.get_mut(id)
+            && std::mem::take(pending)
+        {
+            return true;
         }
         state.waking.remove(id);
         false

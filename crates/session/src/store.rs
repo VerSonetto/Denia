@@ -139,9 +139,7 @@ fn read_page_window(scan: PageScan, before: Option<u64>) -> Result<SessionPage, 
             let Ok(envelope) = serde_json::from_str::<SessionEnvelope>(trimmed) else {
                 break;
             };
-            if !is_transient_event(&envelope.event)
-                && before.is_none_or(|cut| envelope.seq < cut)
-            {
+            if !is_transient_event(&envelope.event) && before.is_none_or(|cut| envelope.seq < cut) {
                 events.push(envelope);
             }
         }
@@ -156,6 +154,320 @@ fn read_page_window(scan: PageScan, before: Option<u64>) -> Result<SessionPage, 
     })
 }
 
+/// 分页索引缓存条目数上限(LRU)。
+///
+/// 单条目只存展示事件的 `(行首偏移, seq)`,不存正文;打开过的长会话
+/// 翻页/重连都命中同一份索引,不会重复全量解析。
+const PAGE_INDEX_MAX_ENTRIES: usize = 4;
+
+/// 单条目可索引的展示事件上限:超出就不驻留(退回每次全量扫描)。
+///
+/// 60k 条 × 16 字节 ≈ 1 MB,四条合计约 4 MB —— 换来的是长会话每次打开
+/// 从 O(日志字节) 的全量 JSON 解析降到 O(新增字节) 的增量扫描。
+const PAGE_INDEX_MAX_DISPLAY_EVENTS: usize = 60_000;
+
+/// 日志超过该体积就不建索引:极端日志的展示事件表可能很大,退回
+/// 每次全量扫描(语义不变,只是不吃这块内存)。
+const PAGE_INDEX_MAX_LOG_BYTES: u64 = 128 * 1024 * 1024;
+
+/// 一个会话的分页扫描增量状态。
+///
+/// 日志只追加,所以索引只需要"记住扫到哪、看到过什么":新请求从
+/// [`PageIndex::scanned`] 继续扫新增行。文件变短(回退截断、损坏修复)
+/// 时整条作废重建——那种情况下前缀也不再可信。
+struct PageIndex {
+    header: SessionHeader,
+    /// 已扫描到的字节位置,永远停在完整行末尾。
+    scanned: u64,
+    /// 展示事件数,等于 `positions.len()`。
+    total: u64,
+    /// 展示事件按下标平行:`(行首字节偏移, seq)`。
+    positions: Vec<(u64, u64)>,
+    /// 全会话非注入 user-message 锚点,以及与它平行的展示序号。
+    anchors: Vec<(SessionAnchor, u64)>,
+    totals: SessionTotals,
+    /// 未闭合轮次的配对状态(`SessionTotals::fold` 的跨事件输入)。
+    open_turn: Option<(u32, u64)>,
+}
+
+/// 一次分页查询的窗口方案(只有偏移,不含正文)。
+struct PagePlan {
+    header: SessionHeader,
+    total: u64,
+    anchors: Vec<SessionAnchor>,
+    totals: SessionTotals,
+    /// 窗口起点;`None` 表示没有任何可读展示事件。
+    start: Option<u64>,
+    /// 窗口终点(含):扫描时确定的文件位置,不把本次请求期间新追加的
+    /// 尾部混进旧的 total/anchors/totals 口径。
+    end: u64,
+    has_more_before: bool,
+}
+
+/// 分页索引缓存:按会话 id 存 `PageIndex`,LRU 淘汰。
+pub(crate) struct PageIndexCache {
+    entries: std::collections::HashMap<String, PageIndex>,
+    order: VecDeque<String>,
+}
+
+impl PageIndexCache {
+    pub(crate) fn new() -> Self {
+        Self {
+            entries: std::collections::HashMap::new(),
+            order: VecDeque::new(),
+        }
+    }
+
+    fn take(&mut self, id: &str) -> Option<PageIndex> {
+        self.order.retain(|entry| entry != id);
+        self.entries.remove(id)
+    }
+
+    fn remove(&mut self, id: &str) {
+        self.order.retain(|entry| entry != id);
+        self.entries.remove(id);
+    }
+
+    fn put(&mut self, id: String, index: PageIndex) {
+        self.order.retain(|entry| entry != &id);
+        self.entries.insert(id.clone(), index);
+        self.order.push_back(id);
+        while self.order.len() > PAGE_INDEX_MAX_ENTRIES {
+            if let Some(stale) = self.order.pop_front() {
+                self.entries.remove(&stale);
+            }
+        }
+    }
+
+    /// 会话被删除时立刻回收,不让索引比日志多活一轮 LRU。
+    pub(crate) fn forget(&mut self, id: &str) {
+        self.remove(id);
+    }
+}
+
+/// 从头建索引:与 [`scan_page`] 同样的首行规则(物理首行才是 header,
+/// 空行跳过)、同样的"首个未知/损坏行处截止"。
+fn build_page_index(file: &Path) -> Result<PageIndex, SessionError> {
+    let mut reader = BufReader::new(File::open(file)?);
+    let mut line = String::new();
+    let mut line_no = 0usize;
+    let mut header = None;
+    let mut index = PageIndex {
+        header: SessionHeader {
+            kind: SessionHeaderKind::Session,
+            version: SESSION_FORMAT_VERSION,
+            id: String::new(),
+            created_at: 0,
+            cwd: String::new(),
+            sandbox: false,
+            parent_session: None,
+            subagent: None,
+        },
+        scanned: 0,
+        total: 0,
+        positions: Vec::new(),
+        anchors: Vec::new(),
+        totals: SessionTotals::default(),
+        open_turn: None,
+    };
+    let mut offset = 0u64;
+    loop {
+        line.clear();
+        let read = reader.read_line(&mut line)?;
+        if read == 0 {
+            break;
+        }
+        line_no += 1;
+        let trimmed = line.trim();
+        let line_end = offset + read as u64;
+        if trimmed.is_empty() {
+            offset = line_end;
+            index.scanned = line_end;
+            continue;
+        }
+        if line_no == 1 {
+            let parsed: SessionHeader = serde_json::from_str(trimmed)
+                .map_err(|e| SessionError::Corrupt(format!("bad header: {e}")))?;
+            header = Some(parsed);
+            offset = line_end;
+            index.scanned = line_end;
+            continue;
+        }
+        let Ok(envelope) = serde_json::from_str::<SessionEnvelope>(trimmed) else {
+            break;
+        };
+        index.fold_line(&envelope, offset, line_end);
+        offset = line_end;
+    }
+    let header = header.ok_or_else(|| SessionError::Corrupt("missing header".into()))?;
+    index.header = header;
+    Ok(index)
+}
+
+/// 从 `index.scanned` 续扫到文件当前末尾(含尾部残行:不解析成功就不前进)。
+fn extend_page_index(file: &Path, index: &mut PageIndex) -> Result<(), SessionError> {
+    let mut handle = File::open(file)?;
+    handle.seek(SeekFrom::Start(index.scanned))?;
+    let mut reader = BufReader::new(handle);
+    let mut line = String::new();
+    let mut offset = index.scanned;
+    loop {
+        line.clear();
+        let read = reader.read_line(&mut line)?;
+        if read == 0 {
+            break;
+        }
+        let trimmed = line.trim();
+        let line_end = offset + read as u64;
+        if trimmed.is_empty() {
+            offset = line_end;
+            index.scanned = line_end;
+            continue;
+        }
+        let Ok(envelope) = serde_json::from_str::<SessionEnvelope>(trimmed) else {
+            break;
+        };
+        index.fold_line(&envelope, offset, line_end);
+        offset = line_end;
+    }
+    Ok(())
+}
+
+impl PageIndex {
+    /// 折进一行已解析事件:统计、锚点、展示事件表与已扫描位置一起前进。
+    fn fold_line(&mut self, envelope: &SessionEnvelope, line_start: u64, line_end: u64) {
+        self.totals.fold(envelope, &mut self.open_turn);
+        self.scanned = line_end;
+        if is_transient_event(&envelope.event) {
+            return;
+        }
+        if let SessionEvent::UserMessage {
+            text,
+            injected: false,
+            ..
+        } = &envelope.event
+        {
+            self.anchors.push((
+                SessionAnchor {
+                    seq: envelope.seq,
+                    text: anchor_preview(text),
+                },
+                self.total,
+            ));
+        }
+        self.positions.push((line_start, envelope.seq));
+        self.total += 1;
+    }
+
+    /// 在一个 `before`/`limit` 查询下算出窗口与全会话统计。
+    ///
+    /// 与 [`scan_page`] 逐字段等价:展示粒度、锚点回退、`has_more_before`
+    /// 都按"可入窗口的展示事件序号"计算,`before` 之外的展示事件只影响
+    /// 锚点与统计,不进窗口。
+    fn plan(&self, before: Option<u64>, limit: usize) -> PagePlan {
+        let eligible = |seq: u64| before.is_none_or(|cut| seq < cut);
+        let mut anchors = Vec::with_capacity(self.anchors.len());
+        anchors.extend(self.anchors.iter().map(|(anchor, _)| anchor.clone()));
+
+        // 一遍表扫描:窗口序号映射锚点(锚点与展示事件表平行推进)。
+        let mut anchor_at: Vec<(u64, u64)> = Vec::new();
+        let mut cursor = 0usize;
+        let mut running = 0u64;
+        for (index, (offset, seq)) in self.positions.iter().enumerate() {
+            while cursor < self.anchors.len() && self.anchors[cursor].1 == index as u64 {
+                if eligible(self.anchors[cursor].0.seq) {
+                    anchor_at.push((running, *offset));
+                }
+                cursor += 1;
+            }
+            if eligible(*seq) {
+                running += 1;
+            }
+        }
+        let total = running;
+        let boundary = total.saturating_sub(limit as u64);
+
+        // 倒扫两项:最后一条可入窗口展示事件的终点,以及窗口起点的兜底偏移。
+        let mut last_eligible = None;
+        let mut need = total - boundary;
+        let mut fallback = None;
+        for (index, (offset, seq)) in self.positions.iter().enumerate().rev() {
+            if !eligible(*seq) {
+                continue;
+            }
+            last_eligible.get_or_insert(index);
+            if need > 0 {
+                need -= 1;
+                if need == 0 {
+                    fallback = Some(*offset);
+                }
+            }
+        }
+        let end = match last_eligible {
+            Some(index) => self
+                .positions
+                .get(index + 1)
+                .map_or(self.scanned, |(next, _)| *next),
+            None => self.scanned,
+        };
+
+        let (start, has_more_before) =
+            match anchor_at.binary_search_by(|(index, _)| index.cmp(&boundary)) {
+                // 边界正好落在锚点:窗口从这条锚点开始。
+                Ok(position) => (Some(anchor_at[position].1), anchor_at[position].0 > 0),
+                // 边界在首条锚点之前:从边界那条展示事件开始。
+                Err(0) => (fallback, boundary > 0 && fallback.is_some()),
+                // 边界落在两锚点之间:回退到前一条锚点,保证窗口首轮次完整。
+                Err(insert) => {
+                    let anchor = anchor_at[insert - 1];
+                    (Some(anchor.1), anchor.0 > 0)
+                }
+            };
+
+        PagePlan {
+            header: self.header.clone(),
+            total,
+            anchors,
+            totals: self.totals,
+            start,
+            end,
+            has_more_before,
+        }
+    }
+}
+
+/// 按字节区间读取窗口正文:与 [`read_page_window`] 同一套过滤(跳过
+/// 流式增量、`before` 之外的行)与同样的"首个损坏行处截止"。
+fn read_window_range(
+    file: &Path,
+    start: u64,
+    end: u64,
+    before: Option<u64>,
+) -> Result<Vec<SessionEnvelope>, SessionError> {
+    let mut handle = File::open(file)?;
+    handle.seek(SeekFrom::Start(start))?;
+    let mut reader = BufReader::new(handle.take(end.saturating_sub(start)));
+    let mut events = Vec::new();
+    let mut line = String::new();
+    loop {
+        line.clear();
+        if reader.read_line(&mut line)? == 0 {
+            break;
+        }
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let Ok(envelope) = serde_json::from_str::<SessionEnvelope>(trimmed) else {
+            break;
+        };
+        if !is_transient_event(&envelope.event) && before.is_none_or(|cut| envelope.seq < cut) {
+            events.push(envelope);
+        }
+    }
+    Ok(events)
+}
+
 impl SessionStore {
     pub fn open(home: &Path) -> Result<Self, SessionError> {
         let root = home.join("sessions");
@@ -165,6 +477,7 @@ impl SessionStore {
             index: Mutex::new(std::collections::HashMap::new()),
             active: Mutex::new(std::collections::HashMap::new()),
             last_scan_ms: Mutex::new(0),
+            page_indexes: Mutex::new(PageIndexCache::new()),
         };
         store.rescan_index()?;
         Ok(store)
@@ -401,6 +714,10 @@ impl SessionStore {
     /// - 第一遍流式校验整份日志,仅保留锚点偏移和最近 `limit` 条展示事件
     ///   的偏移;第二遍 seek 到对齐后的窗口,不再从头解码全部历史。
     ///   内存 O(锚点数 + limit + 窗口),不缓存历史正文。
+    /// - **增量索引**:第一遍的结果(展示事件行偏移、锚点、累计统计、已扫描
+    ///   字节)按会话缓存在 [`PageIndexCache`] 里,日志只追加,所以后续
+    ///   打开/翻页/重连只扫新增字节;文件变短(回退截断、损坏修复)时
+    ///   整条重建。超过驻留预算的超大日志退回每次全量扫描。
     pub fn read_page(
         &self,
         id: &str,
@@ -411,8 +728,65 @@ impl SessionStore {
         if !file.exists() {
             return Err(SessionError::NotFound(id.to_string()));
         }
-        let scan = scan_page(File::open(&file)?, before, limit)?;
-        read_page_window(scan, before)
+        match self.page_plan(&file, id, before, limit)? {
+            Some(plan) => {
+                let events = match plan.start {
+                    Some(start) => read_window_range(&file, start, plan.end, before)?,
+                    None => Vec::new(),
+                };
+                Ok(SessionPage {
+                    header: plan.header,
+                    events,
+                    total: plan.total,
+                    has_more_before: plan.has_more_before,
+                    anchors: plan.anchors,
+                    totals: plan.totals,
+                })
+            }
+            // 极端日志:不驻留索引,退回每次全量扫描。
+            None => {
+                let scan = scan_page(File::open(&file)?, before, limit)?;
+                read_page_window(scan, before)
+            }
+        }
+    }
+
+    /// 取出(必要时重建并续扫)分页索引并算窗口;超预算返回 `None`。
+    ///
+    /// 锁内做扫描:冷扫描会阻塞其它会话的分页请求,但换掉的是"每次翻页
+    /// 都全量解析一遍日志";热态临界区只剩 stat + 比较 + 一次窗口区间计算。
+    fn page_plan(
+        &self,
+        file: &Path,
+        id: &str,
+        before: Option<u64>,
+        limit: usize,
+    ) -> Result<Option<PagePlan>, SessionError> {
+        let limit = limit.clamp(1, 1000);
+        let size = std::fs::metadata(file)?.len();
+        if size > PAGE_INDEX_MAX_LOG_BYTES {
+            self.page_indexes
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .forget(id);
+            return Ok(None);
+        }
+        let mut cache = self.page_indexes.lock().unwrap_or_else(|p| p.into_inner());
+        let mut index = match cache.take(id) {
+            // 变短 = 回退截断/损坏修复:前缀不再可信,整条重建。
+            Some(index) if size >= index.scanned => index,
+            _ => build_page_index(file)?,
+        };
+        if size > index.scanned {
+            extend_page_index(file, &mut index)?;
+        }
+        if index.positions.len() > PAGE_INDEX_MAX_DISPLAY_EVENTS {
+            // 不驻留:本次仍然直接用这份内存索引出页,下次请求再扫。
+            return Ok(Some(index.plan(before, limit)));
+        }
+        let plan = index.plan(before, limit);
+        cache.put(id.to_string(), index);
+        Ok(Some(plan))
     }
 
     /// 登记一个被 `Arc` 持有的会话:list 优先从内存读摘要,
@@ -582,7 +956,7 @@ impl SessionStore {
             );
         }
 
-        summaries.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        summaries.sort_by_key(|summary| std::cmp::Reverse(summary.created_at));
         Ok(summaries)
     }
 
@@ -596,6 +970,10 @@ impl SessionStore {
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .remove(id);
+        self.page_indexes
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .forget(id);
         self.active
             .lock()
             .unwrap_or_else(|p| p.into_inner())
@@ -708,6 +1086,107 @@ mod paging_tests {
         assert_eq!(page.total, 1);
         assert_eq!(page.events.len(), 1);
         assert_eq!(page.totals.turns, 0);
+        drop(store);
+        std::fs::remove_dir_all(home).unwrap();
+    }
+
+    /// 增量索引:打开后追加只扫新增字节,结果必须与全量扫描逐字段一致;
+    /// 尾部残行不前进也不报错;文件变短(回退)后整条重建。
+    #[test]
+    fn page_index_extends_on_append_and_rebuilds_after_shrink() {
+        let home = std::env::temp_dir().join(format!("denia-page-index-{}", uuid::Uuid::new_v4()));
+        let store = SessionStore::open(&home).unwrap();
+        let session = store.create(&home, true).unwrap();
+        let id = session.id().to_string();
+        let message = |text: &str| SessionEvent::UserMessage {
+            text: text.into(),
+            injected: false,
+            channel: None,
+            images: Vec::new(),
+        };
+        let turn = |turn: u32| {
+            [
+                message(&format!("问题 {turn}")),
+                SessionEvent::TurnStart { turn },
+                SessionEvent::TurnEnd {
+                    turn,
+                    reason: TurnEndReason::Completed,
+                },
+            ]
+        };
+        for number in 1..=3u32 {
+            for event in turn(number) {
+                session.append(event).unwrap();
+            }
+        }
+        session.flush().unwrap();
+        // 每轮 3 条展示事件(用户消息 / turn-start / turn-end)。
+        let first = store.read_page(&id, None, 2).unwrap();
+        assert_eq!(first.total, 9);
+        assert_eq!(first.totals.turns, 3);
+
+        // 追加之后:续扫只能看新增字节(旧字节不再解析),统计跟着长。
+        for number in 4..=5u32 {
+            for event in turn(number) {
+                session.append(event).unwrap();
+            }
+        }
+        session.flush().unwrap();
+        let extended = store.read_page(&id, None, 2).unwrap();
+        assert_eq!(extended.total, 15);
+        assert_eq!(extended.totals.turns, 5);
+        assert_eq!(extended.anchors.len(), 5);
+        let legacy = read_page_window(
+            scan_page(File::open(session.file()).unwrap(), None, 2).unwrap(),
+            None,
+        )
+        .unwrap();
+        assert_eq!(legacy.total, extended.total);
+        assert_eq!(legacy.events, extended.events);
+        assert_eq!(legacy.totals, extended.totals);
+        assert_eq!(legacy.anchors.len(), extended.anchors.len());
+
+        // 尾部残行(写到一半):不解析成功就不前进,不报错也不改变统计。
+        {
+            let mut writer = OpenOptions::new()
+                .append(true)
+                .open(session.file())
+                .unwrap();
+            writer.write_all(b"{\"seq\":9").unwrap();
+        }
+        let torn = store.read_page(&id, None, 2).unwrap();
+        assert_eq!(torn.total, 15);
+        assert_eq!(torn.totals.turns, 5);
+
+        // 回退截断到更早的字节位置:前缀不再可信,整条重建。
+        let file = session.file().to_path_buf();
+        let keep = {
+            let bytes = std::fs::read(&file).unwrap();
+            let mut offset = 0usize;
+            let mut lines = 0usize;
+            for (index, byte) in bytes.iter().enumerate() {
+                if *byte != b'\n' {
+                    continue;
+                }
+                lines += 1;
+                if lines == 7 {
+                    offset = index + 1;
+                    break;
+                }
+            }
+            offset
+        };
+        assert!(keep > 0);
+        drop(session);
+        {
+            let writer = OpenOptions::new().write(true).open(&file).unwrap();
+            writer.set_len(keep as u64).unwrap();
+        }
+        let rewound = store.read_page(&id, None, 2).unwrap();
+        assert_eq!(rewound.total, 6);
+        assert_eq!(rewound.totals.turns, 2);
+        assert_eq!(rewound.anchors.len(), 2);
+
         drop(store);
         std::fs::remove_dir_all(home).unwrap();
     }

@@ -1,0 +1,72 @@
+import { useEffect, useRef, useState } from 'react'
+import { t } from '../../i18n'
+import { useStickToBottom } from '../../hooks/useStickToBottom'
+import { useTypewriter } from '../../typewriter'
+import { firstLine } from '../../toolDisplay'
+import { IconChevron, IconThink } from '../icons'
+
+export function ThinkRow({
+  text,
+  streaming = false,
+}: {
+  text: string
+  /** 思考内容正在流式输出:强制展开;输出完毕自动折叠(手动点击随时可开合)。 */
+  streaming?: boolean
+}) {
+  const [open, setOpen] = useState(streaming)
+  // 流式中强制展开,输出完毕自动折叠 —— 跟随 streaming 状态,不依赖用户手势。
+  useEffect(() => {
+    setOpen(streaming)
+  }, [streaming])
+  // 思考框是 240px 的内部滚动框(外层对话容器不被撑高),跟随发生在它自己
+  // 身上:流式期间框内吸底,框内手动上翻即脱跟,滚回底部自动恢复。
+  // 判定/驱动见 useStickToBottom —— 与对话流同一套,不再各自为政。
+  // alignOnAttach 只在流式时对齐:流式展开=看最新,流式结束后手动展开=从头读。
+  const preRef = useRef<HTMLPreElement | null>(null)
+  const follower = useStickToBottom(preRef, {
+    active: streaming,
+    snap: 24,
+    alignOnAttach: streaming,
+  })
+  // 思考框正文:流式时逐字 reveal(打字机),settle 立即全量。
+  const displayText = useTypewriter(text, streaming)
+  const summary = firstLine(text, 80)
+  return (
+    <div className={`disc-row${open ? ' open' : ''}`}>
+      <button
+        className="disc-head"
+        onClick={() => setOpen(!open)}
+      >
+        <span className="glyph">
+          <IconThink size={16} />
+        </span>
+        <span className="title">{t('thinkTitle')}</span>
+        {!open && (
+          <>
+            <span className="sep" />
+            <span className="summary" style={{ fontFamily: 'inherit' }}>
+              {summary}
+            </span>
+          </>
+        )}
+        <span className="chev">
+          <IconChevron size={12} />
+        </span>
+      </button>
+      {open && (
+        <div className="disc-body">
+          <div className="code-card">
+            {/* 跟随滚动发生在 240px 内部框自己身上,外层不撑高。 */}
+            <pre
+              ref={follower.setNode}
+              className={streaming ? 'think-streaming' : undefined}
+              style={{ color: 'var(--label-tertiary)' }}
+            >
+              {displayText}
+            </pre>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}

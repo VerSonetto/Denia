@@ -84,12 +84,7 @@ fn permission_line(mode: PermissionMode) -> String {
         PermissionMode::Plan => "只读执行面，用 exit_plan 提交计划待审批",
         PermissionMode::Full => "全部自动放行，路径可出工作区，不弹审批",
     };
-    format!(
-        "{}（{}）— {}",
-        permission_label(mode),
-        mode.as_str(),
-        note
-    )
+    format!("{}（{}）— {}", permission_label(mode), mode.as_str(), note)
 }
 
 /// `/workspace` 裸输入:列出全部工作区。
@@ -161,11 +156,7 @@ pub enum ModelLookup<'a> {
 ///
 /// 目录里的 id 常带路由前缀(如 `cn:deepseek-v4.1-flash`),要求用户记住前缀
 /// 不现实;只要同一提供商下唯一命中,就用目录里的完整 id。
-pub fn find_model<'a>(
-    models: &'a [ModelOption],
-    provider: &str,
-    query: &str,
-) -> ModelLookup<'a> {
+pub fn find_model<'a>(models: &'a [ModelOption], provider: &str, query: &str) -> ModelLookup<'a> {
     let same_provider = |option: &&ModelOption| option.provider.eq_ignore_ascii_case(provider);
     if let Some(option) = models
         .iter()
@@ -323,9 +314,21 @@ mod tests {
     #[test]
     fn model_lookup_accepts_full_id_prefixless_id_and_display_name() {
         let models = vec![
-            model_option("workbuddy", "cn:deepseek-v4.1-flash", "deepseek-v4.1-flash (workbuddy)"),
-            model_option("workbuddy", "cn:hy4-preview-f", "hy4-preview-free (workbuddy)"),
-            model_option("Astra", "bedrock_gpt_6_astra", "gpt_6_astra (bedrock_openai)"),
+            model_option(
+                "workbuddy",
+                "cn:deepseek-v4.1-flash",
+                "deepseek-v4.1-flash (workbuddy)",
+            ),
+            model_option(
+                "workbuddy",
+                "cn:hy4-preview-f",
+                "hy4-preview-free (workbuddy)",
+            ),
+            model_option(
+                "Astra",
+                "bedrock_gpt_6_astra",
+                "gpt_6_astra (bedrock_openai)",
+            ),
         ];
         let found = |query: &str| match find_model(&models, "workbuddy", query) {
             ModelLookup::Found(option) => option.model.clone(),

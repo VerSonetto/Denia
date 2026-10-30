@@ -1124,7 +1124,8 @@ button.btn.form-action {
 
 .todo-glyph-progress {
   color: var(--label-primary);
-  animation: todo-progress-spin 1s linear infinite;
+  /* 常驻旋转:24 档/秒,比每帧重绘便宜一个量级(见 conversation.css 的说明)。 */
+  animation: todo-progress-spin 1s steps(24, end) infinite;
 }
 
 @keyframes todo-progress-spin {
@@ -1786,11 +1787,11 @@ button.btn.form-action {
 }
 
 .composer-opt-btn.busy {
-  animation: pulse 1.2s var(--ease) infinite;
+  animation: pulse 1.2s steps(8, end) infinite;
 }
 
 .composer-opt-btn.busy svg {
-  animation: composer-spin 1s linear infinite;
+  animation: composer-spin 1s steps(24, end) infinite;
 }
 
 @keyframes composer-spin {

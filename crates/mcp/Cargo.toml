@@ -5,13 +5,15 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+# 共享 fixture 放 tests/common/ 子目录:不会被自动发现为 test target,
+# 只作为上面的 [[bin]] 构建,避免 "present in multiple build targets" 警告。
 [[bin]]
 name = "denia-mcp-fixture"
-path = "tests/fixture_server.rs"
+path = "tests/common/fixture_server.rs"
 
 [[bin]]
 name = "denia-mcp-http-fixture"
-path = "tests/http_fixture_server.rs"
+path = "tests/common/http_fixture_server.rs"
 
 [dependencies]
 denia-core = { workspace = true }

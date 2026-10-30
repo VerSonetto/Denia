@@ -149,6 +149,41 @@ fn reply(
         .into_response()
 }
 
+/// A gap must end SSE so reconnecting clients reload authoritative state.
+/// Filtering out Lagged would leave the connection alive with missing events.
+pub(super) fn live_until_lagged<T: Clone + Send + 'static>(
+    receiver: tokio::sync::broadcast::Receiver<T>,
+) -> impl futures::Stream<Item = T> {
+    BroadcastStream::new(receiver)
+        .take_while(|result| futures::future::ready(result.is_ok()))
+        .map(|result| result.expect("take_while stops at lag"))
+}
+
+async fn events_stream(
+    State(state): State<Arc<AppState>>,
+) -> Sse<impl futures::Stream<Item = Result<Event, Infallible>>> {
+    // 先订阅再拍快照:连接瞬间的 running-changed 进缓冲,不会漏;
+    // 快照作为首帧,刷新/重连后前端能还原中断按钮,不必等下一次增量。
+    let receiver = state.events.subscribe();
+    let snapshot = ServerEvent::RunningSnapshot {
+        ids: state.live.running_ids(),
+    };
+    let snapshot_event =
+        Event::default().data(serde_json::to_string(&snapshot).unwrap_or_default());
+    let live = live_until_lagged(receiver)
+        .map(|event| Ok(Event::default().data(serde_json::to_string(&event).unwrap_or_default())));
+    let stream = futures::stream::once(async move { Ok(snapshot_event) }).chain(live);
+    // 心跳要发成**带 data 的普通帧**,而不是默认那行 `:` 注释:注释行既不被
+    // EventSource 派发、也不产生 envelope,前端就没有任何信号区分"链路活着只是
+    // 没事件"与"链路已经死了"。有了 hb 帧,降级判定只看"多久没收到任何帧"。
+    // (具名事件也不行:规范里 data buffer 为空时整帧不派发,所以必须带 data。)
+    Sse::new(stream).keep_alive(
+        KeepAlive::new()
+            .interval(Duration::from_secs(HEARTBEAT_INTERVAL_SECS))
+            .event(Event::default().data(HEARTBEAT_FRAME)),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -190,40 +225,4 @@ mod tests {
         assert_eq!(stream.next().await, Some(2));
         assert_eq!(stream.next().await, None);
     }
-}
-
-/// A gap must end SSE so reconnecting clients reload authoritative state.
-/// Filtering out Lagged would leave the connection alive with missing events.
-pub(super) fn live_until_lagged<T: Clone + Send + 'static>(
-    receiver: tokio::sync::broadcast::Receiver<T>,
-) -> impl futures::Stream<Item = T> {
-    BroadcastStream::new(receiver)
-        .take_while(|result| futures::future::ready(result.is_ok()))
-        .map(|result| result.expect("take_while stops at lag"))
-}
-
-async fn events_stream(
-    State(state): State<Arc<AppState>>,
-) -> Sse<impl futures::Stream<Item = Result<Event, Infallible>>> {
-    // 先订阅再拍快照:连接瞬间的 running-changed 进缓冲,不会漏;
-    // 快照作为首帧,刷新/重连后前端能还原中断按钮,不必等下一次增量。
-    let receiver = state.events.subscribe();
-    let snapshot = ServerEvent::RunningSnapshot {
-        ids: state.live.running_ids(),
-    };
-    let snapshot_event =
-        Event::default().data(serde_json::to_string(&snapshot).unwrap_or_default());
-    let live = live_until_lagged(receiver).map(|event| {
-        Ok(Event::default().data(serde_json::to_string(&event).unwrap_or_default()))
-    });
-    let stream = futures::stream::once(async move { Ok(snapshot_event) }).chain(live);
-    // 心跳要发成**带 data 的普通帧**,而不是默认那行 `:` 注释:注释行既不被
-    // EventSource 派发、也不产生 envelope,前端就没有任何信号区分"链路活着只是
-    // 没事件"与"链路已经死了"。有了 hb 帧,降级判定只看"多久没收到任何帧"。
-    // (具名事件也不行:规范里 data buffer 为空时整帧不派发,所以必须带 data。)
-    Sse::new(stream).keep_alive(
-        KeepAlive::new()
-            .interval(Duration::from_secs(HEARTBEAT_INTERVAL_SECS))
-            .event(Event::default().data(HEARTBEAT_FRAME)),
-    )
 }

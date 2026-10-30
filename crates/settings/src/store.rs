@@ -199,7 +199,7 @@ fn resolve(state: &NamespaceState) -> Value {
     }
 }
 
-fn view_of(ns: &String, state: &NamespaceState) -> NamespaceView {
+fn view_of(ns: &str, state: &NamespaceState) -> NamespaceView {
     let secrets = state.spec.secrets;
     let secret_infos = secrets
         .iter()
@@ -209,7 +209,7 @@ fn view_of(ns: &String, state: &NamespaceState) -> NamespaceView {
         })
         .collect();
     NamespaceView {
-        ns: ns.clone(),
+        ns: ns.to_string(),
         value: redact_secrets(&resolve(state), secrets),
         base: if state.base.is_null() {
             None
@@ -270,7 +270,7 @@ impl SettingsStore {
             .ok_or_else(|| SettingsError::UnknownNamespace(ns.to_string()))?;
         state.user = next_user;
         state.revision = revision;
-        let view = view_of(&ns.to_string(), state);
+        let view = view_of(ns, state);
         if let Some(sender) = &self.events {
             let _ = sender.send(SettingsEvent::Updated { ns: ns.to_string() });
             let _ = sender.send(SettingsEvent::DocumentUpdated {

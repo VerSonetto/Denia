@@ -38,7 +38,7 @@ use std::collections::HashSet;
 
 use denia_core::session::{SessionEnvelope, SessionEvent};
 use denia_core::task::{
-    FileFingerprint, LedgerOverflow, MAX_VALIDATIONS, RevisionId, TaskOp, TaskOutcome, TaskState,
+    FileFingerprint, LedgerOverflow, MAX_VALIDATIONS, RevisionId, TaskOp, TaskState,
     ValidationResult, upsert_fingerprint,
 };
 
@@ -67,19 +67,6 @@ pub fn project_task_scoped(events: &[SessionEnvelope], scope: &TaskFoldScope) ->
         folder.apply(envelope);
     }
     folder.state
-}
-
-/// 折叠出任务结局;`None` = 日志里没有任务事件(没有可裁决的账本)。
-pub fn project_task_outcome(events: &[SessionEnvelope]) -> Option<TaskOutcome> {
-    project_task(events).map(|state| state.outcome())
-}
-
-/// [`project_task_outcome`] 的带作用域版本。
-pub fn project_task_outcome_scoped(
-    events: &[SessionEnvelope],
-    scope: &TaskFoldScope,
-) -> Option<TaskOutcome> {
-    project_task_scoped(events, scope).map(|state| state.outcome())
 }
 
 /// 折叠输入:折叠器**只读**这些事件,宿主(冷载切片、整份重放)必须用同一口径
@@ -296,7 +283,7 @@ fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) -> u32 {
 mod tests {
     use super::*;
     use denia_core::task::{
-        CheckRun, FileFingerprint, StaleReason, ValidationVerdict, VerificationState,
+        CheckRun, FileFingerprint, StaleReason, TaskOutcome, ValidationVerdict, VerificationState,
     };
 
     fn envelope(seq: u64, event: SessionEvent) -> SessionEnvelope {
@@ -383,7 +370,7 @@ mod tests {
         // 既不阻塞也不被推导出 verified。
         let events = vec![user(1), user(2), user(3)];
         assert_eq!(project_task(&events), None);
-        assert_eq!(project_task_outcome(&events), None);
+        assert_eq!(project_task(&events).map(|state| state.outcome()), None);
     }
 
     #[test]
@@ -405,7 +392,10 @@ mod tests {
         // 整份日志只有被裁掉的操作:折不出账本,但也没有把谁判成通过。
         let legacy_only = vec![user(1), task(2, TaskOp::Legacy), task(3, TaskOp::Legacy)];
         assert_eq!(project_task(&legacy_only), None);
-        assert_eq!(project_task_outcome(&legacy_only), None);
+        assert_eq!(
+            project_task(&legacy_only).map(|state| state.outcome()),
+            None
+        );
     }
 
     #[test]
@@ -445,7 +435,7 @@ mod tests {
         // 宿主写下通过结论:验收通过。
         let passed = vec![user(1), task(2, check("rev-a", 0, "d1", None, 1_002))];
         assert_eq!(
-            project_task_outcome(&passed),
+            project_task(&passed).map(|state| state.outcome()),
             Some(TaskOutcome::Passed),
             "宿主写下通过结论就是验收通过"
         );
@@ -486,7 +476,7 @@ mod tests {
     fn no_task_events_means_no_outcome_to_judge() {
         let unchecked = vec![user(1)];
         assert_eq!(project_task(&unchecked), None);
-        assert_eq!(project_task_outcome(&unchecked), None);
+        assert_eq!(project_task(&unchecked).map(|state| state.outcome()), None);
     }
 
     #[test]
@@ -494,7 +484,10 @@ mod tests {
         // rewind 把 rev-a 的身份报废(它在被截断的区间里出现过):日志里还留着
         // 的那条通过结论不算数 —— 旧分支的"通过"不能借尸还魂。
         let events = vec![user(1), task(2, check("rev-a", 0, "d1", None, 1_002))];
-        assert_eq!(project_task_outcome(&events), Some(TaskOutcome::Passed));
+        assert_eq!(
+            project_task(&events).map(|state| state.outcome()),
+            Some(TaskOutcome::Passed)
+        );
         let scope = TaskFoldScope {
             session: None,
             retired_revisions: vec![rev("rev-a")],
@@ -539,7 +532,10 @@ mod tests {
         );
         assert_eq!(child.outcome(), TaskOutcome::Unverified);
         // 不声明会话身份时也一样保守:标注了来源、但与本折叠方不一致的记录不算数。
-        assert_eq!(project_task_outcome(&events), Some(TaskOutcome::Unverified));
+        assert_eq!(
+            project_task(&events).map(|state| state.outcome()),
+            Some(TaskOutcome::Unverified)
+        );
     }
 
     #[test]
@@ -660,7 +656,7 @@ mod tests {
             task(3, check("rev-a", 0, "d1", None, 1_003)),
         ];
         assert_eq!(
-            project_task_outcome(&events),
+            project_task(&events).map(|state| state.outcome()),
             Some(TaskOutcome::Passed),
             "结论里冻结的就是写入之后的字节"
         );

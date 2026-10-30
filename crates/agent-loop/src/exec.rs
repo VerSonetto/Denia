@@ -345,10 +345,7 @@ fn stub_arguments(arguments: &str) -> Option<String> {
         .and_then(|path| path.as_str())
         .unwrap_or("(未知路径)");
     let mut object = serde_json::Map::new();
-    object.insert(
-        "path".into(),
-        serde_json::Value::String(path.to_string()),
-    );
+    object.insert("path".into(), serde_json::Value::String(path.to_string()));
     object.insert(
         denia_tools::support::ARCHIVED_ARGS_KEY.into(),
         serde_json::Value::String(format!(
@@ -623,7 +620,8 @@ fn local_file_read(cwd: &Path, call: &ToolCallRef, grants: &[PathBuf]) -> Option
     // 必须与 read_file 自身使用同一套参数语义(路径别名、尾部垃圾)。
     // 这里不想为 Deserialize 新增 serde 依赖:先走 `parse_tool_args` 的
     // 宽容入口拿到 `path` 字段,再自己取值。
-    let raw_args: serde_json::Value = denia_tools::support::parse_tool_args(&call.arguments).ok()?;
+    let raw_args: serde_json::Value =
+        denia_tools::support::parse_tool_args(&call.arguments).ok()?;
     let path = raw_args.get("path")?.as_str()?.trim().to_string();
     let raw = Path::new(&path);
     let candidate = if raw.is_absolute() {

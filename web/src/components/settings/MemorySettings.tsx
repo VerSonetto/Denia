@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import * as api from '../../api'
 import { t } from '../../i18n'
+import { formatBytesHuman } from '../../lib/bytes'
 import { ConfirmDialog } from '../ConfirmDialog'
 import { IconCheck } from '../icons'
 import styles from './MemorySettings.module.css'
@@ -27,12 +28,6 @@ function formatRelative(ms: number): string {
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(
     date.getDate(),
   ).padStart(2, '0')}`
-}
-
-function formatSize(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
 }
 
 export function MemorySettings() {
@@ -408,7 +403,7 @@ export function MemorySettings() {
                             {file.name}
                           </span>
                           <span className={styles.fileMeta}>
-                            {formatSize(file.size)} · {formatRelative(file.modifiedMs)}
+                            {formatBytesHuman(file.size)} · {formatRelative(file.modifiedMs)}
                           </span>
                           {file.description && (
                             <span className={styles.fileMeta}>{file.description}</span>

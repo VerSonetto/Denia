@@ -1,3 +1,5 @@
+import type { TranslationKey } from './i18n'
+
 /** Human-readable tool call labels; short paths instead of full absolute paths. */
 
 function normalizeSlashes(path: string): string {
@@ -759,4 +761,83 @@ function lcsSplit(oldLines: string[], newLines: string[]): MidLine[] {
   }
   out.reverse()
   return out
+}
+
+/* ---- 工具行(transcript)共用的头部元信息与 bash 辅助 ---- */
+
+/** 首个非空行;indexOf 切片,不 split 整个大文本(流式每帧调用)。 */
+export function firstLine(text: string, max = 90): string {
+  let rest = text
+  for (;;) {
+    const nl = rest.indexOf('\n')
+    const line = (nl < 0 ? rest : rest.slice(0, nl)).trim()
+    if (line.length > 0 || nl < 0) {
+      return line.length > max ? `${line.slice(0, max)}…` : line
+    }
+    rest = rest.slice(nl + 1)
+  }
+}
+
+/**
+ * 工具行的 diff:文件类工具(edit / write_file)才有。
+ *
+ * - edit:多处编辑每项一帧 hunk,行号锚点从工具结果里逐个抠出;
+ * - write_file:整文件覆盖写,新内容即结果(旧内容不来自参数,详见
+ *   [`writeDiff`]),缺省按"纯新增"展示。
+ */
+export function toolDiff(name: string, args: string, result?: string): EditDiffs | null {
+  if (name === 'edit') return editDiff(name, args, editStartLines(result))
+  if (name === 'write_file') {
+    const diff = writeDiff(name, args)
+    return diff ? { path: diff.path, diffs: [diff] } : null
+  }
+  return null
+}
+
+/**
+ * 结束原因 → 徽标文案。取值与后端 `ExecutionReport.end_reason` 对齐;
+ * `completed` 不在这里 —— 正常结束本身不需要徽标。
+ */
+export const BASH_END_REASON_LABELS: Record<string, TranslationKey> = {
+  timeout: 'bashEndTimeout',
+  cancelled: 'bashEndCancelled',
+  spawn_failed: 'bashEndSpawnFailed',
+}
+
+/** bash 参数里的命令正文(剥掉后端注入的输出编码前缀)。 */
+export function bashCommand(args: string): string | null {
+  const parsed = parseArgsObject(args)
+  const raw = parsed?.['command']
+  const command = typeof raw === 'string' ? raw : cleanBashCommand(args)
+  const cleaned = cleanBashCommand(command)
+  return cleaned.length > 0 ? cleaned : null
+}
+
+/** skill load 的 SKILL.md 正文随工具结果 JSON 返回;展开时按 markdown 渲染
+ * 而不是裸 JSON。解析失败或非 load 结果(list/resource)返回 null 走原 pre。 */
+export function skillLoadBody(name: string, content: string, isError: boolean): string | null {
+  if (isError || name !== 'skill') return null
+  try {
+    const value = JSON.parse(content) as { body?: unknown }
+    return typeof value.body === 'string' && value.body.trim() ? value.body : null
+  } catch {
+    return null
+  }
+}
+
+/** 共享的空输出:每次渲染新建对象会让 `BashCard` 的 memo 形同虚设。 */
+export const EMPTY_BASH_OUTPUT: BashOutput = { stdout: '' }
+
+/** 非 bash 行的执行事实:与 `EMPTY_BASH_OUTPUT` 同理,memo 靠共享对象生效。 */
+export const EMPTY_BASH_EXECUTION: BashExecution = {}
+
+/**
+ * 命令是否"不成功":非零退出,或压根没正常结束(超时/中断/没起来)。
+ *
+ * 不能只看退出码:后三类情况下拿不到退出码,只看它会让这些失败在卡片上
+ * 变得和成功一模一样(连红竖线都没了)。
+ */
+export function bashFailed(exit: BashExecution): boolean {
+  if (exit.code !== undefined) return exit.code !== 0
+  return exit.reason !== undefined && exit.reason !== 'completed'
 }

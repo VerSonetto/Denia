@@ -98,7 +98,7 @@ impl InjectionBaselines {
         // 派生面本身有缓存(按日志版本号),这里只多一次读共享的 Arc,
         // 不做二次克隆;历史投影(旧子代理)已由 `derive_surface` 应用。
         let surface = session.derive_surface();
-        let synced_seq = session.with_events(|events| last_seq(events));
+        let synced_seq = session.with_events(last_seq);
         Self {
             capability_context: injected_text(&surface, CAPABILITY_CHANNEL, CAPABILITY_PREFIX),
             workspace_baseline: injected_text(&surface, WORKSPACE_CHANNEL, WORKSPACE_PREFIX),

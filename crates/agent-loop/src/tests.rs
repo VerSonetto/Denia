@@ -79,7 +79,6 @@ fn system_prompt_frames_runtime_authority() {
 /// 会失败,而不是让子代理读到不存在的工具纪律。
 #[test]
 fn subagent_sections_follow_tool_grant() {
-    use denia_tools::SUBAGENT_READ_ONLY_TOOLS;
     // 用 shipped 基础提示词 + capability 段覆盖段名全集;browser 段由
     // tools 侧的单测覆盖(agent-loop 不依赖 denia-browser)。
     let (mut prompt, _) = denia_tools::default_shipped();
@@ -103,7 +102,7 @@ fn subagent_sections_follow_tool_grant() {
     }
     // 只读集合下的期望:read/glob/grep/skill/browser 段保留,
     // bash/write/todo/edit/agents/jobs/ask 段移除。
-    let allowed: Vec<String> = SUBAGENT_READ_ONLY_TOOLS
+    let allowed: Vec<String> = denia_core::subagent::LEGACY_READ_ONLY_TOOLS
         .iter()
         .map(|name| (*name).to_string())
         .collect();
@@ -3196,7 +3195,12 @@ async fn oversized_write_args_leave_the_model_surface_with_their_call() {
     );
     let small_call = messages
         .iter()
-        .find_map(|message| message.tool_calls.iter().find(|call| call.id == "call_small"))
+        .find_map(|message| {
+            message
+                .tool_calls
+                .iter()
+                .find(|call| call.id == "call_small")
+        })
         .expect("small call stays on the model surface");
     assert!(
         small_call.arguments.contains("tiny"),
@@ -3329,7 +3333,9 @@ async fn selected_local_file_is_readable_in_readonly_but_siblings_are_not() {
         |tools| *tools = denia_tools::default_registry(),
     );
     let session = temp_session();
-    session.set_permission_mode(PermissionMode::ReadOnly).unwrap();
+    session
+        .set_permission_mode(PermissionMode::ReadOnly)
+        .unwrap();
     // 把选中的文件作为本轮附件传入:授权应从这条入站路径建立。
     driver
         .run_turn(
@@ -3347,13 +3353,21 @@ async fn selected_local_file_is_readable_in_readonly_but_siblings_are_not() {
 
     let results = result_texts(&session);
     assert_eq!(results.len(), 2, "{results:?}");
-    assert!(!results[0].0, "selected file must be readable: {}", results[0].1);
+    assert!(
+        !results[0].0,
+        "selected file must be readable: {}",
+        results[0].1
+    );
     assert!(
         results[0].1.contains("PICKED BODY"),
         "selected file content must arrive: {}",
         results[0].1
     );
-    assert!(results[1].0, "sibling file must stay confined: {}", results[1].1);
+    assert!(
+        results[1].0,
+        "sibling file must stay confined: {}",
+        results[1].1
+    );
     assert!(
         !results[1].1.contains("SIBLING BODY"),
         "sibling content must not leak: {}",
@@ -3394,7 +3408,9 @@ async fn selected_local_file_grant_does_not_allow_writes_and_survives_next_turn(
         |tools| *tools = denia_tools::default_registry(),
     );
     let session = temp_session();
-    session.set_permission_mode(PermissionMode::ReadOnly).unwrap();
+    session
+        .set_permission_mode(PermissionMode::ReadOnly)
+        .unwrap();
     driver
         .run_turn(
             &session,
@@ -4180,7 +4196,11 @@ async fn post_compact_maintenance_rebuilds_replayed_reads_and_appends_continue_n
     // 读状态:被回放的条目重建(内容保留、调用指针清空),未回放的条目清出。
     let state = shared.lock().unwrap();
     let kept = state
-        .get(&denia_tools::read_state::ReadKey::new(&kept_path, Some(1), None))
+        .get(&denia_tools::read_state::ReadKey::new(
+            &kept_path,
+            Some(1),
+            None,
+        ))
         .expect("被回放的条目应重建");
     assert!(kept.is_full_read, "重建条目按完整读取口径");
     assert!(kept.content.is_some(), "重建条目保留正文,供下次压缩回放");
@@ -4231,7 +4251,11 @@ async fn rewind_drops_read_state_and_compaction_breakers() {
     driver.on_session_rewound(session.id());
 
     assert!(
-        driver.read_state_for(session.id()).lock().unwrap().is_empty(),
+        driver
+            .read_state_for(session.id())
+            .lock()
+            .unwrap()
+            .is_empty(),
         "回退后旧分支的读记录必须清掉:它指向的正文已被截断,留着只会让重读拿到'未变更'"
     );
     assert_eq!(
@@ -4299,7 +4323,11 @@ async fn hydrate_read_state_rebuilds_from_logged_stamps() {
         assert_eq!(entry.size_bytes, 42);
         assert!(entry.is_full_read, "全程标记应还原");
         assert!(entry.content.is_none(), "重建条目不带正文");
-        assert_eq!(entry.call_id.as_deref(), Some("c1"), "调用 id 供失效逻辑使用");
+        assert_eq!(
+            entry.call_id.as_deref(),
+            Some("c1"),
+            "调用 id 供失效逻辑使用"
+        );
     }
 
     // 表非空:不回放覆盖(活会话的表由工具执行维护)。
@@ -4357,7 +4385,10 @@ async fn read_file_result_carries_read_stamp_meta() {
     assert!(stamp["path"].as_str().unwrap().ends_with("probe.txt"));
     assert_eq!(stamp["offset"], 1);
     assert_eq!(stamp["sizeBytes"], 22, "读取当时的字节数");
-    assert!(stamp["mtimeMs"].as_u64().is_some(), "应带上读取当时的 mtime");
+    assert!(
+        stamp["mtimeMs"].as_u64().is_some(),
+        "应带上读取当时的 mtime"
+    );
     assert_eq!(stamp["partialView"], false, "range view 不是工具截断");
     assert_eq!(
         stamp["fullRead"], true,

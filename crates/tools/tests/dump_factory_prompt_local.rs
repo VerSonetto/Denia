@@ -14,7 +14,10 @@ struct StubHub;
 
 #[async_trait]
 impl denia_tools::BrowserExecute for StubHub {
-    async fn execute(&self, _command: denia_browser::BrowserCommand) -> denia_browser::CommandOutcome {
+    async fn execute(
+        &self,
+        _command: denia_browser::BrowserCommand,
+    ) -> denia_browser::CommandOutcome {
         unimplemented!("stub hub 只用于装配提示词,不执行命令")
     }
 }
@@ -41,10 +44,7 @@ fn dump_factory_prompt() {
         })
         .expect("instance context");
     // MCP 段的目录行由运行时名册渲染;这里给占位,正文纪律来自源码。
-    let ids = vec![
-        "[MCP_SERVER_A]".to_string(),
-        "[MCP_SERVER_B]".to_string(),
-    ];
+    let ids = vec!["[MCP_SERVER_A]".to_string(), "[MCP_SERVER_B]".to_string()];
     prompt
         .section(PromptSection {
             name: "tool:mcp".to_string(),
@@ -105,6 +105,10 @@ fn dump_factory_prompt() {
         assembly.tools.len(),
         schema_json.chars().count()
     );
-    println!("written {} chars to {}", out.chars().count(), path.display());
+    println!(
+        "written {} chars to {}",
+        out.chars().count(),
+        path.display()
+    );
     println!("模型正文 {} 字符", render_prompt(&assembly).chars().count());
 }

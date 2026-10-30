@@ -5,7 +5,8 @@ const text = readFileSync(new URL('../../.github/workflows/desktop-release.yml',
 const trigger = text.split('\non:\n')[1]?.split('\npermissions:')[0]
 assert.ok(trigger)
 assert.deepEqual([...trigger.matchAll(/^  ([a-z_]+):/gm)].map(match => match[1]), ['workflow_dispatch'])
-assert.ok(text.indexOf('pnpm --dir web build') < text.indexOf('cargo build --locked'))
+// 前端产物在编译期被 rust-embed 嵌入,必须先于桌面端构建完成。
+assert.ok(text.indexOf('vite build') < text.indexOf('@tauri-apps/cli@2 build'))
 assert.ok(text.includes('--target x86_64-pc-windows-msvc'))
 assert.ok(text.includes('target/x86_64-pc-windows-msvc/release/denia-desktop.exe'))
 assert.ok(text.includes('--frozen-lockfile'))

@@ -139,10 +139,10 @@ fn local_request(peer: Option<&RemotePeer>, headers: &HeaderMap, require_origin:
     {
         return false;
     }
-    if let Some(site) = headers.get("sec-fetch-site") {
-        if site != "same-origin" {
-            return false;
-        }
+    if let Some(site) = headers.get("sec-fetch-site")
+        && site != "same-origin"
+    {
+        return false;
     }
     let Some(origin) = headers.get(header::ORIGIN) else {
         return !require_origin;

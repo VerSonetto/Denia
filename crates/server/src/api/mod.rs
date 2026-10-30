@@ -29,7 +29,14 @@ use std::sync::Arc;
 
 use axum::Router;
 
+use crate::error::ApiError;
 use crate::state::AppState;
+
+/// `<域>/operation-failed` 统一错误构造:各 API 域(git/runtime/terminal/
+/// remote/skills)的失败码共享同一形状,只有域前缀不同。
+pub(crate) fn operation_failed(domain: &str, message: impl std::fmt::Display) -> ApiError {
+    ApiError::bad_request(format!("{domain}/operation-failed"), message.to_string())
+}
 
 /// API 响应压缩层。
 ///

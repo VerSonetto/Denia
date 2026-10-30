@@ -725,7 +725,7 @@
   height: 6px;
   border-radius: 50%;
   background: var(--accent);
-  animation: traj-pulse 1.1s ease-in-out infinite;
+  animation: traj-pulse 1.1s steps(8, end) infinite;
 }
 
 @keyframes traj-pulse {

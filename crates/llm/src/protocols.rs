@@ -403,49 +403,46 @@ fn apply_anthropic_message_caching(
         None => Some(end),
     };
     let mut applied = 0usize;
-    if let Some(&index) = trailing.first() {
-        if apply_anthropic_cache_control(&mut messages[index], cache_control) {
-            applied += 1;
-        }
+    if let Some(&index) = trailing.first()
+        && apply_anthropic_cache_control(&mut messages[index], cache_control)
+    {
+        applied += 1;
     }
-    if stable_user_turns >= ANTHROPIC_DECIMATION_INTERVAL {
-        if let Some(stable_end) = stable_end {
-            // Newest checkpoint sits `stable_user_turns % 15` turns back from
-            // the stable prefix end; every 15th turn follows it.
-            let mut turns_since_checkpoint = stable_user_turns % ANTHROPIC_DECIMATION_INTERVAL;
-            for index in (0..=stable_end).rev() {
-                if applied >= budget {
-                    break;
-                }
-                if !metas[index].conversational_user {
-                    continue;
-                }
-                if turns_since_checkpoint > 0 {
-                    turns_since_checkpoint -= 1;
-                    continue;
-                }
-                turns_since_checkpoint = ANTHROPIC_DECIMATION_INTERVAL - 1;
-                if apply_anthropic_cache_control(&mut messages[index], cache_control) {
-                    applied += 1;
-                }
+    if stable_user_turns >= ANTHROPIC_DECIMATION_INTERVAL
+        && let Some(stable_end) = stable_end
+    {
+        // Newest checkpoint sits `stable_user_turns % 15` turns back from
+        // the stable prefix end; every 15th turn follows it.
+        let mut turns_since_checkpoint = stable_user_turns % ANTHROPIC_DECIMATION_INTERVAL;
+        for index in (0..=stable_end).rev() {
+            if applied >= budget {
+                break;
             }
-        }
-    }
-    if applied < budget {
-        if let Some(stable_end) = stable_end {
-            if stable_end < end
-                && apply_anthropic_cache_control(&mut messages[stable_end], cache_control)
-            {
-                applied += 1;
+            if !metas[index].conversational_user {
+                continue;
             }
-        }
-    }
-    if applied < budget {
-        if let Some(&index) = trailing.get(1) {
+            if turns_since_checkpoint > 0 {
+                turns_since_checkpoint -= 1;
+                continue;
+            }
+            turns_since_checkpoint = ANTHROPIC_DECIMATION_INTERVAL - 1;
             if apply_anthropic_cache_control(&mut messages[index], cache_control) {
                 applied += 1;
             }
         }
+    }
+    if applied < budget
+        && let Some(stable_end) = stable_end
+        && stable_end < end
+        && apply_anthropic_cache_control(&mut messages[stable_end], cache_control)
+    {
+        applied += 1;
+    }
+    if applied < budget
+        && let Some(&index) = trailing.get(1)
+        && apply_anthropic_cache_control(&mut messages[index], cache_control)
+    {
+        applied += 1;
     }
     debug_assert!(
         applied <= budget,
@@ -634,14 +631,8 @@ pub(crate) fn build_anthropic_body(
         }
         serde_json::Value::Array(tools)
     });
-    let head_breakpoints =
-        usize::from(tools_json.is_some()) + usize::from(system_json.is_some());
-    apply_anthropic_message_caching(
-        &mut wire_messages,
-        &metas,
-        head_breakpoints,
-        &cache_control,
-    );
+    let head_breakpoints = usize::from(tools_json.is_some()) + usize::from(system_json.is_some());
+    apply_anthropic_message_caching(&mut wire_messages, &metas, head_breakpoints, &cache_control);
 
     // thinking 开启时 Anthropic 要求 temperature = 1,干脆不带 temperature。
     let effort = request
@@ -833,6 +824,11 @@ fn payload_preview(raw: &str) -> String {
 /// OpenAI Responses SSE → chunks. Text/reasoning blocks stream via delta
 /// events and close on their item's `done`; function calls open on item
 /// `added`, accumulate arguments, and close calibrated to the done item.
+/// Called with the terminal `response` object so a stateful caller can
+/// record `response.id` and replayable output items for `previous_response_id`.
+type TerminalCallback = Box<dyn FnMut(&serde_json::Value) + Send>;
+
+#[derive(Default)]
 pub struct ResponsesStream {
     next_index: u32,
     text: Option<OpenBlock>,
@@ -846,34 +842,12 @@ pub struct ResponsesStream {
     /// chat-completions 的 finish_reason 语义对齐)。
     had_tool_call: bool,
     completed: bool,
-    /// Called with the terminal `response` object so a stateful caller can
-    /// record `response.id` and replayable output items for `previous_response_id`.
-    on_terminal: Option<Box<dyn FnMut(&serde_json::Value) + Send>>,
-}
-
-impl Default for ResponsesStream {
-    fn default() -> Self {
-        Self {
-            next_index: 0,
-            text: None,
-            reasoning: None,
-            reasoning_replay: None,
-            calls: BTreeMap::new(),
-            usage: None,
-            finish: None,
-            saw_block: false,
-            had_tool_call: false,
-            completed: false,
-            on_terminal: None,
-        }
-    }
+    on_terminal: Option<TerminalCallback>,
 }
 
 impl ResponsesStream {
     /// Build a translator that reports the terminal response object.
-    pub fn with_terminal(
-        on_terminal: Option<Box<dyn FnMut(&serde_json::Value) + Send>>,
-    ) -> Self {
+    pub fn with_terminal(on_terminal: Option<TerminalCallback>) -> Self {
         Self {
             on_terminal,
             ..Self::default()
@@ -1576,16 +1550,10 @@ mod tests {
         let messages = body
             .get("messages")
             .and_then(|value| value.as_array())
-            .map(|messages| {
-                messages
-                    .iter()
-                    .map(message_breakpoint_count)
-                    .sum::<usize>()
-            })
+            .map(|messages| messages.iter().map(message_breakpoint_count).sum::<usize>())
             .unwrap_or(0);
         tools + system + messages
     }
-
 
     #[test]
     fn responses_body_replays_conversation() {

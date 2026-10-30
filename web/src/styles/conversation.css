@@ -497,12 +497,18 @@
   gap: 3px;
 }
 
+/*
+ * 常驻装饰动画一律走 `steps()`:一轮转播只有离散几次取值变化,
+ * 合成器才会在值不变的那些帧上省掉重绘。平滑曲线在 240Hz 屏上等于
+ * 每秒 240 次 PrePaint + Paint(实测单这一项就占 30%+ 一个核),
+ * 而 3px 圆点/7px 指示点的动效以 20~25 次/秒更新肉眼看不出差别。
+ */
 .work-dots i {
   width: 3px;
   height: 3px;
   border-radius: 50%;
   background: currentColor;
-  animation: work-dot 1.1s var(--ease) infinite;
+  animation: work-dot 1.1s steps(24, end) infinite;
 }
 
 .work-dots i:nth-child(2) {
@@ -748,6 +754,23 @@
   color: var(--label-primary);
 }
 
+/* 超长用户消息的展开/收起入口:气泡下方的小号文字按钮,不抢正文层次。 */
+.msg-user-fold {
+  border: none;
+  background: none;
+  padding: 0 4px;
+  margin-top: -4px;
+  color: var(--label-tertiary);
+  font-size: 12px;
+  line-height: 18px;
+  cursor: pointer;
+}
+
+.msg-user-fold:hover {
+  color: var(--label-primary);
+  text-decoration: underline;
+}
+
 .msg-user-images {
   display: flex;
   flex-wrap: wrap;
@@ -774,6 +797,28 @@
   width: 100%;
   height: 100%;
   object-fit: cover;
+}
+
+/* 视觉注入:图片直接铺在对话流里,保持原始比例 —— 按方图裁切会丢掉
+   "模型到底看到了哪一块"的信息。 */
+.msg-user-images.visual {
+  justify-content: flex-start;
+}
+
+.msg-user-images.visual .msg-user-image {
+  display: inline-flex;
+  width: auto;
+  height: auto;
+  max-width: min(360px, 100%);
+  max-height: 220px;
+}
+
+.msg-user-images.visual .msg-user-image img {
+  width: auto;
+  height: auto;
+  max-width: 100%;
+  max-height: 220px;
+  object-fit: contain;
 }
 
 /* 用户消息图片放大预览:portal 到 body;点遮罩/ESC 关闭,方向键翻页。 */
@@ -880,6 +925,20 @@
 
 .inject-row .inject-summary {
   font-family: inherit;
+}
+
+/* 视觉注入行:头部是静态说明(点击图片才打开预览),图片紧随其后。 */
+.disc-head.visual-inject-head {
+  cursor: default;
+}
+
+.disc-head.visual-inject-head:hover {
+  background: none;
+  color: var(--label-secondary);
+}
+
+.visual-inject-body {
+  padding: 2px 0 0 22px;
 }
 
 /* 主代理发给子会话的消息:右对齐用户气泡 + 一枚"来自主代理"角标。
@@ -1142,7 +1201,8 @@
 .dot.run {
   background: var(--label-primary);
   box-shadow: 0 0 0 2px color-mix(in srgb, var(--label-primary) 25%, transparent);
-  animation: pulse 1.4s var(--ease) infinite;
+  /* 侧栏每个运行中会话都有这个点;呼吸效果取 8 档,约 6 次/秒更新。 */
+  animation: pulse 1.4s steps(8, end) infinite;
 }
 
 @keyframes pulse {
@@ -1167,16 +1227,19 @@
     transparent 80%
   );
   background-size: 280px 100%;
-  animation: glare 2.4s ease-out infinite;
+  background-repeat: no-repeat;
+  /* 光带用 transform 平移(合成层内做,不重绘整行),档位限制更新频率。 */
+  animation: glare 2.4s steps(30, end) infinite;
+  will-change: transform;
   pointer-events: none;
 }
 
 @keyframes glare {
   from {
-    background-position: -280px 0;
+    transform: translateX(-100%);
   }
   to {
-    background-position: 200% 0;
+    transform: translateX(100%);
   }
 }
 
@@ -1908,7 +1971,7 @@
 
 .shimmer-text {
   color: var(--label-secondary);
-  animation: pulse 1.2s var(--ease) infinite;
+  animation: pulse 1.2s steps(8, end) infinite;
 }
 
 .status-line .clock {

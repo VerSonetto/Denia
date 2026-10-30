@@ -69,8 +69,7 @@ pub fn register_shipped_prompt(
         name: "tool:ls".to_string(),
         order: SectionOrder::ToolLs.value(),
         text: PromptText::Static(
-            "- ls 只列一层，深入时显式给 depth≤5；不猜路径，读取失败先 ls 再试。"
-                .to_string(),
+            "- ls 只列一层，深入时显式给 depth≤5；不猜路径，读取失败先 ls 再试。".to_string(),
         ),
         complete: false,
         audience: SectionAudience::Model,
@@ -78,7 +77,9 @@ pub fn register_shipped_prompt(
     prompt.section(PromptSection {
         name: "tool:read".to_string(),
         order: SectionOrder::ToolRead.value(),
-        text: PromptText::Static("- 读取前不声称已看过、不猜内容。同一分页未变更的重复读取只返回提示。".to_string()),
+        text: PromptText::Static(
+            "- 读取前不声称已看过、不猜内容。同一分页未变更的重复读取只返回提示。".to_string(),
+        ),
         complete: false,
         audience: SectionAudience::Model,
     })?;
@@ -386,18 +387,7 @@ pub fn register_preset_prompt_section(prompt: &mut SystemPrompt) -> Result<(), S
 /// 服务器名册常驻可见,模型据此知道"接入了什么能力",需要时再用 mcp_list
 /// 查具体工具。纪律与 description 分工不重叠:description 写调用机制与
 /// 分页字段,本段写"这些工具是什么、什么时候用、失败怎么办"的行为准则。
-pub fn register_mcp_prompt_section(prompt: &mut SystemPrompt) -> Result<(), String> {
-    prompt.section(PromptSection {
-        name: "tool:mcp".to_string(),
-        order: SectionOrder::ToolMcp.value(),
-        text: PromptText::Static(render_mcp_section(&[])),
-        complete: false,
-        audience: SectionAudience::Model,
-    })?;
-    Ok(())
-}
-
-/// 带连接目录的 MCP 纪律段:文本每次装配按 `McpManager` 快照实时渲染。
+/// 带连接目录:文本每次装配按 `McpManager` 快照实时渲染。
 pub fn register_mcp_prompt_section_with_manager(
     prompt: &mut SystemPrompt,
     manager: Arc<denia_mcp::McpManager>,
@@ -1580,7 +1570,7 @@ mod browser_prompt_tests {
     #[test]
     fn browser_section_and_schema_available_with_the_legacy_ceiling() {
         assert!(
-            crate::SUBAGENT_READ_ONLY_TOOLS.contains(&"browser"),
+            denia_core::subagent::LEGACY_READ_ONLY_TOOLS.contains(&"browser"),
             "历史只读集合应含 browser（旧描述符的保守上限）"
         );
         let (prompt, registry) = default_shipped_with_browser_and_ask(Some(fake_hub()), true);

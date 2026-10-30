@@ -53,7 +53,10 @@ writer stops; reloading repairs any partial tail before further writes.
 - `pnpm typecheck`: TypeScript verification.
 - `pnpm build`: the same frontend test inventory, type checking and Vite build.
 - `scripts/build.ps1 -NoRun` or `scripts/build.sh`: install the CLI.
-- `scripts/desktop.ps1 -BuildOnly`: build the desktop app.
+- `pwsh scripts/desktop.ps1`: build the desktop app (Vite console, precompressed
+  assets, Tauri shell). Add `-Bundle` for the NSIS installer, `-Check` to run the
+  frontend regression suites first, and `-Fast` for an unoptimized iteration
+  build (cgu=16, no LTO, separate `target/fast`) that is not for release.
 
 Windows CI uses the same verification script. Browser/network integration tests
 that require external dependencies remain explicitly ignored by default.

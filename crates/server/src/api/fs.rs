@@ -420,7 +420,11 @@ fn scan_mention_index(root: &Path) -> Vec<IndexedMention> {
     indexed
 }
 
+/// 提及排序档位:相关性档 → 总档 → 命中位置 → 路径深度 → 目录优先。
+type MentionRank = (u8, usize, usize, usize, u8);
+
 /// 多关键词 AND 匹配,相关性优先于目录类型;空查询优先浅层候选。
+/// 排序档位:相关性档 → 总档 → 命中位置 → 路径深度 → 目录优先。
 /// 隐藏文件只在关键词显式包含点文件路径段时可见。
 /// 性能:只 clone 最终返回的前 50 条,排序用 Top-N 部分选择而非全量排序。
 fn filter_mention_entries(entries: &[IndexedMention], needle: &str) -> Vec<MentionItem> {
@@ -430,7 +434,7 @@ fn filter_mention_entries(entries: &[IndexedMention], needle: &str) -> Vec<Menti
         .any(|keyword| keyword.split('/').any(|segment| segment.starts_with('.')));
     // 先收集命中的(引用,档位):档位比较零分配,只在最后 clone 前 50 条。
     // select_nth_unstable 取 Top-N(O(n))替代全量排序 O(n log n)。
-    let mut scored: Vec<(&IndexedMention, (u8, usize, usize, usize, u8))> = Vec::new();
+    let mut scored: Vec<(&IndexedMention, MentionRank)> = Vec::new();
     for entry in entries {
         if !show_hidden && entry.is_hidden {
             continue;
@@ -438,7 +442,7 @@ fn filter_mention_entries(entries: &[IndexedMention], needle: &str) -> Vec<Menti
         let Some((tier, total_tier, pos)) = match_mention(entry, &keywords) else {
             continue;
         };
-        let rank = (
+        let rank: MentionRank = (
             tier,
             total_tier,
             pos,
@@ -448,7 +452,7 @@ fn filter_mention_entries(entries: &[IndexedMention], needle: &str) -> Vec<Menti
         scored.push((entry, rank));
     }
     if scored.len() > MENTION_MAX_RESULTS {
-        scored.select_nth_unstable_by(MENTION_MAX_RESULTS, |a, b| compare_scored(a, b));
+        scored.select_nth_unstable_by(MENTION_MAX_RESULTS, compare_scored);
         scored.truncate(MENTION_MAX_RESULTS);
     }
     scored.sort_by(compare_scored);
@@ -458,8 +462,8 @@ fn filter_mention_entries(entries: &[IndexedMention], needle: &str) -> Vec<Menti
 /// 完整排序口径:相关性 → 路径深度 → 目录类型 → 小写字典序 → 原文 tiebreak。
 /// 过滤与截断共用同一口径,截断不会误删排序靠前的条目。
 fn compare_scored(
-    left: &(&IndexedMention, (u8, usize, usize, usize, u8)),
-    right: &(&IndexedMention, (u8, usize, usize, usize, u8)),
+    left: &(&IndexedMention, MentionRank),
+    right: &(&IndexedMention, MentionRank),
 ) -> std::cmp::Ordering {
     left.1
         .cmp(&right.1)
@@ -853,17 +857,6 @@ font-src 'self' data:";
 /// 预览资源体积上限（8 MiB），比文本读取的 [`FILE_MAX_BYTES`] 宽，
 /// 因为图片与字体天然比源码大。
 const PREVIEW_MAX_BYTES: u64 = 8 * 1024 * 1024;
-
-/// 工作区根 → URL 首段（base64url，无 padding）。
-///
-/// 用 base64url 是因为工作区路径里有 `\`、`:`、空格等在 URL 路径里必须转义
-/// 的字符，而转义后的形式还要再解码回来才拿得到原路径。base64url 的字母表
-/// （`A-Za-z0-9-_`）本身就是 URL 安全字符集，无需转义，前端也能用
-/// `btoa` 之外的手段复现。
-pub fn encode_workspace_token(root: &str) -> String {
-    use base64::Engine as _;
-    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(root.as_bytes())
-}
 
 /// URL 首段 → 工作区根。解码失败或不是合法 UTF-8 返回 `None`（调用方 400）。
 fn decode_workspace_token(token: &str) -> Option<String> {
@@ -1551,6 +1544,18 @@ mod preview_tests {
     ///
     /// 路径含 Windows 反斜杠、盘符冒号与空格，这些在 URL 路径里都得转义，
     /// 所以走 base64url。往返不保真会让预览读错根目录（静默 404）。
+    ///
+    /// 工作区根 → URL 首段（base64url，无 padding）。
+    ///
+    /// 用 base64url 是因为工作区路径里有 `\`、`:`、空格等在 URL 路径里必须转义
+    /// 的字符，而转义后的形式还要再解码回来才拿得到原路径。base64url 的字母表
+    /// （`A-Za-z0-9-_`）本身就是 URL 安全字符集，无需转义，前端也能用
+    /// `btoa` 之外的手段复现。
+    fn encode_workspace_token(root: &str) -> String {
+        use base64::Engine as _;
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(root.as_bytes())
+    }
+
     #[test]
     fn workspace_token_round_trips() {
         for root in [

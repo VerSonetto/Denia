@@ -165,13 +165,7 @@ impl ProfileStore {
                 Vec::new(),
             );
             layers.push(view.clone());
-            by_id.insert(
-                profile.id.clone(),
-                Layer {
-                    view,
-                    shadowed_by: None,
-                },
-            );
+            by_id.insert(profile.id.clone(), Layer { shadowed_by: None });
         }
         for layer in [
             (ProfileSource::User, &user_files.definitions),
@@ -188,13 +182,7 @@ impl ProfileStore {
                     extra.clone(),
                 );
                 layers.push(view.clone());
-                by_id.insert(
-                    profile.id.clone(),
-                    Layer {
-                        view,
-                        shadowed_by: None,
-                    },
-                );
+                by_id.insert(profile.id.clone(), Layer { shadowed_by: None });
             }
         }
         // 被覆盖项：同一逻辑 id 有多个 layer 时，除最后一个外都记录为 shadowed。
@@ -690,7 +678,6 @@ struct ScanResult {
 }
 
 struct Layer {
-    view: SubagentProfileView,
     #[allow(dead_code)]
     shadowed_by: Option<String>,
 }
@@ -908,7 +895,7 @@ fn parse_frontmatter(
     })?;
     let _ = file_id;
     profile.instructions = body.to_string();
-    profile.validate().map_err(|issues| issues)?;
+    profile.validate()?;
     Ok(profile)
 }
 

@@ -199,13 +199,7 @@ impl Default for ReadFileTool {
 
 /// 单行防护:超长行截断并标注(按字符截断,不撕 UTF-8)。
 fn guard_line(line: &str) -> String {
-    let mut chars = line.chars();
-    let head: String = chars.by_ref().take(MAX_LINE_CHARS).collect();
-    if chars.next().is_some() {
-        format!("{head}…[本行超长,已截断]")
-    } else {
-        head
-    }
+    crate::support::truncate_chars(line, MAX_LINE_CHARS, "…[本行超长,已截断]")
 }
 
 #[async_trait]

@@ -72,7 +72,11 @@ pub struct ReplayPolicy {
 }
 
 impl ReplayPolicy {
-    pub fn prepare<'a>(&self, route: &str, request: &'a GenerateRequest) -> Cow<'a, GenerateRequest> {
+    pub fn prepare<'a>(
+        &self,
+        route: &str,
+        request: &'a GenerateRequest,
+    ) -> Cow<'a, GenerateRequest> {
         let mut state = self
             .state
             .lock()
@@ -200,11 +204,7 @@ mod tests {
         let unchanged = policy.prepare("other-protocol", &request);
         assert!(matches!(unchanged, Cow::Borrowed(_)));
         assert!(std::ptr::eq(unchanged.as_ref(), &request));
-        assert!(
-            unchanged.messages[0]
-                .reasoning_content
-                .is_some()
-        );
+        assert!(unchanged.messages[0].reasoning_content.is_some());
         assert!(
             ReplayPolicy::default().prepare("route", &request).messages[0]
                 .reasoning_content

@@ -35,7 +35,7 @@ pub fn router() -> Router<Arc<AppState>> {
 }
 
 fn error(message: String) -> ApiError {
-    ApiError::bad_request("terminal/operation-failed", message)
+    super::operation_failed("terminal", message)
 }
 
 /// GET /api/terminals — 终端列表快照。

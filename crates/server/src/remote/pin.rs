@@ -28,7 +28,6 @@ pub enum VerifyOutcome {
 /// 一次 PIN 挑战。
 #[derive(Debug, Clone)]
 struct Challenge {
-    ticket_id: String,
     via: Channel,
     peer: String,
     /// `sha256(challenge_id + pin)`:challenge id 当盐,避免同一 PIN 的哈希相同。
@@ -52,7 +51,7 @@ impl ChallengeTable {
     /// 开一个 challenge,返回 id。
     pub fn open(
         &self,
-        ticket_id: &str,
+        _ticket_id: &str,
         via: Channel,
         peer: &str,
         pin: &str,
@@ -62,7 +61,6 @@ impl ChallengeTable {
     ) -> String {
         let id = secret::new_id();
         let challenge = Challenge {
-            ticket_id: ticket_id.to_string(),
             via,
             peer: peer.to_string(),
             pin_hash: hash_pin(&id, pin),

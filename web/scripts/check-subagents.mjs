@@ -10,7 +10,7 @@
  *
  * B 段直接读源码：这些断言的价值在于"回归时立刻失败"，而不是复述实现。
  */
-import { readFileSync, mkdtempSync } from 'node:fs'
+import { mkdtempSync, readdirSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -180,6 +180,18 @@ check('空描述符返回空串', display.subagentSnapshotText(null), '')
 
 /* ---------- B) 契约与清理 ---------- */
 const read = (relative) => readFileSync(join(repo, relative), 'utf8')
+// agent_runtime 已拆成目录:断言只看"这些源码文本存在",与文件切分方式无关。
+let runtimeCache
+const readRuntime = () => {
+  if (runtimeCache !== undefined) return runtimeCache
+  const srcDir = join(repo, 'crates/server/src')
+  const parts = ['agent_runtime.rs']
+  for (const name of readdirSync(join(srcDir, 'agent_runtime'))) {
+    if (name.endsWith('.rs')) parts.push(join('agent_runtime', name))
+  }
+  runtimeCache = parts.map((part) => readFileSync(join(srcDir, part), 'utf8')).join('\n')
+  return runtimeCache
+}
 
 const runtimeSettings = read('web/src/components/settings/RuntimeSettings.tsx')
 assert(
@@ -286,7 +298,7 @@ assert('子会话横幅使用共享的身份摘要', sessionsPage.includes('suba
 assert('子会话横幅渲染摘要', sessionsPage.includes('child-snapshot'))
 assert(
   '列表负载来自服务端快照',
-  read('crates/server/src/agent_runtime.rs').includes('"waitingInteraction"'),
+  readRuntime().includes('"waitingInteraction"'),
 )
 
 // 未决交互的加载期收敛（重启后不得留下"可提交但必然失败"的卡片）。
@@ -301,7 +313,7 @@ assert('执行器拒绝无授权的后台命令', execSource.includes('bash_requ
 assert('会话有效工具面统一判定', read('crates/agent-loop/src/lib.rs').includes('session_tool_face'))
 
 // 派遣崩溃窗口有 fault-injection 覆盖。
-const runtimeSource = read('crates/server/src/agent_runtime.rs')
+const runtimeSource = readRuntime()
 for (const point of ['"create"', '"snapshot"', '"pre-enqueue"', '"enqueue"', '"post-enqueue"']) {
   assert(`故障注入点 ${point}`, runtimeSource.includes(`test_fault(${point})`))
 }
@@ -333,7 +345,7 @@ assert(
 )
 assert(
   '目录预算独立可诊断',
-  read('crates/server/src/agent_runtime.rs').includes('subagent_catalog_max_bytes'),
+  readRuntime().includes('subagent_catalog_max_bytes'),
 )
 
 // 缺口 7：浏览器 tab 按 child 归属，只清理该 child 自己的资源。
@@ -345,12 +357,12 @@ assert(
   '浏览器工具把会话身份当归属',
   read('crates/tools/src/browser.rs').includes('execute_owned(command, owner.as_deref())'),
 )
-const runtimeForBrowser = read('crates/server/src/agent_runtime.rs')
+const runtimeForBrowser = readRuntime()
 assert('停止 child 时清理其 tab', runtimeForBrowser.includes('close_owned_tabs(target)'))
 assert(
   '结束 child 时清理其 tab',
   runtimeForBrowser.includes('async fn close_owned_tabs')
-    && read('crates/server/src/agent_runtime_lifecycle.rs').includes('close_owned_tabs(&child)'),
+    && runtimeForBrowser.includes('close_owned_tabs(&child)'),
 )
 assert('删除会话时清理其 tab', runtimeForBrowser.includes('close_owned_tabs(&child.id)'))
 assert('装配处挂载浏览器中枢', read('crates/server/src/state.rs').includes('attach_browser'))

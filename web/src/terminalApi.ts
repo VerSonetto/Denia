@@ -5,6 +5,8 @@
  * 都要往返,走 HTTP 延迟会叠加;WebSocket 一条连接双向复用。
  */
 
+import { encodeUtf8Base64 } from './lib/base64'
+
 export interface TerminalInfo {
   id: string
   /** shell 展示标签(如 `PowerShell 7 (pwsh)`)。 */
@@ -76,10 +78,7 @@ export function resizeTerminal(id: string, cols: number, rows: number): Promise<
 /* ---- base64:PTY 字节流不保证是合法 UTF-8,必须走二进制安全编码 ---- */
 
 export function encodeInput(text: string): string {
-  const bytes = new TextEncoder().encode(text)
-  let binary = ''
-  for (const byte of bytes) binary += String.fromCharCode(byte)
-  return btoa(binary)
+  return encodeUtf8Base64(text)
 }
 
 export function decodeOutput(base64: string): Uint8Array {

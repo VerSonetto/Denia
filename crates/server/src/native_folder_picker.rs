@@ -388,7 +388,11 @@ mod tests {
 
     #[test]
     fn parse_files_cancel_is_empty_not_error() {
-        assert!(parse_pick_files_output(r#"{"paths":[]}"#).unwrap().is_empty());
+        assert!(
+            parse_pick_files_output(r#"{"paths":[]}"#)
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]

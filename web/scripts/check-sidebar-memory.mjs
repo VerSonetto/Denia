@@ -77,7 +77,8 @@ try {
   assert.doesNotThrow(() => writeSidebarOrder({ workspaces: ['w'], ungrouped: [], sessions: {} }))
   assert.doesNotThrow(() => writeSidebarPins({ workspaces: ['w'], sessions: ['s'] }))
   assert.doesNotThrow(() => writeSidebarFilter('running'))
-  const app = readFileSync(join(root, 'src/App.tsx'), 'utf8')
+  // 侧栏工作区树已整体抽到 components/sidebar;以下断言跟随迁移落在新文件。
+  const app = readFileSync(join(root, 'src/components/sidebar/SidebarWorkspaces.tsx'), 'utf8')
   assert.ok(app.includes('useState(readCollapsedChildren)'))
   assert.ok(app.includes('activeId === revealedSessionRef.current'), '同会话推送不覆盖折叠状态')
   assert.ok(app.includes('beginSessionDrag'), '侧栏会话支持拖动排序')

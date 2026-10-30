@@ -85,21 +85,22 @@ impl Default for McpServerConfig {
     }
 }
 
+/// [`McpServerConfig::connection_key`] 的指纹:与连接有关、与工具开关无关的字段。
+type ConnectionKey = (
+    String,
+    Vec<String>,
+    BTreeMap<String, String>,
+    Option<PathBuf>,
+    String,
+    bool,
+    Option<String>,
+    BTreeMap<String, String>,
+);
+
 impl McpServerConfig {
     /// 决定是否需要重连的指纹:与连接有关、与工具开关无关的字段。
     /// (工具开关只是过滤,不需要重启子进程/重连。)
-    pub fn connection_key(
-        &self,
-    ) -> (
-        String,
-        Vec<String>,
-        BTreeMap<String, String>,
-        Option<PathBuf>,
-        String,
-        bool,
-        Option<String>,
-        BTreeMap<String, String>,
-    ) {
+    pub fn connection_key(&self) -> ConnectionKey {
         (
             self.command.clone(),
             self.args.clone(),

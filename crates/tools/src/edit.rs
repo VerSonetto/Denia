@@ -75,7 +75,10 @@ struct EditSpec {
 ///
 /// `edits` 为空数组时不当作“多处形式”：那个形状几乎总是模型把单处编辑误写成
 /// 数组，此时回退到单处字段；两个都空才报错。
-fn parse_specs(args: &EditArgs) -> Result<(Vec<EditSpec>, Vec<&'static str>), (String, String)> {
+/// 解析成功值:`(编辑规格列表, 被忽略的顶层字段名)`。
+type ParsedEdits = (Vec<EditSpec>, Vec<&'static str>);
+
+fn parse_specs(args: &EditArgs) -> Result<ParsedEdits, (String, String)> {
     if args.edits.as_ref().is_some_and(|edits| !edits.is_empty()) {
         let edits = args.edits.as_ref().expect("checked non-empty");
         let ignored = top_level_ignored(args);
@@ -325,8 +328,7 @@ impl Tool for EditTool {
                     if candidates.len() == 1 {
                         let start = candidates[0];
                         let old_line_count = old_view.matches('\n').count() + 1;
-                        let mut lines: Vec<String> =
-                            view.split('\n').map(str::to_string).collect();
+                        let mut lines: Vec<String> = view.split('\n').map(str::to_string).collect();
                         let new_lines: Vec<String> =
                             new_view.split('\n').map(str::to_string).collect();
                         lines.splice(start..start + old_line_count, new_lines);
@@ -357,7 +359,7 @@ impl Tool for EditTool {
                 } else {
                     format!(
                         "第 {ordinal} 处编辑在 {} 中找不到 old_string({:?}):先 read_file 确认当前原文,再从输出中逐字符复制",
-                        display(&path, &ctx.cwd),
+                        crate::support::display_path(&path, &ctx.cwd),
                         preview(&spec.old)
                     )
                 };
@@ -371,7 +373,7 @@ impl Tool for EditTool {
                     format!(
                         "第 {ordinal} 处编辑的 old_string({:?})在 {} 中出现了 {count} 次",
                         preview(&spec.old),
-                        display(&path, &ctx.cwd)
+                        crate::support::display_path(&path, &ctx.cwd)
                     ),
                     "在该处 old_string 里带上更多上下文使其唯一,或确认要全部替换时给该项设置 replace_all=true;edits 全有或全无,本次调用未写入任何内容".to_string(),
                 );
@@ -421,7 +423,7 @@ impl Tool for EditTool {
                 return tool_error(
                     format!(
                         "{} 在你上次读取之后被改动过(可能由用户、编辑器或其他进程写入),本次编辑未写入",
-                        display(&path, &ctx.cwd)
+                        crate::support::display_path(&path, &ctx.cwd)
                     ),
                     "重新 read_file 获取最新内容,再按最新内容重提编辑",
                 );
@@ -430,7 +432,7 @@ impl Tool for EditTool {
                 return tool_error(
                     format!(
                         "{} 的内容在你上次读取之后被改写(大小与修改时间未变,内容指纹不符),本次编辑未写入",
-                        display(&path, &ctx.cwd)
+                        crate::support::display_path(&path, &ctx.cwd)
                     ),
                     "重新 read_file 获取最新内容,再按最新内容重提编辑",
                 );
@@ -480,7 +482,7 @@ impl Tool for EditTool {
             }
             format!(
                 "已在 {} 应用 {} 处编辑(共替换 {replaced_total} 次):{listing}",
-                display(&path, &ctx.cwd),
+                crate::support::display_path(&path, &ctx.cwd),
                 specs.len(),
             )
         } else {
@@ -491,7 +493,7 @@ impl Tool for EditTool {
             };
             format!(
                 "已在 {} 替换 {verb}({:?} → 新文本),首次替换发生在第 {} 行",
-                display(&path, &ctx.cwd),
+                crate::support::display_path(&path, &ctx.cwd),
                 preview(&specs[0].old),
                 anchors[0],
             )
@@ -537,22 +539,9 @@ impl Tool for EditTool {
     }
 }
 
-fn display(path: &std::path::Path, cwd: &std::path::Path) -> String {
-    path.strip_prefix(cwd)
-        .unwrap_or(path)
-        .to_string_lossy()
-        .replace('\\', "/")
-}
-
 /// 错误消息里的 old_string 预览:太长会撑爆工具结果,只留前 120 字符。
 fn preview(text: &str) -> String {
-    let mut chars = text.chars();
-    let head: String = chars.by_ref().take(120).collect();
-    if chars.next().is_some() {
-        format!("{head}…")
-    } else {
-        head
-    }
+    crate::support::truncate_chars(text, 120, "…")
 }
 
 /// 1-based line number of the first occurrence (newline counting only).
@@ -997,7 +986,11 @@ mod tests {
         // 被忽略的字段必须回告，否则模型会以为 replace_all 生效了。
         assert!(out.content.contains("已忽略"), "{}", out.content);
         for field in ["old_string", "new_string", "replace_all"] {
-            assert!(out.content.contains(field), "回告缺少 {field}: {}", out.content);
+            assert!(
+                out.content.contains(field),
+                "回告缺少 {field}: {}",
+                out.content
+            );
         }
         std::fs::remove_dir_all(&ctx.cwd).unwrap();
     }
@@ -1016,7 +1009,10 @@ mod tests {
             )
             .await;
         assert!(!out.is_error, "{}", out.content);
-        assert_eq!(std::fs::read_to_string(root.join("a.txt")).unwrap(), "bye\n");
+        assert_eq!(
+            std::fs::read_to_string(root.join("a.txt")).unwrap(),
+            "bye\n"
+        );
         std::fs::remove_dir_all(&ctx.cwd).unwrap();
     }
 

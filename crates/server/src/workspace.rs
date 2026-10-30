@@ -92,13 +92,11 @@ impl WorkspaceRegistry {
                 .push((session_id.clone(), *created_at));
         }
         let mut ordered: Vec<(String, Vec<(String, u64)>)> = groups.into_iter().collect();
-        ordered.sort_by(|a, b| {
-            let latest_a = a.1.iter().map(|(_, t)| t).max().unwrap_or(&0);
-            let latest_b = b.1.iter().map(|(_, t)| t).max().unwrap_or(&0);
-            latest_b.cmp(latest_a)
+        ordered.sort_by_key(|(_, times)| {
+            std::cmp::Reverse(times.iter().map(|(_, t)| t).max().copied().unwrap_or(0))
         });
         for (path, mut members) in ordered {
-            members.sort_by(|a, b| b.1.cmp(&a.1));
+            members.sort_by_key(|(_, created_at)| std::cmp::Reverse(*created_at));
             let id = uuid::Uuid::new_v4().to_string();
             let title = Path::new(&path)
                 .file_name()

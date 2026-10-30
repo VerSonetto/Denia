@@ -61,9 +61,7 @@ async fn weixin_login(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     Json(weixin_json(&state))
 }
 
-async fn weixin_logout(
-    State(state): State<Arc<AppState>>,
-) -> Result<impl IntoResponse, ApiError> {
+async fn weixin_logout(State(state): State<Arc<AppState>>) -> Result<impl IntoResponse, ApiError> {
     state.im.logout().await;
     Ok(Json(weixin_json(&state)))
 }
@@ -108,9 +106,7 @@ async fn qqbot_config(
     Ok(Json(qqbot_json(&state)))
 }
 
-async fn qqbot_logout(
-    State(state): State<Arc<AppState>>,
-) -> Result<impl IntoResponse, ApiError> {
+async fn qqbot_logout(State(state): State<Arc<AppState>>) -> Result<impl IntoResponse, ApiError> {
     state.im.logout_qq().await;
     Ok(Json(qqbot_json(&state)))
 }

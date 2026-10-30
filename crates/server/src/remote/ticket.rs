@@ -19,7 +19,6 @@ use super::secret;
 struct Ticket {
     id: String,
     via: Channel,
-    created_at: u64,
     expires_at: u64,
     /// 剩余可用次数。一次性票据为 1。
     remaining: u32,
@@ -81,7 +80,6 @@ impl TicketTable {
         let ticket = Ticket {
             id: secret::new_id(),
             via,
-            created_at: now_ms,
             expires_at: now_ms.saturating_add(ttl_seconds.saturating_mul(1000)),
             remaining: if single_use { 1 } else { u32::MAX },
             pin_required,

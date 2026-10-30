@@ -24,7 +24,7 @@ pub fn router() -> Router<Arc<AppState>> {
         .route("/api/sessions/{id}/skills/{name}", get(skill))
 }
 fn error(e: String) -> ApiError {
-    ApiError::bad_request("runtime/operation-failed", e)
+    super::operation_failed("runtime", e)
 }
 async fn ensure(state: &AppState, id: &str) -> Result<Arc<crate::state::LiveSession>, ApiError> {
     let live = state.live.clone();

@@ -155,9 +155,7 @@ async fn drives_a_real_browser_end_to_end() {
     // 3. 用 ref 点击页面里的链接(ref 机制的核心验证)。
     let clickable_ref = elements
         .lines()
-        .find(|line| {
-            (line.contains("link ") || line.contains("button ")) && line.contains("[ref=")
-        })
+        .find(|line| (line.contains("link ") || line.contains("button ")) && line.contains("[ref="))
         .and_then(|line| {
             let start = line.find("[ref=")? + 5;
             let rest = &line[start..];
@@ -466,8 +464,14 @@ async fn covers_interactions_on_local_fixture() {
         .await;
     assert!(outcome.ok, "drag 应成功: {:?}", outcome.error);
     let value = eval(&manager, "() => window.__events").await;
-    assert!(value["downs"].as_i64().unwrap_or(0) >= 1, "drag 应产生 mousedown");
-    assert!(value["ups"].as_i64().unwrap_or(0) >= 1, "drag 应产生 mouseup");
+    assert!(
+        value["downs"].as_i64().unwrap_or(0) >= 1,
+        "drag 应产生 mousedown"
+    );
+    assert!(
+        value["ups"].as_i64().unwrap_or(0) >= 1,
+        "drag 应产生 mouseup"
+    );
 
     // elementInfo
     let outcome = manager
@@ -516,7 +520,9 @@ async fn covers_interactions_on_local_fixture() {
     assert!(outcome.ok, "waitFor textGone 应成功: {:?}", outcome.error);
 
     // getState
-    let outcome = manager.execute(BrowserCommand::GetState { tab_id: None }).await;
+    let outcome = manager
+        .execute(BrowserCommand::GetState { tab_id: None })
+        .await;
     let value = value_of(&outcome, "getState");
     assert!(
         value["tabs"]
@@ -673,7 +679,10 @@ async fn covers_dialogs_network_and_viewport() {
     let value = value_of(&outcome, "back");
     let back_url = value["url"].as_str().unwrap_or_default();
     println!("back → {back_url}");
-    assert!(!back_url.contains("page2"), "回退后不应在 page2: {back_url}");
+    assert!(
+        !back_url.contains("page2"),
+        "回退后不应在 page2: {back_url}"
+    );
 
     let outcome = manager
         .execute(BrowserCommand::Forward { tab_id: None })
@@ -905,10 +914,7 @@ async fn reclaims_browser_process_when_done() {
         })
         .await;
     let reclaimed = wait_until(|| async { !denia_browser::browser_profile_held(&profile) }).await;
-    assert!(
-        reclaimed,
-        "最后一个 tab 关闭后必须回收进程并释放 profile"
-    );
+    assert!(reclaimed, "最后一个 tab 关闭后必须回收进程并释放 profile");
     assert!(!manager.is_running().await, "控制面也不得再报在跑");
     // 主进程退了不算收干净:Chrome 的 gpu/network/utility/crashpad 子进程会
     // 在父进程死后继续占资源。这一步按命令行里的 profile 路径数残留。
@@ -924,31 +930,27 @@ async fn reclaims_browser_process_when_done() {
             url: Some("data:text/html,<title>again</title>".to_string()),
         })
         .await;
-    assert!(
-        reopened.ok,
-        "回收后必须能再次拉起: {:?}",
-        reopened.error
-    );
+    assert!(reopened.ok, "回收后必须能再次拉起: {:?}", reopened.error);
     assert!(
         denia_browser::browser_profile_held(&profile),
         "重新拉起应重新占用 profile"
     );
 
     // 5. 显式回收:模型收尾靠这一条。
-    let outcome = manager
-        .execute(BrowserCommand::ShutdownBrowser)
-        .await;
+    let outcome = manager.execute(BrowserCommand::ShutdownBrowser).await;
     let value = value_of(&outcome, "shutdownBrowser");
-    assert_eq!(value["released"].as_bool(), Some(true), "应报回收了一个实例");
+    assert_eq!(
+        value["released"].as_bool(),
+        Some(true),
+        "应报回收了一个实例"
+    );
     assert!(
         wait_until(|| async { !denia_browser::browser_profile_held(&profile) }).await,
         "shutdownBrowser 之后 profile 必须自尤"
     );
 
     // 6. 善后命令不得反过来拉起实例:本来就没跑 → 原地返回,不开进程。
-    let again = manager
-        .execute(BrowserCommand::ShutdownBrowser)
-        .await;
+    let again = manager.execute(BrowserCommand::ShutdownBrowser).await;
     let value = value_of(&again, "重复 shutdownBrowser");
     assert_eq!(value["released"].as_bool(), Some(false), "重复回收是空操作");
     let listed = manager.execute(BrowserCommand::List).await;
@@ -975,7 +977,9 @@ async fn reclaims_browser_process_when_done() {
         "收尾路径不得留下任何浏览器进程:{leftovers:?}"
     );
 
-    println!("==> 回收回归全部通过(零 tab 自动回收 + 显式 shutdownBrowser + 善后不拉起 + 无残留进程)");
+    println!(
+        "==> 回收回归全部通过(零 tab 自动回收 + 显式 shutdownBrowser + 善后不拉起 + 无残留进程)"
+    );
 }
 
 /// 还挂着这个 profile 的浏览器进程(`PID:名字`)。
@@ -1000,8 +1004,15 @@ fn processes_on_profile(profile: &std::path::Path) -> Vec<String> {
         // 只算浏览器镜像:查询用的 powershell 自身命令行里带着同一个
         // marker,不滤会把自己数成残留。
         .filter(|line| {
-            let name = line.rsplit(':').next().unwrap_or_default().to_ascii_lowercase();
-            name == "chrome.exe" || name == "msedge.exe" || name.ends_with("chrome.exe") || name.ends_with("msedge.exe")
+            let name = line
+                .rsplit(':')
+                .next()
+                .unwrap_or_default()
+                .to_ascii_lowercase();
+            name == "chrome.exe"
+                || name == "msedge.exe"
+                || name.ends_with("chrome.exe")
+                || name.ends_with("msedge.exe")
         })
         .map(str::to_string)
         .collect()
@@ -1028,4 +1039,3 @@ where
     }
     false
 }
-

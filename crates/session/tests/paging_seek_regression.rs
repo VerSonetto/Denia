@@ -167,7 +167,7 @@ fn legacy_page(
     let mut header = None;
     let mut line = String::new();
     let mut line_no = 0;
-    let mut total = 0;
+    let mut total = 0u64;
     let mut anchors = Vec::new();
     let mut anchor_at = Vec::new();
     let mut totals = SessionTotals::default();
@@ -285,7 +285,10 @@ fn paging_seek_matches_legacy_for_turn_boundaries_chunks_and_global_totals() {
         user("injected preface", true),
     ];
     for turn in 1..=8 {
-        events.push(user(format!(" \n问题 {turn} {}\r\n", "界🙂".repeat(160)), false));
+        events.push(user(
+            format!(" \n问题 {turn} {}\r\n", "界🙂".repeat(160)),
+            false,
+        ));
         events.push(SessionEvent::TurnStart { turn });
         for index in 0..turn * 3 {
             events.push(SessionEvent::AssistantChunk {
@@ -340,7 +343,10 @@ fn paging_seek_matches_legacy_for_turn_boundaries_chunks_and_global_totals() {
         &[None, Some(0), Some(2), Some(35), Some(200), Some(u64::MAX)],
         &[0, 1, 4, 13, 1000, usize::MAX],
     );
-    let page = fixture.store().read_page(&fixture.header.id, Some(35), 1).unwrap();
+    let page = fixture
+        .store()
+        .read_page(&fixture.header.id, Some(35), 1)
+        .unwrap();
     assert_eq!(page.anchors.len(), 8);
     assert_eq!(page.totals.turns, 8);
     assert_eq!(page.totals.steps, 8);
@@ -371,10 +377,20 @@ fn paging_seek_matches_legacy_without_anchors_and_with_nonmonotonic_sequences() 
         line(60, assistant(1)),
         line(15, user("injected but eligible", true)),
         line(10, user("duplicate eligible seq", false)),
-        line(5, SessionEvent::TurnEnd { turn: 1, reason: TurnEndReason::Completed }),
+        line(
+            5,
+            SessionEvent::TurnEnd {
+                turn: 1,
+                reason: TurnEndReason::Completed,
+            },
+        ),
     ];
     std::fs::write(&fixture.file, fixture.log(&lines, "\n")).unwrap();
-    compare_queries(&fixture, &[None, Some(10), Some(30), Some(51)], &[0, 1, 3, 50]);
+    compare_queries(
+        &fixture,
+        &[None, Some(10), Some(30), Some(51)],
+        &[0, 1, 3, 50],
+    );
 }
 
 #[test]
@@ -400,13 +416,25 @@ fn paging_seek_stops_at_unknown_or_malformed_events_without_repairing_the_log() 
     for invalid in invalid {
         let mut lines = prefix.clone();
         lines.push(invalid.into());
-        lines.push(line(5, user("must never be stitched onto the prefix", false)));
+        lines.push(line(
+            5,
+            user("must never be stitched onto the prefix", false),
+        ));
         lines.push(line(6, assistant(2)));
-        lines.push(line(7, SessionEvent::TurnEnd { turn: 1, reason: TurnEndReason::Completed }));
+        lines.push(line(
+            7,
+            SessionEvent::TurnEnd {
+                turn: 1,
+                reason: TurnEndReason::Completed,
+            },
+        ));
         let log = fixture.log(&lines, "\n");
         std::fs::write(&fixture.file, &log).unwrap();
         compare_queries(&fixture, &[None, Some(2), Some(6)], &[0, 1, 1000]);
-        let page = fixture.store().read_page(&fixture.header.id, None, 1).unwrap();
+        let page = fixture
+            .store()
+            .read_page(&fixture.header.id, None, 1)
+            .unwrap();
         assert_eq!(page.total, 3);
         assert_eq!(page.events.len(), 3);
         assert_eq!(page.anchors.len(), 1);
@@ -460,7 +488,11 @@ fn write_synthetic(fixture: &Fixture, turns: u32, chunks: u32) -> SyntheticLog {
     for turn in 1..=turns {
         push(user(format!("synthetic prompt {turn}"), false));
         push(SessionEvent::TurnStart { turn });
-        push(SessionEvent::SystemPrompt { turn, step: 1, text: prompt.clone() });
+        push(SessionEvent::SystemPrompt {
+            turn,
+            step: 1,
+            text: prompt.clone(),
+        });
         push(SessionEvent::ToolCall {
             turn,
             step: 1,
@@ -473,7 +505,10 @@ fn write_synthetic(fixture: &Fixture, turns: u32, chunks: u32) -> SyntheticLog {
                 push(SessionEvent::AssistantChunk {
                     turn,
                     step: 1,
-                    chunk: StreamChunk::TextDelta { index, text: chunk.clone() },
+                    chunk: StreamChunk::TextDelta {
+                        index,
+                        text: chunk.clone(),
+                    },
                 });
             } else {
                 push(SessionEvent::ToolOutputChunk {
@@ -496,7 +531,10 @@ fn write_synthetic(fixture: &Fixture, turns: u32, chunks: u32) -> SyntheticLog {
             replaces: None,
         });
         push(assistant(turn));
-        push(SessionEvent::TurnEnd { turn, reason: TurnEndReason::Completed });
+        push(SessionEvent::TurnEnd {
+            turn,
+            reason: TurnEndReason::Completed,
+        });
     }
     writer.flush().unwrap();
     SyntheticLog { bytes, offsets }
@@ -519,7 +557,11 @@ fn paging_seek_long_log_benchmark() {
     let events_per_turn = u64::from(CHUNKS) + 7;
     println!(
         "paging_seek fixture_bytes={} log_events={} turns={} chunks_per_turn={} repeats={}",
-        synthetic.bytes, synthetic.offsets.len(), TURNS, CHUNKS, REPEATS,
+        synthetic.bytes,
+        synthetic.offsets.len(),
+        TURNS,
+        CHUNKS,
+        REPEATS,
     );
     let queries = [
         ("tail", None),
@@ -535,7 +577,11 @@ fn paging_seek_long_log_benchmark() {
         let first = actual.events.first().unwrap().seq;
         let last = actual.events.last().unwrap().seq;
         let window_start = synthetic.offsets[first as usize - 1];
-        let window_end = synthetic.offsets.get(last as usize).copied().unwrap_or(synthetic.bytes);
+        let window_end = synthetic
+            .offsets
+            .get(last as usize)
+            .copied()
+            .unwrap_or(synthetic.bytes);
         let window_bytes = window_end - window_start;
         let mut legacy_times = Vec::new();
         let mut seek_times = Vec::new();
@@ -552,12 +598,20 @@ fn paging_seek_long_log_benchmark() {
         let seek_time = median(&mut seek_times);
         println!(
             "paging_seek query={name} page_events={} eligible_total={} anchors={} legacy_ms={:.3} seek_ms={:.3} speedup={:.2} legacy_logical_bytes={} seek_logical_bytes={} legacy_full_decodes={} seek_full_decodes={} window_bytes={window_bytes}",
-            actual.events.len(), actual.total, actual.anchors.len(),
-            legacy_time.as_secs_f64() * 1000.0, seek_time.as_secs_f64() * 1000.0,
+            actual.events.len(),
+            actual.total,
+            actual.anchors.len(),
+            legacy_time.as_secs_f64() * 1000.0,
+            seek_time.as_secs_f64() * 1000.0,
             legacy_time.as_secs_f64() / seek_time.as_secs_f64(),
-            expected.1.bytes, synthetic.bytes + window_bytes,
-            expected.1.decodes, synthetic.offsets.len() as u64 + last - first + 1,
+            expected.1.bytes,
+            synthetic.bytes + window_bytes,
+            expected.1.decodes,
+            synthetic.offsets.len() as u64 + last - first + 1,
         );
     }
-    assert_eq!(std::fs::metadata(&fixture.file).unwrap().len(), synthetic.bytes);
+    assert_eq!(
+        std::fs::metadata(&fixture.file).unwrap().len(),
+        synthetic.bytes
+    );
 }

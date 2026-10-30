@@ -117,9 +117,7 @@ fn remove(path: &Path) {
 }
 
 fn normalize_path(raw: &str) -> String {
-    raw.trim()
-        .replace('\\', "/")
-        .to_ascii_lowercase()
+    raw.trim().replace('\\', "/").to_ascii_lowercase()
 }
 
 /// 记录里的 Chrome 是否**就是**当前那个同 PID 进程(身份比对)。
@@ -165,10 +163,7 @@ fn identity(chrome_pid: Option<u32>, fallback_exe: &Path) -> (String, u64) {
                 .unwrap_or_else(|| fallback_exe.to_string_lossy().into_owned()),
             probe.created_ms.unwrap_or(0),
         ),
-        None => (
-            fallback_exe.to_string_lossy().into_owned(),
-            0,
-        ),
+        None => (fallback_exe.to_string_lossy().into_owned(), 0),
     }
 }
 
@@ -185,8 +180,10 @@ pub fn claim(profile_dir: &Path, chrome_pid: Option<u32>, exe: &Path) -> Profile
         writer_pid: std::process::id(),
         written_ms: now_ms(),
     };
-    if let Err(error) = std::fs::write(&path, serde_json::to_vec_pretty(&record).unwrap_or_default())
-    {
+    if let Err(error) = std::fs::write(
+        &path,
+        serde_json::to_vec_pretty(&record).unwrap_or_default(),
+    ) {
         tracing::warn!("写浏览器实例记录失败({}): {error}", path.display());
         return ProfileToken::detached();
     }
@@ -204,7 +201,7 @@ pub enum Reaped {
     /// 只清了一条指向已消失进程的记录。
     StaleRecord,
     /// 连根拔掉了一个残留 Chrome 进程树。
-    Reaped,
+    ProcessTree,
 }
 
 /// 冷启动前清扫上一代残留。
@@ -243,7 +240,7 @@ pub async fn reap_stale(profile_dir: &Path) -> Result<Reaped, String> {
         ));
     }
     remove(&path);
-    Ok(Reaped::Reaped)
+    Ok(Reaped::ProcessTree)
 }
 
 /// 本实例回收自己拉起的 Chrome:按 PID 连根拔进程树并等它消失。
@@ -342,11 +339,7 @@ fn descendant_pids(root: u32, exe_hint: Option<&Path>) -> Vec<u32> {
         if Process32FirstW(snapshot, &mut entry) != 0 {
             loop {
                 let name = lower_utf16(&entry.szExeFile);
-                rows.push((
-                    entry.th32ParentProcessID,
-                    entry.th32ProcessID,
-                    Some(name),
-                ));
+                rows.push((entry.th32ParentProcessID, entry.th32ProcessID, Some(name)));
                 if Process32NextW(snapshot, &mut entry) == 0 {
                     break;
                 }
@@ -400,7 +393,9 @@ fn descendant_pids(root: u32, exe_hint: Option<&Path>) -> Vec<u32> {
             continue;
         };
         // 格式:pid (comm) state ppid ... —— comm 可含空格,从最后一个 ')' 之后取字段。
-        let Some(tail) = stat.rfind(')') else { continue };
+        let Some(tail) = stat.rfind(')') else {
+            continue;
+        };
         let mut fields = stat[tail + 1..].split_whitespace();
         let _state = fields.next();
         let Some(ppid) = fields.next().and_then(|value| value.parse::<u32>().ok()) else {
@@ -507,8 +502,8 @@ pub async fn wait_gone(pid: u32, timeout: Duration) -> bool {
 pub fn describe(pid: u32) -> Option<Probe> {
     use windows_sys::Win32::Foundation::{CloseHandle, FILETIME, HANDLE};
     use windows_sys::Win32::System::Threading::{
-        GetExitCodeProcess, GetProcessTimes, OpenProcess, QueryFullProcessImageNameW,
-        PROCESS_QUERY_LIMITED_INFORMATION,
+        GetExitCodeProcess, GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+        QueryFullProcessImageNameW,
     };
 
     const STILL_ACTIVE: u32 = 259;
@@ -518,8 +513,7 @@ pub fn describe(pid: u32) -> Option<Probe> {
     if pid == 0 {
         return None;
     }
-    let handle: HANDLE =
-        unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+    let handle: HANDLE = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
     if handle.is_null() {
         return None;
     }
@@ -603,10 +597,7 @@ mod tests {
     #[test]
     fn lock_file_sits_beside_profile() {
         let path = path_for(Path::new("/home/u/.denia/browser/profile"));
-        assert_eq!(
-            path,
-            PathBuf::from("/home/u/.denia/browser/.instance.json")
-        );
+        assert_eq!(path, PathBuf::from("/home/u/.denia/browser/.instance.json"));
     }
 
     /// 身份比对:路径大小写/分隔符差异不影响判定,创建时间与 PID 复用必须拦下。
@@ -623,7 +614,10 @@ mod tests {
             exe: Some(r"c:\program files\google\chrome\application\chrome.exe".to_string()),
             created_ms: Some(record.created_ms + 500),
         };
-        assert!(record_matches(&record, &matching), "同路径同创建时间应判为同一进程");
+        assert!(
+            record_matches(&record, &matching),
+            "同路径同创建时间应判为同一进程"
+        );
 
         let reused_pid = Probe {
             exe: matching.exe.clone(),
@@ -762,10 +756,7 @@ mod tests {
         let profile = temp_profile("reused");
         // 本进程活着,但 write_record 写的镜像是 "chrome" —— 身份不符。
         write_record(&path_for(&profile), std::process::id());
-        assert!(
-            !held(&profile),
-            "PID 存活但镜像不符时绝不能认为被自己占用"
-        );
+        assert!(!held(&profile), "PID 存活但镜像不符时绝不能认为被自己占用");
         let _ = std::fs::remove_dir_all(profile.parent().expect("temp root"));
     }
 
@@ -789,7 +780,7 @@ mod tests {
         std::fs::write(path, serde_json::to_vec(&record).expect("serialize")).expect("write");
     }
 
-    /// 残留真被连根拔:假浏览器(子进程) + 本进程写的记录 → Reaped、进程消失、记录清掉。
+    /// 残留真被连根拔:假浏览器(子进程) + 本进程写的记录 → ProcessTree、进程消失、记录清掉。
     ///
     /// 跑的是与真浏览器完全同一份代码路径(chrome_alive → kill_tree → wait_gone)。
     #[tokio::test]
@@ -804,7 +795,7 @@ mod tests {
         assert!(held(&profile), "前置:应判为占用");
         assert_eq!(
             reap_stale(&profile).await.expect("reap"),
-            Reaped::Reaped,
+            Reaped::ProcessTree,
             "残留进程必须被回收"
         );
         assert!(
@@ -879,10 +870,8 @@ mod tests {
     }
 
     fn temp_profile(name: &str) -> PathBuf {
-        let root = std::env::temp_dir().join(format!(
-            "denia-procctl-{name}-{}",
-            uuid::Uuid::new_v4()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("denia-procctl-{name}-{}", uuid::Uuid::new_v4()));
         let profile = root.join("profile");
         std::fs::create_dir_all(&profile).expect("create temp profile");
         profile

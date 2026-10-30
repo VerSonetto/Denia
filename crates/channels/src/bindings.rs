@@ -76,8 +76,8 @@ impl BindingStore {
         match serde_json::to_vec_pretty(&*map) {
             Ok(bytes) => {
                 let temp = self.path.with_extension("json.tmp");
-                if let Err(error) = std::fs::write(&temp, &bytes)
-                    .and_then(|_| std::fs::rename(&temp, &self.path))
+                if let Err(error) =
+                    std::fs::write(&temp, &bytes).and_then(|_| std::fs::rename(&temp, &self.path))
                 {
                     tracing::warn!(%error, "通道绑定落盘失败");
                 }

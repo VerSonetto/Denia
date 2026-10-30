@@ -447,10 +447,7 @@ fn digest_of(path: &Path) -> Option<String> {
 /// 为 `/`),工作区外记绝对路径。指纹比对([`TaskState::paths_changed_since`])按
 /// 这同一口径认路径,两边不一致就认不出"这些字节变了"。
 fn display_path(cwd: &Path, path: &Path) -> String {
-    match path.strip_prefix(cwd) {
-        Ok(relative) => relative.to_string_lossy().replace('\\', "/"),
-        Err(_) => path.to_string_lossy().to_string(),
-    }
+    crate::support::display_path(path, cwd)
 }
 
 /// 检查的工作目录:缺省会话工作区,显式给出时必须是工作区内的路径。

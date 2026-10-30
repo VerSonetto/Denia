@@ -730,7 +730,6 @@ impl LlmAdapter for OpenAiCompatAdapter {
             .map(|budget| budget.min(limit.unwrap_or(u64::MAX)).max(1)))
     }
 
-
     async fn stream(
         &self,
         provider: &str,
@@ -760,45 +759,44 @@ impl LlmAdapter for OpenAiCompatAdapter {
         }
         let mut chain_key: Option<String> = None;
         let mut used_chain = false;
-        if protocol == WireProtocol::Responses && profile.stateful_responses_enabled() {
-            if let Some(cache_key) = request.cache_key.as_deref() {
-                let key = responses_chain_key(&profile.base_url, &request.model, cache_key);
-                chain_key = Some(key.clone());
-                let chain = {
-                    let state = self
-                        .responses_chains
-                        .lock()
-                        .unwrap_or_else(|poison| poison.into_inner());
-                    state.entries.get(&key).cloned()
-                };
-                match chain {
-                    Some(chain) if responses_prefix_compatible(&chain.body, &body) => {
-                        let current = body
-                            .get("input")
-                            .and_then(|value| value.as_array())
-                            .cloned()
-                            .unwrap_or_default();
-                        if let Some(delta) =
-                            responses_delta_input(&chain.body, &current, &chain.output)
-                        {
-                            body["input"] = serde_json::Value::Array(delta);
-                            body["previous_response_id"] =
-                                serde_json::json!(chain.response_id);
-                            used_chain = true;
-                        }
-                        body["store"] = serde_json::json!(true);
+        if protocol == WireProtocol::Responses
+            && profile.stateful_responses_enabled()
+            && let Some(cache_key) = request.cache_key.as_deref()
+        {
+            let key = responses_chain_key(&profile.base_url, &request.model, cache_key);
+            chain_key = Some(key.clone());
+            let chain = {
+                let state = self
+                    .responses_chains
+                    .lock()
+                    .unwrap_or_else(|poison| poison.into_inner());
+                state.entries.get(&key).cloned()
+            };
+            match chain {
+                Some(chain) if responses_prefix_compatible(&chain.body, &body) => {
+                    let current = body
+                        .get("input")
+                        .and_then(|value| value.as_array())
+                        .cloned()
+                        .unwrap_or_default();
+                    if let Some(delta) = responses_delta_input(&chain.body, &current, &chain.output)
+                    {
+                        body["input"] = serde_json::Value::Array(delta);
+                        body["previous_response_id"] = serde_json::json!(chain.response_id);
+                        used_chain = true;
                     }
-                    Some(_) => {
-                        self.responses_chains
-                            .lock()
-                            .unwrap_or_else(|poison| poison.into_inner())
-                            .remove(&key);
-                        body["store"] = serde_json::json!(true);
-                    }
-                    None => body["store"] = serde_json::json!(true),
+                    body["store"] = serde_json::json!(true);
                 }
-                full_body["store"] = serde_json::json!(true);
+                Some(_) => {
+                    self.responses_chains
+                        .lock()
+                        .unwrap_or_else(|poison| poison.into_inner())
+                        .remove(&key);
+                    body["store"] = serde_json::json!(true);
+                }
+                None => body["store"] = serde_json::json!(true),
             }
+            full_body["store"] = serde_json::json!(true);
         }
 
         let url = match protocol {
@@ -821,29 +819,25 @@ impl LlmAdapter for OpenAiCompatAdapter {
             Err(error) => return Err(error),
         };
 
-        let on_terminal: Option<Box<dyn FnMut(&serde_json::Value) + Send>> =
-            chain_key.map(|key| {
-                let chains = Arc::clone(&self.responses_chains);
-                let body = full_body.clone();
-                Box::new(move |response: &serde_json::Value| {
-                    let Some(response_id) = response["id"].as_str().filter(|id| !id.is_empty())
-                    else {
-                        return;
-                    };
-                    let output = response["output"].as_array().cloned().unwrap_or_default();
-                    let mut state = chains
-                        .lock()
-                        .unwrap_or_else(|poison| poison.into_inner());
-                    state.insert(
-                        key.clone(),
-                        ResponsesChain {
-                            body: body.clone(),
-                            output,
-                            response_id: response_id.to_string(),
-                        },
-                    );
-                }) as Box<dyn FnMut(&serde_json::Value) + Send>
-            });
+        let on_terminal: Option<Box<dyn FnMut(&serde_json::Value) + Send>> = chain_key.map(|key| {
+            let chains = Arc::clone(&self.responses_chains);
+            let body = full_body.clone();
+            Box::new(move |response: &serde_json::Value| {
+                let Some(response_id) = response["id"].as_str().filter(|id| !id.is_empty()) else {
+                    return;
+                };
+                let output = response["output"].as_array().cloned().unwrap_or_default();
+                let mut state = chains.lock().unwrap_or_else(|poison| poison.into_inner());
+                state.insert(
+                    key.clone(),
+                    ResponsesChain {
+                        body: body.clone(),
+                        output,
+                        response_id: response_id.to_string(),
+                    },
+                );
+            }) as Box<dyn FnMut(&serde_json::Value) + Send>
+        });
         let translator: Box<dyn EventTranslator> = match protocol {
             WireProtocol::ChatCompletions => Box::new(CompletionsStream::with_inline_think_tags(
                 UsageStyle::OpenAi,

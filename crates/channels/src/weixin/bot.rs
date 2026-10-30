@@ -348,7 +348,8 @@ impl WeixinBot {
                 .await;
             }
             Err(error) => {
-                self.send_text(sender, format!("读取会话失败：{error}")).await;
+                self.send_text(sender, format!("读取会话失败：{error}"))
+                    .await;
             }
         }
     }
@@ -363,7 +364,8 @@ impl WeixinBot {
         };
         let argument = argument.trim();
         if argument.eq_ignore_ascii_case("new") {
-            self.bindings.update(sender, |binding| binding.session_id = None);
+            self.bindings
+                .update(sender, |binding| binding.session_id = None);
             self.send_text(sender, "已切到新会话：下一条消息会新建会话。")
                 .await;
             return;
@@ -371,7 +373,8 @@ impl WeixinBot {
         let sessions = match self.host.sessions(&workspace.id).await {
             Ok(sessions) => sessions,
             Err(error) => {
-                self.send_text(sender, format!("读取会话失败：{error}")).await;
+                self.send_text(sender, format!("读取会话失败：{error}"))
+                    .await;
                 return;
             }
         };
@@ -400,8 +403,11 @@ impl WeixinBot {
     async fn show_models(self: &Arc<Self>, sender: &str) {
         let binding = self.bindings.get(sender);
         let models = self.host.models().await;
-        self.send_text(sender, commands::model_list(binding.model.as_ref(), &models))
-            .await;
+        self.send_text(
+            sender,
+            commands::model_list(binding.model.as_ref(), &models),
+        )
+        .await;
     }
 
     async fn change_model(self: &Arc<Self>, sender: &str, argument: &str) {
@@ -468,7 +474,8 @@ impl WeixinBot {
                 .unwrap_or_else(|_| binding.permission.unwrap_or(PermissionMode::AutoEdit)),
             None => binding.permission.unwrap_or(PermissionMode::AutoEdit),
         };
-        self.send_text(sender, commands::permission_list(current)).await;
+        self.send_text(sender, commands::permission_list(current))
+            .await;
     }
 
     async fn change_permission(self: &Arc<Self>, sender: &str, argument: &str) {
@@ -498,7 +505,8 @@ impl WeixinBot {
                     .await;
                 }
                 Err(error) => {
-                    self.send_text(sender, format!("切换权限失败：{error}")).await;
+                    self.send_text(sender, format!("切换权限失败：{error}"))
+                        .await;
                 }
             }
         } else {
@@ -534,14 +542,22 @@ impl WeixinBot {
         };
         match self.host.answer_approval(&session_id, None, approve).await {
             Ok(true) => {
-                self.send_text(sender, if approve { "已放行。" } else { "已拒绝。" })
-                    .await;
+                self.send_text(
+                    sender,
+                    if approve {
+                        "已放行。"
+                    } else {
+                        "已拒绝。"
+                    },
+                )
+                .await;
             }
             Ok(false) => {
                 self.send_text(sender, "当前没有待审批的请求。").await;
             }
             Err(error) => {
-                self.send_text(sender, format!("结算审批失败：{error}")).await;
+                self.send_text(sender, format!("结算审批失败：{error}"))
+                    .await;
             }
         }
     }
@@ -555,7 +571,10 @@ impl WeixinBot {
             return;
         };
         let workspaces = self.host.workspaces().await;
-        if !workspaces.iter().any(|workspace| workspace.id == workspace_id) {
+        if !workspaces
+            .iter()
+            .any(|workspace| workspace.id == workspace_id)
+        {
             self.set_action("工作区已不存在");
             self.bindings.update(sender, |binding| {
                 binding.workspace_id = None;
@@ -590,11 +609,7 @@ impl WeixinBot {
         let permission = binding.permission.unwrap_or(PermissionMode::AutoEdit);
         let session_id = match binding.session_id.clone() {
             Some(session_id) => session_id,
-            None => match self
-                .host
-                .create_session(&workspace_id, permission)
-                .await
-            {
+            None => match self.host.create_session(&workspace_id, permission).await {
                 Ok(info) => {
                     self.bindings.update(sender, |binding| {
                         binding.session_id = Some(info.id.clone());
@@ -603,7 +618,8 @@ impl WeixinBot {
                 }
                 Err(error) => {
                     self.set_action(format!("新建会话失败：{error}"));
-                    self.send_text(sender, format!("新建会话失败：{error}")).await;
+                    self.send_text(sender, format!("新建会话失败：{error}"))
+                        .await;
                     return;
                 }
             },
@@ -663,7 +679,10 @@ impl WeixinBot {
                         Notice::Ask { questions, .. } => {
                             let mut out = String::from("需要你的回答：");
                             for question in &questions {
-                                out.push_str(&format!("\n\n[{}] {}", question.id, question.question));
+                                out.push_str(&format!(
+                                    "\n\n[{}] {}",
+                                    question.id, question.question
+                                ));
                                 for option in &question.options {
                                     out.push_str(&format!("\n- {}", option.label));
                                 }
@@ -684,7 +703,13 @@ impl WeixinBot {
         };
         let result = self
             .host
-            .run_turn(&session_id, prompt, images, model, &NoticeSink::new(notice_tx))
+            .run_turn(
+                &session_id,
+                prompt,
+                images,
+                model,
+                &NoticeSink::new(notice_tx),
+            )
             .await;
         notifier.abort();
         match result {
@@ -707,8 +732,7 @@ impl WeixinBot {
                 // 模型路由失败时清掉记住的选择:下次消息重新从目录里挑一个,
                 // 避免配置变更后一直撞同一个失效模型。
                 if error.contains("模型") || error.to_ascii_lowercase().contains("model") {
-                    self.bindings
-                        .update(sender, |binding| binding.model = None);
+                    self.bindings.update(sender, |binding| binding.model = None);
                 }
                 self.set_action(format!("执行失败：{error}"));
                 self.send_text(sender, &format!("执行失败：{error}")).await;

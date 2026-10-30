@@ -65,9 +65,8 @@ pub const MAX_TEXT_CHARS: usize = 1800;
 /// `X-WECHAT-UIN` 是每次请求随机生成的 base64(内容是十进制随机数),不是身份,
 /// 只用于让服务端区分客户端实例。
 pub fn headers(token: Option<&str>, body: Option<&str>) -> Vec<(String, String)> {
-    let uin = base64::engine::general_purpose::STANDARD.encode(
-        format!("{}", rand::random::<u32>()).as_bytes(),
-    );
+    let uin = base64::engine::general_purpose::STANDARD
+        .encode(format!("{}", rand::random::<u32>()).as_bytes());
     let mut headers = vec![
         ("iLink-App-Id".to_string(), APP_ID.to_string()),
         (
@@ -78,10 +77,7 @@ pub fn headers(token: Option<&str>, body: Option<&str>) -> Vec<(String, String)>
     ];
     if let Some(body) = body {
         headers.push(("Content-Type".to_string(), "application/json".to_string()));
-        headers.push((
-            "Content-Length".to_string(),
-            body.as_bytes().len().to_string(),
-        ));
+        headers.push(("Content-Length".to_string(), body.len().to_string()));
         headers.push((
             "AuthorizationType".to_string(),
             "ilink_bot_token".to_string(),
@@ -116,8 +112,7 @@ impl UpdatesResponse {
     }
 
     pub fn is_session_expired(&self) -> bool {
-        self.ret == Some(SESSION_EXPIRED_ERRCODE)
-            || self.errcode == Some(SESSION_EXPIRED_ERRCODE)
+        self.ret == Some(SESSION_EXPIRED_ERRCODE) || self.errcode == Some(SESSION_EXPIRED_ERRCODE)
     }
 
     pub fn error_text(&self) -> String {
@@ -193,9 +188,12 @@ impl InboundMessage {
 
     /// 是否只包含非文本消息(图片/文件等)。
     pub fn has_media(&self) -> bool {
-        self.item_list
-            .iter()
-            .any(|item| matches!(item.kind, Some(ITEM_IMAGE | ITEM_VOICE | ITEM_FILE | ITEM_VIDEO)))
+        self.item_list.iter().any(|item| {
+            matches!(
+                item.kind,
+                Some(ITEM_IMAGE | ITEM_VOICE | ITEM_FILE | ITEM_VIDEO)
+            )
+        })
     }
 
     /// 收集图片项(含引用消息里的图片);仅返回 image_item 完整的项。

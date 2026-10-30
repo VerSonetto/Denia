@@ -105,9 +105,7 @@ pub fn parse_aes_key(encoded: &str) -> Result<[u8; 16], String> {
         .decode(encoded)
         .map_err(|error| format!("图片 AES key 不是合法 base64:{error}"))?;
     match decoded.len() {
-        16 => Ok(decoded
-            .try_into()
-            .expect("长度已由 match 保证为 16")),
+        16 => Ok(decoded.try_into().expect("长度已由 match 保证为 16")),
         32 => {
             let text = std::str::from_utf8(&decoded)
                 .map_err(|_| "图片 AES key 文本不是合法 UTF-8".to_string())?;
@@ -135,14 +133,11 @@ fn parse_hex_key(text: &str) -> Result<[u8; 16], String> {
 }
 
 fn aes128_ecb_decrypt(data: &[u8], key: &[u8; 16]) -> Result<Vec<u8>, String> {
-    if data.len() % 16 != 0 {
-        return Err(format!(
-            "图片密文长度不是 16 的倍数({} 字节)",
-            data.len()
-        ));
+    if !data.len().is_multiple_of(16) {
+        return Err(format!("图片密文长度不是 16 的倍数({} 字节)", data.len()));
     }
-    let cipher = Aes128::new_from_slice(key)
-        .map_err(|error| format!("初始化图片 AES 解密失败:{error}"))?;
+    let cipher =
+        Aes128::new_from_slice(key).map_err(|error| format!("初始化图片 AES 解密失败:{error}"))?;
     let mut out = data.to_vec();
     for chunk in out.chunks_mut(16) {
         cipher.decrypt_block(Block::<Aes128>::from_mut_slice(chunk));
@@ -200,7 +195,10 @@ mod tests {
     use super::*;
     use aes::cipher::{BlockEncrypt, KeyInit};
 
-    fn image_with_key(media: Option<super::super::protocol::MediaRef>, aeskey: Option<&str>) -> ImageItem {
+    fn image_with_key(
+        media: Option<super::super::protocol::MediaRef>,
+        aeskey: Option<&str>,
+    ) -> ImageItem {
         ImageItem {
             media,
             mid_size: None,
@@ -263,7 +261,10 @@ mod tests {
         for chunk in ciphertext.chunks_mut(16) {
             cipher.encrypt_block(Block::<Aes128>::from_mut_slice(chunk));
         }
-        let image = image_with_key(None, Some(&key.iter().map(|b| format!("{b:02x}")).collect::<String>()));
+        let image = image_with_key(
+            None,
+            Some(&key.iter().map(|b| format!("{b:02x}")).collect::<String>()),
+        );
         assert_eq!(decrypt_image(&image, &ciphertext).unwrap(), plaintext);
     }
 

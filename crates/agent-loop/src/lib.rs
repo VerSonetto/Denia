@@ -45,11 +45,11 @@ use denia_core::session::{RequestHeaderSnapshot, SessionEnvelope, SessionEvent, 
 use denia_llm::{GenerateRequest, LlmRegistry};
 use denia_session::Session;
 use denia_system_prompt::SystemPrompt;
-use denia_tools::{FileHistoryBackend, ToolRegistry};
 pub use denia_token_meter::{
     BudgetRefusal, Clock, ExecutionBudget, ExecutionCounters, ExecutionLimits,
 };
 use denia_token_meter::{RequestCall as LedgerRequestCall, RequestSource};
+use denia_tools::{FileHistoryBackend, ToolRegistry};
 use tokio_util::sync::CancellationToken;
 
 pub use cache_warm::{CacheWarmingMode, CacheWarmingSettings};
@@ -235,7 +235,9 @@ impl denia_tools::AskBridge for PausingAskBridge {
     ) -> denia_core::session::AskResolution {
         let _guard = pause_guard(&self.budgets, session_id);
         self.inner
-            .ask(session_id, request_id, call_id, questions, timeout_ms, cancel)
+            .ask(
+                session_id, request_id, call_id, questions, timeout_ms, cancel,
+            )
             .await
     }
 }
@@ -396,12 +398,7 @@ impl SessionDriver {
     }
 
     /// Record the request shape a cache refresh should replay.
-    pub fn remember_cache_request(
-        &self,
-        session: &str,
-        provider: &str,
-        request: &GenerateRequest,
-    ) {
+    pub fn remember_cache_request(&self, session: &str, provider: &str, request: &GenerateRequest) {
         self.cache_warmer.remember(session, provider, request);
     }
 
@@ -411,18 +408,10 @@ impl SessionDriver {
     }
 
     /// Arm a refresh for the session's last request.
-    pub fn schedule_cache_warm(
-        &self,
-        session: &str,
-        phase: crate::cache_warm::WarmPhase,
-    ) {
+    pub fn schedule_cache_warm(&self, session: &str, phase: crate::cache_warm::WarmPhase) {
         let settings = self.driver_settings();
-        self.cache_warmer.schedule(
-            session,
-            phase,
-            &self.registry,
-            &settings.cache_warming,
-        );
+        self.cache_warmer
+            .schedule(session, phase, &self.registry, &settings.cache_warming);
     }
 
     fn compaction_state_for(&self, id: &str) -> Arc<compaction_state::CompactionState> {
@@ -793,9 +782,8 @@ impl SessionDriver {
         self.end_turn_budget(session.id());
         match result {
             Ok(reason) => reason,
-            Err(failure) => close_failed_turn(&state, started_after, failure).unwrap_or_else(
-                |failure| TurnEndReason::Error { failure },
-            ),
+            Err(failure) => close_failed_turn(&state, started_after, failure)
+                .unwrap_or_else(|failure| TurnEndReason::Error { failure }),
         }
     }
 
@@ -955,7 +943,10 @@ impl SessionDriver {
             let Some(content) = entry.content.as_ref() else {
                 continue;
             };
-            pairs.push((key.path.to_string_lossy().replace('\\', "/"), content.clone()));
+            pairs.push((
+                key.path.to_string_lossy().replace('\\', "/"),
+                content.clone(),
+            ));
             restored.push((key, entry));
         }
 
@@ -1096,9 +1087,9 @@ fn close_failed_turn(
     let open_steps = state.session.with_events(|events| {
         // 输入或 turn-start 写入失败时，不能替本轮之前的裸开日志补终态。
         let current = &events[events.partition_point(|event| event.seq <= started_after)..];
-        let start = current.iter().position(|event| {
-            matches!(event.event, SessionEvent::TurnStart { turn } if turn == state.turn)
-        })?;
+        let start = current.iter().position(
+            |event| matches!(event.event, SessionEvent::TurnStart { turn } if turn == state.turn),
+        )?;
         let mut open_steps = std::collections::BTreeSet::new();
         for event in &current[start + 1..] {
             match event.event {

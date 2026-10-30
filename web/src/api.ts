@@ -28,6 +28,7 @@ import type {
 } from './types'
 import { subscribeServerEvents } from './serverEvents'
 import { noteSseFrame } from './pushChannel'
+import { encodeUtf8Base64 } from './lib/base64'
 
 export type { AgentPresetRow, AgentPresetsView } from './types'
 
@@ -44,6 +45,22 @@ export class ApiError extends Error {
 /** 非 follow 型请求的默认超时:15s(挂死的请求不能卡住 UI);传 0 表示不设超时。 */
 const DEFAULT_TIMEOUT_MS = 15_000
 
+/** 提取非 2xx 响应错误体里的 code/message(http 与 chat 流式请求共用)。 */
+async function errorInfo(response: Response): Promise<{ code: string; message: string }> {
+  let code = `http-${response.status}`
+  let message = response.statusText
+  try {
+    const body = await response.json()
+    if (body?.error) {
+      code = body.error.code ?? code
+      message = body.error.message ?? message
+    }
+  } catch {
+    /* body was not JSON */
+  }
+  return { code, message }
+}
+
 async function http<T>(path: string, init?: RequestInit, timeoutMs = DEFAULT_TIMEOUT_MS): Promise<T> {
   const timeout = new AbortController()
   // 时长由用户手动操作决定的请求(如原生目录选择器)必须传 0,否则超时 abort 会在
@@ -56,17 +73,7 @@ async function http<T>(path: string, init?: RequestInit, timeoutMs = DEFAULT_TIM
       signal: init?.signal ? AbortSignal.any([init.signal, timeout.signal]) : timeout.signal,
     })
     if (!response.ok) {
-      let code = `http-${response.status}`
-      let message = response.statusText
-      try {
-        const body = await response.json()
-        if (body?.error) {
-          code = body.error.code ?? code
-          message = body.error.message ?? message
-        }
-      } catch {
-        /* body was not JSON */
-      }
+      const { code, message } = await errorInfo(response)
       throw new ApiError(code, message, response.status)
     }
     return response.json() as Promise<T>
@@ -256,11 +263,13 @@ async function parseSseBody(
       } else if (trimmed.startsWith('data:')) {
         const payload = trimmed.slice(5).trim()
         if (!payload) continue
+        let parsed: unknown
         try {
-          onFrame(JSON.parse(payload), isError)
+          parsed = JSON.parse(payload)
         } catch {
-          /* skip malformed frame */
+          continue /* skip malformed frame */
         }
+        onFrame(parsed, isError)
         isError = false
       }
     }
@@ -295,130 +304,97 @@ interface ChatStreamPayload {
   message?: string
 }
 
-/** Calls the SSE chat smoke-test endpoint and resolves with complete text. */
-export async function chatCompletion(
-  options: ChatCompletionOptions,
-  signal?: AbortSignal,
-): Promise<string> {
+/** chat/probe 共用的超时/取消联动:超时与外部 signal 都 abort 内部 controller。 */
+function createChatAbort(timeoutMs: number, signal?: AbortSignal) {
   const controller = new AbortController()
   let timedOut = false
   const timer = window.setTimeout(() => {
     timedOut = true
     controller.abort()
-  }, CHAT_TIMEOUT_MS)
+  }, timeoutMs)
   const onOuterAbort = () => controller.abort()
   if (signal) {
     if (signal.aborted) controller.abort()
     else signal.addEventListener('abort', onOuterAbort, { once: true })
   }
+  return {
+    controller,
+    isTimedOut: () => timedOut,
+    dispose: () => {
+      window.clearTimeout(timer)
+      signal?.removeEventListener('abort', onOuterAbort)
+    },
+  }
+}
+
+/** Calls the SSE chat smoke-test endpoint and resolves with complete text. */
+export async function chatCompletion(
+  options: ChatCompletionOptions,
+  signal?: AbortSignal,
+): Promise<string> {
+  const chat = createChatAbort(CHAT_TIMEOUT_MS, signal)
+  // 超时与用户取消的收尾错误:网络中断和读流中断两个出口必须同一份文案。
+  const abortError = () =>
+    new ApiError(
+      chat.isTimedOut() ? 'chat/timeout' : 'chat/aborted',
+      chat.isTimedOut() ? '模型请求超时' : '模型请求已取消',
+      chat.isTimedOut() ? 504 : 499,
+    )
+  let text = ''
+  // SSE 错误帧与 finish 的失败原因都落到这,取最后一条(last-wins)。
+  const failures: Array<{ code?: string; message?: string }> = []
   try {
-    let response: Response
-    try {
-      response = await fetch('/api/llm/chat', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({
-          provider: options.provider,
-          model: options.model,
-          reasoningEffort: options.reasoningEffort,
-          system: options.system,
-          messages: options.messages.map(({ role, content }) => ({ role, content })),
-        }),
-        signal: controller.signal,
-      })
-    } catch (error) {
-      if (controller.signal.aborted) {
-        throw new ApiError(
-          timedOut ? 'chat/timeout' : 'chat/aborted',
-          timedOut ? '模型请求超时' : '模型请求已取消',
-          timedOut ? 504 : 499,
-        )
-      }
+    const response = await fetch('/api/llm/chat', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        provider: options.provider,
+        model: options.model,
+        reasoningEffort: options.reasoningEffort,
+        system: options.system,
+        messages: options.messages.map(({ role, content }) => ({ role, content })),
+      }),
+      signal: chat.controller.signal,
+    }).catch((error) => {
+      if (chat.controller.signal.aborted) throw abortError()
       throw error
-    }
+    })
     if (!response.ok) {
-      let code = `http-${response.status}`
-      let message = response.statusText
-      try {
-        const body = await response.json()
-        if (body?.error) {
-          code = body.error.code ?? code
-          message = body.error.message ?? message
-        }
-      } catch {
-        /* body was not JSON */
-      }
+      const { code, message } = await errorInfo(response)
       throw new ApiError(code, message, response.status)
     }
     if (!response.body) {
       throw new ApiError('chat/empty-body', '模型没有返回内容', 500)
     }
-    const reader = response.body.getReader()
-    const decoder = new TextDecoder()
-    let buffer = ''
-    let isError = false
-    let text = ''
-    let failure: { code?: string; message?: string } | null = null
-    for (;;) {
-      const { done, value } = await reader.read()
-      if (done) break
-      buffer += decoder.decode(value, { stream: true })
-      const lines = buffer.split('\n')
-      buffer = lines.pop() ?? ''
-      for (const line of lines) {
-        const trimmed = line.trimEnd()
-        if (trimmed.startsWith('event:')) {
-          isError = trimmed.slice(6).trim() === 'error'
-        } else if (trimmed.startsWith('data:')) {
-          const payload = trimmed.slice(5).trim()
-          if (!payload) continue
-          let parsed: ChatStreamPayload
-          try {
-            parsed = JSON.parse(payload) as ChatStreamPayload
-          } catch {
-            continue
-          }
-          if (isError) {
-            failure = parsed as { code?: string; message?: string }
-            isError = false
-            continue
-          }
-          if (parsed.type === 'text-delta' && typeof parsed.text === 'string') {
-            text += parsed.text
-          } else if (
-            parsed.type === 'block-end' &&
-            parsed.block?.type === 'text' &&
-            typeof parsed.block.text === 'string'
-          ) {
-            text = parsed.block.text
-          } else if (parsed.type === 'finish') {
-            const kind = parsed.reason?.kind
-            if (kind && kind !== 'stop') {
-              failure = parsed.reason?.failure ?? { message: '模型输出失败' }
-            }
-          }
+    await parseSseBody(response, (payload, isError) => {
+      const parsed = payload as ChatStreamPayload
+      if (isError) {
+        failures.push(parsed)
+        return
+      }
+      if (parsed.type === 'text-delta' && typeof parsed.text === 'string') {
+        text += parsed.text
+      } else if (
+        parsed.type === 'block-end' &&
+        parsed.block?.type === 'text' &&
+        typeof parsed.block.text === 'string'
+      ) {
+        text = parsed.block.text
+      } else if (parsed.type === 'finish') {
+        const kind = parsed.reason?.kind
+        if (kind && kind !== 'stop') {
+          failures.push(parsed.reason?.failure ?? { message: '模型输出失败' })
         }
       }
-      if (controller.signal.aborted) break
-    }
-    if (controller.signal.aborted) {
-      throw new ApiError(
-        timedOut ? 'chat/timeout' : 'chat/aborted',
-        timedOut ? '模型请求超时' : '模型请求已取消',
-        timedOut ? 504 : 499,
-      )
-    }
+    }, chat.controller.signal)
+    if (chat.controller.signal.aborted) throw abortError()
+    const failure = failures.length > 0 ? failures[failures.length - 1] : null
     if (failure) {
-      throw new ApiError(
-        failure.code ?? 'chat/failed',
-        failure.message ?? '模型调用失败',
-        500,
-      )
+      throw new ApiError(failure.code ?? 'chat/failed', failure.message ?? '模型调用失败', 500)
     }
     return text.trim()
   } finally {
-    window.clearTimeout(timer)
-    signal?.removeEventListener('abort', onOuterAbort)
+    chat.dispose()
   }
 }
 
@@ -449,24 +425,14 @@ export async function probeChatStream(
   signal?: AbortSignal,
   timeoutMs = 120_000,
 ): Promise<void> {
-  const controller = new AbortController()
-  let timedOut = false
-  const timer = window.setTimeout(() => {
-    timedOut = true
-    controller.abort()
-  }, timeoutMs)
-  const onOuterAbort = () => controller.abort()
-  if (signal) {
-    if (signal.aborted) controller.abort()
-    else signal.addEventListener('abort', onOuterAbort, { once: true })
-  }
-  const toFailure = (raw: {
-    code?: string
-    message?: string
-    status?: number
-    requestId?: string
-    providerRetryAfterMs?: number
-  }) => ({
+  const chat = createChatAbort(timeoutMs, signal)
+  // 超时与用户取消的收尾失败:网络中断和读流中断两个出口必须同一份文案。
+  const abortFailure = () =>
+    chat.isTimedOut()
+      ? { code: 'probe/timeout', message: '连接超时,网关长时间无响应', status: 504 }
+      : { code: 'probe/aborted', message: '测试已取消' }
+  let settled = false
+  const toFailure = (raw: { code?: string; message?: string; status?: number; requestId?: string; providerRetryAfterMs?: number }) => ({
     code: raw.code ?? 'probe/failed',
     message: raw.message ?? '模型调用失败',
     status: raw.status,
@@ -474,44 +440,29 @@ export async function probeChatStream(
     retryAfterMs: raw.providerRetryAfterMs,
   })
   try {
-    let response: Response
-    try {
-      response = await fetch('/api/llm/chat', {
-        method: 'POST',
-        headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({
-          provider: options.provider,
-          model: options.model,
-          reasoningEffort: options.reasoningEffort,
-          prompt: options.prompt,
-          ...(options.maxTokens !== undefined ? { max_tokens: options.maxTokens } : {}),
-        }),
-        signal: controller.signal,
-      })
-    } catch (error) {
-      if (controller.signal.aborted) {
-        handlers.onFailure(
-          timedOut
-            ? { code: 'probe/timeout', message: '连接超时,网关长时间无响应', status: 504 }
-            : { code: 'probe/aborted', message: '测试已取消' },
-        )
-        return
+    const response = await fetch('/api/llm/chat', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        provider: options.provider,
+        model: options.model,
+        reasoningEffort: options.reasoningEffort,
+        prompt: options.prompt,
+        ...(options.maxTokens !== undefined ? { max_tokens: options.maxTokens } : {}),
+      }),
+      signal: chat.controller.signal,
+    }).catch((error): Response | null => {
+      if (chat.controller.signal.aborted) {
+        handlers.onFailure(abortFailure())
+      } else {
+        handlers.onFailure({ code: 'probe/network', message: error instanceof Error ? error.message : String(error) })
       }
-      handlers.onFailure({ code: 'probe/network', message: error instanceof Error ? error.message : String(error) })
-      return
-    }
+      return null
+    })
+    // 握手失败已在上面回调过 onFailure,这里直接收尾。
+    if (!response) return
     if (!response.ok) {
-      let code = `http-${response.status}`
-      let message = response.statusText
-      try {
-        const body = await response.json()
-        if (body?.error) {
-          code = body.error.code ?? code
-          message = body.error.message ?? message
-        }
-      } catch {
-        /* body was not JSON */
-      }
+      const { code, message } = await errorInfo(response)
       handlers.onFailure({ code, message, status: response.status })
       return
     }
@@ -520,76 +471,45 @@ export async function probeChatStream(
       return
     }
     handlers.onConnected()
-    const reader = response.body.getReader()
-    const decoder = new TextDecoder()
-    let buffer = ''
-    let isErrorFrame = false
-    let settled = false
-    for (;;) {
-      const { done, value } = await reader.read()
-      if (done) break
-      buffer += decoder.decode(value, { stream: true })
-      const lines = buffer.split('\n')
-      buffer = lines.pop() ?? ''
-      for (const line of lines) {
-        const trimmed = line.trimEnd()
-        if (trimmed.startsWith('event:')) {
-          isErrorFrame = trimmed.slice(6).trim() === 'error'
-        } else if (trimmed.startsWith('data:')) {
-          const payload = trimmed.slice(5).trim()
-          if (!payload) continue
-          let parsed: StreamChunk | { code?: string; message?: string; status?: number; requestId?: string; providerRetryAfterMs?: number }
-          try {
-            parsed = JSON.parse(payload)
-          } catch {
-            continue
-          }
-          if (isErrorFrame) {
-            settled = true
-            handlers.onFailure(toFailure(parsed as { code?: string; message?: string }))
-            isErrorFrame = false
-            continue
-          }
-          const chunk = parsed as StreamChunk
-          if (chunk.type === 'text-delta') {
-            handlers.onFirstToken()
-            handlers.onDelta(chunk.text)
-          } else if (chunk.type === 'reasoning-delta') {
-            handlers.onFirstToken()
-          } else if (chunk.type === 'usage') {
-            handlers.onUsage(chunk.usage)
-          } else if (chunk.type === 'finish') {
-            settled = true
-            if (chunk.reason.kind === 'stop' || chunk.reason.kind === 'tool-calls') {
-              handlers.onSuccess(chunk.reason.kind)
-            } else {
-              handlers.onFailure(
-                toFailure(
-                  chunk.reason.kind === 'error' || chunk.reason.kind === 'aborted'
-                    ? (chunk.reason.failure as { code?: string; message?: string })
-                    : { message: '输出提前截断' },
-                ),
-              )
-            }
-          }
+    await parseSseBody(response, (payload, isError) => {
+      const parsed = payload as StreamChunk | { code?: string; message?: string; status?: number; requestId?: string; providerRetryAfterMs?: number }
+      if (isError) {
+        settled = true
+        handlers.onFailure(toFailure(parsed as { code?: string; message?: string }))
+        return
+      }
+      const chunk = parsed as StreamChunk
+      if (chunk.type === 'text-delta') {
+        handlers.onFirstToken()
+        handlers.onDelta(chunk.text)
+      } else if (chunk.type === 'reasoning-delta') {
+        handlers.onFirstToken()
+      } else if (chunk.type === 'usage') {
+        handlers.onUsage(chunk.usage)
+      } else if (chunk.type === 'finish') {
+        settled = true
+        if (chunk.reason.kind === 'stop' || chunk.reason.kind === 'tool-calls') {
+          handlers.onSuccess(chunk.reason.kind)
+        } else {
+          handlers.onFailure(
+            toFailure(
+              chunk.reason.kind === 'error' || chunk.reason.kind === 'aborted'
+                ? (chunk.reason.failure as { code?: string; message?: string })
+                : { message: '输出提前截断' },
+            ),
+          )
         }
       }
-      if (controller.signal.aborted) break
-    }
+    }, chat.controller.signal)
     if (!settled) {
-      if (controller.signal.aborted) {
-        handlers.onFailure(
-          timedOut
-            ? { code: 'probe/timeout', message: '连接超时,网关长时间无响应', status: 504 }
-            : { code: 'probe/aborted', message: '测试已取消' },
-        )
+      if (chat.controller.signal.aborted) {
+        handlers.onFailure(abortFailure())
       } else {
         handlers.onFailure({ code: 'probe/empty-body', message: '流在完成前提前关闭', status: response.status })
       }
     }
   } finally {
-    window.clearTimeout(timer)
-    signal?.removeEventListener('abort', onOuterAbort)
+    chat.dispose()
   }
 }
 
@@ -921,10 +841,7 @@ export function workspacePreviewUrl(workspacePath: string, file: string): string
  * 含中文是常态（`D:\项目\app`），这里必须走 UTF-8 字节。
  */
 function base64Url(value: string): string {
-  const bytes = new TextEncoder().encode(value)
-  let binary = ''
-  for (const byte of bytes) binary += String.fromCharCode(byte)
-  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
+  return encodeUtf8Base64(value).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
 }
 
 export function getSession(id: string, signal?: AbortSignal): Promise<{

@@ -16,9 +16,9 @@ use tokio::sync::mpsc;
 use crate::bindings::BindingStore;
 use crate::bridge::{ChannelHost, ImageAttachment, Notice, NoticeSink};
 use crate::commands::{self, Command};
+use crate::weixin::SharedStatus;
 use crate::weixin::bot::split_text;
 use crate::weixin::media;
-use crate::weixin::SharedStatus;
 
 use super::client::Client;
 use super::protocol::{ChatType, InboundMessage, MAX_MESSAGE_LENGTH};
@@ -32,9 +32,7 @@ struct PendingAsk {
     session_id: String,
     request_id: String,
     question: AskQuestion,
-    target: String,
     sender: String,
-    chat_type: ChatType,
 }
 
 pub struct QqBot {
@@ -189,7 +187,8 @@ impl QqBot {
         self.set_action(format!("命令 {}", command.name()));
         match command {
             Command::Help => {
-                self.send_text(target, chat_type, commands::help_text()).await;
+                self.send_text(target, chat_type, commands::help_text())
+                    .await;
             }
             Command::Workspace(None) => {
                 let workspaces = self.host.workspaces().await;
@@ -270,8 +269,12 @@ impl QqBot {
                 .await;
             }
             None => {
-                self.send_text(target, chat_type, "没有找到该工作区。发送 /workspace 查看列表。")
-                    .await;
+                self.send_text(
+                    target,
+                    chat_type,
+                    "没有找到该工作区。发送 /workspace 查看列表。",
+                )
+                .await;
             }
         }
     }
@@ -284,9 +287,16 @@ impl QqBot {
             return;
         };
         let workspaces = self.host.workspaces().await;
-        let Some(workspace) = workspaces.iter().find(|workspace| workspace.id == workspace_id) else {
-            self.send_text(target, chat_type, "该工作区已不存在，请重新 /workspace 选择。")
-                .await;
+        let Some(workspace) = workspaces
+            .iter()
+            .find(|workspace| workspace.id == workspace_id)
+        else {
+            self.send_text(
+                target,
+                chat_type,
+                "该工作区已不存在，请重新 /workspace 选择。",
+            )
+            .await;
             return;
         };
         match self.host.sessions(&workspace_id).await {
@@ -319,7 +329,8 @@ impl QqBot {
             return;
         };
         if argument.eq_ignore_ascii_case("new") {
-            self.bindings.update(sender, |binding| binding.session_id = None);
+            self.bindings
+                .update(sender, |binding| binding.session_id = None);
             self.send_text(target, chat_type, "已切到新会话：下一条消息会新建会话。")
                 .await;
             return;
@@ -529,7 +540,11 @@ impl QqBot {
         };
         match self.host.answer_approval(&session_id, None, approve).await {
             Ok(true) => {
-                let text = if approve { "已放行。" } else { "已拒绝。" };
+                let text = if approve {
+                    "已放行。"
+                } else {
+                    "已拒绝。"
+                };
                 self.send_text(target, chat_type, text).await;
             }
             Ok(false) => {
@@ -559,14 +574,21 @@ impl QqBot {
             return;
         };
         let workspaces = self.host.workspaces().await;
-        if !workspaces.iter().any(|workspace| workspace.id == workspace_id) {
+        if !workspaces
+            .iter()
+            .any(|workspace| workspace.id == workspace_id)
+        {
             self.set_action("工作区已不存在");
             self.bindings.update(sender, |binding| {
                 binding.workspace_id = None;
                 binding.session_id = None;
             });
-            self.send_text(target, chat_type, "该工作区已不存在，请重新用 /workspace 选择。")
-                .await;
+            self.send_text(
+                target,
+                chat_type,
+                "该工作区已不存在，请重新用 /workspace 选择。",
+            )
+            .await;
             return;
         }
         let model = match binding.model.clone() {
@@ -668,9 +690,7 @@ impl QqBot {
                                         session_id: session_id.clone(),
                                         request_id: request_id.clone(),
                                         question: question.clone(),
-                                        target: target.clone(),
                                         sender: sender.clone(),
-                                        chat_type,
                                     },
                                 );
                             if let Some(keyboard) =
@@ -693,7 +713,13 @@ impl QqBot {
         };
         let result = self
             .host
-            .run_turn(&session_id, prompt, images, &model, &NoticeSink::new(notice_tx))
+            .run_turn(
+                &session_id,
+                prompt,
+                images,
+                &model,
+                &NoticeSink::new(notice_tx),
+            )
             .await;
         notifier.abort();
         self.clear_pending_asks_for_session(&session_id);

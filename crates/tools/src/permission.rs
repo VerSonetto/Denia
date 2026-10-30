@@ -313,8 +313,8 @@ fn readonly_segment(segment: &str) -> bool {
     }
     match program.as_str() {
         // 无写选项的基础只读命令;`echo` 的重定向形态已在形态检查里排除。
-        "echo" | "ls" | "pwd" | "cat" | "head" | "tail" | "wc" | "which" | "where"
-        | "uniq" | "diff" | "stat" | "file" => true,
+        "echo" | "ls" | "pwd" | "cat" | "head" | "tail" | "wc" | "which" | "where" | "uniq"
+        | "diff" | "stat" | "file" => true,
         // PowerShell 侧的等价只读命令:bash 工具在 Windows 上经 pwsh 执行,
         // 只认 Unix 名单等于在主力平台上失效。这些命令本身没有写形式。
         "get-childitem" | "get-content" | "get-item" | "get-process" | "get-location"
@@ -339,9 +339,9 @@ fn git_is_readonly(args: &[&str]) -> bool {
         return false;
     }
     match *subcommand {
-        "status" | "log" | "diff" | "show" | "rev-parse" | "rev-list" | "blame"
-        | "describe" | "shortlog" | "ls-files" | "ls-tree" | "cat-file" | "grep"
-        | "whatchanged" | "merge-base" | "name-rev" | "for-each-ref" => true,
+        "status" | "log" | "diff" | "show" | "rev-parse" | "rev-list" | "blame" | "describe"
+        | "shortlog" | "ls-files" | "ls-tree" | "cat-file" | "grep" | "whatchanged"
+        | "merge-base" | "name-rev" | "for-each-ref" => true,
         "branch" => rest
             .iter()
             .all(|arg| GIT_BRANCH_READONLY_ARGS.contains(arg)),
@@ -523,10 +523,7 @@ mod tests {
             "Get-ChildItem | Remove-Item",
             "cat f | sh",
         ] {
-            assert!(
-                !certified_readonly_command(command),
-                "{command} 不应判只读"
-            );
+            assert!(!certified_readonly_command(command), "{command} 不应判只读");
         }
     }
 }

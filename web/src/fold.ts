@@ -39,6 +39,11 @@ export type TranscriptNode =
       text: string
       seq?: number
       /**
+       * 随注入一起送给模型的内联图片(浏览器截图 / read_file 读图)。
+       * 有图时对话流直接展示图片本身,而不是只留一行"已注入"文字。
+       */
+      images?: UserMessageImage[]
+      /**
        * 投递来源（`agent:<sender>` / `subagent-settled` / `job-completed` / …）。
        * 只有 agent-delivery 才有；其它注入通道缺省。UI 据此判方向。
        */
@@ -463,7 +468,12 @@ export function foldEvents(events: SessionEnvelope[], parentSessionId?: string):
       case 'user-message':
         closeOpen()
         if (event.injected) {
-          nodes.push({ kind: 'context-injection', text: event.text, seq: event.seq })
+          nodes.push({
+            kind: 'context-injection',
+            text: event.text,
+            seq: event.seq,
+            images: event.images?.length ? event.images : undefined,
+          })
         } else {
           nodes.push({
             kind: 'user',
@@ -859,7 +869,12 @@ function applyEnvelopeStep(
       return [...nodes, { kind: 'turn-start', turn: event.turn, time: event.time }]
     case 'user-message':
       if (event.injected) {
-        return [...nodes, { kind: 'context-injection', text: event.text, seq: event.seq }]
+        return [...nodes, {
+          kind: 'context-injection',
+          text: event.text,
+          seq: event.seq,
+          images: event.images?.length ? event.images : undefined,
+        }]
       }
       return [
         ...nodes,
@@ -1341,10 +1356,13 @@ function closedTurnRows(
   // 可见部分只剩其后的最终回答。
   const foldEnd = lastTool + 1
   const prefix = span.slice(0, foldEnd)
-  // 用户消息与**父代理来信**一样是对话,必须留在原位(任务正文被藏进
-  // "worked X" 概览里,子代理视角下就读不到主代理到底交代了什么)。
+  // 用户消息、**父代理来信**与**带图注入**是对话内容,必须留在原位:
+  // 前者被藏进 "worked X" 后子代理读不到主代理交代了什么;后者藏起来
+  // 用户就看不到模型究竟注入了哪张图。
   const inPlace = (node: TranscriptNode) =>
-    node.kind === 'user' || (node.kind === 'context-injection' && node.fromParentAgent === true)
+    node.kind === 'user' ||
+    (node.kind === 'context-injection' &&
+      (node.fromParentAgent === true || (node.images?.length ?? 0) > 0))
   const hidden = prefix.filter((node) => !inPlace(node))
   // The overview is inserted where the first folded row would sit; when there
   // is nothing expandable, no overview is shown at all.
@@ -1394,4 +1412,32 @@ function rendersContent(node: TranscriptNode): boolean {
     return assistantHasContent(node)
   }
   return false
+}
+
+/* ---- 渲染行的稳定 key ---- */
+
+const localNodeKeys = new WeakMap<TranscriptNode, number>()
+let nextLocalNodeKey = 0
+
+export function transcriptNodeKey(node: TranscriptNode): string {
+  if (node.kind === 'assistant') return `assistant:${node.turn}:${node.step}`
+  if (node.kind === 'tool') return `tool:${node.callId}`
+  if (node.kind === 'user' && node.anchor !== undefined) return `user:${node.anchor}`
+  if (node.kind === 'turn-start' || node.kind === 'turn-end') return `${node.kind}:${node.turn}`
+  if (node.kind === 'compacting') return `compacting:${node.startedAt}`
+  if ('seq' in node && node.seq !== undefined) return `${node.kind}:${node.seq}`
+  let key = localNodeKeys.get(node)
+  if (key === undefined) {
+    key = nextLocalNodeKey++
+    localNodeKeys.set(node, key)
+  }
+  return `${node.kind}:local:${key}`
+}
+
+export function assistantHasActions(
+  node: Extract<TranscriptNode, { kind: 'assistant' }>,
+  onFork?: (seq: number) => void,
+): boolean {
+  return node.blocks.some((block) => block.kind === 'text' && block.text.trim().length > 0) ||
+    (onFork !== undefined && node.seq !== undefined)
 }

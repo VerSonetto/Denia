@@ -26,6 +26,7 @@ import { t } from '../i18n'
 import * as api from '../api'
 import type { OpenedFile } from '../sidePane'
 import { CodeBlock } from '../markdown/CodeBlock'
+import { formatBytesHuman } from '../lib/bytes'
 import { FilePreview, previewKindOf } from './FilePreview'
 import { IconClose, IconFile, IconRefresh, IconSpinner } from './icons'
 import './FileReaderPanel.css'
@@ -246,7 +247,7 @@ export function FileReaderPanel({
           <span className="file-reader-meta">
             {t('sidePaneFileLines', { count: state.view.lines })}
             {' · '}
-            {formatBytes(state.view.size)}
+            {formatBytesHuman(state.view.size)}
           </span>
         )}
         {supportsPreview && (
@@ -327,13 +328,6 @@ export function FileReaderPanel({
       </div>
     </div>
   )
-}
-
-/** 人类可读的字节数(与文件树/产物行同一套口径)。 */
-function formatBytes(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
 }
 
 export default FileReaderPanel

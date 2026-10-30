@@ -277,9 +277,9 @@ fn clip_chars(text: &str, max_chars: usize, what: &str) -> String {
     if total <= max_chars {
         return text.to_string();
     }
-    let shown: String = text.chars().take(max_chars).collect();
     format!(
-        "{shown}\n\n…[{what}已截断:共 {total} 字符,仅返回前 {max_chars} 字符。需要更多时提高 max_chars 参数,或用更具体的 URL 只抓目标页面]"
+        "{}\n\n…[{what}已截断:共 {total} 字符,仅返回前 {max_chars} 字符。需要更多时提高 max_chars 参数,或用更具体的 URL 只抓目标页面]",
+        crate::support::truncate_chars(text, max_chars, "")
     )
 }
 

@@ -450,9 +450,7 @@ mod tests {
         });
         for _ in 0..5 {
             assert!(budget.admit_step().is_ok());
-            assert!(budget
-                .admit_request(&metered(RequestKind::Step, 1))
-                .is_ok());
+            assert!(budget.admit_request(&metered(RequestKind::Step, 1)).is_ok());
         }
     }
 
@@ -570,11 +568,7 @@ mod tests {
         assert_eq!(counters.metered_requests, 0, "旁路不计入用户预算");
         assert_eq!(counters.bypass_requests, 3, "旁路只累计观测计数");
         // 旁路没占额度:用户第一次请求放行,第二次才撞上限。
-        assert!(
-            budget
-                .admit_request(&metered(RequestKind::Step, 1))
-                .is_ok()
-        );
+        assert!(budget.admit_request(&metered(RequestKind::Step, 1)).is_ok());
         assert!(
             budget
                 .admit_request(&metered(RequestKind::Step, 2))

@@ -118,7 +118,7 @@ impl Session {
         {
             return Ok(false);
         }
-        let projection = self.with_events(|events| history::legacy_subagent_drop_set(events));
+        let projection = self.with_events(history::legacy_subagent_drop_set);
         let path = self.file.with_file_name(HISTORY_PROJECTION_FILE);
         let text = serde_json::to_string_pretty(&projection)
             .map_err(|e| SessionError::Corrupt(e.to_string()))?;

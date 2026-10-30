@@ -13,9 +13,9 @@
 //! 把"通过"判成两回事)。
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 #[cfg(windows)]
 use std::sync::Mutex;
-use std::sync::Arc;
 #[cfg(windows)]
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
@@ -1542,40 +1542,14 @@ mod tests {
     }
 
     // ---------------------------------------------------------------------
-    // 实时增量(+ 供 bash 的端到端用例复用的两个脚手架)
+    // 实时增量(sink/deltas_of 脚手架下沉到 support::test_events,与 bash 共用)
     // ---------------------------------------------------------------------
 
     use std::sync::Arc;
     use std::time::Instant;
 
-    use super::{STREAM_BUDGET_BYTES, SessionEvent, SessionEventSink, Streamer};
-
-    /// 收事件的测试 sink。
-    fn sink(events: &Arc<std::sync::Mutex<Vec<SessionEvent>>>) -> SessionEventSink {
-        let events = events.clone();
-        Arc::new(move |event| events.lock().unwrap().push(event))
-    }
-
-    /// 某次调用某条流上收到的增量,按到达顺序。
-    fn deltas_of(
-        events: &Arc<std::sync::Mutex<Vec<SessionEvent>>>,
-        call_id: &str,
-        stream: &str,
-    ) -> Vec<String> {
-        events
-            .lock()
-            .unwrap()
-            .iter()
-            .filter_map(|event| match event {
-                SessionEvent::ToolOutputChunk {
-                    call_id: id,
-                    stream: name,
-                    text,
-                } if id == call_id && name == stream => Some(text.clone()),
-                _ => None,
-            })
-            .collect()
-    }
+    use super::{STREAM_BUDGET_BYTES, SessionEvent, Streamer};
+    use crate::support::test_events::{deltas_of, sink};
 
     /// 首块立即推(短命令也要能看到实时性),窗口内的后续块先攒着,结束必收尾。
     ///

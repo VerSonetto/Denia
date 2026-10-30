@@ -156,7 +156,7 @@ impl HistoryProjection {
 /// 按内容判断的一律不做：这里只按事件类别决策，规则可复现、可审计。
 pub fn legacy_subagent_drop_set(events: &[SessionEnvelope]) -> HistoryProjection {
     let mut dropped: Vec<String> = Vec::new();
-    let mut mark = |name: &str, dropped: &mut Vec<String>| {
+    let mark = |name: &str, dropped: &mut Vec<String>| {
         if !dropped.iter().any(|item| item == name) {
             dropped.push(name.to_string());
         }

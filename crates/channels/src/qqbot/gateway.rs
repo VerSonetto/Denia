@@ -15,9 +15,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::bot::QqBot;
 use super::client::Client;
-use super::protocol::{
-    GatewayPayload, heartbeat_body, identify_body, parse_inbound, resume_body,
-};
+use super::protocol::{GatewayPayload, heartbeat_body, identify_body, parse_inbound, resume_body};
 use crate::weixin::SharedStatus;
 
 const BACKOFF_SECONDS: [u64; 5] = [2, 5, 10, 30, 60];
@@ -109,7 +107,7 @@ async fn connect_once(
                             _ => identify_body(&token),
                         };
                         socket
-                            .send(Message::Text(body.to_string().into()))
+                            .send(Message::Text(body.to_string()))
                             .await
                             .map_err(|error| format!("QQ WebSocket 认证发送失败:{error}"))?;
                         let mut next = tokio::time::interval(Duration::from_millis(
@@ -155,7 +153,7 @@ async fn connect_once(
             _ = tick => {
                 let body = heartbeat_body(last_seq);
                 socket
-                    .send(Message::Text(body.to_string().into()))
+                    .send(Message::Text(body.to_string()))
                     .await
                     .map_err(|error| format!("QQ 心跳发送失败:{error}"))?;
             }

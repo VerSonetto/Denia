@@ -240,6 +240,7 @@ struct IssuedTicket {
 }
 
 impl Inner {
+    #[cfg(test)]
     fn ticket_for(&self, via: Channel) -> Option<&IssuedTicket> {
         match via {
             Channel::Lan => self.lan_ticket.as_ref(),

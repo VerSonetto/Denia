@@ -735,8 +735,7 @@ impl ContextMeter {
                     self.flush_pending_notes();
                     return;
                 }
-                self.call_result_nodes
-                    .insert(call_id.clone(), envelope.seq);
+                self.call_result_nodes.insert(call_id.clone(), envelope.seq);
                 self.fold_message_add(envelope.seq, tokens);
                 self.flush_pending_notes();
             }
@@ -787,10 +786,8 @@ impl ContextMeter {
                 self.archived_calls.insert(call_id.clone());
                 // 说明等本步所有结果到齐再计入表面(与派生面同一条件)。
                 let note = denia_core::session::archived_call_note(placeholder);
-                self.pending_notes.push((
-                    envelope.seq,
-                    estimate_message(&ChatMessage::user(note)),
-                ));
+                self.pending_notes
+                    .push((envelope.seq, estimate_message(&ChatMessage::user(note))));
                 self.flush_pending_notes();
             }
             SessionEvent::CompactionSummary {

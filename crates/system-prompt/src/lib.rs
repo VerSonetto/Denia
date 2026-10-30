@@ -273,16 +273,20 @@ impl Default for SystemPromptConfig {
     }
 }
 
+/// 注册一个工具提供方:装配时按 [`AssembleContext`] 决定贡献哪些工具。
+type ToolProviderHook =
+    std::sync::Arc<dyn Fn(&AssembleContext) -> ToolProviderResult + Send + Sync>;
+/// 注册一个变量解析器:装配时把模板变量解析为其字符串值。
+type VariableHook = std::sync::Arc<dyn Fn(&AssembleContext) -> Option<String> + Send + Sync>;
+
 /// Registry for prompt inputs assembled before each model step.
 #[derive(Clone)]
 pub struct SystemPrompt {
     config: SystemPromptConfig,
     sections: HashMap<String, PromptSection>,
     contexts: HashMap<String, PromptContext>,
-    tool_providers:
-        Vec<std::sync::Arc<dyn Fn(&AssembleContext) -> ToolProviderResult + Send + Sync>>,
-    variables:
-        HashMap<String, std::sync::Arc<dyn Fn(&AssembleContext) -> Option<String> + Send + Sync>>,
+    tool_providers: Vec<ToolProviderHook>,
+    variables: HashMap<String, VariableHook>,
     runtime_context_suppressed: bool,
 }
 

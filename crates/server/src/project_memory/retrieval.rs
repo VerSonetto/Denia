@@ -26,9 +26,7 @@
 use std::collections::BTreeSet;
 use std::path::Path;
 
-use super::{
-    MemoryKind, MemoryStatus, MAX_FILE_BYTES, read_frontmatter, scan_manifest,
-};
+use super::{MAX_FILE_BYTES, MemoryKind, MemoryStatus, read_frontmatter, scan_manifest};
 
 /// 一条命中。
 #[derive(Debug, Clone, serde::Serialize)]
@@ -95,10 +93,10 @@ pub fn search(
             continue;
         };
         let front = read_frontmatter(&absolute);
-        if let Some(wanted) = kind {
-            if front.kind != Some(wanted) {
-                continue;
-            }
+        if let Some(wanted) = kind
+            && front.kind != Some(wanted)
+        {
+            continue;
         }
         if !include_superseded && front.status == Some(MemoryStatus::Superseded) {
             continue;
@@ -175,12 +173,13 @@ fn coverage(needles: &BTreeSet<String>, haystack: &str) -> f32 {
     if needles.len() == 1 {
         // 单字查询:直接看字符是否出现。
         let needle = needles.iter().next().map(String::as_str).unwrap_or("");
-        let hit = haystack
-            .to_lowercase()
-            .contains(needle);
+        let hit = haystack.to_lowercase().contains(needle);
         return if hit { 1.0 } else { 0.0 };
     }
-    let hit = needles.iter().filter(|needle| grams.contains(*needle)).count();
+    let hit = needles
+        .iter()
+        .filter(|needle| grams.contains(*needle))
+        .count();
     hit as f32 / needles.len() as f32
 }
 
@@ -309,9 +308,24 @@ mod tests {
     #[test]
     fn superseded_and_kind_filters_apply() {
         let root = temp_root("filter");
-        write(&root, "old.md", "name: old\nkind: fact\nstatus: superseded\ndescription: 旧状态", "旧");
-        write(&root, "new.md", "name: new\nkind: fact\nstatus: active\ndescription: 新状态", "新");
-        write(&root, "exp.md", "name: exp\nkind: experience\ndescription: 经验状态", "经验");
+        write(
+            &root,
+            "old.md",
+            "name: old\nkind: fact\nstatus: superseded\ndescription: 旧状态",
+            "旧",
+        );
+        write(
+            &root,
+            "new.md",
+            "name: new\nkind: fact\nstatus: active\ndescription: 新状态",
+            "新",
+        );
+        write(
+            &root,
+            "exp.md",
+            "name: exp\nkind: experience\ndescription: 经验状态",
+            "经验",
+        );
 
         let active = search(&root, "状态", 10, None, false);
         assert!(
@@ -322,7 +336,12 @@ mod tests {
         let all = search(&root, "状态", 10, None, true);
         assert_eq!(all.hits.len(), 3);
         let facts = search(&root, "状态", 10, Some(MemoryKind::Fact), false);
-        assert!(facts.hits.iter().all(|hit| hit.kind == Some(MemoryKind::Fact)));
+        assert!(
+            facts
+                .hits
+                .iter()
+                .all(|hit| hit.kind == Some(MemoryKind::Fact))
+        );
         assert_eq!(facts.hits.len(), 1);
         std::fs::remove_dir_all(root).unwrap();
     }

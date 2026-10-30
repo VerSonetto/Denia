@@ -203,9 +203,6 @@ struct UpdateBody {
     session_id: Option<String>,
     #[serde(default)]
     cwd: Option<String>,
-    /// 内置定义的编辑永远写用户覆盖；显式给 project 时才写项目层。
-    #[serde(default)]
-    scope: Option<ProfileWriteScope>,
 }
 
 async fn update_profile(

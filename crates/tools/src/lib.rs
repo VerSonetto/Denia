@@ -55,11 +55,10 @@ pub use prompt::{
     default_shipped, default_shipped_with_browser, default_shipped_with_browser_and_ask,
     register_ask_prompt_section, register_capability_prompt_sections, register_code_style_section,
     register_communication_section, register_context_management_section,
-    register_mcp_prompt_section, register_mcp_prompt_section_with_manager,
-    register_memory_prompt_section, register_preset_prompt_section, register_risk_honesty_section,
-    register_shipped_prompt, register_task_prompt_section, register_working_style_section,
-    render_mcp_section, render_memory_section, shipped_with_persona,
-    shipped_with_persona_and_browser_and_ask,
+    register_mcp_prompt_section_with_manager, register_memory_prompt_section,
+    register_preset_prompt_section, register_risk_honesty_section, register_shipped_prompt,
+    register_task_prompt_section, register_working_style_section, render_mcp_section,
+    render_memory_section, shipped_with_persona, shipped_with_persona_and_browser_and_ask,
 };
 pub use shell_session::{Captured, PersistentShell, ShellHub};
 pub use task::{RunChecksTool, TaskLedgerHost};
@@ -72,19 +71,6 @@ pub use web_fetch::WebFetchTool;
 /// The agent loop wires it to the session append + broadcast; tools never
 /// touch the session handle directly.
 pub type SessionEventSink = Arc<dyn Fn(SessionEvent) + Send + Sync>;
-
-/// 历史只读集合（旧日志与旧参数路径的保守上限）。
-///
-/// **不是**当前子代理策略：现在的子代理按定义（内置 explore/develop/verify
-/// 或用户自定义）声明自己的工具，只受"父可授予工具 ∩ 定义请求 − 硬禁项"约束。
-///
-/// 这个常量只服务两条遗留路径：
-/// 1. 读旧日志里的 `SubagentDescriptor`（缺 `effectiveTools` 时按它保守构造）；
-/// 2. 兼容旧的 `allowed_tools` 参数（显式列表最多与它相交，绝不放开写与命令）。
-///
-/// 权威定义在 `denia_core::subagent::LEGACY_READ_ONLY_TOOLS`；这里只是别名，
-/// 避免两处各写一份导致旧日志的解释漂移。
-pub const SUBAGENT_READ_ONLY_TOOLS: &[&str] = denia_core::subagent::LEGACY_READ_ONLY_TOOLS;
 
 /// 提问通道:宿主实现,把 `ask` 工具的提问挂到会话的挂起表并等待用户应答。
 ///
@@ -111,6 +97,9 @@ pub trait FileHistoryBackend: Send + Sync {
     /// 记录一次即将发生的写操作;实现应在文件被修改前备份原内容。
     async fn track_before_write(&self, path: &std::path::Path) -> Result<(), String>;
 }
+
+/// 会话目标读取器:返回 `(当前目标快照, 激活后的 token 用量)`。
+type GoalReader = Arc<dyn Fn() -> Option<(denia_core::session::GoalState, u64)> + Send + Sync>;
 
 /// Execution context handed to every tool call.
 #[derive(Clone)]
@@ -141,8 +130,7 @@ pub struct ToolContext {
     pub call_id: Option<String>,
     /// 会话目标读取器(`get_goal` 用);`None` 表示当前调用无法读取
     /// 会话目标状态。返回 `(当前目标快照, 激活后的 token 用量)`。
-    pub goal_reader:
-        Option<Arc<dyn Fn() -> Option<(denia_core::session::GoalState, u64)> + Send + Sync>>,
+    pub goal_reader: Option<GoalReader>,
     /// 会话任务验证账本的宿主接口(`run_checks` 用)。
     ///
     /// `None` = 当前调用没有归属的代理会话(单测、宿主配置面):该工具会
@@ -342,7 +330,7 @@ pub fn default_registry() -> ToolRegistry {
     registry.register(Arc::new(ExitPlanTool));
     registry.register(Arc::new(GetGoalTool));
     registry.register(Arc::new(UpdateGoalTool));
-    registry.register(Arc::new(RunChecksTool::default()));
+    registry.register(Arc::new(RunChecksTool));
     registry.register(Arc::new(WebFetchTool::new()));
     registry
 }

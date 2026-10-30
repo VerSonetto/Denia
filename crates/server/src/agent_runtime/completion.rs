@@ -1,3 +1,5 @@
+use super::*;
+
 // 完成结果的投递调度：后台任务与子代理共用一条队列。
 //
 // 生产者只登记结果；本文件决定“什么时候交回模型”。唯一的硬约束是
@@ -46,14 +48,14 @@ impl Runtime {
     }
 
     /// 目标模型此刻是否正处在一个不能打断的动作里。
-    fn model_mid_action(&self, id: &str) -> bool {
+    pub(super) fn model_mid_action(&self, id: &str) -> bool {
         self.inner
             .live
             .get(id)
             .is_some_and(|live| live.mid_action())
     }
 
-    fn capture_completion(&self, id: &str) {
+    pub(super) fn capture_completion(&self, id: &str) {
         let child = self.inner.children.lock().unwrap().get(id).cloned();
         let Some(child) = child else {
             return;
@@ -87,7 +89,7 @@ impl Runtime {
         }
     }
 
-    fn queue_completion(
+    pub(super) fn queue_completion(
         &self,
         child: &Child,
         session: &denia_session::Session,
@@ -185,7 +187,7 @@ impl Runtime {
         );
     }
 
-    fn start_delivery_worker(&self) {
+    pub(super) fn start_delivery_worker(&self) {
         let weak = Arc::downgrade(&self.inner);
         let delivery = self.inner.delivery.clone();
         tokio::spawn(async move {
@@ -209,7 +211,7 @@ impl Runtime {
         });
     }
 
-    async fn retry_deliveries(&self) {
+    pub(super) async fn retry_deliveries(&self) {
         for completion in self.inner.delivery.due() {
             if !self.inner.sessions.exists(&completion.target)
                 || !self.inner.sessions.exists(&completion.child)
@@ -335,7 +337,7 @@ impl Runtime {
         }
     }
 
-    async fn recover_deliveries(&self) -> Result<(), String> {
+    pub(super) async fn recover_deliveries(&self) -> Result<(), String> {
         let sessions = self.inner.sessions.clone();
         let entries = tokio::task::spawn_blocking(move || sessions.list())
             .await

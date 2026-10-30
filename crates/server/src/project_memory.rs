@@ -69,7 +69,13 @@ impl MemoryKind {
     /// 旧四类(user/feedback/project/reference)按"失效方式"归并:只有
     /// feedback 讲的是工作方式,其余三类都是状态。
     fn parse(raw: &str) -> Option<Self> {
-        match raw.trim().trim_matches('"').trim_matches('\'').to_ascii_lowercase().as_str() {
+        match raw
+            .trim()
+            .trim_matches('"')
+            .trim_matches('\'')
+            .to_ascii_lowercase()
+            .as_str()
+        {
             "experience" | "feedback" => Some(MemoryKind::Experience),
             "fact" | "user" | "project" | "reference" => Some(MemoryKind::Fact),
             _ => None,
@@ -187,10 +193,7 @@ fn non_empty(value: &str) -> Option<String> {
 /// 解析 `[a, b]` / `a` 两种写法。
 fn parse_list(value: &str) -> Vec<String> {
     let inner = value.trim().trim_start_matches('[').trim_end_matches(']');
-    inner
-        .split(',')
-        .filter_map(non_empty)
-        .collect()
+    inner.split(',').filter_map(non_empty).collect()
 }
 
 /// 一个工作区的记忆目录根。
@@ -589,7 +592,7 @@ pub fn rebuild_index(root: &Path) -> Result<IndexRebuild, String> {
 }
 
 /// 分区正文:空区给一行占位,免得读者以为重建失败。
-fn render_section(lines: &mut Vec<String>, empty_hint: &str) -> String {
+fn render_section(lines: &mut [String], empty_hint: &str) -> String {
     if lines.is_empty() {
         return format!("{empty_hint}\n");
     }
@@ -656,78 +659,75 @@ pub fn memory_health(root: &Path) -> MemoryHealthReport {
     let mut missing_sections: Vec<String> = Vec::new();
     let mut superseded_still_listed: Vec<String> = Vec::new();
     let mut active_in_history: Vec<String> = Vec::new();
-    let (index_lines, index_entries, index_bytes, broken_links, linked) =
-        match index.as_deref() {
-            Some(content) => {
-                let mut broken = Vec::new();
-                let mut linked: Vec<String> = Vec::new();
-                let mut entries = 0usize;
-                // 当前所处分区:None 表示还没进任何已知分区。
-                let mut section: Option<&str> = None;
-                let mut seen_sections: Vec<&str> = Vec::new();
-                for line in content.lines() {
-                    let trimmed = line.trim();
-                    if trimmed.is_empty() {
-                        continue;
+    let (index_lines, index_entries, index_bytes, broken_links, linked) = match index.as_deref() {
+        Some(content) => {
+            let mut broken = Vec::new();
+            let mut linked: Vec<String> = Vec::new();
+            let mut entries = 0usize;
+            // 当前所处分区:None 表示还没进任何已知分区。
+            let mut section: Option<&str> = None;
+            let mut seen_sections: Vec<&str> = Vec::new();
+            for line in content.lines() {
+                let trimmed = line.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
+                if let Some(heading) = known_section(trimmed) {
+                    section = Some(heading);
+                    if !seen_sections.contains(&heading) {
+                        seen_sections.push(heading);
                     }
-                    if let Some(heading) = known_section(trimmed) {
-                        section = Some(heading);
-                        if !seen_sections.contains(&heading) {
-                            seen_sections.push(heading);
-                        }
-                        continue;
-                    }
-                    // 其他标题视为分区外(说明文字),不算条目。
-                    if trimmed.starts_with('#') {
-                        section = None;
-                        continue;
-                    }
-                    entries += 1;
-                    let Some(target) = entry_target(trimmed) else {
-                        continue;
-                    };
-                    if linked.iter().any(|name| name == &target) {
-                        continue;
-                    }
-                    let path = root.join(&target);
-                    if !path.is_file() {
-                        broken.push(target.clone());
-                        linked.push(target);
-                        continue;
-                    }
-                    let front = read_frontmatter(&path);
-                    let is_superseded = front.status == Some(MemoryStatus::Superseded);
-                    match section {
-                        Some(SECTION_HISTORY) => {
-                            if !is_superseded {
-                                active_in_history.push(target.clone());
-                            }
-                        }
-                        Some(SECTION_EXPERIENCE) | Some(SECTION_FACT) => {
-                            if is_superseded {
-                                superseded_still_listed.push(target.clone());
-                            }
-                        }
-                        // 没有分区标题的旧索引:位置说明不了状态,不报。
-                        _ => {}
-                    }
+                    continue;
+                }
+                // 其他标题视为分区外(说明文字),不算条目。
+                if trimmed.starts_with('#') {
+                    section = None;
+                    continue;
+                }
+                entries += 1;
+                let Some(target) = entry_target(trimmed) else {
+                    continue;
+                };
+                if linked.iter().any(|name| name == &target) {
+                    continue;
+                }
+                let path = root.join(&target);
+                if !path.is_file() {
+                    broken.push(target.clone());
                     linked.push(target);
+                    continue;
                 }
-                for required in [SECTION_EXPERIENCE, SECTION_FACT, SECTION_HISTORY] {
-                    if !seen_sections.contains(&required) {
-                        missing_sections.push(required.to_string());
+                let front = read_frontmatter(&path);
+                let is_superseded = front.status == Some(MemoryStatus::Superseded);
+                match section {
+                    Some(SECTION_HISTORY) => {
+                        if !is_superseded {
+                            active_in_history.push(target.clone());
+                        }
                     }
+                    Some(SECTION_EXPERIENCE) | Some(SECTION_FACT) if is_superseded => {
+                        superseded_still_listed.push(target.clone());
+                    }
+                    // 没有分区标题的旧索引:位置说明不了状态,不报。
+                    _ => {}
                 }
-                (
-                    Some(content.lines().count()),
-                    Some(entries),
-                    Some(content.len()),
-                    broken,
-                    linked,
-                )
+                linked.push(target);
             }
-            None => (None, None, None, Vec::new(), Vec::new()),
-        };
+            for required in [SECTION_EXPERIENCE, SECTION_FACT, SECTION_HISTORY] {
+                if !seen_sections.contains(&required) {
+                    missing_sections.push(required.to_string());
+                }
+            }
+            (
+                Some(content.lines().count()),
+                Some(entries),
+                Some(content.len()),
+                broken,
+                linked,
+            )
+        }
+        None => (None, None, None, Vec::new(), Vec::new()),
+    };
 
     let manifest = scan_manifest(root);
     let mut orphans: Vec<String> = manifest
@@ -831,16 +831,9 @@ fn entry_target(line: &str) -> Option<String> {
     Some(target.trim_start_matches("./").to_string())
 }
 
-/// 读文件头部(最多 8 KiB,UTF-8 边界不完整时 lossy)并提取 frontmatter
-/// 的 `description` 值。
-fn frontmatter_description(path: &Path) -> Option<String> {
-    read_frontmatter(path).description
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use denia_core::session::SessionEvent;
 
     fn temp_root(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("denia-mem-{name}-{}", uuid::Uuid::new_v4()));
@@ -871,7 +864,11 @@ mod tests {
         .unwrap();
         let report = memory_health(&root);
         assert_eq!(report.broken_links, vec!["missing.md".to_string()]);
-        assert_eq!(report.orphans, vec!["b.md".to_string()], "b.md 未登记进索引");
+        assert_eq!(
+            report.orphans,
+            vec!["b.md".to_string()],
+            "b.md 未登记进索引"
+        );
         assert_eq!(
             report.duplicate_groups,
             vec![vec!["a.md".to_string(), "b.md".to_string()]]
@@ -1026,27 +1023,6 @@ mod tests {
         std::fs::remove_dir_all(work).unwrap();
     }
 
-    fn user_envelope(text: &str, injected: bool) -> denia_core::session::SessionEnvelope {
-        denia_core::session::SessionEnvelope {
-            seq: 0,
-            time: 0,
-            event: SessionEvent::UserMessage {
-                text: text.to_string(),
-                injected,
-                channel: None,
-                images: Vec::new(),
-            },
-        }
-    }
-
-    fn envelope(seq: u64, event: SessionEvent) -> denia_core::session::SessionEnvelope {
-        denia_core::session::SessionEnvelope {
-            seq,
-            time: 0,
-            event,
-        }
-    }
-
     /// 重建索引:按 kind/status 分三区,带钩子,原子替换,不碰条目文件。
     #[test]
     fn rebuild_index_splits_sections_and_keeps_bodies() {
@@ -1093,7 +1069,11 @@ mod tests {
         assert!(index[exp_at..fact_at].contains("经验A"));
         assert!(index[hist_at..].contains("b.md"));
         // 条目文件一个字节都没动。
-        assert!(std::fs::read_to_string(root.join("a.md")).unwrap().contains("正文A"));
+        assert!(
+            std::fs::read_to_string(root.join("a.md"))
+                .unwrap()
+                .contains("正文A")
+        );
         // 重建后的索引体检不应报缺区/错位。
         let report = memory_health(&root);
         assert!(report.missing_sections.is_empty(), "{report:?}");
@@ -1142,7 +1122,10 @@ mod tests {
                 .any(|item| item.contains("old.md") && item.contains("missing.md")),
             "{report:?}"
         );
-        assert!(report.untyped.contains(&"loose.md".to_string()), "{report:?}");
+        assert!(
+            report.untyped.contains(&"loose.md".to_string()),
+            "{report:?}"
+        );
         std::fs::remove_dir_all(work).unwrap();
     }
 

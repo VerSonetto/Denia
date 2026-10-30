@@ -101,9 +101,7 @@ pub(crate) fn rescue_fake_tool_calls(text: &str) -> Option<Vec<RescuedCall>> {
         let block_end = tail_start + rrel;
         let body = &lower[block_start..block_end];
         // <function=name>
-        let Some(frel) = body.find("<function=") else {
-            return None;
-        };
+        let frel = body.find("<function=")?;
         let name_start = frel + "<function=".len();
         let mut name_end = name_start;
         while name_end < body.len()
@@ -118,10 +116,7 @@ pub(crate) fn rescue_fake_tool_calls(text: &str) -> Option<Vec<RescuedCall>> {
         // <parameter=key>value</parameter> 反复提取。
         let mut args = serde_json::Map::new();
         let mut psearch = 0usize;
-        loop {
-            let Some(prel) = body[psearch..].find("<parameter=") else {
-                break;
-            };
+        while let Some(prel) = body[psearch..].find("<parameter=") {
             let pkey_start = psearch + prel + "<parameter=".len();
             let mut pkey_end = pkey_start;
             while pkey_end < body.len()
@@ -134,9 +129,7 @@ pub(crate) fn rescue_fake_tool_calls(text: &str) -> Option<Vec<RescuedCall>> {
                 return None;
             }
             // <parameter=key> 的 key 结束于 '>' 之前;值从 '>' 之后开始。
-            let Some(gt_rel) = body[pkey_end..].find('>') else {
-                return None;
-            };
+            let gt_rel = body[pkey_end..].find('>')?;
             let value_start = pkey_end + gt_rel + 1;
             let Some(rrrel) = body[value_start..].find("</parameter>") else {
                 return None; // 参数块未闭合。

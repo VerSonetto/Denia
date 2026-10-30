@@ -17,13 +17,13 @@ use denia_system_prompt::{
 };
 use denia_token_meter::estimate_system_tokens;
 
+use crate::LOCAL_FILE_ACCESS;
 use crate::errors::MAX_FEEDBACK;
 use crate::injections::{InjectionBaselines, refresh_background_injections};
 use crate::rescue::{detect_fake_names, fake_tool_call_feedback, log_rescued, rescue_from_blocks};
 use crate::runtime_context::RuntimeContextProjection;
 use crate::workspace_instructions::skill_gesture;
 use crate::{SessionDriver, TurnState, append, should_log_system_prompt};
-use crate::LOCAL_FILE_ACCESS;
 
 /// 一次 turn 内跨 step 的可变装配状态(注入基准、touched 路径、手势正文)。
 struct TurnAssembly {
@@ -1441,19 +1441,6 @@ mod budget_tests {
             .await
     }
 
-    fn last_turn_end(session: &Session) -> TurnEndReason {
-        session.with_events(|events| {
-            events
-                .iter()
-                .rev()
-                .find_map(|envelope| match &envelope.event {
-                    SessionEvent::TurnEnd { reason, .. } => Some(reason.clone()),
-                    _ => None,
-                })
-                .expect("轮次必须闭合")
-        })
-    }
-
     fn steps_started(session: &Session) -> usize {
         session.with_events(|events| {
             events
@@ -1630,7 +1617,9 @@ mod budget_tests {
             sequence: 1,
             attempt: 2,
         };
-        let refusal = gate.admit(&user_retry).expect_err("第二次用户请求必须撞上限");
+        let refusal = gate
+            .admit(&user_retry)
+            .expect_err("第二次用户请求必须撞上限");
         assert!(refusal.message.contains("执行预算已用尽"));
         let counters = budget.counters();
         assert_eq!(counters.metered_requests, 1, "旁路不吃用户预算");

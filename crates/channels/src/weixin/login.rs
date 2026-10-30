@@ -92,7 +92,11 @@ async fn run_login(
             "expired" => {
                 refresh_count += 1;
                 if refresh_count > MAX_QR_REFRESH {
-                    set_status(&snapshot, "failed", Some("二维码多次过期，请重新登录".to_string()));
+                    set_status(
+                        &snapshot,
+                        "failed",
+                        Some("二维码多次过期，请重新登录".to_string()),
+                    );
                     return;
                 }
                 match client::fetch_qr(&current_base).await {

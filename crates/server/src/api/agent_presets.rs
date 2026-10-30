@@ -198,8 +198,7 @@ mod tests {
     /// 编辑,确认路由、错误码与 JSON 形状和前端契约一致。
     #[tokio::test]
     async fn create_read_and_update_a_user_preset() {
-        let home =
-            std::env::temp_dir().join(format!("denia-presets-api-{}", uuid::Uuid::new_v4()));
+        let home = std::env::temp_dir().join(format!("denia-presets-api-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&home).unwrap();
         let state = Arc::new(crate::state::build_state(&home, false, 0).await.unwrap());
         let app = router().with_state(state.clone());
@@ -352,10 +351,7 @@ mod tests {
         assert_eq!(response.status(), 200);
         let bytes = to_bytes(response.into_body(), 1024 * 1024).await.unwrap();
         let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-        assert!(
-            value["spec"].is_null(),
-            "broken 行没有可编辑的规范:{value}"
-        );
+        assert!(value["spec"].is_null(), "broken 行没有可编辑的规范:{value}");
 
         // 删除收尾。
         let response = app

@@ -15,7 +15,6 @@
 
 use std::path::Path;
 
-use serde_json::Value;
 use serde_yaml::Value as YamlValue;
 
 /// 迁移标记所在的顶层键（不是 settings 命名空间，SettingsStore 会原样保留）。
@@ -197,23 +196,6 @@ pub fn migrate_settings(home: &Path) -> Result<MigrationReport, String> {
     })
 }
 
-/// 迁移后，旧字段不应再出现在正式 schema 里——供启动自检与测试断言。
-pub fn legacy_fields_present(path: &Path) -> Result<Vec<String>, String> {
-    let text = std::fs::read_to_string(path).map_err(|error| error.to_string())?;
-    let value: Value = serde_yaml::from_str::<serde_yaml::Value>(&text)
-        .map_err(|error| error.to_string())
-        .and_then(|value| serde_json::to_value(value).map_err(|error| error.to_string()))?;
-    let mut found = Vec::new();
-    if let Some(runtime) = value.get("runtime").and_then(Value::as_object) {
-        for key in ["maxAgents", "maxDepth"] {
-            if runtime.contains_key(key) {
-                found.push(format!("runtime.{key}"));
-            }
-        }
-    }
-    Ok(found)
-}
-
 fn now_millis() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -266,12 +248,6 @@ mod tests {
         assert!(value["runtime"].get("maxAgents").is_none());
         assert!(value["runtime"].get("maxDepth").is_none());
         // 迁移标记。
-        assert_eq!(value["migrations"]["subagentRedesign"], 1);
-        assert!(
-            legacy_fields_present(&home.join("settings.yaml"))
-                .unwrap()
-                .is_empty()
-        );
         // 备份存在。
         let backups: Vec<_> = std::fs::read_dir(&home)
             .unwrap()

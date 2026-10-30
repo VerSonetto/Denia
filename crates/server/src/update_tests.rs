@@ -68,18 +68,13 @@ struct Assets {
 impl Assets {
     fn record(&self, kind: usize, ranged: bool, name: &str) {
         if name == "SHA256SUMS.txt" {
-            self.hits
-                .checksums
-                .lock()
-                .unwrap()
-                .push(source_label(kind));
+            self.hits.checksums.lock().unwrap().push(source_label(kind));
             return;
         }
         if ranged {
             return;
         }
-        self.downloads
-            .fetch_add(1, AtomicOrdering::SeqCst);
+        self.downloads.fetch_add(1, AtomicOrdering::SeqCst);
         self.hits
             .installers
             .lock()
@@ -104,7 +99,11 @@ impl Assets {
             ))
             .await;
         }
-        let mode = if kind == MIRROR_CORRUPT { 1 } else { self.mode.load(AtomicOrdering::SeqCst) };
+        let mode = if kind == MIRROR_CORRUPT {
+            1
+        } else {
+            self.mode.load(AtomicOrdering::SeqCst)
+        };
         match mode {
             1 => {
                 let mut bad = PAYLOAD.to_vec();
@@ -243,14 +242,21 @@ impl MockServer {
                     }
                 }),
             )
-            .route("/download/{tag}/{name}", asset_route(assets.clone(), DIRECT))
+            .route(
+                "/download/{tag}/{name}",
+                asset_route(assets.clone(), DIRECT),
+            )
             .route(
                 "/mock-ok/{*path}",
                 get({
                     let assets = assets.clone();
                     move |AxumPath(path): AxumPath<String>, headers: HeaderMap| {
                         let assets = assets.clone();
-                        async move { assets.respond(MIRROR_OK, ranged(&headers), &tail(&path)).await }
+                        async move {
+                            assets
+                                .respond(MIRROR_OK, ranged(&headers), tail(&path))
+                                .await
+                        }
                     }
                 }),
             )
@@ -261,7 +267,9 @@ impl MockServer {
                     move |AxumPath(path): AxumPath<String>, headers: HeaderMap| {
                         let assets = assets.clone();
                         async move {
-                            assets.respond(MIRROR_BROKEN, ranged(&headers), &tail(&path)).await
+                            assets
+                                .respond(MIRROR_BROKEN, ranged(&headers), tail(&path))
+                                .await
                         }
                     }
                 }),
@@ -273,7 +281,9 @@ impl MockServer {
                     move |AxumPath(path): AxumPath<String>, headers: HeaderMap| {
                         let assets = assets.clone();
                         async move {
-                            assets.respond(MIRROR_CORRUPT, ranged(&headers), &tail(&path)).await
+                            assets
+                                .respond(MIRROR_CORRUPT, ranged(&headers), tail(&path))
+                                .await
                         }
                     }
                 }),
@@ -288,9 +298,7 @@ impl MockServer {
             .build()
             .unwrap();
         Self {
-            updater: Arc::new(
-                Updater::new(client, source, mirrors).with_origin(local.clone()),
-            ),
+            updater: Arc::new(Updater::new(client, source, mirrors).with_origin(local.clone())),
             releases,
             checks,
             downloads,
@@ -332,7 +340,7 @@ impl MockServer {
     }
 
     /// 走完“检查 → 选源 → 下载 → 校验 → 启动安装器”全流程。
-/// 安装器句柄保持到返回值析构，状态才会停在 Launched 而不是立刻回到 Idle。
+    /// 安装器句柄保持到返回值析构，状态才会停在 Launched 而不是立刻回到 Idle。
     #[cfg(windows)]
     async fn install(&self) -> Installed {
         let paths: Arc<Mutex<Vec<PathBuf>>> = Arc::new(Mutex::new(Vec::new()));
@@ -421,7 +429,12 @@ async fn a_source_returning_wrong_bytes_falls_back_to_the_next_one() {
 async fn sources_that_cannot_answer_are_left_for_last() {
     let server = MockServer::start_with(&[MIRROR_BROKEN]).await;
     let installed = server.install().await;
-    assert_eq!(installed.status.phase, Phase::Launched, "{:?}", installed.status.error);
+    assert_eq!(
+        installed.status.phase,
+        Phase::Launched,
+        "{:?}",
+        installed.status.error
+    );
     assert_eq!(
         server.installers(),
         vec!["direct"],

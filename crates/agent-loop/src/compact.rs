@@ -131,10 +131,7 @@ pub fn select_keep_start(
         }
     }
     // 工具对完整性修正:窗口第一条是 tool result 时,把其 tool_call 一并纳入。
-    loop {
-        let Some(first) = surface.get(start) else {
-            break;
-        };
+    while let Some(first) = surface.get(start) {
         if first.message.role != ChatRole::Tool {
             break;
         }
@@ -744,73 +741,74 @@ mod tests {
     #[test]
     fn keep_window_prefers_recent_and_keeps_tool_pairs() {
         let settings = tiny();
-        let mut events: Vec<SessionEnvelope> = Vec::new();
-        // 老历史:用户消息 + 一条大结果。
-        events.push(envelope(
-            1,
-            denia_core::session::SessionEvent::UserMessage {
-                text: "early request".into(),
-                injected: false,
-                images: Vec::new(),
-                channel: None,
-            },
-        ));
-        events.push(envelope(
-            2,
-            denia_core::session::SessionEvent::AssistantMessage {
-                turn: 1,
-                step: 1,
-                blocks: vec![denia_core::stream::ContentBlock::Text {
-                    text: "let me check".into(),
-                }],
-                usage: None,
-                interrupted: false,
-                source_event_seqs: Vec::new(),
-                first_token_time: None,
-            },
-        ));
-        // 新窗口:刚发生的工具调用对 + 用户新需求。
-        events.push(envelope(
-            3,
-            denia_core::session::SessionEvent::AssistantMessage {
-                turn: 2,
-                step: 1,
-                blocks: vec![denia_core::stream::ContentBlock::ToolCall {
-                    id: "call_9".into(),
-                    name: "bash".into(),
-                    arguments: "{}".into(),
-                    incomplete: false,
-                }],
-                usage: None,
-                interrupted: false,
-                source_event_seqs: Vec::new(),
-                first_token_time: None,
-            },
-        ));
-        events.push(envelope(
-            4,
-            denia_core::session::SessionEvent::ToolResult {
-                turn: 2,
-                step: 1,
-                call_id: "call_9".into(),
-                content: "ok".repeat(1_000),
-                is_error: false,
-                error: None,
-                error_identity: None,
-                meta: None,
-                replaces: None,
-                truncation: None,
-            },
-        ));
-        events.push(envelope(
-            5,
-            denia_core::session::SessionEvent::UserMessage {
-                text: "now do the fix".into(),
-                injected: false,
-                images: Vec::new(),
-                channel: None,
-            },
-        ));
+        let events: Vec<SessionEnvelope> = vec![
+            // 老历史:用户消息 + 一条大结果。
+            envelope(
+                1,
+                denia_core::session::SessionEvent::UserMessage {
+                    text: "early request".into(),
+                    injected: false,
+                    images: Vec::new(),
+                    channel: None,
+                },
+            ),
+            envelope(
+                2,
+                denia_core::session::SessionEvent::AssistantMessage {
+                    turn: 1,
+                    step: 1,
+                    blocks: vec![denia_core::stream::ContentBlock::Text {
+                        text: "let me check".into(),
+                    }],
+                    usage: None,
+                    interrupted: false,
+                    source_event_seqs: Vec::new(),
+                    first_token_time: None,
+                },
+            ),
+            // 新窗口:刚发生的工具调用对 + 用户新需求。
+            envelope(
+                3,
+                denia_core::session::SessionEvent::AssistantMessage {
+                    turn: 2,
+                    step: 1,
+                    blocks: vec![denia_core::stream::ContentBlock::ToolCall {
+                        id: "call_9".into(),
+                        name: "bash".into(),
+                        arguments: "{}".into(),
+                        incomplete: false,
+                    }],
+                    usage: None,
+                    interrupted: false,
+                    source_event_seqs: Vec::new(),
+                    first_token_time: None,
+                },
+            ),
+            envelope(
+                4,
+                denia_core::session::SessionEvent::ToolResult {
+                    turn: 2,
+                    step: 1,
+                    call_id: "call_9".into(),
+                    content: "ok".repeat(1_000),
+                    is_error: false,
+                    error: None,
+                    error_identity: None,
+                    meta: None,
+                    replaces: None,
+                    truncation: None,
+                },
+            ),
+            envelope(
+                5,
+                denia_core::session::SessionEvent::UserMessage {
+                    text: "now do the fix".into(),
+                    injected: false,
+                    images: Vec::new(),
+                    channel: None,
+                },
+            ),
+        ];
 
         let surface = surface_of(&events);
         let start = select_keep_start(&surface, &settings).expect("should find a window");

@@ -354,10 +354,7 @@ impl ImService {
                 return;
             }
         };
-        *self
-            .bot
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner()) = Some(BotHandle { cancel });
+        *self.bot.lock().unwrap_or_else(|poison| poison.into_inner()) = Some(BotHandle { cancel });
         // 账号已就绪:面板立即显示已连接;首次拉取失败会由循环改回 false。
         {
             let mut status = self
@@ -438,7 +435,7 @@ impl ChannelHost for ServerChannelHost {
                 created_at: summary.created_at,
             })
             .collect();
-        rows.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        rows.sort_by_key(|row| std::cmp::Reverse(row.created_at));
         rows.truncate(20);
         Ok(rows)
     }
@@ -521,14 +518,15 @@ impl ChannelHost for ServerChannelHost {
             .flat_map(|group| {
                 let provider = group.id.clone();
                 let provider_name = group.name.clone();
-                group.models.into_iter().map(move |model| {
-                    denia_channels::bridge::ModelOption {
+                group
+                    .models
+                    .into_iter()
+                    .map(move |model| denia_channels::bridge::ModelOption {
                         provider: provider.clone(),
                         provider_name: provider_name.clone(),
                         model: model.id,
                         model_name: model.name,
-                    }
-                })
+                    })
             })
             .collect()
     }

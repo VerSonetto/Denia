@@ -15,8 +15,8 @@ use tokio::io::AsyncWriteExt;
 #[path = "update_mirrors.rs"]
 mod mirrors;
 
-use mirrors::Mirror;
 pub use mirrors::DownloadSource;
+use mirrors::Mirror;
 
 const REPOSITORY_URL: &str = "https://github.com/VerSonetto/Denia";
 const RELEASES_API: &str = "https://api.github.com/repos/VerSonetto/Denia/releases";
@@ -477,7 +477,10 @@ impl Updater {
             let _ = tokio::fs::remove_file(&path).await;
         }
         if failures.len() == attempts && failures.iter().all(|failure| failure.contains("SHA256")) {
-            return Err("所有下载源返回的安装包都未通过 GitHub 记录的 SHA256 校验，已拒绝执行，请稍后重试".to_string());
+            return Err(
+                "所有下载源返回的安装包都未通过 GitHub 记录的 SHA256 校验，已拒绝执行，请稍后重试"
+                    .to_string(),
+            );
         }
         Err(format!(
             "已尝试 {attempts} 个下载源均失败（{}）",
@@ -531,10 +534,10 @@ impl Updater {
         .map_err(|_| "下载源迟迟没有响应".to_string())?
         .map_err(|error| network_error("下载安装包", error))?;
         let response = successful(response, "下载安装包")?;
-        if let Some(size) = response.content_length() {
-            if size > MAX_INSTALLER_BYTES || size != installer.size {
-                return Err("安装包响应大小与发布记录不一致".to_string());
-            }
+        if let Some(size) = response.content_length()
+            && (size > MAX_INSTALLER_BYTES || size != installer.size)
+        {
+            return Err("安装包响应大小与发布记录不一致".to_string());
         }
         let mut stream = response.bytes_stream();
         let mut digest = Sha256::new();

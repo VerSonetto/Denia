@@ -4,35 +4,34 @@ import { saveComposer, type ComposerSnapshot } from '../composerMemory'
 import { useSessionContext } from '../features/conversation/useSessionContext'
 import { useComposerMentions } from '../features/conversation/useComposerMentions';
 import { useComposerSlash } from '../features/conversation/useComposerSlash';
-import { normalizeSelection, LAST_MODEL_KEY, LAST_MODEL_KEY_LEGACY, NODES_THROTTLE_MS, firstAvailableSelection, queuedPayload, pendingMessageKey, latestPermissionMode, consoleDefaultPermission, latestRequestSelection, latestPendingApproval, type OutgoingPayload } from '../features/conversation/sessionState';
-import { RuntimePanel } from '../components/RuntimePanel';
+import { normalizeSelection, LAST_MODEL_KEY, LAST_MODEL_KEY_LEGACY, NODES_THROTTLE_MS, firstAvailableSelection, latestRequestSelection, type OutgoingPayload } from '../features/conversation/sessionState';
+import { usePermissions } from '../features/conversation/usePermissions';
+import { usePromptOptimize } from '../features/conversation/usePromptOptimize';
+import { useMessageQueue, type PostMessageFn } from '../features/conversation/useMessageQueue';
+import { SessionHeader, HeroWorkspaceRow } from '../components/SessionHeader';
 import { useCallback, useEffect, useMemo, useRef, useState, Fragment, type ClipboardEvent, type KeyboardEvent } from 'react';
 import * as api from '../api';
 import { flushSync } from 'react-dom'
 
-import type { ApprovalDecisionPayload } from '../api';
-import { optimizePromptText } from '../promptOptimizer';
 import { addSessionLocal, ensureSession, getActiveWorkspace, markStarted, notify, refreshList, markCompacting, setActiveId, setRunningStatus, useCatalogTick, useCompactingFor, useRunningFor, useSessions, useWorkspaces } from '../appStore';
 import { t } from '../i18n';
 import { attach, ensureFollowing, invalidateSession } from '../sessionStreams';
-import { sessionDisplayTitle, subagentModelLabel, subagentSnapshotFacts, subagentSnapshotText } from '../sessionDisplay';import { openTurnStartedAt, type TranscriptNode } from '../fold';
+import { subagentModelLabel, subagentSnapshotFacts, subagentSnapshotText } from '../sessionDisplay';
+import { openTurnStartedAt, type TranscriptNode } from '../fold';
 import type { TrajectoryQuote } from '../trajectory';
 import { SessionView } from '../components/SessionView';
-import { AgentPresetSelector } from '../components/AgentPresetSelector';
-import { SessionPresetLabel } from '../components/SessionPresetLabel';
-import { OpenInApp } from '../components/OpenInApp';
 import { ErrorBoundary } from '../components/ErrorBoundary';
 import { StatsBar } from '../components/StatsBar';
 import { ComposerModelMenu } from '../components/ComposerModelMenu';
 import { ComposerContextMenu } from '../components/ComposerContextMenu';
 import { buildSessionContextQuote, validateContextQuotes } from '../features/conversation/composerContext';
 import { ComposerEffortControl } from '../components/ComposerEffortControl';
-import { PermissionSelector, loadPermission, hasStoredPermission } from '../components/PermissionSelector';
+import { PermissionSelector } from '../components/PermissionSelector';
 import { PlanReviewPanel } from '../components/PlanReviewPanel';
-import { ApprovalDialog, type ApprovalDecision, type ApprovalRequest } from '../components/ApprovalDialog';
+import { ApprovalDialog } from '../components/ApprovalDialog';
 import { ConfirmDialog } from '../components/ConfirmDialog';
 import { ContextRing } from '../components/ContextRing';
-import { IconWorkspace, IconCheck, IconBranch, IconArrowDown, IconChevron, IconClose, IconDownload, IconFile, IconFolder, IconPanelOpen, IconPlus, IconPromptOptimize, IconSend, IconSparkles, IconUndo, IconSpinner, IconStop, IconSlashCommand, IconAgentSpawn } from '../components/icons';
+import { IconBranch, IconArrowDown, IconClose, IconFile, IconFolder, IconPromptOptimize, IconSend, IconSparkles, IconUndo, IconSpinner, IconStop, IconSlashCommand, IconAgentSpawn } from '../components/icons';
 import { resolveSessionReasoningEffort } from '../modelCatalog';
 import { useStickToBottom } from '../hooks/useStickToBottom';
 import { useContainedWheel } from '../hooks/useContainedWheel';
@@ -45,9 +44,7 @@ import { TodoPanel } from '../components/TodoPanel';
 import { GoalBar } from '../components/GoalBar';
 import { QueuedMessagePanel } from '../components/QueuedMessagePanel';
 import { ConversationAxis } from '../components/ConversationAxis';
-import { downloadFile, serializeSession, type ExportFormat } from '../lib/exportSession';
-import type { AskAnswer, CatalogModel, ModelCatalog, ModelSelection, PendingAttachment, PermissionMode, SessionSummary, SessionTotals, TodoItem, QueuedMessage, UserMessageImage, WorkspaceRecord } from '../types';
-import { normalizePermissionMode } from '../types';
+import type { AskAnswer, CatalogModel, ModelCatalog, ModelSelection, PendingAttachment, SessionSummary, SessionTotals, TodoItem, UserMessageImage, WorkspaceRecord } from '../types';
 import { isGenericImageName } from '../userImages';
 import { setModelSelection as setSharedModelSelection } from '../modelSelectionStore';
 
@@ -119,11 +116,9 @@ export default function SessionsPage({
   const [selection, setSelection] = useState<ModelSelection | null>(null)
   const [wsMenuOpen, setWsMenuOpen] = useState(false)
   const [sending, setSending] = useState(false)
-  const [optimizing, setOptimizing] = useState(false)
-  const [optimizedPrompt, setOptimizedPrompt] = useState<string | null>(null)
-  const originalPromptRef = useRef('')
-  const optimizeAbortRef = useRef<AbortController | null>(null)
-  const optimizingRef = useRef(false)
+  // 提示词优化状态在 usePromptOptimize 里;applyDraft 由 useComposerSlash
+  // 产出,晚于该 hook,故走 ref 转发(页面每渲染重赋)。
+  const applyDraftRef = useRef<(text: string) => void>(() => {})
   // 已发送未获服务端确认的用户消息(乐观行)。
   const [pendingMessages, setPendingMessages] = useState<
     { text: string; images?: UserMessageImage[] }[]
@@ -201,8 +196,7 @@ export default function SessionsPage({
   const [todos, setTodos] = useState<TodoItem[]>([])
   // 当前会话的目标视图(goal 模式);服务端权威,goal/turn-end 事件触发重拉。
   const [goalView, setGoalView] = useState<api.GoalView | null>(null)
-  // 消息队列:AI 运行中输入的新消息,等本轮结束后自动发送。
-  const [queuedMessages, setQueuedMessages] = useState<QueuedMessage[]>([])
+  // 消息队列:AI 运行中输入的新消息,等本轮结束后自动发送(状态与操作在 useMessageQueue)。
   // 会话内容视图:对话 / 轨迹。组件按
   // activeId 重挂(key),视图状态随会话切换自然复位。
   const [view, setView] = useState<'chat' | 'trajectory'>('chat')
@@ -257,6 +251,10 @@ export default function SessionsPage({
   }, [])
   const composingRef = useRef(false)
   const inputHistory = useInputHistory({ sessionId: activeId })
+  const {
+    optimizing, setOptimizing, optimizingRef, optimizedPrompt, setOptimizedPrompt,
+    originalPromptRef, optimizeAbortRef, handleOptimize, handleUndoOptimize,
+  } = usePromptOptimize({ activeId, selection, inert, running, sending, prompt, applyDraftRef })
   const onDraftChange = useCallback((text: string) => {
     inputHistory.resetBrowse()
     setPrompt(text)
@@ -274,6 +272,7 @@ export default function SessionsPage({
       activeId, inert, prompt, promptRef, setPrompt, setOptimizedPrompt, originalPromptRef,
       syncPromptHeight, closeMention, refreshMentions, composingRef,
     })
+  applyDraftRef.current = applyDraft
 
   /* ---- 从侧栏「工作区文件」树拖入的引用 ---- */
 
@@ -483,16 +482,28 @@ export default function SessionsPage({
   // 轨迹引用(芯片挂在输入框上方,随消息以 injected 上下文注入)。
   const [trajQuotes, setTrajQuotes] = useState<TrajectoryQuote[]>([])
   const composerScope = activeId ? `session:${activeId}` : activeWs?.path ? `workspace:${activeWs.path}` : null
-  const composerSnapshot = useMemo<ComposerSnapshot>(() => ({
-    text: prompt, images: pastedImages, attachments, quotes: trajQuotes, queue: queuedMessages,
-  }), [prompt, pastedImages, attachments, trajQuotes, queuedMessages])
-  const composerSnapshotRef = useRef(composerSnapshot)
-  composerSnapshotRef.current = composerSnapshot
+  const composerSnapshotRef = useRef<ComposerSnapshot>({ text: '', images: [], attachments: [], quotes: [], queue: [] })
+  const composerReadyRef = useRef(false)
+  // postMessage 镜像:每渲染重赋(赋值处在 postMessage 定义之后),
+  // 队列自动发送 effect 与立即发送读它拿最新闭包。
+  const postMessageRef = useRef<PostMessageFn>(async () => false)
   const mountedRef = useRef(true)
   useEffect(() => {
     mountedRef.current = true
     return () => { mountedRef.current = false }
   }, [])
+  const {
+    queuedMessages, setQueuedMessages, suppressAutoFlushRef, sendNow, editQueued, deleteQueued,
+    confirmedRef, settlePending, pushPending, enqueueMessage,
+  } = useMessageQueue({
+    activeId, running, composerReadyRef, composerScope, postMessageRef, composerSnapshotRef,
+    runningRef, mountedRef, applyDraft, promptRef, setPastedImages, setAttachments, setTrajQuotes,
+    pastedImages, attachments, trajQuotes, setPendingMessages,
+  })
+  const composerSnapshot = useMemo<ComposerSnapshot>(() => ({
+    text: prompt, images: pastedImages, attachments, quotes: trajQuotes, queue: queuedMessages,
+  }), [prompt, pastedImages, attachments, trajQuotes, queuedMessages])
+  composerSnapshotRef.current = composerSnapshot
   const { ready: composerReady, flush: flushComposer } = useComposerPersistence({
     scope: composerScope,
     snapshot: composerSnapshot,
@@ -505,27 +516,21 @@ export default function SessionsPage({
     },
     onError: (message) => notify('err', message),
   })
+  composerReadyRef.current = composerReady
   const promptEmpty =
     !prompt.trim() &&
     pastedImages.length === 0 &&
     attachments.length === 0 &&
     trajQuotes.length === 0
   const primaryStops = running && promptEmpty
-  // 用户显式选过档位 → 用本地记忆;否则跟随设置里的"默认权限模式"
-  // (异步拉取,见下方 default-permission 效应)。会话级档位优先,由事件流覆盖。
-  const [permission, setPermission] = useState<PermissionMode>(() =>
-    hasStoredPermission() ? loadPermission() : 'auto-edit',
-  )
-  const [permissionBusy, setPermissionBusy] = useState(false)
-  const [fullAccessConfirm, setFullAccessConfirm] = useState(false)
-  // agent preset(预设):名册来自服务端;当前值优先取用户在新会话页的选择,
-  // 其次取会话摘要里记的预设(列表接口携带),最后落到部署默认值。
-  // 会话一旦产出内容就没有改选入口——选择器只长在新会话页那一行。
-  const [agentPresetCatalog, setAgentPresetCatalog] = useState<api.AgentPresetsView | null>(null)
-  const [agentPresetChoice, setAgentPresetChoice] = useState<string | null>(null)
-  const [agentPresetBusy, setAgentPresetBusy] = useState(false)
-  const pendingFullAccessRef = useRef<PermissionMode | null>(null)
-  const [approvalReq, setApprovalReq] = useState<ApprovalRequest | null>(null)
+  // 权限档位与审批(三态、后端写入口、审批弹窗、计划审批)与会话预设
+  // (同一"已建会话写日志,未建会话先记本地"的套路)整体在 usePermissions。
+  const {
+    permission, setPermission, permissionBusy, fullAccessConfirm, confirmFullAccess,
+    cancelFullAccess, approvalReq, requestPermissionChange,
+    handleApproval, planReview, handlePlanDecision, handlePlanExit,
+    agentPresetCatalog, agentPresetChoice, agentPresetBusy, agentPresetId, changeAgentPreset,
+  } = usePermissions({ activeId, activeSession, catalogTick, applySelection })
   const contextSelectionRef = useRef({ start: 0, end: 0 })
   const contextQuotesRef = useRef(trajQuotes)
   contextQuotesRef.current = trajQuotes
@@ -577,186 +582,13 @@ export default function SessionsPage({
     closeSlash()
   }
 
-  // 设置里的默认档位只在"当前没有已加载会话 + 用户没显式选过"时生效
-  // (会话级档位由 attach 的 onSnapshot/onEnvelope 覆盖,优先级更高)。
-  // 保存设置后经 SSE `settings-updated`(App 侧 bumpCatalogTick)重拉,
-  // 改动立刻反映到新草稿的输入框档位上。
-  const noSessionRef = useRef(activeId === null)
-  noSessionRef.current = activeId === null
-  const loadDefaultPermission = useCallback(() => {
-    if (hasStoredPermission()) return
-    void consoleDefaultPermission().then((mode) => {
-      // 异步落地期间若已切入/创建了会话,会话日志的档位说了算,不覆盖。
-      if (!noSessionRef.current) return
-      setPermission(mode)
-    })
-  }, [])
-  useEffect(() => {
-    loadDefaultPermission()
-  }, [loadDefaultPermission, catalogTick])
-
-  // preset 名册:挂载拉一次;服务端广播(复制/删除/用户改了 preset.yml)后重拉。
-  const refreshAgentPresets = useCallback(() => {
-    void api
-      .listAgentPresets()
-      .then(setAgentPresetCatalog)
-      .catch(() => {
-        /* 名册拉取失败不打断会话:选择器隐藏,发送与运行不受影响 */
-      })
-  }, [])
-
-  useEffect(() => {
-    refreshAgentPresets()
-    return api.subscribeEvents((type) => {
-      if (type === 'agent-presets-updated') refreshAgentPresets()
-      // 默认预设写在设置里:设置一变,名册里的"默认"徽标与兜底值同步。
-      if (type === 'settings-updated') refreshAgentPresets()
-    })
-  }, [refreshAgentPresets])
-
-  /** 新会话页显示与提交用的预设 id:本地选择 > 会话摘要 > 部署默认值。 */
-  const agentPresetId =
-    agentPresetChoice ?? activeSession?.agent_preset ?? agentPresetCatalog?.default ?? null
-
-  /**
-   * 切换当前会话的预设(只有还没产出内容的会话可切;服务端拒绝时原样报错)。
-   * 与权限同一套路数:会话已存在就直接写进它的日志(刷新后仍在),还没建会话
-   * 就先记本地,首条消息发出时随会话创建一起应用。
-   */
-  const changeAgentPreset = useCallback(
-    (id: string) => {
-      setAgentPresetChoice(id)
-      if (!activeId) return
-      setAgentPresetBusy(true)
-      void api
-        .setSessionAgentPreset(activeId, id)
-        .catch((error) => {
-          setAgentPresetChoice(null)
-          notify('err', error instanceof Error ? error.message : String(error))
-        })
-        .finally(() => setAgentPresetBusy(false))
-    },
-    [activeId, notify],
-  )
-
-  // 换会话时本地选择归零:重新跟随那个会话自己记录的预设。
-  useEffect(() => {
-    setAgentPresetChoice(null)
-  }, [activeId])
-
-  /** 切换当前会话权限(活动会话直接写后端;无活动会话先记本地,首次发送时带上)。 */
-  const applyPermission = useCallback(
-    (level: PermissionMode) => {
-      if (activeId && level === permission) return
-      setPermission(level)
-      try {
-        window.localStorage.setItem('denia.permission', level)
-        if (level === 'full') {
-          window.localStorage.setItem('denia.permission.migrated', '1')
-        }
-      } catch {
-        /* storage unavailable */
-      }
-      if (!activeId) return
-      setPermissionBusy(true)
-      api
-        .setSessionPermission(activeId, level)
-        .catch((error) => notify('err', error instanceof Error ? error.message : String(error)))
-        .finally(() => setPermissionBusy(false))
-    },
-    [activeId, permission, notify],
-  )
-
-  /** 选择权限:完全访问走风险确认,其余直接写。 */
-  const requestPermissionChange = useCallback(
-    (level: PermissionMode) => {
-      if (level === 'full' && permission !== 'full') {
-        pendingFullAccessRef.current = level
-        setFullAccessConfirm(true)
-        return
-      }
-      void applyPermission(level)
-    },
-    [permission, applyPermission],
-  )
-
-  const confirmFullAccess = useCallback(() => {
-    const level = pendingFullAccessRef.current ?? 'full'
-    pendingFullAccessRef.current = null
-    setFullAccessConfirm(false)
-    void applyPermission(level)
-  }, [applyPermission])
-
-  const cancelFullAccess = useCallback(() => {
-    pendingFullAccessRef.current = null
-    setFullAccessConfirm(false)
-  }, [])
-
-  /** 把用户在审批弹窗里的选择 POST 回后端,driver 随即继续/拒绝该调用。 */
-  const handleApproval = useCallback(
-    (decision: ApprovalDecision) => {
-      if (!approvalReq || !activeId) return
-      const request = approvalReq
-      setApprovalReq(null)
-      api
-        .answerApproval(activeId, request.requestId, decision)
-        .catch((error) => notify('err', error instanceof Error ? error.message : String(error)))
-    },
-    [approvalReq, activeId, notify],
-  )
-
-  /* ---- 计划审批(exit_plan):替换整个输入区的审批面板 ---- */
-
-  /** 挂起审批是 exit_plan 时,从 args_preview 解析计划正文与标题。 */
-  const planReview = useMemo(() => {
-    if (!approvalReq || approvalReq.toolName !== 'exit_plan') return null
-    let planText = ''
-    let title: string | undefined
-    try {
-      const parsed = JSON.parse(approvalReq.argsPreview ?? '{}') as {
-        plan?: unknown
-        title?: unknown
-      }
-      if (typeof parsed.plan === 'string') planText = parsed.plan
-      if (typeof parsed.title === 'string') title = parsed.title
-    } catch {
-      /* 解析失败:面板会显示解析失败提示 */
-    }
-    return { requestId: approvalReq.requestId, planText, title }
-  }, [approvalReq])
-
-  /** 提交计划决策;批准时若换了模型,同步全局模型选择。
-   *  普通函数(非 useCallback):依赖 applySelection/catalog 每渲染重建,
-   *  面板本身随 approvalReq 变化重渲染,无需稳定引用。 */
-  const handlePlanDecision = async (payload: ApprovalDecisionPayload) => {
-    if (!planReview || !activeId) return
-    if (payload.decision === 'allow-once' && payload.selection) {
-      applySelection(payload.selection)
-    }
-    await api.answerApproval(activeId, planReview.requestId, payload)
-  }
-
-  /** 退出计划:切回自动编辑并中断轮次(挂起审批随取消结算为 cancelled)。 */
-  const handlePlanExit = useCallback(() => {
-    if (!activeId) return
-    api
-      .setSessionPermission(activeId, 'auto-edit')
-      .catch((error) => notify('err', error instanceof Error ? error.message : String(error)))
-    api
-      .cancelSession(activeId)
-      .catch((error) => notify('err', error instanceof Error ? error.message : String(error)))
-  }, [activeId, notify])
-
-  // 跟随会话事件流:同步服务端权限模式,并监听后端发起的审批请求。
   // 模型选择恢复:切换会话时,把编辑器上的模型切到该会话日志里最后一次
   // 实际使用的模型(request-header 快照),而不是沿用上一会话/localStorage
   // 的记忆;只在切换后的第一次快照恢复,之后的重放快照不覆盖手动选择。
+  // (权限模式同步与审批监听的那一半订阅在 usePermissions 里。)
   const restoredSelectionRef = useRef<string | null>(null)
   useEffect(() => {
-    if (!activeId) {
-      setApprovalReq(null)
-      return
-    }
+    if (!activeId) return
     restoredSelectionRef.current = null
     const unsubscribe = attach(activeId, {
       onSnapshot: (_header, events, meta) => {
@@ -764,9 +596,6 @@ export default function SessionsPage({
         // 未闭合轮次表用页面事件重建;之后的重连重快照同样以新基准校正。
         totalsRef.current = resetTotals(totalsFromPage(meta?.totals), events)
         setSessionTotals({ ...totalsRef.current.totals })
-        const mode = latestPermissionMode(events)
-        if (mode) setPermission(mode)
-        setApprovalReq(latestPendingApproval(events))
         if (restoredSelectionRef.current === null) {
           const logged = latestRequestSelection(events)
           const current = catalogRef.current
@@ -789,25 +618,10 @@ export default function SessionsPage({
         if (applyTotalsEvent(totalsRef.current, event)) {
           setSessionTotals({ ...totalsRef.current.totals })
         }
-        if (event.type === 'permission-mode') {
-          setPermission(normalizePermissionMode(event.mode))
-        } else if (event.type === 'approval-asked') {
-          setApprovalReq({
-            requestId: event.request_id,
-            toolName: event.tool,
-            argsPreview: event.args_preview,
-            reason: event.reason,
-          })
-        } else if (event.type === 'approval-decided') {
-          setApprovalReq((current) =>
-            current?.requestId === event.request_id ? null : current,
-          )
-        }
       },
     })
     return () => {
       unsubscribe()
-      setApprovalReq(null)
     }
   }, [activeId])
 
@@ -936,10 +750,6 @@ export default function SessionsPage({
     return () => { cancelled = true }
   }, [])
 
-  /* ---- 对话流贴底跟随 ---- *
-   * 判断与驱动都在 useStickToBottom 里(见该 hook 顶部注释),这里只负责
-   * 把「内容变了」与「程序性跳转」两个信号接进去。 */
-
   // 回合启动推一把:首块内容到达前先落到底,后续由 onNodesChange 接管。
   useEffect(() => {
     follow()
@@ -1048,38 +858,6 @@ export default function SessionsPage({
     measure()
     return () => observer.disconnect()
   }, [phase, view])
-
-  /**
-   * 乐观行协调:
-   * - push:发送 202 后注入乐观行。
-   * - settle:流中已出现同文本 user-message(可能先于 push,
-   *   因为 202 返回前服务端已落库并推送)→ 从列表移除并记录确认。
-   * 确认记录带短 TTL(settle 先到时 push 不再注入):快照重放会把
-   * 历史消息也 settle 一遍,永久计数会让之后"同文本重发"(回退后
-   * 常见)的乐观行被误吞——TTL 过期即失效,只有紧邻 202 的竞态窗口
-   * (2 秒)内才生效,这正是它要保护的范围。
-   */
-  const CONFIRM_TTL_MS = 2000
-  const confirmedRef = useRef(new Map<string, number>())
-
-  const settlePending = useCallback((message: { text: string; images?: UserMessageImage[] }) => {
-    const key = pendingMessageKey(message)
-    const now = Date.now()
-    // 惰性清理:快照重放会写入大量历史 key,过期项在读路径顺手删。
-    if (confirmedRef.current.size > 64) {
-      for (const [k, expiresAt] of confirmedRef.current) {
-        if (expiresAt <= now) confirmedRef.current.delete(k)
-      }
-    }
-    confirmedRef.current.set(key, now + CONFIRM_TTL_MS)
-    setPendingMessages((previous) => {
-      const index = previous.findIndex((candidate) => pendingMessageKey(candidate) === key)
-      if (index < 0) return previous
-      const next = [...previous]
-      next.splice(index, 1)
-      return next
-    })
-  }, [])
 
   /* ---- 回退:预览文件变化 → 确认 → 物理截断 + 恢复文件 ---- */
 
@@ -1207,79 +985,7 @@ export default function SessionsPage({
     go(null, null)
   }, [go])
 
-  /* ---- 导出会话:从后端拉全量 events 后回放文件 ---- */
-
-  const handleExport = useCallback(
-    async (format: ExportFormat) => {
-      if (!activeId || exportBusy) return
-      setExportOpen(false)
-      setExportBusy(true)
-      try {
-        const snapshot = await api.getSession(activeId)
-        if (snapshot.events.length === 0) {
-          notify('err', t('exportEmpty'))
-          return
-        }
-        const title = activeSession ? sessionDisplayTitle(activeSession) : t('blankSession')
-        const payload = serializeSession(format, {
-          header: snapshot.header,
-          events: snapshot.events,
-          title,
-        })
-        downloadFile(payload.content, payload.filename, payload.mimeType)
-        notify('ok', t('exportDownloaded', { name: payload.filename }))
-      } catch (error) {
-        console.error('[export] 会话导出失败', error)
-        notify('err', t('exportFailed'))
-      } finally {
-        setExportBusy(false)
-      }
-    },
-    [activeId, activeSession, exportBusy, notify],
-  )
-
-  /* ---- 提示词优化:当前模型 + 最近 5 轮上下文,支持一键撤销 ---- */
-
-  const handleOptimize = async () => {
-    if (!activeId || !selection || optimizing || optimizingRef.current || inert || running || sending) return
-    const original = prompt
-    if (!original.trim()) return
-    const sessionId = activeId
-    const controller = new AbortController()
-    optimizeAbortRef.current?.abort()
-    optimizeAbortRef.current = controller
-    optimizingRef.current = true
-    originalPromptRef.current = original
-    setOptimizedPrompt(null)
-    setOptimizing(true)
-    try {
-      const optimized = await optimizePromptText({
-        sessionId,
-        prompt: original,
-        selection,
-        signal: controller.signal,
-      })
-      if (activeId !== sessionId || optimizeAbortRef.current !== controller) return
-      applyDraft(optimized)
-      originalPromptRef.current = original
-      setOptimizedPrompt(optimized)
-      notify('ok', t('optimizeDone'))
-    } catch (error) {
-      if (controller.signal.aborted || optimizeAbortRef.current !== controller) return
-      notify('err', error instanceof Error ? error.message : String(error))
-    } finally {
-      if (optimizeAbortRef.current === controller) {
-        optimizeAbortRef.current = null
-        optimizingRef.current = false
-        setOptimizing(false)
-      }
-    }
-  }
-
-  const handleUndoOptimize = () => {
-    if (!optimizedPrompt) return
-    applyDraft(originalPromptRef.current)
-  }
+  /* ---- 提示词优化:当前模型 + 最近 5 轮上下文,支持一键撤销(在 usePromptOptimize) ---- */
 
   const confirmRewind = useCallback(async () => {
     if (!activeId || !rewindReq || rewindBusy) return
@@ -1354,19 +1060,6 @@ export default function SessionsPage({
   const showAttachRow =
     pastedImages.length > 0 || attachments.length > 0 || trajQuotes.length > 0
 
-  const pushPending = useCallback((text: string, images?: UserMessageImage[]) => {
-    const message = { text, images }
-    const key = pendingMessageKey(message)
-    const expiresAt = confirmedRef.current.get(key)
-    if (expiresAt !== undefined) {
-      // 确认记录一次性消耗:202 返回前服务端已落库推送(同文本已出现在
-      // 流中)→ 不再注入乐观行。TTL 之外(历史快照的 settle)不算数。
-      confirmedRef.current.delete(key)
-      if (Date.now() < expiresAt) return
-    }
-    setPendingMessages((previous) => [...previous, message])
-  }, [])
-
   /**
    * 发送流程(乐观):
    * 1. 确保会话存在(复用/创建);
@@ -1374,27 +1067,6 @@ export default function SessionsPage({
    * 3. 服务端事件(同文本 user-message)到达 → 移除乐观行(由 Server 流确认);
    * 4. 失败 → 移除乐观行、恢复输入框、报错。
    */
-  /**
-   * 消息入队(AI 运行中):输入区的全部内容(文本 + 图片 + 附件 + 轨迹引用)
-   * 整体搬进队列,输入区随之下空,本轮结束后自动发送。
-   */
-  const enqueueMessage = (text: string) => {
-    setQueuedMessages((previous) => [
-      ...previous,
-      {
-        id: `queue-${crypto.randomUUID()}`,
-        text,
-        images: pastedImages.length > 0 ? pastedImages : undefined,
-        attachments: attachments.length > 0 ? attachments : undefined,
-        quotes: trajQuotes.length > 0 ? trajQuotes : undefined,
-      },
-    ])
-    applyDraft('')
-    setPastedImages([])
-    setAttachments([])
-    setTrajQuotes([])
-  }
-
   /** 清空输入区(文本/优化缓存/图片/附件/轨迹引用),手动发送与命令消费共用。 */
   const clearComposerState = () => {
     applyDraft('')
@@ -1631,39 +1303,9 @@ export default function SessionsPage({
     // postMessage 成功后已清空输入框/附件;发送失败时保留,等待重试。
   }
 
-  /**
-   * 轮次结束自动发送队首队列消息:
-   * running 由 true → false 时,若队列非空,取出队首发送(不打断,因为已结束)。
-   * 用 ref 保存最新 postMessage 与队列,避免 effect 闭包过期。
-   */
-  const postMessageRef = useRef(postMessage)
+  // postMessage 镜像:每渲染重赋,队列自动发送 effect(在 useMessageQueue)
+  // 与"立即发送"读它拿最新闭包。
   postMessageRef.current = postMessage
-  const queuedMessagesRef = useRef(queuedMessages)
-  queuedMessagesRef.current = queuedMessages
-  const prevRunningRef = useRef(running)
-  // 正在"立即发送"(sendNow)时抑制自动发送:sendNow 已移除目标消息,
-  // 若此时 running 变 false,effect 不能再取队首发一次(会重复发送)。
-  const suppressAutoFlushRef = useRef(false)
-  useEffect(() => {
-    const prev = prevRunningRef.current
-    prevRunningRef.current = running
-    if (composerReady && prev && !running && !suppressAutoFlushRef.current) {
-      const next = queuedMessagesRef.current[0]
-      if (next) {
-        void postMessageRef
-          .current(next.text, { clearInput: false, payload: queuedPayload(next) })
-          .then((ok) => {
-            if (ok) {
-              setQueuedMessages((previous) => previous.filter((item) => item.id !== next.id))
-              if (composerScope) void saveComposer(composerScope, { ...composerSnapshotRef.current,
-                queue: composerSnapshotRef.current.queue.filter((item) => item.id !== next.id),
-              }).catch((error) => notify('err', String(error)))
-            }
-          })
-      }
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [running])
 
   const stop = async () => {
     if (!activeId) return
@@ -1672,63 +1314,6 @@ export default function SessionsPage({
     } catch (error) {
       notify('err', error instanceof Error ? error.message : String(error))
     }
-  }
-
-  /* ---- 队列操作:立即发送(打断)/ 编辑(回填输入框)/ 删除 ---- */
-
-  /** 立即发送:先打断当前 AI,再直接发送这条队列消息。 */
-  const sendNow = async (message: QueuedMessage) => {
-    if (!activeId) return
-    const sendQueuedMessage = postMessage
-    suppressAutoFlushRef.current = true
-    try {
-      await api.cancelSession(activeId)
-    } catch (error) {
-      notify('err', error instanceof Error ? error.message : String(error))
-    }
-    // cancel 是异步的,等 driver 退出 running 再发送(running guard 会拒绝并发)。
-    const deadline = Date.now() + 5000
-    while (runningRef.current && Date.now() < deadline) {
-      await new Promise((resolve) => setTimeout(resolve, 150))
-    }
-    if (runningRef.current) {
-      // 没能打断:消息保留在队列,提示用户。
-      suppressAutoFlushRef.current = false
-      notify('err', t('queueSendFailed'))
-      return
-    }
-    if (!mountedRef.current) { suppressAutoFlushRef.current = false; return }
-    // 收到服务端确认后才出队，切换或刷新不会丢失待发送消息。
-    try {
-      const ok = await sendQueuedMessage(message.text, {
-        clearInput: false,
-        payload: queuedPayload(message),
-      })
-      if (ok) {
-        setQueuedMessages((previous) => previous.filter((item) => item.id !== message.id))
-        if (composerScope) await saveComposer(composerScope, { ...composerSnapshotRef.current,
-          queue: composerSnapshotRef.current.queue.filter((item) => item.id !== message.id),
-        })
-      }
-    } finally {
-      suppressAutoFlushRef.current = false
-    }
-  }
-
-  /** 编辑:把消息(含图片/附件/引用)回填到输入框并移出队列(卡片随词典重建)。 */
-  const editQueued = (message: QueuedMessage) => {
-    applyDraft(message.text)
-    // 回填是「整体覆盖」:队列消息就是当时输入区的全量快照,直接恢复。
-    setPastedImages(message.images ?? [])
-    setAttachments(message.attachments ?? [])
-    setTrajQuotes((message.quotes ?? []) as TrajectoryQuote[])
-    setQueuedMessages((previous) => previous.filter((item) => item.id !== message.id))
-    promptRef.current?.focus()
-  }
-
-  /** 删除队列消息。 */
-  const deleteQueued = (message: QueuedMessage) => {
-    setQueuedMessages((previous) => previous.filter((item) => item.id !== message.id))
   }
 
   const onPromptKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
@@ -1823,75 +1408,21 @@ export default function SessionsPage({
   const promptScrollRef = useContainedWheel<HTMLDivElement>()
 
   const workspaceRow = (
-    <div className="composer-workspace hero-ws-row">
-      <button
-        type="button"
-        className={`ws-chip${wsMenuOpen ? ' open' : ''}`}
-        aria-expanded={wsMenuOpen}
-        onClick={() => {
-          if (workspaces.length === 0) onOpenPicker()
-          else setWsMenuOpen((open) => !open)
-        }}
-      >
-        <IconWorkspace size={16} />
-        <span className={activeWs ? 'label' : 'label dim'}>
-          {activeWs?.title ?? t('heroChooseWorkspace')}
-        </span>
-        <IconChevron size={11} />
-      </button>
-      {/* 模式选择关闭时新会话固定用部署默认预设,选择器整个不渲染。 */}
-      {agentPresetCatalog && agentPresetCatalog.modeSelection && agentPresetId && (
-        <AgentPresetSelector
-          value={agentPresetId}
-          presets={agentPresetCatalog.presets}
-          defaultId={agentPresetCatalog.default}
-          disabled={inert || agentPresetBusy}
-          onChange={changeAgentPreset}
-        />
-      )}
-      {wsMenuOpen && (
-        <>
-          <div className="menu-backdrop" onClick={() => setWsMenuOpen(false)} />
-          <div className="ws-menu">
-            {workspaces.map((ws) => {
-              const notCurrent = ws.id !== activeWs?.id
-              const blocked = locked && notCurrent
-              return (
-                <button
-                  key={ws.id}
-                  type="button"
-                  className={`ws-menu-item${ws.id === activeWs?.id ? ' active' : ''}`}
-                  title={blocked ? t('workspaceLockedTitle') : ws.path}
-                  disabled={blocked}
-                  onClick={() => {
-                    setWsMenuOpen(false)
-                    onSelectWorkspace(ws)
-                  }}
-                >
-                  <IconWorkspace size={18} />
-                  <span className="ws-menu-text">
-                    <span className="name">{ws.title}</span>
-                    <span className="ws-menu-path">{ws.path}</span>
-                  </span>
-                  {ws.id === activeWs?.id && <IconCheck size={13} />}
-                </button>
-              )
-            })}
-            <button
-              type="button"
-              className="ws-menu-item create"
-              onClick={() => {
-                setWsMenuOpen(false)
-                onAddWorkspace()
-              }}
-            >
-              <IconPlus size={13} />
-              <span className="name">{t('addWorkspaceMenu')}</span>
-            </button>
-          </div>
-        </>
-      )}
-    </div>
+    <HeroWorkspaceRow
+      workspaces={workspaces}
+      activeWs={activeWs}
+      locked={locked}
+      inert={inert}
+      wsMenuOpen={wsMenuOpen}
+      setWsMenuOpen={setWsMenuOpen}
+      agentPresetCatalog={agentPresetCatalog}
+      agentPresetId={agentPresetId}
+      agentPresetBusy={agentPresetBusy}
+      changeAgentPreset={changeAgentPreset}
+      onSelectWorkspace={onSelectWorkspace}
+      onAddWorkspace={onAddWorkspace}
+      onOpenPicker={onOpenPicker}
+    />
   )
 
   const composerCard = (
@@ -2259,103 +1790,20 @@ export default function SessionsPage({
       data-tight={layoutFit === 'tight' || undefined}
     >
       {phase === 'active' && (
-        <header className="session-header">
-          {/* 标题块:标题与预设标签同处一块,标签紧贴标题文字。
-              这样头部动作区一个元素都不新增,标签也不会飘到最右。 */}
-          <div className="session-title-block">
-            <h1 className="session-title">
-              {activeSession ? sessionDisplayTitle(activeSession) : t('blankSession')}
-            </h1>
-            {activeSession && agentPresetId && (
-              <SessionPresetLabel
-                presetId={agentPresetId}
-                presets={agentPresetCatalog?.presets ?? []}
-              />
-            )}
-          </div>
-          {activeSession?.cwd_alive === false && (
-            <span className="badge err" title={t('deadCwdHint')}>
-              {t('deadCwd')}
-            </span>
-          )}
-          <div className="view-switch" role="tablist" aria-label={t('viewTrajectory')}>
-            <button
-              type="button"
-              role="tab"
-              aria-selected={view === 'chat'}
-              className={`view-switch-tab${view === 'chat' ? ' active' : ''}`}
-              onClick={() => setView('chat')}
-            >
-              {t('viewChat')}
-            </button>
-            <button
-              type="button"
-              role="tab"
-              aria-selected={view === 'trajectory'}
-              className={`view-switch-tab${view === 'trajectory' ? ' active' : ''}`}
-              onClick={() => setView('trajectory')}
-            >
-              {t('viewTrajectory')}
-            </button>
-          </div>
-          <OpenInApp
-            cwd={activeSession?.cwd_alive === false ? null : activeSession?.cwd ?? null}
-          />
-          {/* 右侧面板开关:工作区头部最右、紧邻导出。 */}
-          {onToggleSidePane && (
-            <button
-              type="button"
-              className={`icon-btn session-pane-btn${sidePaneOpen ? ' active' : ''}`}
-              title={t('sidePaneToggle')}
-              aria-label={sidePaneOpen ? t('sidePaneCollapse') : t('sidePaneExpand')}
-              aria-pressed={sidePaneOpen}
-              data-testid="side-pane-toggle"
-              onClick={onToggleSidePane}
-            >
-              <IconPanelOpen size={15} />
-            </button>
-          )}
-          <div className={`session-export${exportOpen ? ' open' : ''}`}>
-            <button
-              type="button"
-              className="icon-btn session-export-btn"
-              title={t('exportSessionHint')}
-              aria-label={t('exportSession')}
-              aria-haspopup="menu"
-              aria-expanded={exportOpen}
-              disabled={!activeId || exportBusy}
-              onClick={() => setExportOpen((open) => !open)}
-            >
-              <IconDownload size={15} />
-            </button>
-            {exportOpen && (
-              <>
-                <div className="menu-backdrop" onClick={() => setExportOpen(false)} />
-                <div className="session-export-menu" role="menu">
-                  <button
-                    type="button"
-                    role="menuitem"
-                    className="session-export-item"
-                    onClick={() => void handleExport('markdown')}
-                  >
-                    <span className="session-export-item-title">{t('exportAsMarkdown')}</span>
-                    <span className="session-export-item-hint">.md</span>
-                  </button>
-                  <button
-                    type="button"
-                    role="menuitem"
-                    className="session-export-item"
-                    onClick={() => void handleExport('json')}
-                  >
-                    <span className="session-export-item-title">{t('exportAsJson')}</span>
-                    <span className="session-export-item-hint">.json</span>
-                  </button>
-                </div>
-              </>
-            )}
-          </div>
-          {activeId && <RuntimePanel key={activeId} id={activeId} />}
-        </header>
+        <SessionHeader
+          activeSession={activeSession}
+          activeId={activeId}
+          agentPresetId={agentPresetId}
+          agentPresetCatalog={agentPresetCatalog}
+          view={view}
+          setView={setView}
+          sidePaneOpen={sidePaneOpen}
+          onToggleSidePane={onToggleSidePane}
+          exportOpen={exportOpen}
+          exportBusy={exportBusy}
+          setExportOpen={setExportOpen}
+          setExportBusy={setExportBusy}
+        />
       )}
       <div
         className="conversation-scroll"

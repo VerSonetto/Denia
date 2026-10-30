@@ -229,8 +229,11 @@ impl Tool for BashTool {
                 .error
                 .clone()
                 .unwrap_or_else(|| "命令启动失败".to_string());
-            return tool_error(message, "确认命令在该宿主 shell 上可用;工作目录是会话工作区")
-                .with_report(run.report());
+            return tool_error(
+                message,
+                "确认命令在该宿主 shell 上可用;工作目录是会话工作区",
+            )
+            .with_report(run.report());
         }
         ToolOutput {
             content: run.render(),
@@ -244,36 +247,9 @@ impl Tool for BashTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::support::test_events::{deltas_of, sink};
     use denia_core::session::{PermissionMode, SessionEvent};
     use tokio_util::sync::CancellationToken;
-
-    use crate::SessionEventSink;
-
-    fn sink(events: &Arc<std::sync::Mutex<Vec<SessionEvent>>>) -> SessionEventSink {
-        let events = events.clone();
-        Arc::new(move |event| events.lock().unwrap().push(event))
-    }
-
-    /// 某次调用某条流上收到的增量,按到达顺序。
-    fn deltas_of(
-        events: &Arc<std::sync::Mutex<Vec<SessionEvent>>>,
-        call_id: &str,
-        stream: &str,
-    ) -> Vec<String> {
-        events
-            .lock()
-            .unwrap()
-            .iter()
-            .filter_map(|event| match event {
-                SessionEvent::ToolOutputChunk {
-                    call_id: id,
-                    stream: name,
-                    text,
-                } if id == call_id && name == stream => Some(text.clone()),
-                _ => None,
-            })
-            .collect()
-    }
 
     fn ctx(dir: &std::path::Path) -> ToolContext {
         ToolContext {
@@ -405,11 +381,8 @@ mod tests {
         // 宽容解析:"timeout_ms" 传字符串数字不硬失败。
         let dir = std::env::temp_dir();
         let tool = BashTool::new();
-        let command = if cfg!(windows) {
-            r#"{"command":"echo ok","timeout_ms":"10000"}"#
-        } else {
-            r#"{"command":"echo ok","timeout_ms":"10000"}"#
-        };
+        // 宽容解析:"timeout_ms" 传字符串数字不硬失败。
+        let command = r#"{"command":"echo ok","timeout_ms":"10000"}"#;
         let out = tool.execute(command, &ctx(&dir)).await;
         assert!(!out.is_error, "{}", out.content);
     }

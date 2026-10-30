@@ -4,12 +4,15 @@
  *
  * ## 自适应跟随(核心)
  * 不用固定字符/秒限速(那会让快模型积压、显示变慢),而是让显示位置
- * 以指数收敛逼近目标:每帧显示位置向目标前进 `1 - e^(-λ·dt)` 比例。
+ * 以指数收敛逼近目标:每次提交把显示位置向目标推进 `1 - e^(-λ·dt)` 比例。
+ *
+ * 收敛按真实经过时间算,但提交频率封顶约 30 次/秒(见 `MIN_COMMIT_MS`):
+ * 240Hz 屏上逐帧提交等于每秒 240 次重渲染,换不来肉眼可见的平滑度。
  *
  * 稳态下显示领先/落后量与模型速率成正比:
- * - 快模型(每秒上百字):每帧自动多 reveal 一些,延迟恒定在 ~100ms,
+ * - 快模型(每秒上百字):每次提交自动多 reveal 一些,延迟恒定在 ~100ms,
  *   视觉上是"快速一字字长出来",不积压不跳变;
- * - 慢模型(每秒十几字):每帧 reveal 半字到一字,打字机质感;
+ * - 慢模型(每秒十几字):每次提交 reveal 半字到一字,打字机质感;
  * - 模型暂停:显示位置收完剩余文本后停帧,追加时从中断处继续。
  *
  * 模型完全收尾(settle,streaming=false)时立即返回全文,不播尾巴。
@@ -28,6 +31,14 @@ import { useEffect, useRef, useState } from 'react'
 const DEFAULT_FOLLOW = 8
 /** 帧间隔下限(ms):防止 dt 过小导致无进展。 */
 const MIN_FRAME_MS = 8
+/**
+ * 提交间隔下限(ms):约 30 次/秒。
+ *
+ * 高频屏(实测 240Hz)上每帧 setState 等于每秒 240 次 React 重渲染 +
+ * Markdown 尾部重解析,而人眼对逐字显示的分辨率到不了这个量级。
+ * 收敛仍按真实 dt 计算,所以滞后量不变(依旧约 100ms),只是采样更疏。
+ */
+const MIN_COMMIT_MS = 32
 /** 落后超过该值直接跳到底,不再逐字播(极端卡顿恢复场景)。 */
 const CATCH_UP_JUMP = 2000
 
@@ -64,7 +75,7 @@ export function useTypewriter(
     }
     const last = targetRef.current
     if (last !== null && text.startsWith(last)) {
-      // append-only 继续:显示位置照旧,逐帧追新增。
+      // append-only 继续:显示位置照旧,继续追新增。
     } else {
       // 首帧或目标非 append(重试/切消息):从头播。
       shownRef.current = 0
@@ -75,7 +86,7 @@ export function useTypewriter(
 
     let raf = 0
     let stopped = false
-    let lastAt = performance.now()
+    let lastCommitAt = performance.now()
     const tick = (now: number) => {
       if (stopped) return
       const shownNow = shownRef.current
@@ -83,8 +94,13 @@ export function useTypewriter(
         // 播完:停帧(模型后续追加到 text 会重新触发 effect)。
         return
       }
-      const dt = Math.max(MIN_FRAME_MS, now - lastAt) / 1000
-      // 指数收敛:每帧前进剩余距离的固定比例,速率自适应模型。
+      if (now - lastCommitAt < MIN_COMMIT_MS && text.length - shownNow <= CATCH_UP_JUMP) {
+        // 未到提交间隔:继续等下一帧,不触发渲染。
+        raf = requestAnimationFrame(tick)
+        return
+      }
+      const dt = Math.max(MIN_FRAME_MS, now - lastCommitAt) / 1000
+      // 指数收敛:每次提交前进剩余距离的固定比例,速率自适应模型。
       const k = 1 - Math.exp(-follow * dt)
       let next = shownNow + (text.length - shownNow) * k
       if (text.length - shownNow > CATCH_UP_JUMP || next >= text.length - 0.5) {
@@ -93,10 +109,9 @@ export function useTypewriter(
       }
       shownRef.current = next
       setShown(Math.floor(next))
-      lastAt = now
+      lastCommitAt = now
       if (next < text.length) raf = requestAnimationFrame(tick)
     }
-    lastAt = performance.now()
     raf = requestAnimationFrame(tick)
     return () => {
       stopped = true

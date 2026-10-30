@@ -8,7 +8,7 @@
 //! 挂到会话的挂起表并等待 REST 应答;回答以普通工具结果回注 agent loop。
 
 use async_trait::async_trait;
-use denia_core::session::{AskAnswer, AskOption, AskOutcome, AskQuestion, AskResolution};
+use denia_core::session::{AskOption, AskOutcome, AskQuestion, AskResolution};
 use denia_core::tool::ToolSchema;
 use serde::Deserialize;
 
@@ -365,15 +365,10 @@ impl Tool for AskTool {
     }
 }
 
-/// 判定一个回答是否为空(既没选也没写、也没显式跳过)。
-pub fn answer_is_blank(answer: &AskAnswer) -> bool {
-    answer.selected.is_empty() && answer.custom.as_deref().unwrap_or("").trim().is_empty()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use denia_core::session::PermissionMode;
+    use denia_core::session::{AskAnswer, PermissionMode};
     use std::sync::Arc;
     use tokio_util::sync::CancellationToken;
 

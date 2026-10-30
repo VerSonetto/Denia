@@ -24,12 +24,6 @@ use crate::errors::{MAX_FEEDBACK, feedback_eligible, feedback_text, summarize_fa
 use crate::flush_before_dispatch;
 use crate::{TurnState, append, build_header_snapshot};
 
-/// 一次成功 step 的模型输出。
-pub(crate) struct StepOutput {
-    pub blocks: Vec<ContentBlock>,
-    pub finish: Option<FinishReason>,
-}
-
 /// dispatch 的三种去向:
 /// - `Step`:模型消息已落盘,主循环继续(死循环检测 → 救援 → 工具执行);
 /// - `RestartStep`:自纠反馈已注入,直接开新 step(旧 step 已闭合);
@@ -212,7 +206,9 @@ pub(crate) async fn dispatch_request(
             Ok(stream) => stream,
             Err(error) => {
                 let failure = error.failure.clone();
-                if failure.code == denia_core::error::codes::CONTEXT_WINDOW_EXCEEDED && !context_recovered {
+                if failure.code == denia_core::error::codes::CONTEXT_WINDOW_EXCEEDED
+                    && !context_recovered
+                {
                     context_recovered = true;
                     append(&state.session, &state.emit, SessionEvent::RetryAttempt { turn: state.turn, step, attempt: 1, code: failure.code.clone(), message: "输入上下文超限，尝试本逻辑步骤唯一一次强制压缩；关闭、失败或断路时停止。".into(), delay_ms: 0 })?;
                     if run_compaction_gate(driver, state, step, framed_system, tools, true).await {
@@ -228,7 +224,10 @@ pub(crate) async fn dispatch_request(
                 append(
                     &state.session,
                     &state.emit,
-                    SessionEvent::StepEnd { turn: state.turn, step },
+                    SessionEvent::StepEnd {
+                        turn: state.turn,
+                        step,
+                    },
                 )?;
                 if feedback_eligible(&failure.code) && state.feedback < MAX_FEEDBACK {
                     state.feedback += 1;
@@ -244,7 +243,9 @@ pub(crate) async fn dispatch_request(
                     )?;
                     return Ok(RequestOutcome::RestartStep);
                 }
-                return Ok(RequestOutcome::TurnEnded(close_error(state, step, failure, 0)));
+                return Ok(RequestOutcome::TurnEnded(close_error(
+                    state, step, failure, 0,
+                )));
             }
         };
 

@@ -645,9 +645,7 @@ pub fn apply_goal_op(
             objective,
             token_budget,
         } => {
-            let Some(mut goal) = current.clone() else {
-                return None;
-            };
+            let mut goal = current.clone()?;
             if goal.status == GoalStatus::Complete {
                 return Some(goal);
             }
@@ -669,18 +667,14 @@ pub fn apply_goal_op(
             Some(touch(goal))
         }
         GoalOp::Pause => {
-            let Some(mut goal) = current.clone() else {
-                return None;
-            };
+            let mut goal = current.clone()?;
             if goal.status == GoalStatus::Active {
                 goal.status = GoalStatus::Paused;
             }
             Some(touch(goal))
         }
         GoalOp::Resume => {
-            let Some(mut goal) = current.clone() else {
-                return None;
-            };
+            let mut goal = current.clone()?;
             if matches!(goal.status, GoalStatus::Paused | GoalStatus::Blocked) {
                 goal.status = GoalStatus::Active;
                 goal.blocked_reason = None;
@@ -688,16 +682,12 @@ pub fn apply_goal_op(
             Some(touch(goal))
         }
         GoalOp::Round => {
-            let Some(mut goal) = current.clone() else {
-                return None;
-            };
+            let mut goal = current.clone()?;
             goal.rounds_started = goal.rounds_started.saturating_add(1);
             Some(touch(goal))
         }
         GoalOp::Complete => {
-            let Some(mut goal) = current.clone() else {
-                return None;
-            };
+            let mut goal = current.clone()?;
             if goal.status != GoalStatus::Complete {
                 goal.status = GoalStatus::Complete;
                 goal.blocked_reason = None;
@@ -705,9 +695,7 @@ pub fn apply_goal_op(
             Some(touch(goal))
         }
         GoalOp::Block { reason } => {
-            let Some(mut goal) = current.clone() else {
-                return None;
-            };
+            let mut goal = current.clone()?;
             if goal.status != GoalStatus::Complete {
                 goal.status = GoalStatus::Blocked;
                 goal.blocked_reason =
@@ -716,9 +704,7 @@ pub fn apply_goal_op(
             Some(touch(goal))
         }
         GoalOp::BudgetLimit => {
-            let Some(mut goal) = current.clone() else {
-                return None;
-            };
+            let mut goal = current.clone()?;
             if goal.status == GoalStatus::Active {
                 goal.status = GoalStatus::BudgetLimited;
             }
@@ -1253,8 +1239,7 @@ pub fn is_archived_arguments(arguments: &str) -> bool {
 ///
 /// 与 [`archived_call_note`] 不同——那条表示“已写入”,只用于真实成功
 /// 后被归档的调用;占位符本身作为参数发出去的调用必然没有执行。
-pub const ARCHIVED_SKIP_NOTE: &str =
-    "[工具调用归档] 上一次调用没有执行:它的参数是历史归档占位符,不是有效参数。如仍需要该操作,请重新生成完整参数。";
+pub const ARCHIVED_SKIP_NOTE: &str = "[工具调用归档] 上一次调用没有执行:它的参数是历史归档占位符,不是有效参数。如仍需要该操作,请重新生成完整参数。";
 
 /// 一条派生 surface 消息及其来源事件 seq。压缩器用它把消息切回事件区间。
 #[derive(Debug, Clone)]
@@ -1501,7 +1486,11 @@ fn derive_surface_inner(events: &[SessionEnvelope]) -> Vec<SurfaceMessage> {
                 unanswered.retain(|id| id != call_id);
                 let Some(position) = surface.iter().position(|item| {
                     item.message.role == crate::message::ChatRole::Assistant
-                        && item.message.tool_calls.iter().any(|call| call.id == *call_id)
+                        && item
+                            .message
+                            .tool_calls
+                            .iter()
+                            .any(|call| call.id == *call_id)
                 }) else {
                     // 调用已被压缩折掉:结果同样不在模型面上,静默跳过。
                     continue;
@@ -2233,9 +2222,7 @@ mod tests {
     fn assistant_calls(text: &str, calls: &[(&str, &str)]) -> SessionEvent {
         let mut blocks = Vec::new();
         if !text.is_empty() {
-            blocks.push(ContentBlock::Text {
-                text: text.into(),
-            });
+            blocks.push(ContentBlock::Text { text: text.into() });
         }
         for (id, arguments) in calls {
             blocks.push(ContentBlock::ToolCall {

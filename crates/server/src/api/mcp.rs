@@ -73,7 +73,7 @@ fn merge_server(
                 .filter(|(_, value)| !value.is_empty()),
         );
         incoming.headers = headers;
-        incoming.scope = existing.scope.clone();
+        incoming.scope = existing.scope;
         incoming.workspace_id = existing.workspace_id.clone();
         incoming.protocol_version = existing.protocol_version.clone();
         incoming.call_timeout_ms = existing.call_timeout_ms;

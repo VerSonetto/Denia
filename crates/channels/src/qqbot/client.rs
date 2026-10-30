@@ -6,9 +6,7 @@ use reqwest::header::{AUTHORIZATION, CONTENT_TYPE};
 use serde_json::{Value, json};
 use tokio::sync::Mutex;
 
-use super::protocol::{
-    API_BASE, ChatType, GATEWAY_PATH, MAX_MESSAGE_LENGTH, TOKEN_URL, text_body,
-};
+use super::protocol::{API_BASE, ChatType, GATEWAY_PATH, MAX_MESSAGE_LENGTH, TOKEN_URL, text_body};
 
 const API_TIMEOUT: Duration = Duration::from_secs(30);
 const TOKEN_REFRESH_MARGIN: Duration = Duration::from_secs(60);
@@ -23,7 +21,10 @@ pub struct Client {
 }
 
 impl Client {
-    pub fn new(app_id: impl Into<String>, client_secret: impl Into<String>) -> Result<Self, String> {
+    pub fn new(
+        app_id: impl Into<String>,
+        client_secret: impl Into<String>,
+    ) -> Result<Self, String> {
         let http = reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(15))
             .build()
@@ -76,7 +77,10 @@ impl Client {
                     .or_else(|| raw.as_str().and_then(|text| text.parse().ok()))
             })
             .unwrap_or(7200);
-        *guard = Some((access.clone(), Instant::now() + Duration::from_secs(expires)));
+        *guard = Some((
+            access.clone(),
+            Instant::now() + Duration::from_secs(expires),
+        ));
         Ok(access)
     }
 
@@ -84,7 +88,10 @@ impl Client {
         let token = self.token().await?;
         Ok(vec![
             (AUTHORIZATION.as_str().to_string(), format!("QQBot {token}")),
-            (CONTENT_TYPE.as_str().to_string(), "application/json".to_string()),
+            (
+                CONTENT_TYPE.as_str().to_string(),
+                "application/json".to_string(),
+            ),
         ])
     }
 
@@ -133,9 +140,7 @@ impl Client {
     }
 
     pub async fn gateway_url(&self) -> Result<String, String> {
-        let value = self
-            .get_json(&format!("{API_BASE}{GATEWAY_PATH}"))
-            .await?;
+        let value = self.get_json(&format!("{API_BASE}{GATEWAY_PATH}")).await?;
         value
             .get("url")
             .and_then(Value::as_str)
@@ -182,9 +187,12 @@ impl Client {
 
     /// ACK 一次按钮点击;不 ACK 用户端会显示错误图标。
     pub async fn ack_interaction(&self, interaction_id: &str) -> Result<(), String> {
-        self.put_json(&format!("/interactions/{interaction_id}"), json!({ "code": 0 }))
-            .await
-            .map(|_| ())
+        self.put_json(
+            &format!("/interactions/{interaction_id}"),
+            json!({ "code": 0 }),
+        )
+        .await
+        .map(|_| ())
     }
 
     /// 下载附件(QQ 多媒体 CDN 需要 Authorization 头)。

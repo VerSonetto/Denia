@@ -48,7 +48,12 @@ impl Client {
         serde_json::to_string(&payload).map_err(|error| format!("微信请求序列化失败:{error}"))
     }
 
-    fn post_request(&self, endpoint: &str, body: &str, timeout: Duration) -> reqwest::RequestBuilder {
+    fn post_request(
+        &self,
+        endpoint: &str,
+        body: &str,
+        timeout: Duration,
+    ) -> reqwest::RequestBuilder {
         let mut request = self
             .http
             .post(format!("{}/{}", self.base_url, endpoint))
@@ -162,10 +167,7 @@ impl Client {
     }
 }
 
-async fn read_json(
-    response: reqwest::Response,
-    endpoint: &str,
-) -> Result<Value, String> {
+async fn read_json(response: reqwest::Response, endpoint: &str) -> Result<Value, String> {
     let status = response.status();
     let text = response.text().await.unwrap_or_default();
     if !status.is_success() {

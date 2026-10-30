@@ -245,7 +245,7 @@ impl ReadState {
             .filter(|(_, entry)| entry.is_writable_basis())
             .map(|(key, entry)| (key.clone(), entry.clone()))
             .collect();
-        items.sort_by(|a, b| b.1.read_at.cmp(&a.1.read_at));
+        items.sort_by_key(|(_, entry)| std::cmp::Reverse(entry.read_at));
         items.truncate(limit);
         items
     }

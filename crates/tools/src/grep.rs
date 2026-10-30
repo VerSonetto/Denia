@@ -374,7 +374,7 @@ fn search_file(
         line_no += 1;
         if regex.is_match(line) {
             local.push(GrepHit {
-                path: display_path(path, display_root),
+                path: crate::support::display_path(path, display_root),
                 line_no,
                 line: preview_line(line),
             });
@@ -395,22 +395,8 @@ fn search_file(
     stop.load(Ordering::Relaxed)
 }
 
-fn display_path(path: &Path, display_root: &Path) -> String {
-    path.strip_prefix(display_root)
-        .unwrap_or(path)
-        .to_string_lossy()
-        .replace('\\', "/")
-}
-
 fn preview_line(line: &[u8]) -> String {
-    let text = String::from_utf8_lossy(line);
-    let mut chars = text.chars();
-    let head: String = chars.by_ref().take(LINE_PREVIEW_CHARS).collect();
-    if chars.next().is_some() {
-        format!("{head}…")
-    } else {
-        head
-    }
+    crate::support::truncate_chars(&String::from_utf8_lossy(line), LINE_PREVIEW_CHARS, "…")
 }
 
 /// memchr 的最小实现:扫描换行偏移。regex crate 的 memchr 在 bytes 模式下

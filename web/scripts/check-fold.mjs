@@ -216,5 +216,40 @@ check('增量路径:迟到增量同样不回填', lateIncr.live, undefined)
 const oddStream = mod.foldEvents([toolCall, chunk(2, 'console', 'x')]).find((n) => n.kind === 'tool')
 check('未知流名归入 stdout', oddStream.live.stdout, 'x')
 
+/* 12) 视觉注入(浏览器截图 / read_file 读图):图片随事件进入节点,
+      冷启动与增量两条路径都不能丢;带图注入不能被 turn 概览折叠掉,
+      否则对话流里只剩一行"已注入"文字。 */
+const injectedImage = {
+  seq: 4, time: 1400, type: 'user-message', injected: true,
+  text: '[harness] 读取图片:a.png(image/png)', channel: 'image',
+  images: [{ mime: 'image/png', data: 'AAAA', path: 'a.png' }],
+}
+const imageTurn = [
+  { seq: 1, time: 1000, type: 'turn-start', turn: 1 },
+  { seq: 2, time: 1100, type: 'tool-call', turn: 1, step: 1, call_id: 'c1', name: 'browser', arguments: '{}' },
+  { seq: 3, time: 1200, type: 'tool-result', turn: 1, step: 1, call_id: 'c1', content: 'ok', is_error: false },
+  injectedImage,
+  { seq: 5, time: 1500, type: 'tool-call', turn: 1, step: 2, call_id: 'c2', name: 'read_file', arguments: '{}' },
+  { seq: 6, time: 1600, type: 'tool-result', turn: 1, step: 2, call_id: 'c2', content: 'ok', is_error: false },
+  { seq: 7, time: 1700, type: 'assistant-message', turn: 1, step: 2, blocks: [{ type: 'text', text: 'done' }] },
+  { seq: 8, time: 1800, type: 'turn-end', turn: 1, reason: { kind: 'completed' } },
+]
+const coldImage = mod.foldEvents(imageTurn).find((n) => n.kind === 'context-injection')
+check('冷启动:注入图片保留在节点上', coldImage.images.length, 1)
+check('冷启动:图片路径保留', coldImage.images[0].path, 'a.png')
+
+const incrImage = mod
+  .applyEnvelopes(mod.foldEvents(imageTurn.slice(0, 3)), imageTurn.slice(3))
+  .find((n) => n.kind === 'context-injection')
+check('增量:注入图片保留在节点上', incrImage.images.length, 1)
+check('增量:与冷启动逐字一致', incrImage, coldImage)
+
+const imageRows = mod.groupTranscript(mod.foldEvents(imageTurn))
+check(
+  '带图注入不被 turn 概览折叠',
+  imageRows.some((row) => row.kind === 'node' && row.node.kind === 'context-injection'),
+  true,
+)
+
 console.log(failed === 0 ? '\nALL PASS' : `\n${failed} FAILED`)
 process.exit(failed === 0 ? 0 : 1)

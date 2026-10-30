@@ -437,7 +437,6 @@ mod tests {
         }
     }
 
-
     #[test]
     fn lookback_guard_leaves_ancient_results_for_compaction() {
         let surface = surface_with_rounds(20, &"x".repeat(2000));
@@ -583,27 +582,28 @@ mod tests {
 
     #[test]
     fn non_compactable_tool_is_skipped() {
-        let mut surface = Vec::new();
-        surface.push(SurfaceMessage {
-            seq: 1,
-            message: ChatMessage::assistant(
-                "t".to_string(),
-                None,
-                vec![ToolCallRef {
-                    id: "c1".into(),
-                    name: "todo_write".into(), // 不在白名单
-                    arguments: "{}".into(),
-                }],
-            ),
-            is_error: false,
-            channel: None,
-        });
-        surface.push(SurfaceMessage {
-            seq: 2,
-            message: ChatMessage::tool_result("c1", "x".repeat(5000)),
-            is_error: false,
-            channel: None,
-        });
+        let surface = vec![
+            SurfaceMessage {
+                seq: 1,
+                message: ChatMessage::assistant(
+                    "t".to_string(),
+                    None,
+                    vec![ToolCallRef {
+                        id: "c1".into(),
+                        name: "todo_write".into(), // 不在白名单
+                        arguments: "{}".into(),
+                    }],
+                ),
+                is_error: false,
+                channel: None,
+            },
+            SurfaceMessage {
+                seq: 2,
+                message: ChatMessage::tool_result("c1", "x".repeat(5000)),
+                is_error: false,
+                channel: None,
+            },
+        ];
         let cfg = MicrocompactSettings {
             keep_recent_groups: 1,
             min_savings: 0,

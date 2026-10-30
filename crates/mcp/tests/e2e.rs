@@ -238,7 +238,12 @@ async fn results_do_not_leak_across_sessions() {
         })
         .await
         .expect_err("跨会话续读必须失败");
-    assert_eq!(foreign, PagedError::ForeignSession { result_id: id.clone() });
+    assert_eq!(
+        foreign,
+        PagedError::ForeignSession {
+            result_id: id.clone()
+        }
+    );
 
     // 旧式 offset 续读同样按会话隔离:s2 名下没有那次结果。
     let legacy = manager

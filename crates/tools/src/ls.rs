@@ -221,7 +221,7 @@ impl Tool for LsTool {
                     let mut sink = entries.lock().unwrap();
                     sink.push(Entry {
                         is_dir: file_type.is_dir(),
-                        rel: relative_display(entry.path(), &root),
+                        rel: crate::support::display_path(entry.path(), &root),
                     });
                     if sink.len() > COLLECT_CAP {
                         overflow.store(true, Ordering::Relaxed);
@@ -299,14 +299,6 @@ impl Tool for LsTool {
             )),
         }
     }
-}
-
-/// 相对 `root` 的展示路径,统一用 `/`;越界(理论上不可达)时退回完整路径。
-fn relative_display(path: &Path, root: &Path) -> String {
-    path.strip_prefix(root)
-        .unwrap_or(path)
-        .to_string_lossy()
-        .replace('\\', "/")
 }
 
 /// 空目录提示里用的目录名:工作区内给相对路径,工作区外给绝对路径。

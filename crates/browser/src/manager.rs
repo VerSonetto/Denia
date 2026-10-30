@@ -18,9 +18,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use chromiumoxide::cdp::browser_protocol::emulation::{
-    SetDeviceMetricsOverrideParams,
-};
+use chromiumoxide::cdp::browser_protocol::emulation::SetDeviceMetricsOverrideParams;
 use chromiumoxide::cdp::browser_protocol::input::MouseButton;
 use chromiumoxide::cdp::browser_protocol::network::{
     EnableParams as NetworkEnableParams, EventLoadingFailed, EventRequestWillBeSent,
@@ -803,7 +801,9 @@ impl BrowserManager {
                 if let Ok(mut map) = dialogs.lock() {
                     map.remove(&tab);
                 }
-                let _ = broadcast.send(BrowserEvent::DialogClosed { tab_id: tab.clone() });
+                let _ = broadcast.send(BrowserEvent::DialogClosed {
+                    tab_id: tab.clone(),
+                });
                 let _ = broadcast.send(BrowserEvent::TabsChanged);
             }
         });
@@ -877,7 +877,10 @@ impl BrowserManager {
                     let kind = serde_str_id(&event.r#type);
                     let message = event.message.clone();
                     if let Ok(mut map) = dialogs.lock() {
-                        map.insert(tab_dialog.clone(), json!({ "type": kind, "message": message }));
+                        map.insert(
+                            tab_dialog.clone(),
+                            json!({ "type": kind, "message": message }),
+                        );
                     }
                     let _ = broadcast.send(BrowserEvent::DialogOpened {
                         tab_id: tab_dialog.clone(),
@@ -954,10 +957,7 @@ impl BrowserManager {
             let released = self.releaser.release("tool").await;
             return CommandOutcome {
                 elapsed_ms: started.elapsed().as_millis() as u64,
-                ..CommandOutcome::ok_value(
-                    json!({ "released": released, "running": false }),
-                    0,
-                )
+                ..CommandOutcome::ok_value(json!({ "released": released, "running": false }), 0)
             };
         }
         // 未运行时的 list/close:原地返回。close 若走下面的通用路径,会先把
@@ -1111,10 +1111,7 @@ impl BrowserManager {
         // 一个 about:blank —— 保留旧有「模型总能拿到落点」的行为;
         // close/list/getState 等善后与查询路径绝不能开页,否则「收尾动作
         // 自己把浏览器开了回来」又会出现。
-        if guard
-            .as_ref()
-            .is_some_and(|inner| inner.pages.is_empty())
-            && needs_target_tab(&command)
+        if guard.as_ref().is_some_and(|inner| inner.pages.is_empty()) && needs_target_tab(&command)
         {
             let (tab_id, page) = {
                 let inner = guard
@@ -1126,8 +1123,7 @@ impl BrowserManager {
                     .new_page("about:blank")
                     .await
                     .map_err(|error| format!("创建标签页失败: {error}"))?;
-                let tab_id =
-                    inner.register(page.clone(), "about:blank".to_string(), String::new());
+                let tab_id = inner.register(page.clone(), "about:blank".to_string(), String::new());
                 inner.active_tab = Some(tab_id.clone());
                 (tab_id, page)
             };
@@ -1239,17 +1235,15 @@ impl BrowserManager {
                     .await;
                 drop(guard);
                 self.broadcast(BrowserEvent::TabsChanged);
-                Ok(CommandOutcome::ok_value(json!({ "activeTabId": tab_id }), 0))
+                Ok(CommandOutcome::ok_value(
+                    json!({ "activeTabId": tab_id }),
+                    0,
+                ))
             }
             BrowserCommand::Navigate { url, tab_id } => {
                 let (tab_id, page) = inner.resolve(tab_id.as_deref())?;
                 let response = page
-                    .execute(
-                        NavigateParams::builder()
-                            .url(url.clone())
-                            .build()
-                            .unwrap(),
-                    )
+                    .execute(NavigateParams::builder().url(url.clone()).build().unwrap())
                     .await
                     .map_err(|error| format!("导航失败: {error}"))?;
                 if let Some(error_text) = response.result.error_text.clone() {
@@ -1264,7 +1258,10 @@ impl BrowserManager {
                     url: url.clone(),
                     title: String::new(),
                 });
-                Ok(CommandOutcome::ok_value(json!({ "url": url, "status": status }), 0))
+                Ok(CommandOutcome::ok_value(
+                    json!({ "url": url, "status": status }),
+                    0,
+                ))
             }
             BrowserCommand::Back { tab_id } => {
                 let (tab_id, page) = inner.resolve(tab_id.as_deref())?;
@@ -1452,8 +1449,8 @@ impl BrowserManager {
             } => {
                 let (tab_id, page) = inner.resolve(tab_id.as_deref())?;
                 let target = elements::normalize_ref(&r#ref);
-                let backend = elements::resolve_element(&page, &self.ref_table(&tab_id), &target)
-                    .await?;
+                let backend =
+                    elements::resolve_element(&page, &self.ref_table(&tab_id), &target).await?;
                 elements::fill_backend(&page, backend, &value).await?;
                 Ok(CommandOutcome::ok_value(json!({ "filled": target }), 0))
             }
@@ -1483,7 +1480,12 @@ impl BrowserManager {
                 elements::press_key(&page, &key).await?;
                 Ok(CommandOutcome::ok_value(json!({ "pressed": key }), 0))
             }
-            BrowserCommand::Hover { tab_id, r#ref, x, y } => {
+            BrowserCommand::Hover {
+                tab_id,
+                r#ref,
+                x,
+                y,
+            } => {
                 let (tab_id, page) = inner.resolve(tab_id.as_deref())?;
                 match (r#ref.as_deref().map(elements::normalize_ref), x, y) {
                     (Some(reference), _, _) => {
@@ -1515,7 +1517,10 @@ impl BrowserManager {
                             elements::resolve_element(&page, &self.ref_table(&tab_id), &reference)
                                 .await?;
                         elements::scroll_into_view(&page, backend).await?;
-                        Ok(CommandOutcome::ok_value(json!({ "scrolledTo": reference }), 0))
+                        Ok(CommandOutcome::ok_value(
+                            json!({ "scrolledTo": reference }),
+                            0,
+                        ))
                     }
                     None => {
                         let dx = delta_x.unwrap_or(0.0);
@@ -1539,8 +1544,8 @@ impl BrowserManager {
             } => {
                 let (tab_id, page) = inner.resolve(tab_id.as_deref())?;
                 let target = elements::normalize_ref(&r#ref);
-                let backend = elements::resolve_element(&page, &self.ref_table(&tab_id), &target)
-                    .await?;
+                let backend =
+                    elements::resolve_element(&page, &self.ref_table(&tab_id), &target).await?;
                 let selected = elements::select_backend(&page, backend, &values).await?;
                 Ok(CommandOutcome::ok_value(json!({ "selected": selected }), 0))
             }
@@ -1551,8 +1556,8 @@ impl BrowserManager {
             } => {
                 let (tab_id, page) = inner.resolve(tab_id.as_deref())?;
                 let target = elements::normalize_ref(&r#ref);
-                let backend = elements::resolve_element(&page, &self.ref_table(&tab_id), &target)
-                    .await?;
+                let backend =
+                    elements::resolve_element(&page, &self.ref_table(&tab_id), &target).await?;
                 let state =
                     elements::check_backend(&page, backend, checked.unwrap_or(true)).await?;
                 Ok(CommandOutcome::ok_value(json!({ "checked": state }), 0))
@@ -2008,7 +2013,10 @@ mod tests {
         // @ 前缀归一化(快照产出 e6,模型可能带 @ 传)。
         assert_eq!(pick_target(Some("@e12"), None).as_deref(), Some("e12"));
         assert_eq!(pick_target(None, Some("#x")).as_deref(), Some("#x"));
-        assert_eq!(pick_target(None, Some("text=登录")).as_deref(), Some("text=登录"));
+        assert_eq!(
+            pick_target(None, Some("text=登录")).as_deref(),
+            Some("text=登录")
+        );
         assert_eq!(pick_target(None, None), None);
     }
 

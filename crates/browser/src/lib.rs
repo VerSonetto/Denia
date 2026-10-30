@@ -22,8 +22,8 @@
 //!   闲置超时看护、模型显式 `shutdownBrowser`;另有启动前清扫孤儿进程兜底
 //!   (见 [`procctl`])。
 
-mod elements;
 pub mod driver;
+mod elements;
 pub mod manager;
 pub mod network;
 mod procctl;

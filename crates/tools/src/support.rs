@@ -181,8 +181,8 @@ fn json_type_name(raw: &str) -> &str {
     match text.split([' ', '`']).next().unwrap_or(text) {
         "string" => "string",
         "bool" | "boolean" => "boolean",
-        "u8" | "u16" | "u32" | "u64" | "u128" | "usize" | "i8" | "i16" | "i32" | "i64"
-        | "i128" | "isize" | "f32" | "f64" | "integer" | "number" | "floating" => "number",
+        "u8" | "u16" | "u32" | "u64" | "u128" | "usize" | "i8" | "i16" | "i32" | "i64" | "i128"
+        | "isize" | "f32" | "f64" | "integer" | "number" | "floating" => "number",
         "unit" => "null",
         "sequence" | "array" => "array",
         "map" | "object" => "object",
@@ -200,6 +200,65 @@ pub fn tool_error(reason: impl std::fmt::Display, hint: impl std::fmt::Display) 
         content: format!("[工具错误] {reason}\n建议:{hint}"),
         is_error: true,
         ..Default::default()
+    }
+}
+
+/// 相对 `root` 的展示路径:工作区内记相对路径,越界退回完整路径;
+/// 分隔符统一为 `/`。edit/grep/ls/task 的结果文案共用这一口径。
+pub fn display_path(path: &std::path::Path, root: &std::path::Path) -> String {
+    path.strip_prefix(root)
+        .unwrap_or(path)
+        .to_string_lossy()
+        .replace('\\', "/")
+}
+
+/// 按字符(char)截断到 `max` 个字符,超限追加 `suffix`,不撕 UTF-8;
+/// 未超限时原样返回。各工具的展示级截断(错误预览/单行防护/响应裁剪)
+/// 共用这一个出口,超限判定与拼接语义全仓一致。
+pub fn truncate_chars(text: &str, max: usize, suffix: &str) -> String {
+    let mut chars = text.chars();
+    let head: String = chars.by_ref().take(max).collect();
+    if chars.next().is_some() {
+        format!("{head}{suffix}")
+    } else {
+        head
+    }
+}
+
+/// bash/shell 测试共用的脚手架:事件收集 sink 与实时增量提取。
+#[cfg(test)]
+pub(crate) mod test_events {
+    use std::sync::Arc;
+
+    use denia_core::session::SessionEvent;
+
+    /// 收事件的测试 sink。
+    pub(crate) fn sink(
+        events: &Arc<std::sync::Mutex<Vec<SessionEvent>>>,
+    ) -> crate::SessionEventSink {
+        let events = events.clone();
+        Arc::new(move |event| events.lock().unwrap().push(event))
+    }
+
+    /// 某次调用某条流上收到的增量,按到达顺序。
+    pub(crate) fn deltas_of(
+        events: &Arc<std::sync::Mutex<Vec<SessionEvent>>>,
+        call_id: &str,
+        stream: &str,
+    ) -> Vec<String> {
+        events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|event| match event {
+                SessionEvent::ToolOutputChunk {
+                    call_id: id,
+                    stream: name,
+                    text,
+                } if id == call_id && name == stream => Some(text.clone()),
+                _ => None,
+            })
+            .collect()
     }
 }
 
@@ -344,10 +403,9 @@ mod tests {
             path: String,
             content: String,
         }
-        let error = parse_tool_args::<Args>(
-            r#"{"_args_cleared":"本次调用的参数已归档","path":"a.rs"}"#,
-        )
-        .unwrap_err();
+        let error =
+            parse_tool_args::<Args>(r#"{"_args_cleared":"本次调用的参数已归档","path":"a.rs"}"#)
+                .unwrap_err();
         assert!(error.starts_with("缺少参数 `content`"), "{error}");
         assert!(error.contains("归档占位符"), "{error}");
     }

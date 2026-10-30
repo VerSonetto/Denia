@@ -73,11 +73,15 @@ impl CacheWarmer {
     /// process from retaining every session's full history.
     pub fn remember(&self, session: &str, provider: &str, request: &GenerateRequest) {
         const MAX_REMEMBERED: usize = 64;
-        let mut last = self.last.lock().unwrap_or_else(|poison| poison.into_inner());
-        if last.len() >= MAX_REMEMBERED && !last.contains_key(session) {
-            if let Some(evicted) = last.keys().next().cloned() {
-                last.remove(&evicted);
-            }
+        let mut last = self
+            .last
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        if last.len() >= MAX_REMEMBERED
+            && !last.contains_key(session)
+            && let Some(evicted) = last.keys().next().cloned()
+        {
+            last.remove(&evicted);
         }
         last.insert(
             session.to_string(),

@@ -57,9 +57,7 @@ pub struct Attachment {
 
 impl Attachment {
     pub fn is_image(&self) -> bool {
-        self.content_type
-            .to_ascii_lowercase()
-            .starts_with("image/")
+        self.content_type.to_ascii_lowercase().starts_with("image/")
     }
 }
 
@@ -231,10 +229,7 @@ pub fn ask_keyboard(
                 &format!("opt{index}"),
                 &option.label,
                 &option.label,
-                &format!(
-                    "ask:{session_id}:{request_id}:{}:{index}",
-                    question.id
-                ),
+                &format!("ask:{session_id}:{request_id}:{}:{index}", question.id),
                 if option.recommended { 1 } else { 0 },
             )
         })

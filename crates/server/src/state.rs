@@ -219,13 +219,16 @@ pub struct LiveSessions {
     /// 串行化加载与卸载清理:释放 inner 后仍持有,防止旧会话的清理擦掉
     /// 刚重载会话的新状态。回调可以读取注册表,但不能触发加载/裁剪。
     lifecycle: std::sync::Mutex<()>,
-    on_evict: std::sync::OnceLock<Arc<dyn Fn(&str) + Send + Sync>>,
+    on_evict: std::sync::OnceLock<SessionHook>,
     /// 最多同时驻留的完整会话数。超出后按 LRU 淘汰非运行、无订阅者会话,
     /// 防止连续打开长会话把后端常驻内存撑到 O(全部历史)。
     max_resident: usize,
     /// 驻留会话的日志字节总预算(代理量)。
     max_resident_bytes: u64,
 }
+
+/// 会话生命周期钩子:入参是被处理会话的 id。
+type SessionHook = Arc<dyn Fn(&str) + Send + Sync>;
 
 impl Default for LiveSessions {
     fn default() -> Self {
@@ -675,7 +678,7 @@ impl denia_tools::AskBridge for ServerAskBridge {
 pub struct RunningGuard {
     live: Arc<LiveSession>,
     events: broadcast::Sender<ServerEvent>,
-    on_idle: Option<Arc<dyn Fn(&str) + Send + Sync>>,
+    on_idle: Option<SessionHook>,
 }
 
 impl RunningGuard {
@@ -690,7 +693,7 @@ impl RunningGuard {
     pub fn with_on_idle(
         live: Arc<LiveSession>,
         events: broadcast::Sender<ServerEvent>,
-        on_idle: Arc<dyn Fn(&str) + Send + Sync>,
+        on_idle: SessionHook,
     ) -> Self {
         Self {
             live,

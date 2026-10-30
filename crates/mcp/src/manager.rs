@@ -15,7 +15,6 @@
 //!   不允许覆盖 `bash`/`read_file` 这类内置能力。
 
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use arc_swap::ArcSwap;
@@ -255,7 +254,10 @@ impl std::fmt::Display for PagedError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::UnknownResult { result_id } => {
-                write!(f, "结果 {result_id} 已不存在(从未产生、已被淘汰或服务器重连)")
+                write!(
+                    f,
+                    "结果 {result_id} 已不存在(从未产生、已被淘汰或服务器重连)"
+                )
             }
             Self::ForeignSession { result_id } => {
                 write!(f, "结果 {result_id} 属于另一个会话,不能在这里续读")
@@ -306,8 +308,6 @@ pub struct McpManager {
     snapshot: ArcSwap<McpSnapshot>,
     /// 内置工具名:与它们冲突的 MCP 工具一律跳过,不覆盖。
     builtin_names: HashSet<String>,
-    /// 子进程工作目录缺省值(通常是 denia 的 home 或会话 cwd,目前未用)。
-    default_cwd: Option<PathBuf>,
     /// 结果缓存:身份令牌 → 某次真实执行的完整结果。
     ///
     /// 续读必须复用上次结果——MCP 工具可能有副作用(下单、发消息),
@@ -322,7 +322,6 @@ impl McpManager {
             connected: RwLock::new(HashMap::new()),
             snapshot: ArcSwap::from_pointee(McpSnapshot::empty()),
             builtin_names,
-            default_cwd: None,
             results: Mutex::new(ResultCache::default()),
         }
     }
@@ -498,7 +497,13 @@ impl McpManager {
             .await
             .map_err(PagedError::Call)?;
         let result_id = self.store_result(qualified, call.arguments, call.session, &result);
-        Ok(paged_of(&result.text, result.is_error, call, false, result_id))
+        Ok(paged_of(
+            &result.text,
+            result.is_error,
+            call,
+            false,
+            result_id,
+        ))
     }
 
     /// 按令牌取一条仍然有效的结果;命中即刷新它的 LRU 顺序。
@@ -1029,7 +1034,12 @@ mod tests {
             .call_paged(&page_call(&arguments, 0, 2, Some(&id), false, Some("s2")))
             .await
             .expect_err("跨会话续读必须失败");
-        assert_eq!(foreign, PagedError::ForeignSession { result_id: id.clone() });
+        assert_eq!(
+            foreign,
+            PagedError::ForeignSession {
+                result_id: id.clone()
+            }
+        );
         // 无会话上下文也算「另一个会话」,不把结果泄给不持有身份的调用方。
         let anonymous = manager
             .call_paged(&page_call(&arguments, 0, 2, Some(&id), false, None))
@@ -1045,7 +1055,14 @@ mod tests {
         let manager = McpManager::new(HashSet::new());
         let arguments = serde_json::json!({ "chars": 3 });
         let error = manager
-            .call_paged(&page_call(&arguments, 0, 10, Some("res-0-0"), false, Some("s1")))
+            .call_paged(&page_call(
+                &arguments,
+                0,
+                10,
+                Some("res-0-0"),
+                false,
+                Some("s1"),
+            ))
             .await
             .expect_err("未知令牌必须失败");
         assert_eq!(
@@ -1144,7 +1161,14 @@ mod tests {
         }
         let arguments = serde_json::json!({ "chars": 3 });
         let error = manager
-            .call_paged(&page_call(&arguments, 0, 10, Some(&oldest), false, Some("s1")))
+            .call_paged(&page_call(
+                &arguments,
+                0,
+                10,
+                Some(&oldest),
+                false,
+                Some("s1"),
+            ))
             .await
             .expect_err("最旧的一条已被淘汰");
         assert_eq!(
@@ -1154,7 +1178,14 @@ mod tests {
             }
         );
         let paged = manager
-            .call_paged(&page_call(&arguments, 0, 1, Some(&newest), false, Some("s1")))
+            .call_paged(&page_call(
+                &arguments,
+                0,
+                1,
+                Some(&newest),
+                false,
+                Some("s1"),
+            ))
             .await
             .expect("最新结果仍在缓存里");
         assert_eq!(paged.text, "1");

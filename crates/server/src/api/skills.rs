@@ -21,9 +21,9 @@ where
 {
     tokio::task::spawn_blocking(operation)
         .await
-        .map_err(|e| ApiError::bad_request("skills/operation-failed", e.to_string()))?
+        .map_err(|e| super::operation_failed("skills", e.to_string()))?
         .map(Json)
-        .map_err(|e| ApiError::bad_request("skills/operation-failed", e))
+        .map_err(|e| super::operation_failed("skills", e))
 }
 #[cfg(test)]
 mod tests {

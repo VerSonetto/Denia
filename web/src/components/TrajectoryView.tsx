@@ -13,7 +13,7 @@ import type { SessionEnvelope, TokenUsage } from '../types'
 import { toolCallSummary } from '../toolDisplay'
 import { CopyMessageButton } from './CopyMessageButton'
 import { IconChevron, IconSearch } from './icons'
-import { formatDuration } from './transcript'
+import { formatDuration } from './transcript/formatDuration'
 
 /**
  * Trajectory 视图(可读性增强):

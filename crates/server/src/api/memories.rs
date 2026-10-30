@@ -17,14 +17,8 @@ use crate::state::AppState;
 pub fn router() -> Router<Arc<AppState>> {
     Router::new()
         .route("/api/memories/projects", get(list_projects))
-        .route(
-            "/api/memories/projects/{id}/health",
-            get(memory_health),
-        )
-        .route(
-            "/api/memories/projects/{id}/search",
-            get(search_memories),
-        )
+        .route("/api/memories/projects/{id}/health", get(memory_health))
+        .route("/api/memories/projects/{id}/search", get(search_memories))
         .route(
             "/api/memories/projects/{id}/index",
             axum::routing::post(rebuild_memory_index),
@@ -78,13 +72,7 @@ async fn search_memories(
     let limit = params.limit.unwrap_or(20);
     let include_superseded = params.include_superseded.unwrap_or(false);
     let result = tokio::task::spawn_blocking(move || {
-        crate::project_memory::retrieval::search(
-            &root,
-            &params.q,
-            limit,
-            kind,
-            include_superseded,
-        )
+        crate::project_memory::retrieval::search(&root, &params.q, limit, kind, include_superseded)
     })
     .await
     .map_err(|e| ApiError::bad_request("memory/search-failed", e.to_string()))?;
@@ -128,11 +116,9 @@ async fn memory_health(
     let root =
         crate::project_memory::memory_root(&state.home, std::path::Path::new(&workspace.path));
     // fs 阻塞调用走 spawn_blocking(与列表端点同约定)。
-    let report = tokio::task::spawn_blocking(move || {
-        crate::project_memory::memory_health(&root)
-    })
-    .await
-    .map_err(|e| ApiError::bad_request("memory/health-failed", e.to_string()))?;
+    let report = tokio::task::spawn_blocking(move || crate::project_memory::memory_health(&root))
+        .await
+        .map_err(|e| ApiError::bad_request("memory/health-failed", e.to_string()))?;
     Ok(Json(json!({ "health": report })))
 }
 
@@ -206,7 +192,13 @@ async fn read_memory_file(
     })
     .await
     .map_err(|e| ApiError::bad_request("memory/read-failed", e.to_string()))?
-    .map_err(io_error)?;
+    .map_err(|error| {
+        io_error(
+            "读取期间文件已被删除或移动,请刷新列表",
+            "memory/read-failed",
+            error,
+        )
+    })?;
     if metadata.len() > crate::project_memory::MAX_FILE_BYTES {
         return Err(ApiError::new(
             axum::http::StatusCode::PAYLOAD_TOO_LARGE,
@@ -223,7 +215,13 @@ async fn read_memory_file(
     })
     .await
     .map_err(|e| ApiError::bad_request("memory/read-failed", e.to_string()))?
-    .map_err(io_error)?;
+    .map_err(|error| {
+        io_error(
+            "读取期间文件已被删除或移动,请刷新列表",
+            "memory/read-failed",
+            error,
+        )
+    })?;
     let name = path
         .strip_prefix(&root)
         .unwrap_or(&path)
@@ -272,15 +270,18 @@ async fn delete_memory_file(
                     ApiError::bad_request("memory/bad-path", message)
                 }
             })?;
-        let metadata =
-            std::fs::symlink_metadata(&path).map_err(|error| delete_io_error(&raw, error))?;
+        let metadata = std::fs::symlink_metadata(&path).map_err(|error| {
+            io_error(&format!("文件不存在:{raw}"), "memory/delete-failed", error)
+        })?;
         if metadata.is_symlink() || !metadata.is_file() {
             return Err(ApiError::bad_request(
                 "memory/bad-path",
                 format!("非法文件:{raw}"),
             ));
         }
-        std::fs::remove_file(&path).map_err(|error| delete_io_error(&raw, error))?;
+        std::fs::remove_file(&path).map_err(|error| {
+            io_error(&format!("文件不存在:{raw}"), "memory/delete-failed", error)
+        })?;
         Ok::<String, ApiError>(
             path.strip_prefix(&root)
                 .unwrap_or(&path)
@@ -293,35 +294,20 @@ async fn delete_memory_file(
     Ok(Json(json!({ "deleted": name })))
 }
 
-/// 删除期的 fs 错误:文件消失按 404(并发二次删是常态),其余 500。
-fn delete_io_error(raw: &str, error: std::io::Error) -> ApiError {
+/// 读取/删除期的 fs 错误:文件消失按 404(并发二次删是删除期的常态,
+/// 读取期变更则是变更提示的素材),其余 500。`not_found` 是 404 文案,
+/// `failed_code` 是其余错误的码。
+fn io_error(not_found: &str, failed_code: &'static str, error: std::io::Error) -> ApiError {
     if error.kind() == std::io::ErrorKind::NotFound {
         ApiError::new(
             axum::http::StatusCode::NOT_FOUND,
             "memory/file-not-found",
-            format!("文件不存在:{raw}"),
+            not_found,
         )
     } else {
         ApiError::new(
             axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            "memory/delete-failed",
-            error.to_string(),
-        )
-    }
-}
-
-/// 读取期的 fs 错误:文件消失按 404(读取期变更提示的素材),其余 500。
-fn io_error(error: std::io::Error) -> ApiError {
-    if error.kind() == std::io::ErrorKind::NotFound {
-        ApiError::new(
-            axum::http::StatusCode::NOT_FOUND,
-            "memory/file-not-found",
-            "读取期间文件已被删除或移动,请刷新列表",
-        )
-    } else {
-        ApiError::new(
-            axum::http::StatusCode::INTERNAL_SERVER_ERROR,
-            "memory/read-failed",
+            failed_code,
             error.to_string(),
         )
     }
@@ -340,7 +326,11 @@ mod tests {
     async fn memory_api_lists_projects_and_reads_files() {
         let home = std::env::temp_dir().join(format!("denia-mem-api-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&home).unwrap();
-        let state = Arc::new(crate::state::build_state(&home, false, 43654).await.unwrap());
+        let state = Arc::new(
+            crate::state::build_state(&home, false, 43654)
+                .await
+                .unwrap(),
+        );
         let ws_dir = home.join("ws");
         std::fs::create_dir_all(&ws_dir).unwrap();
         let record = state
@@ -410,10 +400,7 @@ mod tests {
 
         // 体检端点:确定性检查(这里只验证形状与"已登记文件不报孤儿")。
         let health: Value = client
-            .get(format!(
-                "{base}/api/memories/projects/{}/health",
-                record.id
-            ))
+            .get(format!("{base}/api/memories/projects/{}/health", record.id))
             .send()
             .await
             .unwrap()
@@ -470,7 +457,11 @@ mod tests {
     async fn memory_api_deletes_files() {
         let home = std::env::temp_dir().join(format!("denia-mem-del-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&home).unwrap();
-        let state = Arc::new(crate::state::build_state(&home, false, 43654).await.unwrap());
+        let state = Arc::new(
+            crate::state::build_state(&home, false, 43654)
+                .await
+                .unwrap(),
+        );
         let ws_dir = home.join("ws");
         std::fs::create_dir_all(&ws_dir).unwrap();
         let record = state

@@ -25,25 +25,77 @@ const PROBE_RANGE: &str = "bytes=0-0";
 /// 取自 XIU2 的 Github Enhancement 油猴脚本里给 Release/Code(ZIP) 用的那组前缀；
 /// 2026-10-15 实测过一轮：DNS 失效、404 与路径拼接错误的源已剔除。
 const MIRROR_TABLE: &[(&str, &str, &[&str])] = &[
-    ("gh.h233.eu.org", "https://gh.h233.eu.org/https://github.com", &[]),
+    (
+        "gh.h233.eu.org",
+        "https://gh.h233.eu.org/https://github.com",
+        &[],
+    ),
     ("gh.ddlc.top", "https://gh.ddlc.top/https://github.com", &[]),
     ("gh-proxy", "https://gh-proxy.org/https://github.com", &[]),
-    ("gh-proxy Fastly", "https://cdn.gh-proxy.org/https://github.com", &[]),
-    ("gh-proxy EdgeOne", "https://edgeone.gh-proxy.org/https://github.com", &[]),
+    (
+        "gh-proxy Fastly",
+        "https://cdn.gh-proxy.org/https://github.com",
+        &[],
+    ),
+    (
+        "gh-proxy EdgeOne",
+        "https://edgeone.gh-proxy.org/https://github.com",
+        &[],
+    ),
     ("isteed CORS", "https://cors.isteed.cc/github.com", &[]),
-    ("ghproxy.it", "https://ghproxy.it/https://github.com", &["ghfast.top"]),
-    ("boki.moe", "https://github.boki.moe/https://github.com", &[]),
-    ("gh.monlor.com", "https://gh.monlor.com/https://github.com", &[]),
-    ("ednovas", "https://github.ednovas.xyz/https://github.com", &[]),
-    ("geekertao", "https://ghfile.geekertao.top/https://github.com", &["gh.dpik.top"]),
+    (
+        "ghproxy.it",
+        "https://ghproxy.it/https://github.com",
+        &["ghfast.top"],
+    ),
+    (
+        "boki.moe",
+        "https://github.boki.moe/https://github.com",
+        &[],
+    ),
+    (
+        "gh.monlor.com",
+        "https://gh.monlor.com/https://github.com",
+        &[],
+    ),
+    (
+        "ednovas",
+        "https://github.ednovas.xyz/https://github.com",
+        &[],
+    ),
+    (
+        "geekertao",
+        "https://ghfile.geekertao.top/https://github.com",
+        &["gh.dpik.top"],
+    ),
     ("keleyaa", "https://ghp.keleyaa.com/https://github.com", &[]),
-    ("gh.chjina.com", "https://gh.chjina.com/https://github.com", &[]),
-    ("hwinziej", "https://ghpxy.hwinzniej.top/https://github.com", &[]),
-    ("crashmc", "https://cdn.crashmc.com/https://github.com", &["cdn.akaere.online"]),
+    (
+        "gh.chjina.com",
+        "https://gh.chjina.com/https://github.com",
+        &[],
+    ),
+    (
+        "hwinziej",
+        "https://ghpxy.hwinzniej.top/https://github.com",
+        &[],
+    ),
+    (
+        "crashmc",
+        "https://cdn.crashmc.com/https://github.com",
+        &["cdn.akaere.online"],
+    ),
     ("yylx", "https://git.yylx.win/https://github.com", &[]),
     ("mrhjx", "https://gitproxy.mrhjx.cn/https://github.com", &[]),
-    ("cxkpro", "https://ghproxy.cxkpro.top/https://github.com", &[]),
-    ("gh.idayer.com", "https://gh.idayer.com/https://github.com", &[]),
+    (
+        "cxkpro",
+        "https://ghproxy.cxkpro.top/https://github.com",
+        &[],
+    ),
+    (
+        "gh.idayer.com",
+        "https://gh.idayer.com/https://github.com",
+        &[],
+    ),
     ("ghproxy.net", "https://ghproxy.net/https://github.com", &[]),
     ("ghfast.top", "https://ghfast.top/https://github.com", &[]),
     ("wget.la", "https://wget.la/https://github.com", &[]),
@@ -167,10 +219,16 @@ pub(super) async fn rank_candidates(
         .collect();
     candidates.push(official_candidate(canonical));
     // buffer_unordered 按完成顺序返回，延迟必须跟着下标回到各自的候选上。
-    let probes = stream::iter(candidates.iter().cloned().enumerate().map(|(index, candidate)| {
-        let url = candidate.url.clone();
-        async move { (index, probe(client, url).await) }
-    }))
+    let probes = stream::iter(
+        candidates
+            .iter()
+            .cloned()
+            .enumerate()
+            .map(|(index, candidate)| {
+                let url = candidate.url.clone();
+                async move { (index, probe(client, url).await) }
+            }),
+    )
     .buffer_unordered(candidates.len().max(1))
     .collect::<Vec<_>>()
     .await;
@@ -245,10 +303,7 @@ async fn probe(client: &Client, url: String) -> Option<Duration> {
     let started = Instant::now();
     let response = tokio::time::timeout(
         PROBE_TIMEOUT,
-        client
-            .get(&url)
-            .header(header::RANGE, PROBE_RANGE)
-            .send(),
+        client.get(&url).header(header::RANGE, PROBE_RANGE).send(),
     )
     .await
     .ok()?

@@ -274,12 +274,6 @@ fn endpoint_of(event: &str, base: &str) -> Option<String> {
     Some(joined.to_string())
 }
 
-/// 仅供测试:暴露 SSE 事件的解析判定。
-#[cfg(test)]
-pub(crate) fn endpoint_of_for_test(event: &str, base: &str) -> Option<String> {
-    endpoint_of(event, base)
-}
-
 /// 未使用但保留:便于将来按事件名分流(如 `event: ping`)。
 #[allow(dead_code)]
 fn event_name_of(event: &str) -> Option<String> {

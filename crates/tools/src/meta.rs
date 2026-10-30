@@ -70,7 +70,10 @@ mod tests {
         assert_eq!(tool_action_class("edit"), ToolActionClass::FileWrite);
         assert_eq!(tool_action_class("bash"), ToolActionClass::Shell);
         assert_eq!(tool_action_class("job_start"), ToolActionClass::Shell);
-        assert_eq!(tool_action_class("run_checks"), ToolActionClass::ShellChecks);
+        assert_eq!(
+            tool_action_class("run_checks"),
+            ToolActionClass::ShellChecks
+        );
         assert_eq!(tool_action_class("read_file"), ToolActionClass::Read);
         assert_eq!(tool_action_class("grep"), ToolActionClass::Read);
     }

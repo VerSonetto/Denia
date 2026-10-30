@@ -2,11 +2,11 @@ use super::*;
 
 use std::collections::HashSet;
 
+use axum::Router;
 use axum::body::Body;
 use axum::http::StatusCode;
 use axum::response::Response;
 use axum::routing::get;
-use axum::Router;
 
 const ASSET: &str = "/VerSonetto/Denia/releases/download/v0.4.6/Denia-setup.exe";
 
@@ -42,12 +42,16 @@ fn built_in_mirrors_are_https_github_proxies_with_unique_labels() {
         "标签重复会让界面分不清是谁在下载"
     );
     for mirror in mirrors.iter() {
-        let base = Url::parse(&mirror.prefix)
-            .unwrap_or_else(|error| panic!("{}: {error}", mirror.prefix));
+        let base =
+            Url::parse(&mirror.prefix).unwrap_or_else(|error| panic!("{}: {error}", mirror.prefix));
         assert_eq!(base.scheme(), "https", "{}", mirror.prefix);
         assert!(base.host_str().is_some_and(|host| !host.is_empty()));
-        let url = candidate_url(&mirror.prefix, &format!("{GITHUB_ORIGIN}{ASSET}"), GITHUB_ORIGIN)
-            .unwrap_or_else(|| panic!("{} 无法拼接官方地址", mirror.prefix));
+        let url = candidate_url(
+            &mirror.prefix,
+            &format!("{GITHUB_ORIGIN}{ASSET}"),
+            GITHUB_ORIGIN,
+        )
+        .unwrap_or_else(|| panic!("{} 无法拼接官方地址", mirror.prefix));
         assert!(url.starts_with(&mirror.prefix));
         assert!(url.ends_with(ASSET));
         for redirect in mirror.redirect_hosts.iter() {
@@ -213,12 +217,18 @@ async fn ranking_keeps_each_latency_with_its_own_source() {
             .unwrap_or_default()
     };
     assert!(latency("fast") < latency("slow"), "延迟必须归属各自的源");
-    assert!(latency("slow") >= Duration::from_millis(140), "{:?}", latency("slow"));
+    assert!(
+        latency("slow") >= Duration::from_millis(140),
+        "{:?}",
+        latency("slow")
+    );
     assert_eq!(latency("broken"), Duration::ZERO, "失败源不参与排序");
     let direct = ranked.iter().find(|candidate| candidate.direct).unwrap();
     assert_eq!(direct.url, canonical);
     assert!(
-        direct.latency.is_some_and(|latency| latency >= Duration::from_millis(40)),
+        direct
+            .latency
+            .is_some_and(|latency| latency >= Duration::from_millis(40)),
         "官方地址同样参与测速：国内直连慢时就不该被选中"
     );
 }

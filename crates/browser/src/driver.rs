@@ -21,9 +21,9 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use chromiumoxide::Handler;
 use chromiumoxide::browser::{Browser, BrowserConfig};
 use chromiumoxide::handler::viewport::Viewport;
-use chromiumoxide::Handler;
 use futures::StreamExt;
 
 use crate::procctl;
@@ -115,7 +115,7 @@ pub async fn launch(spec: &LaunchSpec, generation: u64) -> Result<(Session, Sess
     // 残留进程会让本次 launch 以 `ExitStatus(21)` 这种看不出所以然的形态失败。
     // 只有「真的被别的实例占着」才中止 —— 否则宁可扫干净再启。
     match procctl::reap_stale(&spec.profile_dir).await {
-        Ok(procctl::Reaped::Reaped) => {
+        Ok(procctl::Reaped::ProcessTree) => {
             tracing::info!("已回收上次残留的浏览器进程,本次为干净冷启动")
         }
         Ok(_) => {}
@@ -274,7 +274,10 @@ pub fn detect_browser_executable() -> Result<PathBuf, String> {
     if let Some(path) = env_executable("CHROME") {
         return Ok(path);
     }
-    if let Some(path) = common_install_paths().into_iter().find(|path| path.is_file()) {
+    if let Some(path) = common_install_paths()
+        .into_iter()
+        .find(|path| path.is_file())
+    {
         return Ok(path);
     }
     chromiumoxide::detection::default_executable(chromiumoxide::detection::DetectionOptions {

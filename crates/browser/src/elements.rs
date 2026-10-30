@@ -118,7 +118,8 @@ impl Renderer<'_> {
             if let Some(backend_id) = node.backend_dom_node_id {
                 let reference = format!("e{}", self.next_ref);
                 self.next_ref += 1;
-                self.refs.insert(reference.clone(), backend_id.inner().to_owned());
+                self.refs
+                    .insert(reference.clone(), backend_id.inner().to_owned());
                 line.push_str(&format!(" [ref={reference}]"));
             }
             if !value.is_empty() {
@@ -182,9 +183,9 @@ pub async fn resolve_element(
     let trimmed = target.trim();
     let bare = normalize_ref(trimmed);
     if is_aria_ref(&bare) {
-        let backend = refs.get(&bare).ok_or_else(|| {
-            format!("元素引用 {bare} 不存在或已失效(页面导航后需重新 snapshot)")
-        })?;
+        let backend = refs
+            .get(&bare)
+            .ok_or_else(|| format!("元素引用 {bare} 不存在或已失效(页面导航后需重新 snapshot)"))?;
         return Ok(backend_id(*backend));
     }
     let locator = trimmed.strip_prefix("text=").map(unquote);
@@ -235,7 +236,12 @@ async fn find_by_text(page: &Page, text: &str) -> Result<BackendNodeId, String> 
     .await;
     // 搜索会话用完即弃。
     let _ = page
-        .execute(DiscardSearchResultsParams::builder().search_id(search_id).build().unwrap())
+        .execute(
+            DiscardSearchResultsParams::builder()
+                .search_id(search_id)
+                .build()
+                .unwrap(),
+        )
         .await;
     let node_id = fetch?;
     backend_from_node_id(page, node_id).await
@@ -285,7 +291,10 @@ pub async fn scroll_into_view(page: &Page, backend_node_id: BackendNodeId) -> Re
 }
 
 /// 元素内容四边形的中心点(不可见/零尺寸时报错)。
-pub async fn element_center(page: &Page, backend_node_id: BackendNodeId) -> Result<(f64, f64), String> {
+pub async fn element_center(
+    page: &Page,
+    backend_node_id: BackendNodeId,
+) -> Result<(f64, f64), String> {
     let quads = page
         .execute(
             GetContentQuadsParams::builder()
@@ -476,8 +485,7 @@ fn char_key_definition(character: char) -> Option<()> {
 /// (`Enter`/`Tab`/`Escape`/`ArrowDown`/`a`…)。
 pub async fn press_key(page: &Page, key_spec: &str) -> Result<(), String> {
     let (modifiers, key_name) = parse_key_spec(key_spec);
-    let definition = lookup_key(&key_name)
-        .ok_or_else(|| format!("无法识别的按键: {key_spec}"))?;
+    let definition = lookup_key(&key_name).ok_or_else(|| format!("无法识别的按键: {key_spec}"))?;
 
     let mut builder = DispatchKeyEventParams::builder();
     let down_type = if let Some(text) = definition.text {
@@ -500,14 +508,9 @@ pub async fn press_key(page: &Page, key_spec: &str) -> Result<(), String> {
     page.execute(builder.clone().r#type(down_type).build().unwrap())
         .await
         .map_err(|error| format!("按键失败({key_spec}): {error}"))?;
-    page.execute(
-        builder
-            .r#type(DispatchKeyEventType::KeyUp)
-            .build()
-            .unwrap(),
-    )
-    .await
-    .map_err(|error| format!("按键失败({key_spec}): {error}"))?;
+    page.execute(builder.r#type(DispatchKeyEventType::KeyUp).build().unwrap())
+        .await
+        .map_err(|error| format!("按键失败({key_spec}): {error}"))?;
     Ok(())
 }
 
@@ -651,13 +654,7 @@ pub async fn drag(page: &Page, from: (f64, f64), to: (f64, f64)) -> Result<(), S
 }
 
 /// 鼠标滚轮(页面滚动)。
-pub async fn wheel(
-    page: &Page,
-    x: f64,
-    y: f64,
-    delta_x: f64,
-    delta_y: f64,
-) -> Result<(), String> {
+pub async fn wheel(page: &Page, x: f64, y: f64, delta_x: f64, delta_y: f64) -> Result<(), String> {
     page.execute(
         DispatchMouseEventParams::builder()
             .x(x)
@@ -674,11 +671,7 @@ pub async fn wheel(
 }
 
 /// 在当前鼠标位置滚动的兜底:先移到视口中心再滚。
-pub async fn wheel_at_center(
-    page: &Page,
-    delta_x: f64,
-    delta_y: f64,
-) -> Result<(), String> {
+pub async fn wheel_at_center(page: &Page, delta_x: f64, delta_y: f64) -> Result<(), String> {
     wheel(page, 720.0, 450.0, delta_x, delta_y).await
 }
 
