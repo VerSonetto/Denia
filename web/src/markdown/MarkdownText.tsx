@@ -155,11 +155,14 @@ export const MarkdownText = memo(function MarkdownText({ text, streaming = false
   const streamRef = useRef<StreamingRenderer | null>(null)
   const repairRef = useRef<HeadingRepair | null>(null)
   const streamLabelsRef = useRef<MarkdownLabels>(labels)
-  // 流式时逐字 reveal:显示文本与模型到达文本分离(打字机效果)。
-  // settle / 非流式时 useTypewriter 立即返回全文,走 settled 渲染。
-  const displayText = useTypewriter(text, streaming)
+  // 流式时逐字 reveal:显示文本与模型到达文本分离(揭示引擎,见 typewriter.ts)。
+  // 生产端停下后残余还要按恒定速度排空;`done` 之前仍走增量解析路径,
+  // 定稿那一遍全量解析(数学公式、标题修复)因此顺延一个呼吸的时间。
+  const reveal = useTypewriter(text, streaming)
+  const displayText = reveal.text
+  const live = streaming || !reveal.done
   const children = useMemo(() => {
-    if (!streaming) {
+    if (!live) {
       streamRef.current = null
       repairRef.current = null
       // 定稿走全量修复:模型漏写的标题分隔空格与黏连的表格在这一遍统一还原。
@@ -173,6 +176,6 @@ export const MarkdownText = memo(function MarkdownText({ text, streaming = false
     // 修复后的文本不是原文的逐字前缀(拆分黏连会插入换行),增量解析器会因此
     // 重置冻结前缀。这是刻意取舍:拆分依赖后到的信息,只追加的方案做不到。
     return streamRef.current.render(repairRef.current.repair(displayText))
-  }, [displayText, streaming, labels])
+  }, [displayText, live, labels])
   return <div className="markdown">{children}</div>
 })

@@ -100,6 +100,10 @@ const stubs = new Map([
       if (b.postFailures > 0) { b.postFailures--; throw new Error('MOCK_POST_FAILURE'); }
       return { ok: true };
     }
+    export async function steerSession(...args) {
+      b.record('steerSession', args);
+      return { accepted: true };
+    }
     export async function uploadAttachment(...args) {
       b.record('uploadAttachment', args);
       return { path: 'mock-upload/' + args[0].name };
@@ -122,6 +126,7 @@ const stubs = new Map([
     export const getActiveWorkspace = () => b.snapshot.activeWs;
     export async function ensureSession(ws, ...options) { b.record('ensureSession', [ws, ...options]); return b.snapshot.activeId ?? (ws ? 'mock-new-session' : null); }
     export function notify(...args) { b.notifications.push(args); }
+    export function subscribeRunningStatus() { return () => {}; }
     export function setRunningStatus(id, running) { b.record('setRunningStatus', [id, running]); b.publish({ running }); }
     export function setActiveId(...args) {
       b.record('setActiveId', args);
@@ -141,8 +146,13 @@ const stubs = new Map([
     export function invalidateSession(...args) { b.record('invalidateSession', args); }
   `],
   ['features/conversation/useSessionContext', 'export const useSessionContext = () => ({ context: null });'],
-  ['hooks/useStickToBottom', `import { useMemo } from 'react';
-    export function useStickToBottom(ref) { return useMemo(() => ({ stick: true, snapToBottom() {}, release() {}, reset() {}, follow() {}, setNode(node) { ref.current = node; } }), [ref]); }
+  ['streaming/useFollow', `import { useMemo } from 'react';
+    export function useFollow(ref) { return useMemo(() => ({ stick: true, pressure: { speedCps: 0, speedAt: 0, scale: 1 }, snapToBottom() {}, release() {}, reset() {}, follow() {}, setPort(node) { ref.current = node; } }), [ref]); }
+  `],
+  ['streaming/pressure', `import { createContext } from 'react';
+    export const SmoothStreamContext = createContext(null);
+    export const useStreamPressure = () => null;
+    export const createPressure = () => ({ speedCps: 0, speedAt: 0, scale: 1 });
   `],
   ['hooks/useContainedWheel', "import { useRef } from 'react'; export const useContainedWheel = () => useRef(null);"],
   ['components/PermissionSelector', `export const PermissionSelector = () => null;
@@ -580,8 +590,33 @@ try {
     assert.equal(chip().querySelector('.att-name').textContent, expectedTitle(source))
     await click(sendButton())
     assertPostedQuote(calls('postPrompt')[1], source, active.id)
-    assert.deepEqual(calls('postPrompt')[1].args, calls('postPrompt')[0].args)
+    // 自动发送带 source=queue；用户编辑后手动重发是普通来源。除来源标记外
+    // 载荷必须逐字一致，避免编辑回填丢引用/附件。
+    assert.deepEqual(
+      { ...calls('postPrompt')[1].args[1], source: undefined },
+      { ...calls('postPrompt')[0].args[1], source: undefined },
+    )
+    assert.equal(calls('postPrompt')[1].args[1].source, 'user')
     assert.equal(chip(), null)
+  })
+
+  await test('6b 队列立即发送选择器：引导立即交给服务端且不打断', async () => {
+    await mount({ activeId: active.id, running: true })
+    await setDraft('Guide this step')
+    await click(sendButton())
+    assert.equal(bridge.queue.length, 1)
+    const picker = document.querySelector('.queue-send-picker')
+    assert.ok(picker, '队列条目必须有左右发送方式选择器')
+    assert.equal(document.querySelector('.queue-send-menu'), null, '不得再出现悬浮菜单')
+    const choices = [...document.querySelectorAll('.queue-send-choice')].map(node => node.textContent)
+    assert.deepEqual(choices, [t('queueModeInterject'), t('queueModeGuide')], '左右选择器依次提供插话与引导')
+    await click(document.querySelector('.queue-guide'))
+    await waitFor(() => calls('steerSession').length === 1, 'Guiding must call the steer endpoint immediately')
+    assert.deepEqual(calls('steerSession')[0].args, [active.id, { id: bridge.queue[0].id, prompt: 'Guide this step' }])
+    assert.equal(calls('cancelSession').length, 0, '引导不得打断当前轮次')
+    await waitFor(() => document.querySelector('.queue-mode')?.textContent.includes(t('queueStateSteering')), '引导必须显示已交给模型的状态')
+    assert.equal(document.querySelector('.queue-send-picker'), null, '已交给模型的引导不再提供重复发送入口')
+    assert.ok(document.querySelector('.queue-steering-state'), '等待态必须可见')
   })
 
   // Latest UI contract: modes stay available with existing text, regardless of session age.

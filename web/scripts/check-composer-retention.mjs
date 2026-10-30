@@ -60,14 +60,20 @@ const stubs = new Map([
     export const useRunningFor = () => b.running;
     export function notify(...args) { b.notifications.push(args); }
     export async function ensureSession() { throw new Error('Unexpected session creation'); }
+    export function subscribeRunningStatus() { return () => {}; }
     export function setRunningStatus() {} export function setActiveId() {}
     export function markStarted() {} export function markCompacting() {}
     export function refreshList() {} export function addSessionLocal() {}
   `],
   ['sessionStreams', 'export function attach() { return () => {}; } export function ensureFollowing() {} export function invalidateSession() {}'],
   ['features/conversation/useSessionContext', 'export const useSessionContext = () => ({ context: null });'],
-  ['hooks/useStickToBottom', `import { useMemo } from 'react';
-    export function useStickToBottom(ref) { return useMemo(() => ({ stick: true, snapToBottom() {}, release() {}, reset() {}, follow() {}, setNode(node) { ref.current = node; } }), [ref]); }
+  ['streaming/useFollow', `import { useMemo } from 'react';
+    export function useFollow(ref) { return useMemo(() => ({ stick: true, pressure: { speedCps: 0, speedAt: 0, scale: 1 }, snapToBottom() {}, release() {}, reset() {}, follow() {}, setPort(node) { ref.current = node; } }), [ref]); }
+  `],
+  ['streaming/pressure', `import { createContext } from 'react';
+    export const SmoothStreamContext = createContext(null);
+    export const useStreamPressure = () => null;
+    export const createPressure = () => ({ speedCps: 0, speedAt: 0, scale: 1 });
   `],
   ['hooks/useContainedWheel', "import { useRef } from 'react'; export const useContainedWheel = () => useRef(null);"],
   ['components/PermissionSelector', "export const PermissionSelector = () => null; export const loadPermission = () => 'auto-edit'; export const hasStoredPermission = () => false;"],

@@ -791,13 +791,21 @@ button.btn.form-action {
   padding: 6px 12px;
 }
 
-/* ---- 消息队列面板(输入框上方,与 todo panel 同级) ---- */
+/* ---- 消息队列面板(输入框上方,与 todo / 目标条同一条停靠栈) ----
+ *
+ * 和 .todo-panel 共用同一套「停靠面板」口径:同一个表面色与圆角、40px 头部、
+ * 内容左缘落在 --dock-inset 上、13px 正文。队列条是输入区的待发件箱,不是
+ * 独立卡片:比输入卡更重的投影、更大的圆角或另一套标题字号,都会把它从停靠
+ * 栈里摘出去,和紧挨着的 todo 面板对不齐。 */
 
 .queue-panel {
   box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
   flex: none;
-  overflow: hidden;
   width: 100%;
+  min-width: 0;
+  overflow: hidden;
   border: 1px solid var(--border-l1);
   border-radius: var(--r-md);
   background: var(--composer-panel-surface);
@@ -805,113 +813,166 @@ button.btn.form-action {
 
 .queue-head {
   display: flex;
+  flex: none;
   align-items: center;
-  /* 8px:与列表行同格,面板里的所有竖向间隙收敛到 8/6 两档。 */
   gap: 8px;
-  width: 100%;
-  /* 10px + 18px 行高 = 38px 内容高,加上下边框 40px,与 todo 面板、目标条
-     三张卡片完全同高,叠在输入卡上方时边缘能连成一条线。min-height 是这道
-     下限的护栅:正文行高将来一改,头部不会被行高悄悄带高或带矮。 */
+  /* 与 .todo-header 同高同缩进:两块面板上下相邻,头部高度或左缘差 1px
+     都会在输入区上方显出一条错缝。面板的 1px 边框由这里补回,内容正好
+     落在 --dock-inset 上。 */
   min-height: 40px;
-  /* 左内边距比头部内边距少 1px:面板有 1px 边框,减掉它内容才落在 --dock-inset
-     上,与输入卡里的控件、状态栏胶囊对齐。 */
   padding: 10px 12px 10px calc(var(--dock-inset, 10px) - 1px);
-  border: none;
-  background: transparent;
-  /* 显式给字号行高:不写的话这里继承 button 的 UA 字体(13.33px/normal),
-     任何直接写进头部的文本都会掉出面板的字号阶梯。 */
+  border-bottom: 1px solid var(--border-l1);
+  color: var(--label-tertiary);
+  font-family: var(--font-ui);
   font-size: 13px;
   line-height: 18px;
-  font-family: var(--font-ui);
 }
 
 .queue-lead {
-  display: grid;
+  display: inline-flex;
   flex: none;
-  place-items: center;
+  align-items: center;
   color: var(--label-tertiary);
 }
 
-/* 面板字阶共三档:标题 13/18/600、正文 13/20/400、元信息 12/18/400。
-   标题靠字重与行高分开,不再靠另一个字号(13px 已经不能再降,降了就与元信息
-   挤在同一档)。 */
 .queue-title {
   flex: none;
+  color: var(--label-primary);
   font-size: 13px;
-  line-height: 18px;
   font-weight: 600;
   letter-spacing: 0.01em;
-  color: var(--label-primary);
+  line-height: 18px;
 }
 
 .queue-count {
   flex: none;
-  font-size: 12px;
-  line-height: 18px;
+  min-width: 20px;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: var(--bg-layer-2);
   color: var(--label-tertiary);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  line-height: 18px;
+  text-align: center;
 }
 
 .queue-hint {
   flex: 1 1 auto;
   min-width: 0;
   overflow: hidden;
-  font-size: 12px;
-  line-height: 18px;
-  color: var(--label-caption);
+  color: var(--label-tertiary);
+  font-size: 11px;
+  line-height: 1.4;
+  text-align: right;
   text-overflow: ellipsis;
   white-space: nowrap;
-  text-align: right;
 }
 
 .queue-list {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
   margin: 0;
-  /* 上 4px:原先的 2px 贴着头部分隔线,行与头之间几乎没有呼吸。 */
-  padding: 4px 12px 12px calc(var(--dock-inset, 10px) - 1px);
-  list-style: none;
-  max-height: 200px;
+  padding: 2px 0;
+  max-height: 224px;
   overflow-y: auto;
+  scrollbar-width: thin;
 }
 
 .queue-item {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: 8px;
   min-width: 0;
-  font-size: 13px;
-  line-height: 20px;
+  /* 左缘与头部标题同一条竖线:索引占 20px、间隙 8px,正文再右移 28px;
+     右缘留 12px 给动作键,和头部的右内边距对齐。 */
+  padding: 7px 12px 7px calc(var(--dock-inset, 10px) - 1px);
   color: var(--label-secondary);
+  transition: background 0.12s var(--ease);
 }
 
-.queue-content {
+.queue-item + .queue-item {
+  box-shadow: inset 0 1px 0 color-mix(in srgb, var(--border-l1) 70%, transparent);
+}
+
+.queue-item:hover,
+.queue-item:focus-within {
+  background: var(--hover-fill);
+}
+
+.queue-item.steering {
+  background: color-mix(in srgb, var(--accent-soft) 55%, transparent);
+}
+
+.queue-index {
+  display: grid;
+  flex: none;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  /* 正文行高 26(见 .queue-line),20px 的方格下移 3px 才和它同心。 */
+  margin-top: 3px;
+  border-radius: 6px;
+  background: var(--bg-layer-2);
+  color: var(--label-tertiary);
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+}
+
+.queue-main {
   display: flex;
   flex: 1 1 auto;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.queue-line {
+  display: flex;
   align-items: center;
   gap: 8px;
   min-width: 0;
+  /* 撑到选择器的高度:13px 正文、18px 状态胶囊与 26px 分段胶囊共用一条
+     中线,行高也正好 40px,与头部同格。 */
+  min-height: 26px;
 }
 
 .queue-text {
+  flex: 1 1 auto;
   min-width: 0;
   overflow: hidden;
+  color: var(--label-primary);
+  font-size: 13px;
+  line-height: 20px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.queue-text-muted {
-  color: var(--label-tertiary);
-  font-style: italic;
-}
-
-/* 队列项的媒体行:引用/附件芯片 + 图片缩略图,横向排列不换行。 */
-.queue-media {
-  display: flex;
+.queue-mode {
+  display: inline-flex;
   flex: none;
   align-items: center;
   gap: 4px;
-  max-width: 45%;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: var(--bg-layer-2);
+  color: var(--label-secondary);
+  font-size: 11px;
+  line-height: 18px;
+  white-space: nowrap;
+}
+
+.queue-mode.steering {
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+.queue-media {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  max-height: 44px;
   overflow: hidden;
 }
 
@@ -922,13 +983,12 @@ button.btn.form-action {
   gap: 4px;
   max-width: 160px;
   padding: 1px 7px;
-  border: 1px solid var(--border-l1);
-  border-radius: 4px;
+  border: none;
+  border-radius: 6px;
   background: var(--bg-layer-2);
-  /* 12px:芯片里装的是文件名与引用标题,11px 下长名字只能靠悬停才能认出来。 */
-  font-size: 12px;
-  line-height: 16px;
   color: var(--label-tertiary);
+  font-size: 10.5px;
+  line-height: 16px;
 }
 
 .queue-chip-name {
@@ -941,12 +1001,10 @@ button.btn.form-action {
 .queue-thumb {
   display: block;
   flex: none;
-  /* 28×22:比 12px 芯片(20px)高 2px,缩略图不再比旁边的芯片矮一截。 */
-  width: 28px;
-  height: 22px;
+  width: 26px;
+  height: 20px;
   overflow: hidden;
-  border: 1px solid var(--border-l1);
-  border-radius: 4px;
+  border-radius: 5px;
   background: var(--bg-layer-2);
 }
 
@@ -962,6 +1020,8 @@ button.btn.form-action {
   flex: none;
   align-items: center;
   gap: 2px;
+  /* 动作区自身 26px 高(选择器撑起),与 .queue-line 同高,不再用负边距
+     对中线;带图片的行,动作区仍贴住第一行正文。 */
 }
 
 .queue-action {
@@ -969,6 +1029,12 @@ button.btn.form-action {
   height: 24px;
   border-radius: 6px;
   color: var(--label-tertiary);
+  opacity: 0.65;
+}
+
+.queue-item:hover .queue-action,
+.queue-item:focus-within .queue-action {
+  opacity: 1;
 }
 
 .queue-action:hover {
@@ -976,18 +1042,116 @@ button.btn.form-action {
   color: var(--label-primary);
 }
 
-.queue-send-now:hover {
-  color: var(--label-primary);
+.queue-send-picker {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  /* 分段胶囊:底槽用 active-fill,两档本身透明,悬停时才抬起一层 ——
+     不画边框,免得这一行里冒出一块像输入框的控件。 */
+  padding: 2px;
+  border: none;
+  border-radius: 999px;
   background: var(--active-fill);
 }
 
+.queue-send-choice {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 22px;
+  padding: 0 8px;
+  border: none;
+  background: transparent;
+  color: var(--label-primary);
+  font-family: var(--font-ui);
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background 0.12s var(--ease), color 0.12s var(--ease);
+}
+
+/* 两半只在外侧收圆:中间那道直边留给分隔线,不会画出一条穿过弧边的线。 */
+.queue-send-choice:first-child {
+  border-radius: 999px 0 0 999px;
+}
+
+.queue-send-choice:last-child {
+  border-radius: 0 999px 999px 0;
+}
+
+.queue-send-choice > svg {
+  flex: none;
+  opacity: 0.55;
+}
+
+.queue-send-choice:hover {
+  background: var(--hover-fill);
+  color: var(--label-primary);
+}
+
+.queue-send-choice:hover > svg {
+  opacity: 1;
+}
+
+.queue-send-choice:active {
+  background: var(--active-fill);
+}
+
+/* 1px 底槽色:读起来是一条胶囊的两个选项,而不是两颗各自为政的键。 */
+.queue-send-choice + .queue-send-choice {
+  box-shadow: inset 1px 0 0 var(--border-l1);
+}
+
+/* 键盘焦点:与输入区其他控件同一档(2px、外扩 2px)。行本身的
+   :focus-within 只给一层底色,不足以指出是哪一颗键。 */
+.queue-send-choice:focus-visible,
+.queue-action:focus-visible {
+  outline: 2px solid var(--label-secondary);
+  outline-offset: 2px;
+}
+
 .queue-delete:hover {
-  color: var(--danger);
+  color: var(--danger-fg);
   background: var(--danger-soft);
 }
 
-/* ---- todo panel (docked above the composer) ---- */
+@media (max-width: 560px) {
+  .queue-head {
+    gap: 6px;
+  }
 
+  .queue-hint {
+    display: none;
+  }
+
+  /* 一行放不下「正文 + 状态 + 选择器 + 两个动作键」:正文独占一行,动作区
+     换到第二行,左缘退到正文列(索引 20 + 间隙 8)。 */
+  .queue-item {
+    flex-wrap: wrap;
+    /* 左缘仍落在 --dock-inset 上(减 1px 补面板边框),与头部图标、
+     todo 列表同一条竖线;右侧留 12px,删除键不会顶出面板圆角。 */
+    padding: 7px 12px 7px calc(var(--dock-inset, 10px) - 1px);
+  }
+
+  .queue-main {
+    flex-basis: calc(100% - 28px);
+  }
+
+  .queue-actions {
+    /* 不能再用基类的 flex:none + width:100%:左上边距 28px 会让它比行内容
+       宽 28px,靠 overflow:hidden 被裁掉的恰好是删除键。 */
+    flex: 1 1 100%;
+    width: auto;
+    margin-top: 2px;
+    margin-left: 28px;
+  }
+
+  .queue-send-picker {
+    margin-right: auto;
+  }
+}
 .todo-panel {
   box-sizing: border-box;
   flex: none;

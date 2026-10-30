@@ -4,7 +4,7 @@ import { sessionDisplayTitle } from '../../sessionDisplay'
 import { SESSION_DRAG_MIME } from '../../splitView'
 import type { DropPlacement } from '../../sidebarOrder'
 import type { SessionSummary } from '../../types'
-import { IconCaretRight, IconPin, IconTrash } from '../icons'
+import { IconCaretRight, IconPin, IconTarget, IconTrash } from '../icons'
 import { relativeTimeLabel } from './nesting'
 
 export function SessionRow({
@@ -13,6 +13,7 @@ export function SessionRow({
   active,
   secondaryActive = false,
   running,
+  marked = false,
   now,
   childCount = 0,
   collapsed = false,
@@ -34,6 +35,8 @@ export function SessionRow({
   /** 分屏副窗格里的会话:弱高亮,与主窗格区分。 */
   secondaryActive?: boolean
   running: boolean
+  /** 用户手动标记为「进行中」(与 running 独立,跨轮次保留)。 */
+  marked?: boolean
   /** 行尾相对时间的当前时刻(侧栏级 60s 时钟)。 */
   now: number
   /** 后代总数:>0 时渲染折叠钮,折叠时显示 +n 徽标。 */
@@ -119,6 +122,16 @@ export function SessionRow({
         {pinned && (
           <span className="pin-mark" title={t('pinnedLabel')} aria-label={t('pinnedLabel')}>
             <IconPin size={10} />
+          </span>
+        )}
+        {marked && (
+          <span
+            className="in-progress-mark"
+            title={t('markedInProgressHint')}
+            aria-label={t('markedInProgressHint')}
+            data-testid="in-progress-mark"
+          >
+            <IconTarget size={11} />
           </span>
         )}
         {isSubagent && (

@@ -3,11 +3,13 @@ import { bumpCatalogTick } from '../../appStore'
 import { t } from '../../i18n'
 import {
   readCollapsedChildren,
+  readInProgressMarks,
   readSidebarFilter,
   readSidebarOrder,
   readSidebarPins,
   restoredSidebarSession,
   writeCollapsedChildren,
+  writeInProgressMarks,
   writeSidebarFilter,
   writeSidebarOrder,
   writeSidebarPins,
@@ -17,7 +19,7 @@ import { applyManualOrder, applyPins, moveId, toggleId } from '../../sidebarOrde
 import { sessionAlias, setSessionAlias } from '../../sessionAliases'
 import { sessionDisplayTitle } from '../../sessionDisplay'
 import type { SessionSummary, WorkspaceRecord } from '../../types'
-import { IconClose, IconNewSession, IconPencil, IconPin, IconSessionSearch, IconTrash, IconWorkspace } from '../icons'
+import { IconClose, IconNewSession, IconPencil, IconPin, IconSessionSearch, IconTarget, IconTrash, IconWorkspace } from '../icons'
 import { SidebarContextMenu, type SidebarMenuState } from '../SidebarContextMenu'
 import { ConfirmDialog } from '../ConfirmDialog'
 import type { SidebarDrag, SidebarDropTarget } from './nesting'
@@ -37,6 +39,7 @@ export function SidebarWorkspaces({
   activeId,
   secondaryId,
   runningIds,
+  sessionsLoaded,
   searchOpen,
   onSearchOpenChange,
   expandAllTick,
@@ -53,6 +56,8 @@ export function SidebarWorkspaces({
   /** 分屏副窗格的会话 id(弱高亮;null = 未分屏)。 */
   secondaryId?: string | null
   runningIds: Record<string, boolean>
+  /** 会话列表是否已从服务端加载完成:未完成前不能清理标记(空列表会误删)。 */
+  sessionsLoaded: boolean
   searchOpen: boolean
   onSearchOpenChange: (open: boolean) => void
   expandAllTick: number
@@ -71,6 +76,10 @@ export function SidebarWorkspaces({
   const [order, setOrder] = useState(readSidebarOrder)
   const [filter, setFilter] = useState<SidebarFilter>(readSidebarFilter)
   const [pins, setPins] = useState(readSidebarPins)
+  // 手动「进行中」标记:与 running 分开持久化,只有移除标记才消失。
+  const [inProgress, setInProgress] = useState<ReadonlySet<string>>(
+    () => new Set(readInProgressMarks()),
+  )
   const [confirming, setConfirming] = useState<{ kind: 'session' | 'workspace'; id: string } | null>(null)
   const [contextMenu, setContextMenu] = useState<SidebarMenuState | null>(null)
   const [renameTarget, setRenameTarget] = useState<SessionSummary | null>(null)
@@ -82,6 +91,51 @@ export function SidebarWorkspaces({
   const pinnedSessions = useMemo(() => new Set(pins.sessions), [pins.sessions])
   const revealedSessionRef = useRef(restoredSidebarSession(activeId))
   useEffect(() => { writeCollapsedChildren(collapsedChildren) }, [collapsedChildren])
+
+  /**
+   * 标记/取消标记「进行中」。
+   *
+   * 幂等:Set 语义下重复标记不会产生重复项;写回 localStorage 时也去重。
+   * 取消标记只影响本账本,不触碰服务端 running 状态。
+   */
+  const toggleInProgress = useCallback((id: string) => {
+    setInProgress((previous) => {
+      const next = new Set(previous)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      writeInProgressMarks([...next])
+      return next
+    })
+  }, [])
+
+  /**
+   * 会话删除/消失后清理标记。
+   *
+   * 必须等列表真正加载完成:首屏 sessions 为空,若此时按"不在列表里"清理,
+   * 会把重启后刚恢复的标记一次性抹掉。筛选本身也按列表过滤,所以多留几个
+   * 孤儿 id 不会显示出来,但清理能让账本不随长期使用无限增长。
+   *
+   * 空列表同样不能当作"会话都被删了":首次拉取失败时 appStore 也会把
+   * sessionsLoaded 置真(见 refreshList 的 catch),此时一次网络故障就会
+   * 清空账本。等下一次拿到非空列表再清理;期间孤儿标记不会显示。
+   * 一旦本次挂载见过非空列表,后续的空列表就是权威结果(例如删掉了最后
+   * 一个会话),仍按"不在列表里"清理。
+   */
+  const sawSessionsRef = useRef(false)
+  useEffect(() => {
+    if (!sessionsLoaded) return
+    if (sessions.length > 0) sawSessionsRef.current = true
+    else if (!sawSessionsRef.current) return
+    setInProgress((previous) => {
+      if (previous.size === 0) return previous
+      const alive = new Set(sessions.map((session) => session.id))
+      const next = new Set([...previous].filter((id) => alive.has(id)))
+      if (next.size === previous.size) return previous
+      writeInProgressMarks([...next])
+      return next
+    })
+  }, [sessions, sessionsLoaded])
+
   // 行尾相对时间的时钟;60s 一跳足够分钟级分桶。
   const [now, setNow] = useState(() => Date.now())
   const [query, setQuery] = useState('')
@@ -237,8 +291,9 @@ export function SidebarWorkspaces({
   const filtering = filter === 'running'
   const forceOpen = searching || filtering
   const matchesStatus = useCallback(
-    (session: SessionSummary) => !filtering || !!runningIds[session.id],
-    [filtering, runningIds],
+    (session: SessionSummary) =>
+      !filtering || !!runningIds[session.id] || inProgress.has(session.id),
+    [filtering, runningIds, inProgress],
   )
   const matchesSession = useCallback(
     (session: SessionSummary) => matchesQuery(session) && matchesStatus(session),
@@ -258,8 +313,10 @@ export function SidebarWorkspaces({
     filteredGroups.length === 0 &&
     filteredUngrouped.length === 0 &&
     (forceOpen || (orderedWorkspaces.length === 0 && ungrouped.length === 0))
+  // 计数 = 运行中 ∪ 手动标记:与筛选口径一致,避免出现"列表 3 项、角标 1"。
   const runningCount = sessions.reduce(
-    (count, session) => count + (runningIds[session.id] ? 1 : 0),
+    (count, session) =>
+      count + (runningIds[session.id] || inProgress.has(session.id) ? 1 : 0),
     0,
   )
 
@@ -468,6 +525,12 @@ export function SidebarWorkspaces({
           label: pinned ? t('unpin') : t('pinToTop'),
           icon: <IconPin size={13} />,
           onSelect: () => togglePinned('session', session.id),
+        },
+        {
+          key: 'in-progress',
+          label: inProgress.has(session.id) ? t('unmarkInProgress') : t('markInProgress'),
+          icon: <IconTarget size={13} />,
+          onSelect: () => toggleInProgress(session.id),
         },
         {
           key: 'delete',
@@ -684,6 +747,7 @@ export function SidebarWorkspaces({
                       active={session.id === activeId}
                       secondaryActive={!!secondaryId && session.id === secondaryId}
                       running={!!runningIds[session.id]}
+                      marked={inProgress.has(session.id)}
                       now={now}
                       childCount={descendantCount.get(session.id) ?? 0}
                       collapsed={collapsedChildren[session.id] === true}
@@ -795,6 +859,7 @@ export function SidebarWorkspaces({
                           active={session.id === activeId}
                           secondaryActive={!!secondaryId && session.id === secondaryId}
                           running={!!runningIds[session.id]}
+                          marked={inProgress.has(session.id)}
                           now={now}
                           childCount={descendantCount.get(session.id) ?? 0}
                           collapsed={collapsedChildren[session.id] === true}

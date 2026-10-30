@@ -270,8 +270,12 @@
   --nav-height: 39px;
   display: flex;
   flex-direction: column;
-  gap: 7px;
-  padding: 0 4px 25px;
+  gap: 6px;
+  /* 水平:外层 4px + 左对齐导航按钮(扩展)的内边距 8px = 12px，与
+   * .sidebar-region-head 的 12px 文字基线对齐；新建会话是居中填充按钮，
+   * 不参与这条左基线。垂直:底部 12px 与工作区头部的 32px 高呼吸一致，
+   * 不再用 25px 把「新建会话」和工作区列表拉成两段。 */
+  padding: 0 4px 12px;
   flex: none;
 }
 
@@ -280,10 +284,10 @@
   display: flex;
   align-items: center;
   justify-content: flex-start;
-  gap: 12px;
+  gap: 10px;
   min-height: var(--nav-height);
   margin: 0;
-  padding: 8px 12px;
+  padding: 8px 8px;
   border: none;
   border-radius: var(--r-sm);
   background: transparent;
@@ -318,7 +322,6 @@
   color: var(--label-primary);
   gap: 11px;
   padding: 0 12px;
-  margin-bottom: 1px;
   font-weight: 500;
 }
 .sidebar-new-btn:not(.sidebar-extensions-btn):hover {
@@ -335,6 +338,11 @@
 }
 @media (max-width: 820px) {
   .sidebar-primary { --nav-height: 44px; }
+  /* 手机上侧栏是 min(86vw, 320px) 的抽屉:宽态内容若仍冻结在桌面
+   * 280px 宽度,320px 屏幕(86vw≈275px)会把按钮右缘裁掉,宽屏手机则
+   * 在右侧留一段空白。抽屉宽度靠 transform 动画、不随展开收窄,
+   * 所以这里直接吃满内容区。 */
+  .shell[data-mobile] .sidebar-wide { width: 100%; }
 }
 @media (prefers-reduced-motion: reduce) {
   .sidebar :is(button, .ws-group-body) { transition: none; }
@@ -748,6 +756,15 @@
   display: inline-flex;
   align-items: center;
   color: var(--label-caption);
+}
+
+/* 手动「进行中」标记:与运行圆点区分(几何图标、强调色,不脉动)。 */
+.in-progress-mark {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  color: var(--accent);
+  opacity: 0.9;
 }
 
 .ws-group-head-row {

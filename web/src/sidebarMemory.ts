@@ -2,6 +2,7 @@ const CHILDREN_KEY = 'denia.sidebar-collapsed-children.v1'
 const ORDER_KEY = 'denia.sidebar-order.v1'
 const FILTER_KEY = 'denia.sidebar-filter.v1'
 const PINS_KEY = 'denia.sidebar-pins.v1'
+const IN_PROGRESS_KEY = 'denia.sidebar-in-progress.v1'
 
 /** 侧栏手动排序账本:工作区顺序、未分组会话顺序、每个工作区的会话顺序。 */
 export interface SidebarOrder {
@@ -125,6 +126,37 @@ export function writeSidebarPins(value: SidebarPins): void {
     }))
   } catch {
     // 写入失败只影响刷新后的置顶状态。
+  }
+}
+
+/**
+ * 手动标记为「进行中」的会话账本。
+ *
+ * 与 `runningIds`(服务端权威的正在跑)是**两个事实**:
+ * - running 是模型此刻是否在产出,轮次结束就消失;
+ * - 标记是用户显式的工作清单,只有「移除标记」或会话被删除才会消失。
+ *
+ * 「进行中任务」筛选展示两者的并集:标记项跨轮次、跨重启保留,running 项
+ * 仍按原行为即时进出。账本只存 id,列表渲染时按会话表过滤 —— 会话删掉后
+ * 下次读取自然不再出现,不留下永远点不到的孤儿。
+ */
+export function readInProgressMarks(): string[] {
+  try {
+    const value: unknown = JSON.parse(window.localStorage.getItem(IN_PROGRESS_KEY) ?? '[]')
+    // 写入已去重;读取也兜住手工编辑/旧版本留下的重复 id。
+    return [...new Set(readIdList(value))]
+  } catch {
+    return []
+  }
+}
+
+export function writeInProgressMarks(ids: readonly string[]): void {
+  try {
+    const unique = [...new Set(ids.filter((id) => id.length > 0))]
+    if (unique.length === 0) window.localStorage.removeItem(IN_PROGRESS_KEY)
+    else window.localStorage.setItem(IN_PROGRESS_KEY, JSON.stringify(unique))
+  } catch {
+    // 写入失败只影响刷新后的标记,本次页面内的勾选仍然生效。
   }
 }
 

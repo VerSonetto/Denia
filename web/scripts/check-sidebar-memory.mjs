@@ -22,6 +22,7 @@ try {
     readCollapsedChildren, writeCollapsedChildren, restoredSidebarSession,
     readSidebarOrder, writeSidebarOrder, readSidebarFilter, writeSidebarFilter,
     readSidebarPins, writeSidebarPins,
+    readInProgressMarks, writeInProgressMarks,
   } = await import(pathToFileURL(output).href)
 
   assert.deepEqual(readCollapsedChildren(), {})
@@ -66,6 +67,16 @@ try {
   store.set('denia.sidebar-pins.v1', '{"workspaces":["w",1,""],"sessions":"x"}')
   assert.deepEqual(readSidebarPins(), { workspaces: ['w'], sessions: [] }, '非法置顶项丢弃')
 
+  assert.deepEqual(readInProgressMarks(), [], '默认没有进行中标记')
+  writeInProgressMarks(['s1', 's1', '', 's2'])
+  assert.deepEqual(readInProgressMarks(), ['s1', 's2'], '标记去重且忽略空 id')
+  writeInProgressMarks([])
+  assert.equal(store.has('denia.sidebar-in-progress.v1'), false, '清空标记时移除键')
+  store.set('denia.sidebar-in-progress.v1', '{bad')
+  assert.deepEqual(readInProgressMarks(), [])
+  store.set('denia.sidebar-in-progress.v1', '["a",2,"b","a"]')
+  assert.deepEqual(readInProgressMarks(), ['a', 'b'], '非字符串标记丢弃且读取去重')
+
   window.localStorage.getItem = () => { throw new Error('blocked') }
   window.localStorage.setItem = () => { throw new Error('quota') }
   window.localStorage.removeItem = () => { throw new Error('blocked') }
@@ -73,10 +84,12 @@ try {
   assert.deepEqual(readSidebarOrder(), { workspaces: [], ungrouped: [], sessions: {} })
   assert.deepEqual(readSidebarPins(), { workspaces: [], sessions: [] })
   assert.equal(readSidebarFilter(), 'all')
+  assert.deepEqual(readInProgressMarks(), [])
   assert.doesNotThrow(() => writeCollapsedChildren({ parent: true }))
   assert.doesNotThrow(() => writeSidebarOrder({ workspaces: ['w'], ungrouped: [], sessions: {} }))
   assert.doesNotThrow(() => writeSidebarPins({ workspaces: ['w'], sessions: ['s'] }))
   assert.doesNotThrow(() => writeSidebarFilter('running'))
+  assert.doesNotThrow(() => writeInProgressMarks(['s']))
   // 侧栏工作区树已整体抽到 components/sidebar;以下断言跟随迁移落在新文件。
   const app = readFileSync(join(root, 'src/components/sidebar/SidebarWorkspaces.tsx'), 'utf8')
   assert.ok(app.includes('useState(readCollapsedChildren)'))
@@ -84,6 +97,21 @@ try {
   assert.ok(app.includes('beginSessionDrag'), '侧栏会话支持拖动排序')
   assert.ok(app.includes('beginWorkspaceDrag'), '侧栏工作区支持拖动排序')
   assert.ok(app.includes("t('sidebarFilterRunning')"), '侧栏提供进行中筛选标签')
+  assert.ok(app.includes('markInProgress'), '会话右键菜单提供标记进行中')
+  assert.ok(app.includes('unmarkInProgress'), '会话右键菜单提供移除标记')
+  assert.ok(app.includes('inProgress.has(session.id)'), '进行中筛选按手动标记与 running 的并集')
+  assert.ok(app.includes('readInProgressMarks'), '标记跨重启恢复')
+  assert.ok(app.includes('writeInProgressMarks'), '标记持久化到本机账本')
+  assert.ok(app.includes('sessionsLoaded'), '列表加载完成前不清理标记')
+  assert.ok(app.includes('sawSessionsRef'), '首次空列表不清标记,见过真实列表后空列表才权威')
+  assert.equal(
+    app.split('marked={inProgress.has(session.id)}').length - 1,
+    2,
+    '分组与未分组会话都传入标记',
+  )
+  const row = readFileSync(join(root, 'src/components/sidebar/SessionRow.tsx'), 'utf8')
+  assert.ok(row.includes('data-testid="in-progress-mark"'), '标记有稳定的测试锚点')
+  assert.ok(row.includes("t('markedInProgressHint')"), '标记有可访问的提示文案')
   assert.ok(app.includes('openSessionMenu'), '会话支持自定义右键菜单')
   assert.ok(app.includes('openWorkspaceMenu'), '工作区支持自定义右键菜单')
   assert.ok(app.includes("t('confirmDeleteInline')"), '删除改为行内二次确认')

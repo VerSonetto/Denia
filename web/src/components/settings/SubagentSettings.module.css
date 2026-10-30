@@ -130,6 +130,11 @@
   color: var(--label-caption);
 }
 
+/* 显式模型已不在目录里：不是硬错误(派遣会回退)，但必须让人看见。 */
+.modelWarn {
+  color: var(--danger-fg);
+}
+
 .defActions {
   display: flex;
   flex-wrap: wrap;
@@ -319,6 +324,11 @@
 
 .alertTitle {
   font-weight: 650;
+}
+
+/* 模型不可用提示占满表单网格整行，避免和 provider/model 选择器挤在一列。 */
+.modelAlert {
+  grid-column: 1 / -1;
 }
 
 .alertList {

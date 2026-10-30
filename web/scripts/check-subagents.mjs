@@ -229,6 +229,32 @@ assert('新页面固定说明继承语义', settings.includes("t('subagentsInher
 assert('新页面固定说明禁止二次派遣', settings.includes("t('subagentsNoDispatchNote')"))
 assert('没有全局 AGENTS.md 开关', !settings.toLowerCase().includes('includeglobal'))
 assert('没有深度开关', !settings.includes('maxDepth') && !settings.includes('max_depth'))
+assert(
+  '模型来源与不可用提示可渲染',
+  settings.includes('subagentsModelSourceInherit') &&
+    settings.includes('subagentsModelSourceExplicit') &&
+    settings.includes('subagentsModelUnavailable'),
+)
+assert(
+  '预览展示 modelFallback',
+  settings.includes('preview.modelFallback'),
+)
+assert(
+  '有模型目录时用选择器',
+  settings.includes('function ExplicitModelFields') &&
+    settings.includes('groups.length > 0') &&
+    settings.includes("label=\"provider\""),
+)
+assert(
+  '没有模型目录时回退文本框',
+  settings.includes('<TextInput value={model.provider}') &&
+    settings.includes('<TextInput value={model.model}'),
+)
+assert(
+  '目录缺项时保留已保存模型值',
+  settings.includes('providerOptions.push') && settings.includes('modelOptions.push'),
+)
+assert('显式模型选择进入保存载荷', settings.includes('onModelChange') && settings.includes('model: profile.model'))
 
 const modal = read('web/src/components/SettingsModal.tsx')
 assert('设置弹窗挂载子代理页', modal.includes('<SubagentSettings notify={notify} />'))
@@ -252,6 +278,11 @@ for (const path of [
   assert(`路由存在 ${path}`, routes.includes(path))
 }
 assert('project 作用域不接受任意 filePath', !routes.includes('filePath'))
+assert(
+  '预览 API 返回 modelFallback',
+  routes.includes('"modelFallback": model_fallback') &&
+    routes.includes('model_origin == resolver::ModelOrigin::ProfileExplicit'),
+)
 
 // 生成的 wire 类型包含运行快照字段（bindings 漂移守卫）。
 const generated = read('web/src/generated/core.ts')

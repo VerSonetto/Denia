@@ -565,6 +565,9 @@
   .queue-head { min-height: 44px; padding: 12px 12px 12px calc(var(--dock-inset, 10px) - 1px); }
   .goal-bar { min-height: 46px; padding: 12px 8px 12px calc(var(--dock-inset, 10px) - 1px); }
   .queue-action { width: 32px; height: 32px; }
+  /* 分段选择器同时是触摸目标:22px 的桌面档位手指按不准,抬到 30px;
+     两半之间仍只靠 1px 底槽色分隔。 */
+  .queue-send-choice { height: 30px; padding: 0 10px; font-size: 13px; }
 }
 @media (prefers-reduced-motion: reduce) {
   .prompt-panel,

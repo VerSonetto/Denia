@@ -18,9 +18,11 @@
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import * as api from '../../api'
+import { subscribeServerEvents } from '../../serverEvents'
 import { t } from '../../i18n'
 import type { Notify } from '../../App'
 import type {
+  ModelCatalog,
   ModelSelection,
   ProfileSource,
   ProfileWriteScope,
@@ -76,6 +78,7 @@ export function SubagentSettings({ notify }: { notify: Notify }) {
   const [workspaces, setWorkspaces] = useState<{ id: string; title: string; path: string }[]>([])
   const [workspaceId, setWorkspaceId] = useState('')
   const [catalog, setCatalog] = useState<SubagentCatalogView | null>(null)
+  const [models, setModels] = useState<ModelCatalog | null>(null)
   const [tools, setTools] = useState<SubagentToolsView | null>(null)
   const [draft, setDraft] = useState<Draft | null>(null)
   const [preview, setPreview] = useState<SubagentPreview | null>(null)
@@ -103,14 +106,16 @@ export function SubagentSettings({ notify }: { notify: Notify }) {
     setLoading(true)
     setError('')
     try {
-      const [profileView, toolView, settings, workspaceList] = await Promise.all([
+      const [profileView, toolView, settings, workspaceList, modelCatalog] = await Promise.all([
         api.listSubagentProfiles(scope),
         api.listSubagentTools(scope),
         api.getSettings(),
         api.listWorkspaces(),
+        api.getCatalog().catch(() => null),
       ])
       setCatalog(profileView)
       setTools(toolView)
+      setModels(modelCatalog)
       const rows = workspaceList.workspaces.map((entry) => ({
         id: entry.id,
         title: entry.title,
@@ -138,6 +143,16 @@ export function SubagentSettings({ notify }: { notify: Notify }) {
   useEffect(() => {
     void load()
   }, [load])
+
+  // 主代理用 create_subagent 写入永久定义时，管理页要即时出现新条目，
+  // 不需要用户关掉设置再打开。
+  useEffect(
+    () =>
+      subscribeServerEvents((type) => {
+        if (type === 'subagents-updated') void load()
+      }),
+    [load],
+  )
 
   const startCreate = () => {
     const profile = blankProfile()
@@ -401,6 +416,7 @@ export function SubagentSettings({ notify }: { notify: Notify }) {
           <DraftEditor
             draft={draft}
             tools={tools}
+            models={models}
             preview={preview}
             projectWritable={Boolean(catalog?.projectDir)}
             saving={saving}
@@ -439,6 +455,7 @@ export function SubagentSettings({ notify }: { notify: Notify }) {
                     <ProfileRow
                       key={view.qualifiedId}
                       view={view}
+                      models={models}
                       active={draft?.target === view.qualifiedId}
                       onEdit={() => startEdit(view, 'edit')}
                       onCopy={() => startEdit(view, 'copy')}
@@ -489,6 +506,7 @@ export function SubagentSettings({ notify }: { notify: Notify }) {
               <ProfileRow
                 key={view.qualifiedId}
                 view={view}
+                models={models}
                 shadowed
                 onCopy={() => startEdit(view, 'copy')}
               />
@@ -515,6 +533,7 @@ export function SubagentSettings({ notify }: { notify: Notify }) {
 
 function ProfileRow({
   view,
+  models,
   active,
   shadowed,
   onEdit,
@@ -524,6 +543,7 @@ function ProfileRow({
   onDelete,
 }: {
   view: SubagentProfileView
+  models: ModelCatalog | null
   active?: boolean
   shadowed?: boolean
   onEdit?: () => void
@@ -542,6 +562,16 @@ function ProfileRow({
     view.profile.model.mode === 'inherit'
       ? t('subagentsModelInherit')
       : `${view.profile.model.selection.provider}/${view.profile.model.selection.model}`
+  const availability =
+    view.profile.model.mode === 'explicit'
+      ? modelAvailability(models, view.profile.model.selection)
+      : 'inherit'
+  const modelHint =
+    availability === 'unavailable'
+      ? t('subagentsModelFallbackHint')
+      : availability === 'inherit'
+        ? t('subagentsModelSourceInherit')
+        : t('subagentsModelSourceExplicit')
   const diagnostic = view.diagnostics?.[0]?.message
   return (
     <article
@@ -572,7 +602,10 @@ function ProfileRow({
       {view.profile.description && <p className={styles.defDesc}>{view.profile.description}</p>}
       <p className={styles.defMeta}>
         <span>{tools}</span>
-        <span>{model}</span>
+        <span title={modelHint} className={availability === 'unavailable' ? styles.modelWarn : undefined}>
+          {model}
+          {availability === 'unavailable' ? ` · ${t('subagentsModelUnavailable')}` : ''}
+        </span>
         <span>
           {view.profile.permissionCeiling === 'read-only'
             ? t('subagentsCeilingReadOnly')
@@ -614,6 +647,7 @@ function ProfileRow({
 function DraftEditor({
   draft,
   tools,
+  models,
   preview,
   projectWritable,
   saving,
@@ -627,6 +661,7 @@ function DraftEditor({
 }: {
   draft: Draft
   tools: SubagentToolsView | null
+  models: ModelCatalog | null
   preview: SubagentPreview | null
   projectWritable: boolean
   saving: boolean
@@ -877,7 +912,7 @@ function DraftEditor({
           }
         />
         {profile.model.mode === 'explicit' && (
-          <ExplicitModelFields model={profile.model.selection} onChange={onModelChange} />
+          <ExplicitModelFields models={models} model={profile.model.selection} onChange={onModelChange} />
         )}
 
         <SetmActions>
@@ -901,12 +936,22 @@ function DraftEditor({
                     {preview.model?.provider}/{preview.model?.model}
                   </span>
                   <span>
+                    {preview.modelOrigin === 'parent'
+                      ? t('subagentsModelSourceInherit')
+                      : t('subagentsModelSourceExplicit')}
+                  </span>
+                  <span>
                     {preview.permissionCeiling === 'read-only'
                       ? t('subagentsCeilingReadOnly')
                       : t('subagentsCeilingInherit')}
                   </span>
                   <span>{preview.instructionScope}</span>
                 </p>
+                {preview.modelFallback && (
+                  <p className={styles.modelWarn} role="status">
+                    {preview.modelFallback}
+                  </p>
+                )}
                 <span className={styles.sectionLabel}>{t('subagentsPreviewTools')}</span>
                 {(preview.tools ?? []).length === 0 ? (
                   <p className={styles.hint}>{t('subagentsToolsNone')}</p>
@@ -932,15 +977,96 @@ function DraftEditor({
   )
 }
 
+/** 显式模型在目录里的可用性;`unknown` = 目录还没加载出来,不误报。 */
+function modelAvailability(
+  models: ModelCatalog | null,
+  selection: ModelSelection,
+): 'ok' | 'unavailable' | 'unknown' {
+  if (!models || models.groups.length === 0) return 'unknown'
+  const group = models.groups.find((entry) => entry.id === selection.provider)
+  if (!group) return 'unavailable'
+  return group.models.some((entry) => entry.id === selection.model) ? 'ok' : 'unavailable'
+}
+
 function ExplicitModelFields({
+  models,
   model,
   onChange,
 }: {
+  models: ModelCatalog | null
   model: ModelSelection
   onChange: (next: SubagentProfile['model']) => void
 }) {
   const patch = (part: Partial<ModelSelection>) =>
     onChange({ mode: 'explicit', selection: { ...model, ...part } })
+  const availability = modelAvailability(models, model)
+  const groups = models?.groups ?? []
+  const group = groups.find((entry) => entry.id === model.provider)
+  const modelInfo = group?.models.find((entry) => entry.id === model.model)
+  // 目录里没有当前保存的 provider/model 时，把已保存值作为一项保留在选择
+  // 器里：否则下拉框只显示占位符，用户看不到定义里究竟写了什么。
+  const providerOptions: SelectOption<string>[] = groups.map((entry) => ({
+    id: entry.id,
+    label: entry.name || entry.id,
+  }))
+  if (model.provider && !providerOptions.some((option) => option.id === model.provider)) {
+    providerOptions.push({ id: model.provider, label: model.provider })
+  }
+  const modelOptions: SelectOption<string>[] = (group?.models ?? []).map((entry) => ({
+    id: entry.id,
+    label: entry.name,
+  }))
+  if (model.model && !modelOptions.some((option) => option.id === model.model)) {
+    modelOptions.push({ id: model.model, label: model.model })
+  }
+  const effortOptions: SelectOption[] = [
+    { id: '', label: t('subagentsEffortDefault') },
+    ...(modelInfo?.reasoning?.efforts ?? []).map((effort) => ({
+      id: effort.id,
+      label: effort.name,
+    })),
+  ]
+
+  // 目录可用时给选择器(避免手输 provider/model 拼错);目录为空/加载失败
+  // 时退回文本框,不阻断用户编辑已有定义。
+  if (groups.length > 0) {
+    return (
+      <div className="setm-form-grid two">
+        <DropdownField
+          label="provider"
+          value={model.provider}
+          options={providerOptions}
+          onChange={(provider) => {
+            const nextGroup = groups.find((entry) => entry.id === provider)
+            patch({
+              provider,
+              model: nextGroup?.models[0]?.id ?? '',
+              reasoningEffort: undefined,
+            })
+          }}
+        />
+        <DropdownField
+          label="model"
+          value={model.model}
+          options={modelOptions}
+          onChange={(nextModel) => patch({ model: nextModel, reasoningEffort: undefined })}
+        />
+        <DropdownField
+          label="reasoning effort"
+          value={model.reasoningEffort ?? ''}
+          options={effortOptions}
+          onChange={(effort) => patch({ reasoningEffort: effort || undefined })}
+        />
+        {availability === 'unavailable' && (
+          <div className={`${styles.alert} ${styles.modelAlert}`} role="alert">
+            <span className={styles.alertTitle}>{t('subagentsModelUnavailable')}</span>
+            <p className={styles.hint}>{t('subagentsModelFallbackHint')}</p>
+          </div>
+        )}
+      </div>
+    )
+  }
+
   return (
     <div className="setm-form-grid two">
       <Field label="provider" error={null}>
