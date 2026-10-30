@@ -43,6 +43,7 @@ pub fn router() -> Router<Arc<AppState>> {
         )
         .route("/api/sessions/{id}/events", get(get_session_events))
         .route("/api/sessions/{id}/prompt", post(prompt_session))
+        .route("/api/sessions/{id}/steer", post(steer_session))
         .route("/api/sessions/{id}/cancel", post(cancel_session))
         .route(
             "/api/sessions/{id}/permission",
@@ -355,6 +356,19 @@ async fn prompt_session(
     Json(body): Json<crate::application::sessions::PromptCommand>,
 ) -> Result<impl IntoResponse, ApiError> {
     state.session_commands().submit_prompt(id, body).await?;
+    Ok((StatusCode::ACCEPTED, Json(json!({ "accepted": true }))))
+}
+
+/// 运行中「引导」：不打断当前输出/工具调用，在下一 step 边界注入。
+///
+/// 409 表示当前没有可引导的轮次（会话空闲/刚结束），前端应回落到普通队列，
+/// 而不是把消息丢掉。
+async fn steer_session(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(body): Json<crate::application::sessions::SteerCommand>,
+) -> Result<impl IntoResponse, ApiError> {
+    state.session_commands().steer_prompt(id, body).await?;
     Ok((StatusCode::ACCEPTED, Json(json!({ "accepted": true }))))
 }
 
@@ -867,6 +881,9 @@ async fn rewind_session(
     // 摘除(读状态表 + 压缩断路器),否则模型重读文件会拿到"未变更"却看不到
     // 内容、自动压缩也会按旧分支的失败计数熔断。
     state.driver.on_session_rewound(&id);
+    // 运行时里按 seq 记账的每会话状态(收件箱水位等)同样指向被截掉的分支:
+    // 不清掉的话回退后的子代理完成通知会静默丢失。
+    state.runtime.on_session_rewound(&id);
     let _ = state.events.send(ServerEvent::SessionsUpdated);
     Ok(Json(json!({
         "ok": true,

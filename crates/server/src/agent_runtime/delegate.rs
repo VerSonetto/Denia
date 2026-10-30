@@ -70,7 +70,7 @@ impl Runtime {
         let legacy_path = args.profile_id.is_none()
             && args.inline.is_none()
             && (args.persona.is_some() || args.allowed_tools.is_some());
-        let dispatch = if legacy_path {
+        let mut dispatch = if legacy_path {
             crate::subagents::resolver::legacy_dispatch(&args, fork, &parent_selection, &registered)
                 .map_err(|error| error.render())?
         } else {
@@ -100,7 +100,12 @@ impl Runtime {
             )
             .map_err(|error| error.render())?
         };
-        self.inner
+        // 模型可用性：显式配置不可用时**回退为跟随主会话**（需求：未配置、
+        // 配置无效或模型不可用都不能阻断派遣）。回退事实随结果返回，界面
+        // 与调用方都能看到"实际用的不是定义里写的那个"。
+        let mut model_fallback: Option<String> = None;
+        if let Err(error) = self
+            .inner
             .registry
             .resolve_call(
                 &dispatch.selection.provider,
@@ -108,7 +113,22 @@ impl Runtime {
                 dispatch.selection.reasoning_effort.as_deref(),
             )
             .await
-            .map_err(|e| e.to_string())?;
+        {
+            if dispatch.model_origin == crate::subagents::resolver::ModelOrigin::ProfileExplicit {
+                model_fallback = Some(format!(
+                    "子代理定义的模型 {}/{} 当前不可用（{}），已回退为跟随主会话 {}/{}",
+                    dispatch.selection.provider,
+                    dispatch.selection.model,
+                    error,
+                    parent_selection.provider,
+                    parent_selection.model
+                ));
+                dispatch.selection = parent_selection.clone();
+                dispatch.model_origin = crate::subagents::resolver::ModelOrigin::Parent;
+            } else {
+                return Err(error.to_string());
+            }
+        }
         let prompt = args.prompt.clone();
         if prompt.len() > config.output_bytes {
             return Err("子代理提示词过大".into());
@@ -316,6 +336,18 @@ impl Runtime {
             return Err("注入故障：返回 pending 前失败".to_string());
         }
         let _ = self.inner.events.send(ServerEvent::SessionsUpdated);
+        let mut trace = crate::trajectory::TraceRecord::now(owner, "subagent");
+        trace.operation = Some("spawned".into());
+        trace.agent_id = Some(owner.to_string());
+        trace.call_id = Some(id.clone());
+        trace.data = Some(json!({
+            "childId": id,
+            "profile": dispatch.qualified_id,
+            "inline": dispatch.inline,
+            "model": dispatch.selection,
+            "fork": fork,
+        }));
+        self.inner.trace.record(&trace);
         drop(admission);
         let mut result = background_result(json!({"childId":id,"messageId":message_id}), true);
         // 只回摘要，不回整份提示快照（计划 8.3）。
@@ -331,6 +363,9 @@ impl Runtime {
         });
         if !deprecations.is_empty() {
             result["deprecations"] = json!(deprecations);
+        }
+        if let Some(fallback) = model_fallback {
+            result["modelFallback"] = json!(fallback);
         }
         Ok(result)
     }

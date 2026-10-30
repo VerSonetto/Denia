@@ -15,6 +15,7 @@ use denia_core::{
 use denia_llm::{
     ChunkStream, GenerateRequest, LlmAdapter, LlmModelInfo, LlmResolvedModelInfo, ProviderInfo,
 };
+use futures::StreamExt as _;
 struct Mock;
 #[async_trait]
 impl LlmAdapter for Mock {
@@ -46,6 +47,108 @@ impl LlmAdapter for Mock {
         // 定义）本来就不该看到 skill。需要它的分支各自断言。
         if request.model == "hold" {
             return Ok(Box::pin(futures::stream::pending()));
+        }
+        // —— 用户轮次与子代理结算的交错（完成通知回归）——
+        // 两个模型都停在闸门上，由测试决定"谁先收尾"，从而复现
+        // "父代理跑用户轮次时/之后子代理才结束"这两种交错。
+        if request.model == "race-parent" {
+            let tool_results = request
+                .messages
+                .iter()
+                .filter(|message| message.role == denia_core::message::ChatRole::Tool)
+                .count();
+            if tool_results == 0 {
+                return Ok(tool_call_stream(
+                    "race-spawn",
+                    "spawn_agent",
+                    json!({"prompt":"后台调查","model":"race-child"}),
+                ));
+            }
+            if request
+                .messages
+                .iter()
+                .any(|message| message.content.contains("[子代理执行结束]"))
+            {
+                return Ok(text_stream("收到子代理结果"));
+            }
+            if RACE_PARENT_HOLD.load(Ordering::SeqCst) {
+                RACE_PARENT_STREAMING.store(true, Ordering::SeqCst);
+                return Ok(Box::pin(
+                    futures::stream::once(async {
+                        while !RACE_PARENT_OPEN.load(Ordering::SeqCst) {
+                            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                        }
+                        Ok(StreamChunk::BlockEnd {
+                            index: 0,
+                            block: ContentBlock::Text {
+                                text: "我先回复当前进度".into(),
+                            },
+                        })
+                    })
+                    .chain(futures::stream::iter(vec![Ok(
+                        StreamChunk::Finish {
+                            reason: FinishReason::Stop,
+                        },
+                    )])),
+                ));
+            }
+            return Ok(text_stream("我先回复当前进度"));
+        }
+        // —— 步骤边界引导注入 ——
+        // 模型在请求里看到排队的引导就正常收尾；看不到则给出可被测试判定的
+        // 失败文本。用于验证驱动器在**第一次请求前**就把引导落成用户消息。
+        if request.model == "steering-test" {
+            if request
+                .messages
+                .iter()
+                .any(|message| message.content.contains("引导测试"))
+            {
+                return Ok(text_stream("已收到引导"));
+            }
+            return Ok(text_stream("没收到引导"));
+        }
+        // —— 步骤边界：工具动作执行中排队，下一步就应看到 ——
+        // 首个请求先调用一个耗时工具，测试在这段时间里 steer；工具结果落盘后
+        // 下一次请求必须带上引导，而不是等整轮结束。
+        if request.model == "steering-midturn" {
+            let tool_results = request
+                .messages
+                .iter()
+                .filter(|message| message.role == denia_core::message::ChatRole::Tool)
+                .count();
+            if tool_results == 0 {
+                return Ok(tool_call_stream(
+                    "mid-slow-tool",
+                    "bash",
+                    json!({"command": "sleep 0.4"}),
+                ));
+            }
+            if request
+                .messages
+                .iter()
+                .any(|message| message.content.contains("中途引导"))
+            {
+                return Ok(text_stream("步骤边界收到引导"));
+            }
+            return Ok(text_stream("本轮没收到引导"));
+        }
+        if request.model == "race-child" {
+            return Ok(Box::pin(
+                futures::stream::once(async {
+                    while !RACE_CHILD_OPEN.load(Ordering::SeqCst) {
+                        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                    }
+                    Ok(StreamChunk::BlockEnd {
+                        index: 0,
+                        block: ContentBlock::Text {
+                            text: "子代理收尾".into(),
+                        },
+                    })
+                })
+                .chain(futures::stream::iter(vec![Ok(StreamChunk::Finish {
+                    reason: FinishReason::Stop,
+                })])),
+            ));
         }
         if request.model == "background-agent-parent" {
             let results: Vec<_> = request
@@ -894,6 +997,27 @@ async fn subagents_follow_profile_capability_and_hard_denied_rules() {
     assert_eq!(
         inline_desc.effective_tools.clone().unwrap(),
         vec!["grep".to_string(), "read_file".to_string()]
+    );
+    // inline 只是本次派遣的临时规格：不写进任何作用域的管理目录。
+    let catalog = state.subagent_profiles.catalog(Some(&ctx.cwd));
+    assert!(
+        catalog
+            .effective
+            .iter()
+            .all(|view| !view.qualified_id.starts_with("inline:")),
+        "inline 临时定义不得出现在管理目录：{:?}",
+        catalog
+            .effective
+            .iter()
+            .map(|view| view.qualified_id.as_str())
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        catalog
+            .effective
+            .iter()
+            .all(|view| view.profile.name != "缓存调查员"),
+        "inline 临时定义不得写入 ProfileStore"
     );
 
     // ⑤ 旧参数路径：显式列表最多与历史只读上限相交，绝不自动变全工具。
@@ -3961,4 +4085,1121 @@ async fn snapshot_failure_settles_child_and_notifies_parent_once() {
         before + 1,
         "同一轮失败只允许一条完成通知"
     );
+}
+
+// ——— 用户轮次与子代理结算的交错(完成通知回归)———
+//
+// 场景:主代理派出子代理后结束本轮;用户随后发了一条消息,父代理跑完这一轮;
+// 子代理在这**之后**(或**这一轮进行中**)才收尾。完成通知必须仍然自动送达
+// 父会话并起新一轮,不能停在收件箱里等用户再发一条消息。
+
+static RACE_CHILD_OPEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static RACE_PARENT_HOLD: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static RACE_PARENT_OPEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static RACE_PARENT_STREAMING: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// 上面几个闸门是进程级的,三条用例必须串行:并发跑会互相改写开关。
+/// 用 tokio 的 Mutex:守卫要跨 `.await` 持有整个用例,同步锁会被
+/// clippy `await_holding_lock` 拒绝,异步锁正是为这种用法设计的。
+static RACE_SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+async fn race_guard() -> tokio::sync::MutexGuard<'static, ()> {
+    RACE_SERIAL.lock().await
+}
+
+/// 以用户身份发一条消息(走真实 API 路径:human_turn + CAS + run_turn)。
+async fn post_prompt(state: Arc<crate::state::AppState>, id: &str, prompt: &str) {
+    use tower::ServiceExt;
+    let response = crate::api::router()
+        .with_state(state)
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri(format!("/api/sessions/{id}/prompt"))
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(
+                    json!({"prompt": prompt, "provider": "runtime-test", "model": "race-parent"})
+                        .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        response.status(),
+        axum::http::StatusCode::ACCEPTED,
+        "用户消息必须被接收"
+    );
+}
+
+/// 等父会话出现第 `at_least` 条包含 `needle` 的助手消息,并且已经空闲。
+async fn wait_for_reply(live: &Arc<crate::state::LiveSession>, needle: &str, at_least: usize) {
+    tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        loop {
+            let count = live
+                .session
+                .events()
+                .iter()
+                .filter(|event| {
+                    matches!(&event.event, SessionEvent::AssistantMessage { blocks, .. }
+                        if blocks.iter().any(|block| matches!(block, ContentBlock::Text { text } if text.contains(needle))))
+                })
+                .count();
+            if count >= at_least && !live.running.load(Ordering::SeqCst) {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("父代理未在期限内给出包含 {needle:?} 的回复"));
+}
+
+#[tokio::test]
+async fn completion_after_user_turn_still_reaches_parent() {
+    let _serial = race_guard().await;
+    let (state, ctx) = setup().await;
+    let owner = ctx.session_id.clone().unwrap();
+    let live = state.live.get(&owner).unwrap();
+    live.running.store(false, Ordering::SeqCst);
+    RACE_CHILD_OPEN.store(false, Ordering::SeqCst);
+    RACE_PARENT_HOLD.store(false, Ordering::SeqCst);
+    let state = Arc::new(state);
+
+    // 第一轮:派出子代理并结束本轮(子代理卡在闸门上,仍在运行)。
+    post_prompt(state.clone(), &owner, "派出子代理").await;
+    wait_for_reply(&live, "我先回复当前进度", 1).await;
+    let child = wait_for_child(&state, &owner).await;
+    wait_for_running(&state, &child).await;
+
+    // 用户再发一条消息:父代理跑完这一轮,此时子代理仍未收尾。
+    post_prompt(state.clone(), &owner, "现在进展如何").await;
+    wait_for_reply(&live, "我先回复当前进度", 2).await;
+
+    // 父代理重新空闲后才结算子代理。
+    RACE_CHILD_OPEN.store(true, Ordering::SeqCst);
+    let notice = wait_for_settled_notice(&state, &owner, &child, "子代理执行结束").await;
+    assert!(notice.contains(&child), "{notice}");
+    wait_for_reply(&live, "收到子代理结果", 1).await;
+}
+
+#[tokio::test]
+async fn completion_during_user_turn_still_reaches_parent() {
+    let _serial = race_guard().await;
+    let (state, ctx) = setup().await;
+    let owner = ctx.session_id.clone().unwrap();
+    let live = state.live.get(&owner).unwrap();
+    live.running.store(false, Ordering::SeqCst);
+    RACE_CHILD_OPEN.store(false, Ordering::SeqCst);
+    RACE_PARENT_HOLD.store(false, Ordering::SeqCst);
+    RACE_PARENT_OPEN.store(false, Ordering::SeqCst);
+    RACE_PARENT_STREAMING.store(false, Ordering::SeqCst);
+    let state = Arc::new(state);
+
+    post_prompt(state.clone(), &owner, "派出子代理").await;
+    wait_for_reply(&live, "我先回复当前进度", 1).await;
+    let child = wait_for_child(&state, &owner).await;
+    wait_for_running(&state, &child).await;
+
+    // 第二轮(用户消息)卡在流式输出里:子代理此刻收尾,通知只能排队。
+    RACE_PARENT_HOLD.store(true, Ordering::SeqCst);
+    post_prompt(state.clone(), &owner, "现在进展如何").await;
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        while !RACE_PARENT_STREAMING.load(Ordering::SeqCst) {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("父代理第二轮必须真的发起请求");
+    RACE_CHILD_OPEN.store(true, Ordering::SeqCst);
+    // 等子代理结算通知真的落进父会话收件箱,再放开父代理这一轮。
+    tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        loop {
+            let queued = live.session.events().iter().any(|event| {
+                matches!(&event.event, SessionEvent::AgentInbox { source, .. } if source == "subagent-settled")
+            });
+            if queued {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("子代理结算后必须投进父会话收件箱");
+    RACE_PARENT_OPEN.store(true, Ordering::SeqCst);
+    wait_for_reply(&live, "我先回复当前进度", 2).await;
+    wait_for_reply(&live, "收到子代理结果", 1).await;
+}
+
+/// 回退(rewind)会物理截断日志并**复用** seq:运行时里按 seq 记账的每会话状态
+/// 必须一起作废。
+///
+/// 锁死现象:回退后父代理再也收不到子代理完成的结果。收件箱水位停在旧分支的
+/// 最大 seq 上,而新分支的日志从 `toSeq` 重新编号 —— 水位之下的 `AgentInbox`
+/// 永远不被扫描:既不落 `AgentDelivery`(模型看不到),`resume_pending` 也认为
+/// 收件箱是空的(不唤醒)。表现就是"结果再也没回传,直到用户手动再发消息"。
+#[tokio::test]
+async fn rewind_does_not_swallow_later_completions() {
+    let _serial = race_guard().await;
+    let (state, ctx) = setup().await;
+    let owner = ctx.session_id.clone().unwrap();
+    let live = state.live.get(&owner).unwrap();
+    live.running.store(false, Ordering::SeqCst);
+    RACE_CHILD_OPEN.store(false, Ordering::SeqCst);
+    RACE_PARENT_HOLD.store(false, Ordering::SeqCst);
+    let state = Arc::new(state);
+
+    post_prompt(state.clone(), &owner, "派出子代理").await;
+    wait_for_reply(&live, "我先回复当前进度", 1).await;
+    let child = wait_for_child(&state, &owner).await;
+    wait_for_running(&state, &child).await;
+
+    // 回退到第一条用户消息之前:日志物理截断,seq 从被截掉的那条重新开始。
+    let rewind_seq = live
+        .session
+        .events()
+        .iter()
+        .find_map(|event| match &event.event {
+            SessionEvent::UserMessage {
+                injected: false, ..
+            } => Some(event.seq),
+            _ => None,
+        })
+        .expect("父会话必须有用户消息");
+    let before = live.session.events().last().map(|event| event.seq).unwrap();
+    assert!(before > rewind_seq, "测试前提:回退点之后还有事件");
+    rewind_session(state.clone(), &owner, rewind_seq).await;
+    let after = live.session.events().last().map(|event| event.seq);
+    assert!(
+        after.is_none_or(|seq| seq < rewind_seq),
+        "回退必须物理截断日志:{after:?}"
+    );
+
+    // 子代理此刻收尾:通知的 seq 落在回退前的水位之下。
+    RACE_CHILD_OPEN.store(true, Ordering::SeqCst);
+    let notice = wait_for_settled_notice(&state, &owner, &child, "子代理执行结束").await;
+    assert!(notice.contains(&child), "{notice}");
+    tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        loop {
+            let delivered = live.session.events().iter().any(|event| {
+                matches!(&event.event, SessionEvent::AgentDelivery { id, .. } if id.contains(&child))
+            });
+            if delivered {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("回退后子代理完成通知必须仍被领取进模型历史");
+    wait_for_reply(&live, "收到子代理结果", 1).await;
+}
+
+/// 以用户身份回退会话到某条用户消息之前(走真实 API 路径)。
+async fn rewind_session(state: Arc<crate::state::AppState>, id: &str, to_seq: u64) {
+    use tower::ServiceExt;
+    let response = crate::api::router()
+        .with_state(state)
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri(format!("/api/sessions/{id}/rewind"))
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(json!({"toSeq": to_seq}).to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        response.status(),
+        axum::http::StatusCode::OK,
+        "回退必须成功"
+    );
+}
+
+// ——— 会话轨迹/日志查询（AI 自查）———
+
+#[tokio::test]
+async fn session_trace_projects_errors_with_locator_and_redaction() {
+    let (state, ctx) = setup().await;
+    let owner = ctx.session_id.clone().unwrap();
+    let live = state.live.get(&owner).unwrap();
+    live.session
+        .append(SessionEvent::UserMessage {
+            text: "用 sk-abcdefghijklmnopqrstuvwxyz 跑一下".into(),
+            injected: false,
+            channel: None,
+            images: Vec::new(),
+        })
+        .unwrap();
+    live.session
+        .append(SessionEvent::ToolCall {
+            turn: 1,
+            step: 1,
+            call_id: "call-trace-1".into(),
+            name: "bash".into(),
+            arguments: json!({"command": "echo api_key=supersecret123"}).to_string(),
+        })
+        .unwrap();
+    live.session
+        .append(SessionEvent::ToolResult {
+            turn: 1,
+            step: 1,
+            call_id: "call-trace-1".into(),
+            content: "api_key=supersecret123 执行失败".into(),
+            is_error: true,
+            error: Some("工具执行失败".into()),
+            error_identity: Some(denia_core::session::ToolFailureIdentity {
+                name: "bash".into(),
+                code: "tool/failed".into(),
+            }),
+            meta: None,
+            truncation: None,
+            replaces: None,
+        })
+        .unwrap();
+    live.session
+        .append(SessionEvent::TurnEnd {
+            turn: 1,
+            reason: TurnEndReason::Error {
+                failure: denia_core::error::LlmFailure::new(
+                    "provider/unavailable",
+                    "上游暂时不可用",
+                ),
+            },
+        })
+        .unwrap();
+
+    let out = state
+        .runtime
+        .execute(
+            "session_trace",
+            json!({"level": "error", "limit": 10}),
+            &ctx,
+        )
+        .await
+        .expect("查询自己的轨迹必须成功");
+    let records = out["records"].as_array().unwrap();
+    let tool_error = records
+        .iter()
+        .find(|record| {
+            record["kind"] == "error"
+                && record["tool"] == "bash"
+                && record["callId"] == "call-trace-1"
+        })
+        .expect("错误记录必须带工具名与 callId");
+    assert_eq!(tool_error["error"]["kind"], "tool");
+    assert_eq!(tool_error["session"], owner);
+    assert_eq!(tool_error["agentId"], owner);
+    assert_eq!(tool_error["operation"], "tool_result");
+    assert!(tool_error["time"].is_number());
+    assert_eq!(tool_error["error"]["context"]["tool"], "bash");
+    assert_eq!(tool_error["seq"], 3);
+    assert_eq!(tool_error["turn"], 1);
+    assert!(
+        records.iter().any(|record| {
+            record["kind"] == "error"
+                && record["operation"] == "turn_end"
+                && record["error"]["code"] == "provider/unavailable"
+        }),
+        "轮次失败必须出现在错误记录里"
+    );
+    let serialized = out.to_string();
+    assert!(!serialized.contains("supersecret123"), "{serialized}");
+    assert!(
+        !serialized.contains("sk-abcdefghijklmnopqrstuvwxyz"),
+        "{serialized}"
+    );
+    assert!(serialized.contains("[REDACTED]"));
+
+    // 脱敏不是只对 level=error 生效：普通用户消息/工具调用同样脱敏。
+    let all = state
+        .runtime
+        .execute("session_trace", json!({"limit": 10}), &ctx)
+        .await
+        .expect("查询全部轨迹必须成功");
+    let all_records = all["records"].as_array().unwrap();
+    assert!(all_records.iter().any(|record| record["kind"] == "user"));
+    assert!(
+        all_records.iter().any(|record| record["kind"] == "user"
+            && record["text"]
+                .as_str()
+                .is_some_and(|text| text.contains("[REDACTED]"))),
+        "普通用户消息也必须脱敏：{all}"
+    );
+    let all_serialized = all.to_string();
+    assert!(
+        !all_serialized.contains("supersecret123"),
+        "{all_serialized}"
+    );
+    assert!(
+        !all_serialized.contains("sk-abcdefghijklmnopqrstuvwxyz"),
+        "{all_serialized}"
+    );
+
+    // limit 截断：只保留最近 N 条，并明确标记 truncated。
+    let limited = state
+        .runtime
+        .execute("session_trace", json!({"limit": 2}), &ctx)
+        .await
+        .expect("查询必须成功");
+    assert_eq!(limited["records"].as_array().unwrap().len(), 2);
+    assert_eq!(limited["truncated"], true);
+    assert!(limited["matched"].as_u64().unwrap() > 2);
+}
+
+#[tokio::test]
+async fn session_trace_rejects_unrelated_sessions() {
+    let (state, ctx) = setup().await;
+    let other = state.sessions.create(&ctx.cwd, true).expect("创建无关会话");
+    let out = state
+        .runtime
+        .execute("session_trace", json!({"session": other.id()}), &ctx)
+        .await;
+    assert!(out.is_err(), "无关会话必须被拒绝");
+    assert!(out.unwrap_err().contains("trace/forbidden"));
+}
+
+// ——— 队列「引导」：入队幂等、按序取走、空闲拒绝 ———
+
+#[tokio::test]
+async fn steering_queue_is_idempotent_ordered_and_idle_safe() {
+    let (state, ctx) = setup().await;
+    let owner = ctx.session_id.clone().unwrap();
+    let live = state.live.get(&owner).unwrap();
+    live.running.store(true, Ordering::SeqCst);
+
+    let mut events = state.events.subscribe();
+    state
+        .runtime
+        .steer(
+            &owner,
+            SteeringMessage {
+                id: "guide-1".into(),
+                text: "先看日志".into(),
+                images: Vec::new(),
+            },
+        )
+        .await
+        .expect("运行中必须接收引导");
+    // 重复提交同 id：幂等，不产生第二条。
+    state
+        .runtime
+        .steer(
+            &owner,
+            SteeringMessage {
+                id: "guide-1".into(),
+                text: "先看日志".into(),
+                images: Vec::new(),
+            },
+        )
+        .await
+        .expect("重复提交必须幂等成功");
+    state
+        .runtime
+        .steer(
+            &owner,
+            SteeringMessage {
+                id: "guide-2".into(),
+                text: "再看测试".into(),
+                images: Vec::new(),
+            },
+        )
+        .await
+        .expect("第二条引导必须接收");
+
+    let drained = state
+        .runtime
+        .drain_steering_inner(&owner)
+        .expect("取走引导");
+    assert_eq!(drained.len(), 2, "同 id 重复提交只能保留一条");
+    assert_eq!(drained[0].id, "guide-1");
+    assert_eq!(drained[1].id, "guide-2");
+    assert_eq!(drained[0].text, "先看日志");
+
+    // 每个被取走的条目都广播送达事件，前端据此出队。
+    let mut delivered = Vec::new();
+    while let Ok(event) = events.try_recv() {
+        if let ServerEvent::SteeringDelivered { message_id, .. } = event {
+            delivered.push(message_id);
+        }
+    }
+    assert_eq!(
+        delivered,
+        vec!["guide-1".to_string(), "guide-2".to_string()]
+    );
+
+    // 取走后队列为空；空闲会话拒绝新的引导（前端回落到普通队列）。
+    live.running.store(false, Ordering::SeqCst);
+    let rejected = state
+        .runtime
+        .steer(
+            &owner,
+            SteeringMessage {
+                id: "guide-3".into(),
+                text: "晚了".into(),
+                images: Vec::new(),
+            },
+        )
+        .await;
+    assert!(rejected.is_err());
+    assert!(rejected.unwrap_err().contains("session/not-running"));
+}
+
+#[tokio::test]
+async fn steering_injected_at_next_step_boundary() {
+    let (state, ctx) = setup().await;
+    let owner = ctx.session_id.clone().unwrap();
+    let live = state.live.get(&owner).unwrap();
+    live.running.store(true, Ordering::SeqCst);
+    state
+        .runtime
+        .steer(
+            &owner,
+            SteeringMessage {
+                id: "guide-step".into(),
+                text: "引导测试：先读日志".into(),
+                images: Vec::new(),
+            },
+        )
+        .await
+        .expect("运行中必须接收引导");
+
+    let selection = ModelSelection {
+        provider: "runtime-test".into(),
+        model: "steering-test".into(),
+        reasoning_effort: None,
+    };
+    let emit: Arc<dyn Fn(&SessionEnvelope) + Send + Sync> = Arc::new(|_| {});
+    let reason = state
+        .driver
+        .run_turn(
+            &live.session,
+            &selection,
+            "",
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            false,
+            CancellationToken::new(),
+            emit,
+        )
+        .await;
+    assert_eq!(reason, TurnEndReason::Completed);
+    assert!(
+        live.session.events().iter().any(|envelope| matches!(
+            &envelope.event,
+            SessionEvent::UserMessage { text, channel: Some(channel), injected: false, .. }
+                if text.contains("引导测试") && channel == "steering:guide-step"
+        )),
+        "引导必须以真实用户消息落进会话日志，并带稳定 id 供前端对齐"
+    );
+    assert!(
+        live.session.events().iter().any(|envelope| matches!(
+            &envelope.event,
+            SessionEvent::AssistantMessage { blocks, .. }
+                if blocks.iter().any(|block| matches!(block, ContentBlock::Text { text } if text.contains("已收到引导")))
+        )),
+        "模型必须在本次请求里看到引导"
+    );
+    live.running.store(false, Ordering::SeqCst);
+}
+
+// ——— 永久子代理定义（主代理自建）与模型回退 ———
+
+#[tokio::test]
+async fn create_subagent_writes_editable_definition_and_rejects_silent_overwrite() {
+    let (state, ctx) = setup().await;
+    let args = json!({
+        "id": "rust-reviewer",
+        "name": "Rust 审查员",
+        "description": "审查 Rust 代码的边界与错误处理",
+        "instructions": "只做代码审查，不改文件。",
+        "tools": {"mode": "allowlist", "names": ["read_file", "grep"]},
+        "model": {"mode": "inherit"},
+        "scope": "user"
+    });
+    let created = state
+        .runtime
+        .execute("create_subagent", args.clone(), &ctx)
+        .await
+        .expect("主代理应能创建永久定义");
+    assert_eq!(created["action"], "created");
+    assert_eq!(created["qualifiedId"], "user:rust-reviewer");
+    assert_eq!(created["profile"]["model"]["mode"], "inherit");
+    let catalog = state.subagent_profiles.catalog(None);
+    let saved = catalog
+        .effective
+        .iter()
+        .find(|view| view.qualified_id == "user:rust-reviewer")
+        .expect("定义必须出现在管理页目录里");
+    assert!(saved.editable, "用户级定义必须可编辑");
+    assert_eq!(saved.profile.name, "Rust 审查员");
+
+    // 同 id 再建一次：默认拒绝，避免静默改写用户配置。
+    let conflict = state
+        .runtime
+        .execute("create_subagent", args.clone(), &ctx)
+        .await
+        .expect_err("同 id 默认必须拒绝");
+    assert!(conflict.contains("subagent/profile-exists"), "{conflict}");
+
+    // 显式 overwrite 才更新，并回显 updated。
+    let updated = state
+        .runtime
+        .execute(
+            "create_subagent",
+            json!({
+                "id": "rust-reviewer",
+                "name": "Rust 审查员（更新）",
+                "description": "审查 Rust 代码",
+                "instructions": "只做代码审查。",
+                "tools": {"mode": "allowlist", "names": ["read_file"]},
+                "scope": "user",
+                "overwrite": true
+            }),
+            &ctx,
+        )
+        .await
+        .expect("显式覆盖必须成功");
+    assert_eq!(updated["action"], "updated");
+    assert_eq!(updated["profile"]["name"], "Rust 审查员（更新）");
+}
+
+#[tokio::test]
+async fn subagent_cannot_define_permanent_profiles() {
+    let (state, ctx) = setup().await;
+    let child = state
+        .runtime
+        .execute(
+            "spawn_agent",
+            json!({"prompt": "调查", "profile_id": "builtin:explore"}),
+            &ctx,
+        )
+        .await
+        .unwrap();
+    let child_id = child["childId"].as_str().unwrap().to_string();
+    let child_ctx = ToolContext {
+        session_id: Some(child_id),
+        ..ctx.clone()
+    };
+    let result = state
+        .runtime
+        .execute(
+            "create_subagent",
+            json!({
+                "id": "forbidden",
+                "name": "越权",
+                "description": "不应写入",
+                "scope": "user"
+            }),
+            &child_ctx,
+        )
+        .await
+        .expect_err("子代理不得创建永久定义");
+    assert!(result.contains("subagent/host-administration"), "{result}");
+}
+
+#[tokio::test]
+async fn unavailable_explicit_model_falls_back_to_parent() {
+    let (state, ctx) = setup().await;
+    state
+        .runtime
+        .execute(
+            "create_subagent",
+            json!({
+                "id": "fallback-agent",
+                "name": "回退验证",
+                "description": "验证不可用模型回退",
+                "instructions": "返回结论。",
+                "tools": {"mode": "inherit"},
+                "model": {"mode": "explicit", "selection": {"provider": "missing", "model": "nope"}},
+                "scope": "user"
+            }),
+            &ctx,
+        )
+        .await
+        .expect("定义允许保存（派遣时回退）");
+    let result = state
+        .runtime
+        .execute(
+            "spawn_agent",
+            json!({"prompt": "执行", "profile_id": "user:fallback-agent"}),
+            &ctx,
+        )
+        .await
+        .expect("显式模型不可用不能阻断派遣");
+    assert_eq!(result["profile"]["model"]["provider"], "runtime-test");
+    assert_eq!(result["profile"]["model"]["model"], "done");
+    let fallback = result["modelFallback"].as_str().expect("必须回传回退说明");
+    assert!(
+        fallback.contains("不可用") && fallback.contains("回退"),
+        "{fallback}"
+    );
+    let child = state.live.get(result["childId"].as_str().unwrap()).unwrap();
+    assert_eq!(
+        child
+            .session
+            .header()
+            .subagent
+            .as_ref()
+            .unwrap()
+            .selection
+            .model,
+        "done"
+    );
+}
+
+#[tokio::test]
+async fn available_explicit_model_is_used_without_fallback() {
+    let (state, ctx) = setup().await;
+    let result = state
+        .runtime
+        .execute(
+            "spawn_agent",
+            json!({
+                "prompt": "用显式模型执行",
+                "inline": {
+                    "name": "显式模型员",
+                    "description": "验证可用显式模型实际生效",
+                    "tools": {"mode": "allowlist", "names": ["read_file"]},
+                    "model": {
+                        "mode": "explicit",
+                        "selection": {"provider": "runtime-test", "model": "explicit-child"}
+                    }
+                }
+            }),
+            &ctx,
+        )
+        .await
+        .expect("可用的显式模型必须允许派遣");
+    assert!(
+        result.get("modelFallback").is_none(),
+        "模型可用时不得报回退：{result}"
+    );
+    assert_eq!(result["profile"]["model"]["provider"], "runtime-test");
+    assert_eq!(result["profile"]["model"]["model"], "explicit-child");
+    let child = state.live.get(result["childId"].as_str().unwrap()).unwrap();
+    let selection = &child.session.header().subagent.as_ref().unwrap().selection;
+    assert_eq!(selection.provider, "runtime-test");
+    assert_eq!(selection.model, "explicit-child");
+    settle(&state.runtime, result["childId"].as_str().unwrap()).await;
+}
+
+/// 预览与真实派遣同一口径：定义里的显式模型不可用时，展示回退后的父模型，
+/// 而不是把定义标成不可用却让派遣照常成功。
+#[tokio::test]
+async fn preview_reports_model_fallback_for_unavailable_explicit_model() {
+    use tower::ServiceExt;
+    let (state, ctx) = setup().await;
+    let state = Arc::new(state);
+    let owner = ctx.session_id.clone().unwrap();
+    // 父会话最近一次请求的模型：预览据此判断"跟随主会话"的实际值。
+    state
+        .live
+        .get(&owner)
+        .unwrap()
+        .session
+        .append(SessionEvent::RequestHeader {
+            turn: 1,
+            step: 1,
+            header: denia_core::session::RequestHeaderSnapshot {
+                config: denia_core::config::LlmCallConfig {
+                    provider: "runtime-test".into(),
+                    model: "done".into(),
+                    reasoning_effort: None,
+                    temperature: None,
+                    max_tokens: None,
+                    stop: Vec::new(),
+                },
+                system: Some("SECRET SYSTEM PROMPT".into()),
+                tools: Vec::new(),
+            },
+            reason: denia_core::session::RequestHeaderReason::Initial,
+            starts_series: false,
+        })
+        .unwrap();
+    let response = crate::api::router()
+        .with_state(state.clone())
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri("/api/subagent-profiles/preview")
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(
+                    json!({
+                        "sessionId": owner,
+                        "inline": {
+                            "name": "预览回退",
+                            "description": "不可用模型",
+                            "tools": {"mode": "allowlist", "names": ["read_file"]},
+                            "model": {
+                                "mode": "explicit",
+                                "selection": {"provider": "missing", "model": "nope"}
+                            }
+                        }
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), axum::http::StatusCode::OK);
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    let body: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(body["modelOrigin"], "parent");
+    assert_eq!(body["model"]["provider"], "runtime-test");
+    assert_eq!(body["model"]["model"], "done");
+    let fallback = body["modelFallback"]
+        .as_str()
+        .expect("预览必须回传回退说明");
+    assert!(
+        fallback.contains("不可用") && fallback.contains("回退"),
+        "{fallback}"
+    );
+}
+
+/// inline 临时子代理只属于当前父会话：父会话被删除时，连同它的会话日志
+/// 一起清理，不会残留成孤儿会话。
+#[tokio::test]
+async fn inline_child_is_cleaned_up_with_parent_session() {
+    let (state, ctx) = setup().await;
+    let owner = ctx.session_id.clone().unwrap();
+    let child = state
+        .runtime
+        .execute(
+            "spawn_agent",
+            json!({
+                "prompt": "临时任务",
+                "inline": {
+                    "name": "临时清理员",
+                    "description": "验证随父会话清理",
+                    "tools": {"mode": "allowlist", "names": ["read_file"]}
+                }
+            }),
+            &ctx,
+        )
+        .await
+        .unwrap();
+    let child_id = child["childId"].as_str().unwrap().to_string();
+    settle(&state.runtime, &child_id).await;
+    assert!(state.sessions.load(&child_id).is_ok(), "子会话应已落盘");
+
+    state.runtime.remove_owner(&owner).await.unwrap();
+
+    assert!(
+        state.sessions.load(&child_id).is_err(),
+        "父会话删除后 inline 子会话日志必须清理"
+    );
+    assert_eq!(state.runtime.list(&owner), json!([]));
+}
+
+#[tokio::test]
+async fn session_trace_merges_queue_and_subagent_auxiliary_records() {
+    let (state, ctx) = setup().await;
+    let owner = ctx.session_id.clone().unwrap();
+    state
+        .live
+        .get(&owner)
+        .unwrap()
+        .running
+        .store(true, Ordering::SeqCst);
+    state
+        .runtime
+        .steer(
+            &owner,
+            SteeringMessage {
+                id: "trace-guide".into(),
+                text: "轨迹引导".into(),
+                images: Vec::new(),
+            },
+        )
+        .await
+        .unwrap();
+    state.runtime.drain_steering_inner(&owner).unwrap();
+    let child = state
+        .runtime
+        .execute(
+            "spawn_agent",
+            json!({"prompt": "等待父消息", "profile_id": "builtin:explore"}),
+            &ctx,
+        )
+        .await
+        .unwrap();
+    let child_id = child["childId"].as_str().unwrap().to_string();
+    state
+        .runtime
+        .execute(
+            "send_message",
+            json!({"target": child_id, "message": "api_key=supersecret123"}),
+            &ctx,
+        )
+        .await
+        .expect("直接子代理可接收消息");
+
+    let queue = state
+        .runtime
+        .execute(
+            "session_trace",
+            json!({"kind": ["queue"], "limit": 20}),
+            &ctx,
+        )
+        .await
+        .unwrap();
+    let operations: Vec<&str> = queue["records"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|record| record["operation"].as_str())
+        .collect();
+    assert!(operations.contains(&"steer_accepted"), "{queue}");
+    assert!(operations.contains(&"steer_delivered"), "{queue}");
+
+    let subagent = state
+        .runtime
+        .execute(
+            "session_trace",
+            json!({"kind": ["subagent"], "limit": 20}),
+            &ctx,
+        )
+        .await
+        .unwrap();
+    let serialized = subagent.to_string();
+    assert!(serialized.contains("message_sent"), "{serialized}");
+    assert!(serialized.contains("spawned"), "{serialized}");
+    assert!(
+        !serialized.contains("supersecret123"),
+        "辅助记录读取时必须脱敏：{serialized}"
+    );
+    assert!(serialized.contains("[REDACTED]"), "{serialized}");
+    settle(&state.runtime, &child_id).await;
+}
+
+#[tokio::test]
+async fn session_trace_allows_only_self_direct_parent_and_direct_child() {
+    let (state, ctx) = setup().await;
+    let parent = ctx.session_id.clone().unwrap();
+    let first = state
+        .runtime
+        .execute(
+            "spawn_agent",
+            json!({"prompt": "第一个子代理", "profile_id": "builtin:explore"}),
+            &ctx,
+        )
+        .await
+        .unwrap();
+    let first_id = first["childId"].as_str().unwrap().to_string();
+    let second = state
+        .runtime
+        .execute(
+            "spawn_agent",
+            json!({"prompt": "第二个子代理", "profile_id": "builtin:explore"}),
+            &ctx,
+        )
+        .await
+        .unwrap();
+    let second_id = second["childId"].as_str().unwrap().to_string();
+    let child_ctx = ToolContext {
+        session_id: Some(first_id.clone()),
+        ..ctx.clone()
+    };
+
+    // 子代理可查直接父代理；父代理可查直接子代理。
+    state
+        .runtime
+        .execute("session_trace", json!({}), &child_ctx)
+        .await
+        .expect("子代理必须能查自己的轨迹");
+    state
+        .runtime
+        .execute("session_trace", json!({"session": parent}), &child_ctx)
+        .await
+        .expect("子代理必须能查直接父代理");
+    state
+        .runtime
+        .execute("session_trace", json!({"session": first_id}), &ctx)
+        .await
+        .expect("父代理必须能查直接子代理");
+
+    // 兄弟会话不在关系表里：拒绝，且不泄露目标是否存在。
+    let rejected = state
+        .runtime
+        .execute("session_trace", json!({"session": second_id}), &child_ctx)
+        .await
+        .expect_err("兄弟子代理必须被拒绝");
+    assert!(rejected.contains("trace/forbidden"), "{rejected}");
+    settle(&state.runtime, &first_id).await;
+    settle(&state.runtime, &second_id).await;
+}
+
+#[tokio::test]
+async fn http_steer_queues_text_and_rejects_idle_sessions() {
+    use tower::ServiceExt;
+
+    let (state, ctx) = setup().await;
+    let owner = ctx.session_id.clone().unwrap();
+    let live = state.live.get(&owner).unwrap();
+    live.running.store(true, Ordering::SeqCst);
+    let state = Arc::new(state);
+
+    let response = crate::api::router()
+        .with_state(state.clone())
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri(format!("/api/sessions/{owner}/steer"))
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(
+                    json!({"id": "api-guide-1", "prompt": "下一步先跑测试"}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), axum::http::StatusCode::ACCEPTED);
+    let drained = state
+        .runtime
+        .drain_steering_inner(&owner)
+        .expect("取走 API 排入的引导");
+    assert_eq!(drained.len(), 1);
+    assert_eq!(drained[0].id, "api-guide-1");
+    assert_eq!(drained[0].text, "下一步先跑测试");
+
+    live.running.store(false, Ordering::SeqCst);
+    let idle = crate::api::router()
+        .with_state(state)
+        .oneshot(
+            axum::http::Request::builder()
+                .method("POST")
+                .uri(format!("/api/sessions/{owner}/steer"))
+                .header("content-type", "application/json")
+                .body(axum::body::Body::from(
+                    json!({"id": "api-guide-2", "prompt": "太晚了"}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(idle.status(), axum::http::StatusCode::CONFLICT);
+}
+
+/// 引导只等待当前 step 正在执行的动作，不等整轮结束。
+///
+/// 首个请求调用一个耗时工具；测试在工具执行期间 steer。工具结果落盘后，
+/// 下一次请求必须立刻带上引导，而且整轮只应有一个 TurnStart/TurnEnd。
+#[tokio::test]
+async fn steering_waits_for_the_current_step_not_the_whole_turn() {
+    let (state, ctx) = setup().await;
+    let owner = ctx.session_id.clone().unwrap();
+    let live = state.live.get(&owner).unwrap();
+    live.running.store(true, Ordering::SeqCst);
+
+    let selection = ModelSelection {
+        provider: "runtime-test".into(),
+        model: "steering-midturn".into(),
+        reasoning_effort: None,
+    };
+    let emit: Arc<dyn Fn(&SessionEnvelope) + Send + Sync> = Arc::new(|_| {});
+    let driver = state.driver.clone();
+    let session = live.session.clone();
+    let turn = tokio::spawn(async move {
+        driver
+            .run_turn(
+                &session,
+                &selection,
+                "",
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                false,
+                CancellationToken::new(),
+                emit,
+            )
+            .await
+    });
+
+    // 工具调用事件先落盘、再执行；等到它说明当前 step 的动作已经开始。
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let started = live.session.events().iter().any(|envelope| {
+                matches!(
+                    &envelope.event,
+                    SessionEvent::ToolCall { name, .. } if name == "bash"
+                )
+            });
+            if started {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("首个 step 必须发起工具调用");
+
+    state
+        .runtime
+        .steer(
+            &owner,
+            SteeringMessage {
+                id: "mid-guide".into(),
+                text: "中途引导：继续读日志".into(),
+                images: Vec::new(),
+            },
+        )
+        .await
+        .expect("工具执行期间必须接收引导");
+
+    let reason = tokio::time::timeout(std::time::Duration::from_secs(15), turn)
+        .await
+        .expect("整轮应在工具结束后收尾")
+        .expect("turn task");
+    assert_eq!(reason, TurnEndReason::Completed);
+
+    let events = live.session.events();
+    let guide_seq = events
+        .iter()
+        .find_map(|envelope| match &envelope.event {
+            SessionEvent::UserMessage {
+                text,
+                channel: Some(channel),
+                injected: false,
+                ..
+            } if text.contains("中途引导") && channel == "steering:mid-guide" => {
+                Some(envelope.seq)
+            }
+            _ => None,
+        })
+        .expect("引导必须以用户消息落进本轮日志");
+    let turn_end_seq = events
+        .iter()
+        .find_map(|envelope| match &envelope.event {
+            SessionEvent::TurnEnd { .. } => Some(envelope.seq),
+            _ => None,
+        })
+        .expect("本轮必须闭合");
+    assert!(
+        guide_seq < turn_end_seq,
+        "引导必须在 TurnEnd 之前注入当前轮，而不是等下一轮"
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|envelope| matches!(envelope.event, SessionEvent::TurnStart { .. }))
+            .count(),
+        1,
+        "引导不得另起一轮"
+    );
+    assert!(
+        events.iter().any(|envelope| matches!(
+            &envelope.event,
+            SessionEvent::AssistantMessage { blocks, .. }
+                if blocks.iter().any(|block| matches!(block, ContentBlock::Text { text } if text.contains("步骤边界收到引导")))
+        )),
+        "工具动作完成后的下一次请求必须看到引导"
+    );
+    live.running.store(false, Ordering::SeqCst);
 }

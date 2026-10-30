@@ -35,6 +35,7 @@ pub mod skills;
 pub mod state;
 pub mod subagents;
 pub mod system_prompt_store;
+pub mod trajectory;
 pub mod update;
 pub mod web_assets;
 pub mod workspace;

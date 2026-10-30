@@ -104,6 +104,9 @@ pub enum ServerEvent {
     /// agent preset 名册变化(用户复制/删除,或在编辑器里改了 preset.yml);
     /// 前端据此刷新选择器与设置页。
     AgentPresetsUpdated,
+    /// 子代理定义变化(用户管理页增删改,或主代理用 create_subagent 写入);
+    /// 前端据此刷新子代理管理页与派遣目录。
+    SubagentsUpdated,
     /// MCP 服务器配置或连接状态发生变化;前端据此刷新 MCP 面板。
     McpUpdated,
     /// 远程连接状态变化(开启/关闭局域网或隧道、会话增减);前端据此刷新
@@ -115,6 +118,14 @@ pub enum ServerEvent {
     CompactionFailed {
         id: String,
         reason: String,
+    },
+    /// 一条运行中「引导」消息已在步骤边界投递给模型。
+    ///
+    /// 前端据此把持久化队列里的对应项移出——即使目标会话不在当前窗口，
+    /// 也不会在轮次结束后被当成"未发送"再发一遍。
+    SteeringDelivered {
+        id: String,
+        message_id: String,
     },
 }
 

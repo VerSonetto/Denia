@@ -124,6 +124,7 @@ pub const JOB_TOOLS: &[&str] = &["job_start", "job_list", "job_output", "job_kil
 pub const SUBAGENT_TOOLS: &[&str] = &[
     "spawn_agent",
     "fork_agent",
+    "create_subagent",
     "send_message",
     "interrupt_agent",
     "list_agents",
@@ -433,6 +434,7 @@ mod tests {
             "skill",
             "spawn_agent",
             "fork_agent",
+            "create_subagent",
             "send_message",
             "interrupt_agent",
             "list_agents",

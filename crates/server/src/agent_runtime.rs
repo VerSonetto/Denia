@@ -34,6 +34,15 @@ struct Inbox {
     pending: BTreeMap<u64, (String, String, String)>,
     seen: HashSet<String>,
 }
+
+/// 一条排队中的「引导」消息(运行时内存态)。
+#[derive(Debug, Clone)]
+pub struct SteeringMessage {
+    /// 客户端生成的稳定 id:送达事件与队列项一一对应。
+    pub id: String,
+    pub text: String,
+    pub images: Vec<denia_core::message::ImageData>,
+}
 struct Inner {
     home: PathBuf,
     sessions: Arc<denia_session::SessionStore>,
@@ -62,6 +71,13 @@ struct Inner {
     completion_marks: Mutex<HashMap<String, u64>>,
     delivery: Arc<CompletionQueue>,
     paused: Mutex<HashSet<String>>,
+    /// 用户「引导」消息:运行中排在这里,由驱动器在 step 边界取走并落成
+    /// 真实用户消息。只驻内存 —— 进程重启时轮次已中止,前端持久化的队列
+    /// 会在下一次空闲时按普通消息重发,不会丢失。
+    steering: Mutex<HashMap<String, std::collections::VecDeque<SteeringMessage>>>,
+    /// 会话轨迹/日志查询的辅助记录（队列发送、子代理定义等不落在
+    /// SessionEvent 里的动作）。主轨迹仍直接投影会话日志。
+    trace: crate::trajectory::TraceStore,
     /// 统一准入:创建、终态 child 恢复、消息唤醒共用同一份槽位账。
     admission: crate::subagents::policy::Admission,
     /// goal 轮连续失败计数(会话级内存护栏;成功轮清零,blocked 后移除)。
@@ -139,6 +155,8 @@ impl Runtime {
                 completion_marks: Mutex::new(HashMap::new()),
                 delivery: Arc::new(CompletionQueue::default()),
                 paused: Mutex::new(HashSet::new()),
+                steering: Mutex::new(HashMap::new()),
+                trace: crate::trajectory::TraceStore::new(home),
                 admission: crate::subagents::policy::Admission::new(),
                 goal_failures: Mutex::new(HashMap::new()),
                 registry,
@@ -286,6 +304,27 @@ impl Runtime {
     pub fn execution_limits(&self) -> denia_agent_loop::ExecutionLimits {
         execution_limits_from(&self.inner.settings)
     }
+    /// 会话回退后的运行时内存态同步。
+    ///
+    /// rewind 是**物理截断**：被截掉那支连同它的 seq 一起消失，重建的分支
+    /// 从 `toSeq` 重新编号。任何按 seq 记账的每会话状态在回退后都会指向旧
+    /// 分支——最要命的是收件箱水位：水位落在新日志里更靠前的位置，水位之下
+    /// 新追加的 `AgentInbox` 永远不会被扫描。表现就是子代理完成通知既不落
+    /// `AgentDelivery`（模型看不到结果），收件箱也被判成空的（`resume_pending`
+    /// 不唤醒），必须等用户再发一条消息才可能收到。
+    ///
+    /// 摘除整条记录而不是回拨水位：重新扫描截断后的日志才是“新分支还有哪
+    /// 些待收消息”的唯一来源——旧分支那几条 `AgentInbox` 已经不在了。
+    pub fn on_session_rewound(&self, id: &str) {
+        self.inner.inboxes.lock().unwrap().remove(id);
+        self.inner.completion_marks.lock().unwrap().remove(id);
+        self.inner.deferred_wakes.lock().unwrap().remove(id);
+        self.inner.wakes.lock().unwrap().remove(id);
+        // 回退是用户的重定向动作：旧分支留下的暂停标记不再作数（与
+        // `human_turn` 清暂停同一口径），否则自动唤醒会被永久挡住。
+        self.inner.paused.lock().unwrap().remove(id);
+    }
+
     fn is_active(&self, id: &str) -> bool {
         self.inner
             .live
@@ -326,12 +365,15 @@ mod artifacts;
 mod capabilities;
 mod completion;
 mod config;
+mod definition;
 mod delegate;
 mod handoff;
 mod inbox;
 mod registry;
+mod steering;
 #[cfg(test)]
 mod tests;
+mod trace;
 mod turn;
 
 use artifacts::{ArtifactRef, artifacts, display_path, push_unique, tool_path_argument};

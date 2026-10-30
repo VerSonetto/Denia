@@ -479,6 +479,9 @@ impl Runtime {
     pub fn on_idle(&self, id: &str) {
         // 轮次收尾是最后一道动作边界:即使某个异常路径漏了 StepEnd，
         // 这里也必须把模型判回空闲，否则完成结果会被永久留在等待队列。
+        // 未被取走的引导消息也在这里丢弃:前端队列会按普通消息重发，
+        // 留在内存里只会在下一轮 step 边界被误注入。
+        self.clear_steering(id);
         if let Some(live) = self.inner.live.get(id) {
             live.set_activity(ModelActivity::Idle);
             live.running.store(false, Ordering::SeqCst);

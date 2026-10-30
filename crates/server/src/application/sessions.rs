@@ -4,6 +4,7 @@ use crate::state::{RunningGuard, ServerEvent};
 use denia_core::config::ModelSelection;
 use denia_core::session::SessionEnvelope;
 use serde::Deserialize;
+use serde_json::json;
 use std::sync::{Arc, atomic::Ordering};
 use tokio_util::sync::CancellationToken;
 
@@ -28,6 +29,10 @@ pub struct PromptCommand {
     /// 轨迹引用(标题, 正文);以 injected 上下文消息随本轮注入。
     #[serde(default)]
     quoted: Vec<PromptQuote>,
+    /// 消息来源（user / queue / interject / guide），仅用于轨迹记录与审计；
+    /// 缺省按 user。它不改变发送语义。
+    #[serde(default)]
+    source: Option<String>,
 }
 
 impl PromptCommand {
@@ -47,6 +52,7 @@ impl PromptCommand {
             images: Vec::new(),
             files: Vec::new(),
             quoted: Vec::new(),
+            source: None,
         }
     }
 
@@ -67,8 +73,17 @@ impl PromptCommand {
             images,
             files: Vec::new(),
             quoted: Vec::new(),
+            source: None,
         }
     }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SteerCommand {
+    /// 客户端生成的稳定 id：送达事件据此与持久化队列项对齐。
+    pub id: String,
+    pub prompt: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -147,6 +162,9 @@ impl<'a> SessionCommands<'a> {
                 "请从父会话向子代理发送指令",
             ));
         }
+        // 新的真实用户消息取代此前排队的「引导」:引导只在原轮次内有效，
+        // 新轮次从这一条开始。未送达的引导由前端持久化队列按普通消息重发。
+        self.services.runtime.clear_steering(&id);
         {
             let session = live.session.clone();
             let cwd = session.header().cwd.clone();
@@ -176,6 +194,22 @@ impl<'a> SessionCommands<'a> {
             self.services.events.clone(),
             Arc::new(move |id| runtime.on_idle(id)),
         );
+        // 队列/插话/普通发送在轨迹里可区分：客户端显式带 source，缺省 user。
+        // 这条记录只进辅助轨迹（traces/），不改会话事件与模型上下文。
+        let source = body.source.clone().unwrap_or_else(|| "user".into());
+        let mut record = crate::trajectory::TraceRecord::new(
+            &id,
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|duration| duration.as_millis() as u64)
+                .unwrap_or(0),
+            if source == "queue" { "queue" } else { "user" },
+        );
+        record.operation = Some("prompt_submitted".into());
+        record.agent_id = Some(id.clone());
+        record.text = Some(prompt.chars().take(600).collect());
+        record.data = Some(json!({"source": source}));
+        self.services.runtime.record_trace(record);
         // 运行状态立即推给控制台(侧栏圆点/发送按钮,无需 follow 长连接)。
         let _ = self.services.events.send(ServerEvent::RunningChanged {
             id: id.clone(),
@@ -398,5 +432,62 @@ impl<'a> SessionCommands<'a> {
         });
 
         Ok(())
+    }
+
+    /// 运行中「引导」：把消息排进当前轮次，在下一个 step 边界注入。
+    ///
+    /// 只支持纯文本：图片/附件需要落盘授权与视觉能力校验，属于"新一轮"的
+    /// 范畴；前端在带图/附件时回落到普通队列（本轮结束后发送），不会丢。
+    pub async fn steer_prompt(&self, id: String, body: SteerCommand) -> Result<(), CommandError> {
+        let text = body.prompt.trim().to_string();
+        if text.is_empty() {
+            return Err(CommandError::bad_request(
+                "steering/empty",
+                "引导消息不能为空",
+            ));
+        }
+        if body.id.trim().is_empty() || body.id.len() > 200 {
+            return Err(CommandError::bad_request(
+                "steering/bad-id",
+                "引导消息 id 无效",
+            ));
+        }
+        let live = self
+            .services
+            .live
+            .get_or_load(self.services.sessions, &id)
+            .map_err(CommandError::from_session)?;
+        if live.session.header().subagent.is_some() {
+            return Err(CommandError::bad_request(
+                "subagent/read-only",
+                "请从父会话向子代理发送指令",
+            ));
+        }
+        if !live.running.load(Ordering::SeqCst) {
+            return Err(CommandError::new(
+                FailureKind::Conflict,
+                "session/not-running",
+                "当前没有进行中的轮次，引导消息应进入普通队列",
+            ));
+        }
+        self.services
+            .runtime
+            .steer(
+                &id,
+                crate::agent_runtime::SteeringMessage {
+                    id: body.id,
+                    text,
+                    images: Vec::new(),
+                },
+            )
+            .await
+            .map_err(|error| {
+                let kind = if error.starts_with("session/not-running") {
+                    FailureKind::Conflict
+                } else {
+                    FailureKind::BadRequest
+                };
+                CommandError::new(kind, "steering/rejected", error)
+            })
     }
 }

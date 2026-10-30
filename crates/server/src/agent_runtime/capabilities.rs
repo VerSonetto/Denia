@@ -102,6 +102,11 @@ impl AgentRuntime for Runtime {
             RuntimeCommand::SendMessage(args) => {
                 let target = args.target;
                 self.authorize(owner, &target, false)?;
+                let mut trace = crate::trajectory::TraceRecord::now(owner, "subagent");
+                trace.operation = Some("message_sent".into());
+                trace.agent_id = Some(owner.to_string());
+                trace.call_id = Some(target.clone());
+                trace.text = Some(args.message.chars().take(600).collect());
                 let id = self
                     .enqueue(
                         &target,
@@ -110,6 +115,8 @@ impl AgentRuntime for Runtime {
                         format!("agent:{owner}"),
                     )
                     .await?;
+                trace.data = Some(json!({"target": target, "messageId": id.clone()}));
+                self.inner.trace.record(&trace);
                 Ok(json!({"messageId":id,"target":target}))
             }
             RuntimeCommand::WaitAgent(args) => {
@@ -147,6 +154,8 @@ impl AgentRuntime for Runtime {
                     .await
                     .map_err(|e| format!("子代理启动任务失败：{e}"))?
             }
+            RuntimeCommand::DefineSubagent(args) => self.define_subagent(args, ctx).await,
+            RuntimeCommand::SessionTrace(args) => self.session_trace(args, ctx).await,
         }
     }
     async fn context(&self, session: &str, cwd: &Path) -> Result<Vec<String>, String> {
@@ -409,6 +418,14 @@ impl AgentRuntime for Runtime {
         })
         .await
         .map_err(|e| e.to_string())?
+    }
+
+    /// 取走本会话排队的引导消息，并按顺序广播送达事件(见 steering 模块)。
+    async fn drain_steering(
+        &self,
+        session: &str,
+    ) -> Result<Vec<denia_tools::capabilities::SteeringInput>, String> {
+        self.drain_steering_inner(session)
     }
 
     /// 会话的冻结工具授权：MCP 目录等按会话投影的目录必须用它过滤。

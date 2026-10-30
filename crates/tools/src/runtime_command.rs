@@ -1,5 +1,5 @@
 //! Model JSON is parsed at the tool boundary. Hosts dispatch typed operations.
-use denia_core::subagent::SubagentInlineSpec;
+use denia_core::subagent::{ModelChoice, PermissionCeiling, SubagentInlineSpec, ToolSelection};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -15,6 +15,11 @@ pub enum RuntimeCommand {
     InterruptAgent(TargetArgs),
     SendMessage(SendArgs),
     WaitAgent(TargetArgs),
+    /// 永久子代理定义：写入用户级/项目级定义目录（管理页可查看、编辑、删除）。
+    #[serde(rename = "create_subagent")]
+    DefineSubagent(DefineSubagentArgs),
+    /// 查询当前/相关会话的结构化轨迹与错误记录。
+    SessionTrace(SessionTraceArgs),
     /// 派遣：参数在这里就完成类型化校验，宿主不再零散读取 JSON。
     #[serde(skip)]
     Delegate {
@@ -130,7 +135,57 @@ pub struct SendArgs {
     pub message: String,
 }
 
-fn required<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<String, D::Error> {
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct DefineSubagentArgs {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    /// 角色补充提示（正文）。
+    #[serde(default)]
+    pub instructions: String,
+    /// 缺省继承父工具；allowlist 时按名字校验是否已注册。
+    #[serde(default)]
+    pub tools: Option<ToolSelection>,
+    /// 缺省跟随主会话；explicit 时保存定义，不可用则在派遣时回退。
+    #[serde(default)]
+    pub model: Option<ModelChoice>,
+    #[serde(default)]
+    pub permission_ceiling: Option<PermissionCeiling>,
+    /// `user`（跨项目，缺省）或 `project`（随项目走）。
+    #[serde(default)]
+    pub scope: Option<String>,
+    /// 已存在同 id 定义时是否覆盖（默认拒绝，避免静默改写用户配置）。
+    #[serde(default)]
+    pub overwrite: Option<bool>,
+}
+
+/// 会话轨迹查询参数（宿主投影层与工具 schema 共用）。
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct SessionTraceArgs {
+    /// `current`（缺省）或相关会话 id（自己/父/子）。
+    #[serde(default)]
+    pub session: Option<String>,
+    #[serde(default)]
+    pub kind: Option<Vec<String>>,
+    /// `error` = 只看错误记录。
+    #[serde(default)]
+    pub level: Option<String>,
+    #[serde(default)]
+    pub query: Option<String>,
+    #[serde(default)]
+    pub since: Option<u64>,
+    #[serde(default)]
+    pub limit: Option<usize>,
+    #[serde(default)]
+    pub text_limit: Option<usize>,
+}
+
+fn required<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
     let value = String::deserialize(deserializer)?;
     if value.trim().is_empty() {
         return Err(serde::de::Error::custom("参数必须为非空字符串"));

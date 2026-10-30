@@ -152,6 +152,36 @@ pub(crate) async fn run_turn_inner(
         // —— 背景注入(工作区指令/能力上下文/技能目录),失败不阻断 ——
         refresh_background_injections(driver, state, &mut assembly.baselines, &assembly.touched)
             .await?;
+        // —— 用户「引导」注入(步骤边界)——
+        //
+        // 用户在上一段输出/工具执行期间发起的引导消息不打断当前动作,由宿主
+        // 排队;这里在工具结果均已落盘、下一次请求尚未装配的边界把它落成真实
+        // 用户消息。失败只记警告:引导是增强通道,不能让一次宿主故障终止整轮。
+        if let Some(runtime) = driver.runtime.as_ref() {
+            match runtime.drain_steering(state.session.id()).await {
+                Ok(items) => {
+                    for item in items {
+                        append(
+                            &state.session,
+                            &state.emit,
+                            SessionEvent::UserMessage {
+                                text: item.text,
+                                injected: false,
+                                channel: Some(format!("steering:{}", item.id)),
+                                images: item.images,
+                            },
+                        )?;
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        session_id = state.session.id(),
+                        %error,
+                        "引导消息注入失败，本轮继续"
+                    );
+                }
+            }
+        }
         let real_input = state.session.with_events(|events| {
             events
                 .iter()
@@ -991,11 +1021,21 @@ pub(crate) fn apply_subagent_context(
     } else {
         format!("可用工具仅限：{}。", child.effective_tools.join("、"))
     };
+    let comm_note = if child
+        .effective_tools
+        .iter()
+        .any(|name| name == "send_message")
+    {
+        "- 你可以用 send_message 主动联系父代理：同步关键进展、请求澄清或报告阻塞；只在信息会改变对方下一步动作时发送，避免重复与高频通信；\n"
+    } else {
+        ""
+    };
     let constraints = format!(
         "# 子代理约束\n\
          - 你是子代理，**不能派遣子代理**，也不能使用宿主配置或会话主控工具；\n\
          - 不会自动加载全局 AGENTS.md，只自动发现项目级规则；工作目录、权限模式与工作区沙箱与父代理一致；\n\
          - {tools_note}\n\
+         {comm_note}\
          - 权限上限：{ceiling}{}；\n\
          - 无法完成的动作不要假装完成：把阻塞、未覆盖范围与需要的决策写进最终结果。\n\
          - 汇报时区分三种情形：成功结果（附证据）、任务失败（附原因）、等待父代理决策。",
@@ -1154,6 +1194,50 @@ mod subagent_section_tests {
         assert!(constraints.text.contains("写文件与命令一律被拒绝"));
         // 零工具时请求工具面也必须为空（schema 与授权一致）。
         assert!(a.tools.is_empty(), "零工具定义不得拿到任何 schema");
+    }
+
+    #[test]
+    fn child_comm_note_only_appears_when_send_message_is_granted() {
+        let constraints_of = |tools: Vec<&str>| {
+            let mut a = assembly();
+            apply_subagent_context(&mut a, &child("", tools, "inherit"));
+            a.sections
+                .iter()
+                .find(|section| section.name == SUBAGENT_CONSTRAINTS_SECTION)
+                .map(|section| section.text.clone())
+                .expect("约束段必须存在")
+        };
+
+        let granted = constraints_of(vec!["read_file", "send_message"]);
+        assert!(
+            granted.contains("主动联系父代理"),
+            "授予 send_message 时必须鼓励子代理主动联系父代理：{granted}"
+        );
+        assert!(
+            granted.contains("避免重复与高频通信"),
+            "通信约束必须抑制高频：{granted}"
+        );
+        assert!(
+            granted.lines().all(|line| !line.starts_with("- - ")),
+            "约束列表不能出现双项目符号：{granted}"
+        );
+
+        let without = constraints_of(vec!["read_file"]);
+        assert!(
+            !without.contains("send_message"),
+            "未授予 send_message 时不得出现通信提示：{without}"
+        );
+        assert!(
+            without.lines().all(|line| !line.starts_with("- - ")),
+            "约束列表不能出现双项目符号：{without}"
+        );
+        // 通信行缺失时，权限上限行仍然是独立列表项。
+        assert!(
+            without
+                .lines()
+                .any(|line| line.starts_with("- 权限上限：inherit")),
+            "权限上限必须保持独立列表项：{without}"
+        );
     }
 
     #[test]

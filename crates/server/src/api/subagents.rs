@@ -551,6 +551,38 @@ async fn preview_profile(
     .map_err(map_error)?;
     let ceiling = dispatch.permission_ceiling;
     let mode = resolver::effective_permission_mode(ceiling, context.mode);
+    // 预览与真实派遣同一口径：显式模型不可用时展示"回退为跟随主会话"，
+    // 而不是把定义标成不可用却让派遣照常成功。
+    let mut model = dispatch.selection.clone();
+    let mut model_origin = dispatch.model_origin;
+    let mut model_fallback: Option<String> = None;
+    if let Err(error) = state
+        .registry
+        .resolve_call(
+            &model.provider,
+            &model.model,
+            model.reasoning_effort.as_deref(),
+        )
+        .await
+    {
+        if model_origin == resolver::ModelOrigin::ProfileExplicit {
+            model_fallback = Some(format!(
+                "定义的模型 {}/{} 当前不可用（{}），实际会回退为跟随主会话 {}/{}",
+                model.provider,
+                model.model,
+                error,
+                context.selection.provider,
+                context.selection.model
+            ));
+            model = context.selection.clone();
+            model_origin = resolver::ModelOrigin::Parent;
+        } else {
+            return Err(ApiError::bad_request(
+                "subagent/model-unavailable",
+                error.to_string(),
+            ));
+        }
+    }
     Ok(Json(json!({
         "sessionId": context.session_id,
         "final": true,
@@ -563,12 +595,13 @@ async fn preview_profile(
         },
         "tools": dispatch.tools,
         "toolCount": dispatch.tools.len(),
-        "model": dispatch.selection,
-        "modelOrigin": match dispatch.model_origin {
+        "model": model,
+        "modelOrigin": match model_origin {
             resolver::ModelOrigin::CallOverride => "call-override",
             resolver::ModelOrigin::ProfileExplicit => "profile-explicit",
             resolver::ModelOrigin::Parent => "parent",
         },
+        "modelFallback": model_fallback,
         "permissionCeiling": ceiling.as_str(),
         "effectivePermissionMode": mode.as_str(),
         "delegationAllowed": false,

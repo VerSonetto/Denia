@@ -273,7 +273,10 @@ pub fn register_capability_prompt_sections(prompt: &mut SystemPrompt) -> Result<
         order: SectionOrder::ToolAgents.value(),
         text: PromptText::Static(
             "- 委派要算成本：只有子任务可独立完成、边界清楚，且收益大于启动、上下文复制与集成开销时，才用 spawn_agent/fork_agent；主代理能直接做完的短任务不派。尽量按不重叠的文件或模块分工，由主代理统一集成；send_message 仅限直接父子。类型按注入的子代理目录选择：默认 develop 实现与修复（可写可跑命令），explore 只读调查，verify 验证；inline 为临时定义，不落盘。\n\
-             - 子代理继承系统提示基础、工作目录、权限模式与模型默认值，角色提示是追加而非替换；不自动继承全局 AGENTS.md，只自动发现项目级规则。不得再派遣子代理，也不得使用宿主配置与会话主控工具。结果必须区分成功、失败与待主代理决策；需要落盘改动或与用户确认的关键决定留在主代理。"
+             - create_subagent 用于把长期角色固化成永久定义（写入子代理管理页，用户可查看、编辑、删除）；**默认优先 inline 临时定义**，只在用户明确要求、或同一角色确需跨会话反复使用时才创建永久定义。创建前先用 ask 确认名称、职责、可用工具与模型，不要自作主张扩大工具面；同 id 默认拒绝覆盖，确需更新时显式 overwrite=true，并在结果里报告写入作用域。\n\
+             - 排查失败、复核子代理结果或回溯关键状态时，用 session_trace 查看当前会话/直接子的结构化轨迹与错误记录（按 kind/level/query/since/limit 收窄）；它读已落盘日志，文本已脱敏并截断，不要用它整段倾倒日志。\n\
+             - 子代理继承系统提示基础、工作目录、权限模式与模型默认值，角色提示是追加而非替换；不自动继承全局 AGENTS.md，只自动发现项目级规则。不得再派遣子代理，也不得使用宿主配置与会话主控工具。结果必须区分成功、失败与待主代理决策；需要落盘改动或与用户确认的关键决定留在主代理。\n\
+             - 主代理与子代理之间可以**双向**发送消息（send_message 仅限直接父子）：子代理在需要澄清、分工变化或拿到阶段性结论时主动联系主代理；主代理据此同步进展、调整分工、补充约束。鼓励在关键节点做这种协作调用，但避免无意义的高频通信：同一信息不要重复发送，能凭已有结果继续推进时不要再开一轮问答。"
                 .to_string(),
         ),
         complete: false,
@@ -1713,10 +1716,16 @@ mod capability_prompt_tests {
         );
         assert!(body.contains("job_start"));
         assert!(body.contains("<available_skills>"));
+        // 任务四：双向通信与协作纪律必须对模型可见，且明确抑制高频通信。
+        assert!(body.contains("双向"), "{}", &body[..body.len().min(4000)]);
+        assert!(body.contains("高频"));
+        assert!(body.contains("create_subagent"));
+        assert!(body.contains("session_trace"));
         // Model audience 段不进用户可见副本。
         let user_body = denia_system_prompt::render_prompt_for_user(&assembly);
         assert!(!user_body.contains("spawn_agent/fork_agent"));
         assert!(!user_body.contains("job_start"));
+        assert!(!user_body.contains("双向"));
     }
 
     #[test]

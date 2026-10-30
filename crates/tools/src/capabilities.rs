@@ -98,6 +98,19 @@ pub trait AgentRuntime: Send + Sync {
         Ok(None)
     }
 
+    /// 取走该会话在**当前步骤边界**应注入的用户引导消息。
+    ///
+    /// 语义：用户在模型输出/工具执行期间发起的「引导」消息先排队，不打断
+    /// 当前动作；驱动器在每个 step 开始时取走并落成真实用户消息，模型在
+    /// 下一次请求里看到它。返回顺序即用户发送顺序。实现方负责在投递后
+    /// 发出送达事件（供前端把队列项从"等待"移走）。
+    ///
+    /// 默认空实现：不启用引导的部署无需关心。
+    async fn drain_steering(&self, session: &str) -> Result<Vec<SteeringInput>, String> {
+        let _ = session;
+        Ok(Vec::new())
+    }
+
     /// 某会话的**冻结**工具授权。
     ///
     /// `None` = 该会话没有被定义收窄（普通会话），调用方按"部署全集"处理。
@@ -125,6 +138,20 @@ pub struct SubagentPrompt {
     pub parent_preset_persona: Option<String>,
     /// 旧描述符（迁移前）：授权是保守历史集合，只能查看与受限继续。
     pub legacy: bool,
+}
+
+/// 一条待注入的「引导」消息。
+///
+/// 与普通 prompt 同形的最小集：引导在已运行的轮次内部投递，模型选择沿用
+/// 当前轮次，不能在这里改路由；附件/轨迹引用等需要落授权的载荷仍走普通
+/// 队列（本轮结束后发送），不参与中途注入。
+#[derive(Debug, Clone, Default)]
+pub struct SteeringInput {
+    /// 客户端生成的稳定 id：送达事件据此让前端把队列项移出。
+    pub id: String,
+    pub text: String,
+    /// 内联图片；空表示纯文本。
+    pub images: Vec<denia_core::message::ImageData>,
 }
 
 pub fn schemas() -> Vec<ToolSchema> {
@@ -188,6 +215,57 @@ pub fn schemas() -> Vec<ToolSchema> {
                 "persona": {"type": "string", "description": "已废弃：角色补充提示。"}
             }),
             vec!["prompt"],
+        ),
+        (
+            "create_subagent",
+            "创建一个**永久**子代理定义，写入用户级或项目级定义目录，会出现在设置 → 子代理管理页，用户可查看、编辑、删除。只应在用户明确要求固化一个长期角色时使用；一次性任务优先用 spawn_agent 的 inline 临时定义（不落盘）。同 id 默认拒绝覆盖，需显式 overwrite=true。",
+            json!({
+                "id": {"type": "string", "description": "定义 id（小写字母、数字与连字符）；同时是文件名。"},
+                "name": {"type": "string", "description": "显示名。"},
+                "description": {"type": "string", "description": "一句话用途，写入派遣目录供后续选择。"},
+                "instructions": {"type": "string", "description": "角色补充提示（追加在父系统提示之后，不替换父 persona）。"},
+                "tools": {
+                    "type": "object",
+                    "description": "缺省 {mode:\"inherit\"}；也可 {mode:\"allowlist\",names:[...]}。",
+                    "properties": {
+                        "mode": {"type": "string", "enum": ["inherit", "allowlist"]},
+                        "names": {"type": "array", "items": {"type": "string"}}
+                    }
+                },
+                "model": {
+                    "type": "object",
+                    "description": "缺省 {mode:\"inherit\"} 跟随主会话；或 {mode:\"explicit\",selection:{provider,model,reasoningEffort}}。",
+                    "properties": {
+                        "mode": {"type": "string", "enum": ["inherit", "explicit"]},
+                        "selection": {
+                            "type": "object",
+                            "properties": {
+                                "provider": {"type": "string"},
+                                "model": {"type": "string"},
+                                "reasoningEffort": {"type": "string"}
+                            }
+                        }
+                    }
+                },
+                "permissionCeiling": {"type": "string", "enum": ["inherit", "read-only"], "description": "只允许收窄。"},
+                "scope": {"type": "string", "enum": ["user", "project"], "description": "缺省 user（跨项目）；project 随项目走。"},
+                "overwrite": {"type": "boolean", "description": "同 id 已存在时是否覆盖（默认 false）。"}
+            }),
+            vec!["id", "name", "description"],
+        ),
+        (
+            "session_trace",
+            "查看当前会话或直接父/子代理会话的结构化轨迹、日志与错误记录，用于自我审查和故障定位。覆盖用户消息、模型输出、工具调用/结果、队列引导送达、子代理通信、关键状态变更与错误；错误记录带时间、会话、代理、操作/工具、错误类型、消息、上下文与定位（session+seq+turn/step/callId）。文本已脱敏并截断；默认只返回最近 50 条，可用 kind/level/query/since/limit 收窄，避免日志量拖垮上下文。",
+            json!({
+                "session": {"type": "string", "description": "缺省 current；也可填直接父代理或直接子代理的会话 id。"},
+                "kind": {"type": "array", "items": {"type": "string", "enum": ["user", "queue", "assistant", "tool_call", "tool_result", "turn", "state", "subagent", "error"]}, "description": "只保留这些类型。"},
+                "level": {"type": "string", "enum": ["all", "error"], "description": "error = 只看错误记录。"},
+                "query": {"type": "string", "description": "不区分大小写的子串过滤（文本/工具名/操作/错误码）。"},
+                "since": {"type": "integer", "description": "只看该 epoch 毫秒之后的记录。"},
+                "limit": {"type": "integer", "minimum": 1, "maximum": 200, "description": "返回条数，默认 50。"},
+                "textLimit": {"type": "integer", "minimum": 120, "maximum": 4000, "description": "单条文本上限（字符），默认 600。"}
+            }),
+            vec![],
         ),
         (
             "send_message",
@@ -332,4 +410,56 @@ fn validate_arguments(schema: &ToolSchema, args: &Value) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn permanent_definition_and_trace_tools_are_model_facing_schemas() {
+        let schemas = schemas();
+        let schema = |name: &str| {
+            schemas
+                .iter()
+                .find(|schema| schema.name == name)
+                .unwrap_or_else(|| panic!("缺少工具 schema：{name}"))
+        };
+
+        let create = schema("create_subagent");
+        let required: Vec<&str> = create.parameters["required"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(Value::as_str)
+            .collect();
+        assert_eq!(required, vec!["id", "name", "description"]);
+        assert!(
+            create.parameters["properties"]["overwrite"]["type"] == "boolean",
+            "create_subagent 必须显式暴露 overwrite"
+        );
+        assert!(
+            create.parameters["properties"]["model"]["description"]
+                .as_str()
+                .is_some_and(|text| text.contains("inherit")),
+            "模型参数必须说明缺省跟随主会话"
+        );
+
+        let trace = schema("session_trace");
+        for field in ["session", "kind", "level", "query", "since", "limit"] {
+            assert!(
+                trace.parameters["properties"].get(field).is_some(),
+                "session_trace 缺少过滤字段 {field}"
+            );
+        }
+        assert_eq!(
+            trace.parameters["properties"]["limit"]["maximum"],
+            json!(TRACE_LIMIT_MAX_FOR_SCHEMA),
+            "limit 上限必须与投影硬上限一致"
+        );
+    }
+
+    /// schema 里的 limit 上限（与 `denia_server::trajectory` 的硬上限同值；
+    /// tools crate 不依赖 server，因此在这里显式锁定再交叉验证）。
+    const TRACE_LIMIT_MAX_FOR_SCHEMA: usize = 200;
 }
