@@ -4,7 +4,7 @@ import { saveComposer, type ComposerSnapshot } from '../composerMemory'
 import { useSessionContext } from '../features/conversation/useSessionContext'
 import { useComposerMentions } from '../features/conversation/useComposerMentions';
 import { useComposerSlash } from '../features/conversation/useComposerSlash';
-import { normalizeSelection, LAST_MODEL_KEY, LAST_MODEL_KEY_LEGACY, NODES_THROTTLE_MS, firstAvailableSelection, latestRequestSelection, type OutgoingPayload } from '../features/conversation/sessionState';
+import { normalizeSelection, LAST_MODEL_KEY, LAST_MODEL_KEY_LEGACY, NODES_THROTTLE_MS, firstAvailableSelection, latestRequestSelection, queuedPayload, type OutgoingPayload } from '../features/conversation/sessionState';
 import { usePermissions } from '../features/conversation/usePermissions';
 import { usePromptOptimize } from '../features/conversation/usePromptOptimize';
 import { useMessageQueue, type PostMessageFn } from '../features/conversation/useMessageQueue';
@@ -33,7 +33,8 @@ import { ConfirmDialog } from '../components/ConfirmDialog';
 import { ContextRing } from '../components/ContextRing';
 import { IconBranch, IconArrowDown, IconClose, IconFile, IconFolder, IconPromptOptimize, IconSend, IconSparkles, IconUndo, IconSpinner, IconStop, IconSlashCommand, IconAgentSpawn } from '../components/icons';
 import { resolveSessionReasoningEffort } from '../modelCatalog';
-import { useStickToBottom } from '../hooks/useStickToBottom';
+import { useFollow } from '../streaming/useFollow';
+import { SmoothStreamContext } from '../streaming/pressure';
 import { useContainedWheel } from '../hooks/useContainedWheel';
 
 import { collectSkillTokens, parseLeadingCommand } from './slash';
@@ -44,7 +45,7 @@ import { TodoPanel } from '../components/TodoPanel';
 import { GoalBar } from '../components/GoalBar';
 import { QueuedMessagePanel } from '../components/QueuedMessagePanel';
 import { ConversationAxis } from '../components/ConversationAxis';
-import type { AskAnswer, CatalogModel, ModelCatalog, ModelSelection, PendingAttachment, SessionSummary, SessionTotals, TodoItem, UserMessageImage, WorkspaceRecord } from '../types';
+import type { AskAnswer, CatalogModel, ModelCatalog, ModelSelection, PendingAttachment, QueuedMessage, SessionSummary, SessionTotals, TodoItem, UserMessageImage, WorkspaceRecord } from '../types';
 import { isGenericImageName } from '../userImages';
 import { setModelSelection as setSharedModelSelection } from '../modelSelectionStore';
 
@@ -217,9 +218,9 @@ export default function SessionsPage({
   const layoutRef = useRef<HTMLDivElement | null>(null)
 
   /* ---- 对话流贴底跟随 ---- *
-   * 判定与驱动都在 useStickToBottom 里(见该 hook 顶部注释),这里只负责把
+   * 判定与驱动都在 useFollow 里(见 streaming/useFollow 顶部注释),这里只管把
    * 「内容变了」与「程序性跳转」两个信号接进去。 */
-  const follower = useStickToBottom(scrollRef, { active: running || compactingAt !== null })
+  const follower = useFollow(scrollRef, { active: running || compactingAt !== null })
   const stick = follower.stick
   const snapToBottom = follower.snapToBottom
   const releaseFollow = follower.release
@@ -493,8 +494,8 @@ export default function SessionsPage({
     return () => { mountedRef.current = false }
   }, [])
   const {
-    queuedMessages, setQueuedMessages, suppressAutoFlushRef, sendNow, editQueued, deleteQueued,
-    confirmedRef, settlePending, pushPending, enqueueMessage,
+    queuedMessages, setQueuedMessages, setAutoFlushSuppressed, sendNow, editQueued, deleteQueued,
+    confirmedRef, settlePending, pushPending, enqueueMessage, updateQueued,
   } = useMessageQueue({
     activeId, running, composerReadyRef, composerScope, postMessageRef, composerSnapshotRef,
     runningRef, mountedRef, applyDraft, promptRef, setPastedImages, setAttachments, setTrajQuotes,
@@ -992,7 +993,7 @@ export default function SessionsPage({
     setRewindBusy(true)
     // 回退期间抑制队列自动发送:上面的打断会让 running 转 false,若不抑制,
     // 队首消息会在日志即将被截断的瞬间被发出去。
-    suppressAutoFlushRef.current = true
+    setAutoFlushSuppressed(true)
     try {
       // 运行中也能回退:先替用户打断当前轮次并等它真正退出。不再要求
       // 先手动暂停 —— 但打断必须发生在用户确认之后(取消确认框时 AI
@@ -1050,7 +1051,7 @@ export default function SessionsPage({
     } catch (error) {
       notify('err', error instanceof Error ? error.message : String(error))
     } finally {
-      suppressAutoFlushRef.current = false
+      setAutoFlushSuppressed(false)
       setRewindBusy(false)
     }
   }, [activeId, rewindReq, rewindBusy])
@@ -1112,7 +1113,11 @@ export default function SessionsPage({
    */
   const postMessage = async (
     text: string,
-    options?: { clearInput?: boolean; payload?: OutgoingPayload },
+    options?: {
+      clearInput?: boolean
+      payload?: OutgoingPayload
+      source?: 'user' | 'queue' | 'interject' | 'guide'
+    },
   ): Promise<boolean> => {
     if (sendingRef.current || !composerReady) return false
     // 载荷:显式传入优先(队列消息),否则取输入区当前内容。
@@ -1243,6 +1248,7 @@ export default function SessionsPage({
         files: uploadedPaths,
         quoted: outgoingQuotes.map(({ title, text }) => ({ title, text })),
         skills: skillNames.length > 0 ? skillNames : undefined,
+        source: options?.source ?? 'user',
       })
       // 发送成功后立即打开 follow,收流式增量;不要等 running SSE 才建连。
       ensureFollowing(id)
@@ -1292,7 +1298,8 @@ export default function SessionsPage({
       onOpenPicker()
       return
     }
-    // AI 正在运行:不打断,把消息加入队列(含图片/附件/引用),本轮结束后自动发送。
+    // AI 正在运行:照旧入队,本轮结束自动发送。立即发出的两种方式由队列
+    // 条目上的发送选择器决定(插话 / 引导),不在输入区打断用户写作。
     if (running) {
       enqueueMessage(trimmed)
       notify('ok', t('queueSentHint'))
@@ -1301,6 +1308,50 @@ export default function SessionsPage({
     // 不运行时:附件随消息一起发。
     await postMessage(trimmed)
     // postMessage 成功后已清空输入框/附件;发送失败时保留,等待重试。
+  }
+
+  /** 队列条目「插话」：打断当前轮次后立即发送。 */
+  const interjectQueued = async (message: QueuedMessage) => {
+    updateQueued(message.id, { mode: 'interject' })
+    await sendNow({ ...message, mode: 'interject' })
+  }
+
+  /**
+   * 队列条目「引导」：立即交给服务端，在当前动作结束后、下一次模型请求前注入。
+   *
+   * 不打断当前输出/工具调用；纯文本走 steer 接口，服务端在**下一个 step
+   * 边界**落成真实用户消息，而不是等整轮结束。图片/附件暂不支持中途注入，
+   * 保留在队列中按普通消息发送。步骤刚好结束时回落到普通发送。
+   */
+  const guideQueued = async (message: QueuedMessage) => {
+    if (!activeId) return
+    const textOnly = !message.images && !message.attachments && !message.quotes
+    if (runningRef.current && textOnly) {
+      try {
+        await api.steerSession(activeId, { id: message.id, prompt: message.text })
+        updateQueued(message.id, { state: 'steering', mode: 'guide' })
+        notify('ok', t('queueSteerAccepted'))
+        return
+      } catch (error) {
+        if (!(error instanceof api.ApiError && error.status === 409)) {
+          notify('err', error instanceof Error ? error.message : String(error))
+          return
+        }
+        // 409 = 轮次刚好结束：按普通消息立即发送。
+      }
+    }
+    if (runningRef.current) {
+      notify('ok', t('queueGuideAttachments'))
+      return
+    }
+    const ok = await postMessage(message.text, {
+      clearInput: false,
+      payload: queuedPayload(message),
+      source: 'guide',
+    })
+    if (ok) {
+      setQueuedMessages((previous) => previous.filter((item) => item.id !== message.id))
+    }
   }
 
   // postMessage 镜像:每渲染重赋,队列自动发送 effect(在 useMessageQueue)
@@ -1807,7 +1858,7 @@ export default function SessionsPage({
       )}
       <div
         className="conversation-scroll"
-        ref={follower.setNode}
+        ref={follower.setPort}
         data-conversation-scroll=""
       >
         {phase === 'active' && view === 'chat' && (
@@ -1832,39 +1883,43 @@ export default function SessionsPage({
           className={view === 'trajectory' ? 'conversation-view full-bleed' : 'conversation-view'}
           ref={viewRef}
         >
-          {showTranscript && activeId ? (
-            // 局部边界:transcript 子树崩了不该带走侧栏/输入框(只降级这一块)。
-            // key 与会话/重挂 tick 对齐,回退重挂时边界一并重置。
-            <ErrorBoundary key={`${activeId}-${transcriptReloadTick}`}>
-              <SessionView
-                key={`${activeId}-${transcriptReloadTick}`}
-                id={activeId}
-                view={view}
-                pendingMessages={pendingMessages}
-                compacting={compactingAt}
-                onTodosChange={setTodos}
-                onGoalTouch={handleGoalTouch}
-                onPendingSettled={settlePending}
-                onNotFound={handleNotFound}
-                onNodesChange={handleNodesChange}
-                onAnchorsChange={setAxisAnchors}
-                jumpRequest={axisJump}
-                onJumpSettled={handleJumpSettled}
-                onRewind={handleRewindClick}
-                onFork={handleForkClick}
-                onQuote={handleQuote}
-                onLoopContinue={handleLoopContinue}
-                onAskAnswer={handleAskAnswer}
-                onAskCancel={handleAskCancel}
-              />
-            </ErrorBoundary>
-          ) : (
-            <div className="session-hero">
-              <div className="hero-headline">
-                <span className="hero-headline-text">{t('heroTitle')}</span>
+          {/* 揭示引擎从这里取压压通道:正文与思考正文的揭示速度由本次对话流的
+              跟随滞后决定(见 streaming/pressure)。 */}
+          <SmoothStreamContext.Provider value={follower.pressure}>
+            {showTranscript && activeId ? (
+              // 局部边界:transcript 子树崩了不该带走侧栏/输入框(只降级这一块)。
+              // key 与会话/重挂 tick 对齐,回退重挂时边界一并重置。
+              <ErrorBoundary key={`${activeId}-${transcriptReloadTick}`}>
+                <SessionView
+                  key={`${activeId}-${transcriptReloadTick}`}
+                  id={activeId}
+                  view={view}
+                  pendingMessages={pendingMessages}
+                  compacting={compactingAt}
+                  onTodosChange={setTodos}
+                  onGoalTouch={handleGoalTouch}
+                  onPendingSettled={settlePending}
+                  onNotFound={handleNotFound}
+                  onNodesChange={handleNodesChange}
+                  onAnchorsChange={setAxisAnchors}
+                  jumpRequest={axisJump}
+                  onJumpSettled={handleJumpSettled}
+                  onRewind={handleRewindClick}
+                  onFork={handleForkClick}
+                  onQuote={handleQuote}
+                  onLoopContinue={handleLoopContinue}
+                  onAskAnswer={handleAskAnswer}
+                  onAskCancel={handleAskCancel}
+                />
+              </ErrorBoundary>
+            ) : (
+              <div className="session-hero">
+                <div className="hero-headline">
+                  <span className="hero-headline-text">{t('heroTitle')}</span>
+                </div>
               </div>
-            </div>
-          )}
+            )}
+          </SmoothStreamContext.Provider>
         </div>
         {(phase === 'hero' || view === 'chat') && (
           <div className="composer-seat" ref={seatRef} data-composer-seat="">
@@ -1873,7 +1928,8 @@ export default function SessionsPage({
               {phase === 'active' && (
                 <QueuedMessagePanel
                   messages={queuedMessages}
-                  onSendNow={(message) => void sendNow(message)}
+                  onInterject={(message) => void interjectQueued(message)}
+                  onGuide={(message) => void guideQueued(message)}
                   onEdit={editQueued}
                   onDelete={deleteQueued}
                 />

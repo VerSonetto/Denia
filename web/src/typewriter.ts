@@ -1,136 +1,228 @@
 /**
- * 打字机显示:把「模型已到达的文本」与「UI 逐帧显示的文本」分离,
- * 逐字 reveal 的质感与模型吐字速度天然并存。
+ * 揭示引擎:把「模型已到达的文本」与「UI 已显示的文本」拆成两个状态机的一半。
  *
- * ## 自适应跟随(核心)
- * 不用固定字符/秒限速(那会让快模型积压、显示变慢),而是让显示位置
- * 以指数收敛逼近目标:每次提交把显示位置向目标推进 `1 - e^(-λ·dt)` 比例。
+ * ## 字符积分(核心)
+ * 显示位置不跟"剩余距离的比例"走,而是跟**速度**走:
  *
- * 收敛按真实经过时间算,但提交频率封顶约 30 次/秒(见 `MIN_COMMIT_MS`):
- * 240Hz 屏上逐帧提交等于每秒 240 次重渲染,换不来肉眼可见的平滑度。
+ *   v = 90 + 积压^1.25 × 0.85  (封顶 600 码元/秒)
  *
- * 稳态下显示领先/落后量与模型速率成正比:
- * - 快模型(每秒上百字):每次提交自动多 reveal 一些,延迟恒定在 ~100ms,
- *   视觉上是"快速一字字长出来",不积压不跳变;
- * - 慢模型(每秒十几字):每次提交 reveal 半字到一字,打字机质感;
- * - 模型暂停:显示位置收完剩余文本后停帧,追加时从中断处继续。
+ * 积压小的时候 v ≈ 90,是一段稳定的打字机节奏(不会越放越慢);积压大时
+ * 超线性追赶(1000 字积压约 4700 码元/秒的势能,但被上限钳住),一次网络
+ * 分块送来几百字,画面仍是一行行长出来,而不是整段砸在屏幕上。每次提交的
+ * 小数零头记进 `debt` 带到下一帧 —— 分数级积分不丢字。
  *
- * 模型完全收尾(settle,streaming=false)时立即返回全文,不播尾巴。
+ * 积压超过 `LIVE_LAG_CHAR_CEILING` 后额外按 0.15s 窗口补速,保证显示不会
+ * 长时间落后于流;极端积压(切回标签页、断流重连)直接跳到全文。
+ *
+ * ## 闭环背压
+ * 每帧从压力通道读 `scale`(0.55~1)乘进速度:跟随引擎的滞后占满容量时
+ * 揭示自动慢下来,腾出空间让视口追上。两个状态机因此互相咬合,而不是各自
+ * 按自己的节奏跑。
+ *
+ * ## 提交频率
+ * 收敛按真实时间算,但提交间隔封顶约 30 次/秒(见 `MIN_COMMIT_MS`):
+ * 240Hz 屏上逐帧提交等于每秒 240 次 React 重渲染 + Markdown 尾部重解析,
+ * 而人眼对逐字显示的分辨率到不了这个量级。
+ *
+ * ## 尾部收束
+ * 生产端结束(settle)时通常还剩几十个字(揭示本来就允许略落后)。这里不
+ * 直接跳到全文,而是按"剩余量 / 100~280ms"的速度匀速排空,`done` 之后才
+ * 交给定稿渲染 —— 结算那一帧不会整段砸下来,数学公式与标题修复也顺延一个
+ * 呼吸的时间。
  *
  * ## 代理对安全
- * 文本按 UTF-16 码元索引推进,截断点落在完整代理对上
- * (emoji/生僻字是 2 个码元,拆开会显示 �),`safeSlice` 保证不折断。
- *
- * ## 重置
- * 目标文本非 append(重试生成/切消息)时放弃旧累积从头播。
+ * 文本按 UTF-16 码元索引推进,截断点落在完整代理对上(emoji/生僻字是 2 个
+ * 码元,拆开会显示 �),`safeSlice` 保证不折断。
  */
 
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
+import { MAX_FRAME_MS, drainCpsFor, queueRevealStep } from './streaming/physics'
+import { useStreamPressure, type StreamPressure } from './streaming/pressure'
 
-/** 收敛速率(1/秒):显示位置向目标指数逼近的系数。越大越跟手。 */
-const DEFAULT_FOLLOW = 8
-/** 帧间隔下限(ms):防止 dt 过小导致无进展。 */
-const MIN_FRAME_MS = 8
 /**
  * 提交间隔下限(ms):约 30 次/秒。
  *
  * 高频屏(实测 240Hz)上每帧 setState 等于每秒 240 次 React 重渲染 +
- * Markdown 尾部重解析,而人眼对逐字显示的分辨率到不了这个量级。
- * 收敛仍按真实 dt 计算,所以滞后量不变(依旧约 100ms),只是采样更疏。
+ * Markdown 尾部重解析,换不来肉眼可见的平滑度。速度仍按真实 dt 计算,
+ * 所以揭示速率不受影响,只是采样更疏。
  */
 const MIN_COMMIT_MS = 32
-/** 落后超过该值直接跳到底,不再逐字播(极端卡顿恢复场景)。 */
+/** 单次积分的时长下限(ms):防止同一毫秒内两次提交算出零进展。 */
+const MIN_FRAME_MS = 8
+/** 积压超过该值直接跳到底(极端积压:切回标签页、断流重连后的补发)。 */
 const CATCH_UP_JUMP = 2000
+/** 收束兜底(ms):帧循环被隐藏标签页等拖住时,到时也必须定稿。 */
+const DRAIN_DEADLINE_MS = 400
 
 export interface TypewriterOptions {
-  /** 收敛速率(1/秒);缺省 8,越大显示越跟手。 */
-  follow?: number
+  /**
+   * 压力通道;缺省取对话流的 context。
+   *
+   * 自带内层滚动框的组件(思考框)传自己的那一份 —— 那里的跟随发生在内层,
+   * 背压也该由内层的滞后决定。
+   */
+  pressure?: StreamPressure | null
+}
+
+export interface Reveal {
+  /** 当前应显示的文本前缀。 */
+  text: string
+  /** 生产端已结束且残余已排空:可以切到定稿渲染。 */
+  done: boolean
 }
 
 /**
- * 返回当前应显示的文本片段(逐字 reveal)。
+ * 返回当前应显示的文本与"是否已定稿"。
  * @param text - 模型已到达的完整目标文本。
- * @param streaming - 是否仍在流式;false 时立即返回全文。
- * @param options - 跟随速率等显示参数。
+ * @param streaming - 生产端是否仍在输出。
+ * @param options - 压力通道等显示参数。
  */
 export function useTypewriter(
   text: string,
   streaming: boolean,
   options?: TypewriterOptions,
-): string {
-  const follow = options?.follow ?? DEFAULT_FOLLOW
-  // 当前显示了多少"码元"。
-  const shownRef = useRef(0)
-  // 上一帧的目标文本(判定 append / 重置)。
+): Reveal {
+  const contextPressure = useStreamPressure()
+  const pressure = options?.pressure ?? contextPressure
+  const pressureRef = useRef<StreamPressure | null>(pressure)
+  pressureRef.current = pressure
+
+  // 已显示的码元数(UTF-16 单元)。ref 供帧循环推进,state 只负责触发渲染。
+  const shownRef = useRef(streaming ? 0 : text.length)
+  // 分数级积分的进位:几次提交凑不满一个字也不会丢。
+  const debtRef = useRef(0)
+  // 上一帧的目标文本(判定追加 / 重置)。
   const targetRef = useRef<string | null>(null)
+  // 这段文本是否以"生产中"的身份进来过:决定 settle 时排空还是直接全量。
+  const liveRef = useRef(false)
   const [shown, setShown] = useState(() => (streaming ? 0 : text.length))
+  const rafRef = useRef(0)
+  const timerRef = useRef(0)
+
+  const stop = useCallback(() => {
+    if (rafRef.current !== 0) {
+      cancelAnimationFrame(rafRef.current)
+      rafRef.current = 0
+    }
+    if (timerRef.current !== 0) {
+      window.clearTimeout(timerRef.current)
+      timerRef.current = 0
+    }
+  }, [])
 
   useEffect(() => {
-    if (!streaming) {
-      // settle / 非流式:立即补齐,不播尾巴。
-      shownRef.current = text.length
-      targetRef.current = null
-      setShown(text.length)
-      return
-    }
-    const last = targetRef.current
-    if (last !== null && text.startsWith(last)) {
-      // append-only 继续:显示位置照旧,继续追新增。
-    } else {
-      // 首帧或目标非 append(重试/切消息):从头播。
+    stop()
+    const length = text.length
+    // 目标非追加(重试生成 / 换了一段正文):放弃旧位置从头播。
+    const previous = targetRef.current
+    if (previous !== null && !text.startsWith(previous)) {
       shownRef.current = 0
+      debtRef.current = 0
       setShown(0)
     }
-    if (shownRef.current > text.length) shownRef.current = text.length
     targetRef.current = text
 
-    let raf = 0
-    let stopped = false
+    const finish = () => {
+      stop()
+      shownRef.current = length
+      setShown(length)
+    }
+
+    if (!streaming) {
+      const wasLive = liveRef.current
+      liveRef.current = false
+      if (!wasLive || shownRef.current >= length) {
+        // 非流式首屏(历史回放 / 已定稿):立即全量,不播尾巴。
+        finish()
+        return
+      }
+      // 尾部收束:残余按固定速度排空,结算那一帧不再整段砸下来。
+      let lastCommitAt = performance.now()
+      const drainTick = (now: number) => {
+        rafRef.current = 0
+        const backlog = length - shownRef.current
+        if (backlog <= 0) {
+          finish()
+          return
+        }
+        const since = now - lastCommitAt
+        if (since < MIN_COMMIT_MS) {
+          rafRef.current = requestAnimationFrame(drainTick)
+          return
+        }
+        const dtMs = Math.max(MIN_FRAME_MS, Math.min(MAX_FRAME_MS, since))
+        const chars = Math.max(1, Math.round((drainCpsFor(backlog) * dtMs) / 1000))
+        shownRef.current = Math.min(length, shownRef.current + chars)
+        lastCommitAt = now
+        setShown(Math.floor(shownRef.current))
+        if (shownRef.current >= length) {
+          finish()
+          return
+        }
+        rafRef.current = requestAnimationFrame(drainTick)
+      }
+      // 隐藏标签页里 rAF 不跑:兜底定时器保证这段文本总会定稿。
+      timerRef.current = window.setTimeout(finish, DRAIN_DEADLINE_MS)
+      rafRef.current = requestAnimationFrame(drainTick)
+      return () => stop()
+    }
+
+    liveRef.current = true
+    if (shownRef.current >= length) {
+      // 已追平:停帧,等下一次 text 变化重新拉起。
+      return
+    }
     let lastCommitAt = performance.now()
     const tick = (now: number) => {
-      if (stopped) return
-      const shownNow = shownRef.current
-      if (shownNow >= text.length) {
-        // 播完:停帧(模型后续追加到 text 会重新触发 effect)。
+      rafRef.current = 0
+      const backlog = length - shownRef.current
+      if (backlog <= 0) return
+      const since = now - lastCommitAt
+      if (since < MIN_COMMIT_MS && backlog <= CATCH_UP_JUMP) {
+        rafRef.current = requestAnimationFrame(tick)
         return
       }
-      if (now - lastCommitAt < MIN_COMMIT_MS && text.length - shownNow <= CATCH_UP_JUMP) {
-        // 未到提交间隔:继续等下一帧,不触发渲染。
-        raf = requestAnimationFrame(tick)
+      if (backlog > CATCH_UP_JUMP) {
+        shownRef.current = length
+        debtRef.current = 0
+        setShown(length)
         return
       }
-      const dt = Math.max(MIN_FRAME_MS, now - lastCommitAt) / 1000
-      // 指数收敛:每次提交前进剩余距离的固定比例,速率自适应模型。
-      const k = 1 - Math.exp(-follow * dt)
-      let next = shownNow + (text.length - shownNow) * k
-      if (text.length - shownNow > CATCH_UP_JUMP || next >= text.length - 0.5) {
-        // 极端积压直接跳底;剩余不足半字时落定,避免无限逼近。
-        next = text.length
+      const channel = pressureRef.current
+      const dtMs = Math.max(MIN_FRAME_MS, Math.min(MAX_FRAME_MS, since))
+      const step = queueRevealStep(backlog, dtMs, debtRef.current, channel?.scale ?? 1)
+      shownRef.current = Math.min(length, shownRef.current + step.chars)
+      debtRef.current = step.debt
+      // 上报揭示速率:跟随引擎据此开合预测预留。
+      if (channel !== null) {
+        channel.speedCps = step.speedCps
+        channel.speedAt = now
       }
-      shownRef.current = next
-      setShown(Math.floor(next))
       lastCommitAt = now
-      if (next < text.length) raf = requestAnimationFrame(tick)
+      setShown(Math.floor(shownRef.current))
+      if (shownRef.current < length) rafRef.current = requestAnimationFrame(tick)
     }
-    raf = requestAnimationFrame(tick)
-    return () => {
-      stopped = true
-      cancelAnimationFrame(raf)
-    }
-  }, [text, streaming, follow])
+    rafRef.current = requestAnimationFrame(tick)
+    return () => stop()
+  }, [text, streaming, stop])
 
-  if (!streaming) return text
+  useEffect(() => stop, [stop])
+
+  if (!streaming && shown >= text.length) return { text, done: true }
   const target = targetRef.current
-  return target !== null && text.startsWith(target) ? safeSlice(text, shown) : ''
+  // 目标与本次渲染的文本对不上(追加还没进 effect):先空一帧,不显示错位文本。
+  const base = target !== null && text.startsWith(target) ? text : ''
+  return { text: safeSlice(base, shown), done: false }
 }
 
 /**
  * 按"码元数"截断字符串,绝不切开 UTF-16 代理对。
- * 落点在代理对起点(高位代理)时包含整个对;在代理对中部(低位代理)
- * 时回退一个码元,保证 emoji 完整显示。
+ * 落点在代理对起点(高位代理)时包含整个对;在代理对中部(低位代理)时
+ * 回退一个码元,保证 emoji 完整显示。
  */
 function safeSlice(text: string, length: number): string {
   const target = Math.floor(length)
+  if (target <= 0) return ''
   if (target >= text.length) return text
   const code = text.charCodeAt(target)
   if (code >= 0xd800 && code <= 0xdbff && target + 1 < text.length) {

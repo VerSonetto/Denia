@@ -39,16 +39,17 @@ import {
 import { useBrowserSidebar } from './hooks/useBrowserSidebar'
 import { useIsMobile } from './hooks/useIsMobile'
 import { useSidePaneController, useTerminalReconcile } from './hooks/useSidePane'
+import { startQueueScheduler } from './features/conversation/queueScheduler'
 import { useSidebarCollapse } from './hooks/useSidebarCollapse'
 import { useSplitView } from './hooks/useSplitView'
 import { registerOpenFile } from './fileOpen'
 import { registerOpenReview, type OpenReviewOptions } from './reviewOpen'
 import { setTurnChanges } from './turnChangesStore'
-import { scopeKey } from './sidePane'
+import { scopeKey, upsertTab } from './sidePane'
 import { SidePane } from './components/SidePane'
 import { TerminalHost } from './components/TerminalHost'
 import { closeTerminal } from './terminalApi'
-import { dropScope, peekSidePane } from './sidePaneStore'
+import { dropScope, peekSidePane, setSidePaneCollapsed, updateSidePane } from './sidePaneStore'
 import { useModelSelection } from './modelSelectionStore'
 import type { SidePaneTab } from './sidePane'
 import {
@@ -128,9 +129,13 @@ export default function App() {
     setExtensionTab(null)
   }, [])
   // 浏览器侧栏编排(会话绑定 / 收尾自动销毁 / 刷新恢复)全部在 hook 内。
-  // 面板标签现在统一由 SidePane 承载,所以这里只用它的 `userClose`
-  // 把"用户手动收起浏览器"这个意图转达给 hook(停止 AI 自动重开)。
-  const { userClose: closeBrowserSidebar } = useBrowserSidebar(activeId)
+  // 面板标签现在统一由 SidePane 承载:可视化请求到达时由下面的回调真正
+  // 打开/激活浏览器标签并展开侧栏(此前只记录绑定,所以看不到画面)。
+  const visualRequestRef = useRef<(sessionId: string) => void>(() => {})
+  const { userClose: dismissBrowserSidebar } = useBrowserSidebar(
+    activeId,
+    (sessionId) => visualRequestRef.current(sessionId),
+  )
 
   /* ---- 右侧面板(多标签工作区) ---- */
 
@@ -142,6 +147,42 @@ export default function App() {
   // 而用户在空白页也已经选好了工作区。
   const paneWorkspacePath = activeSessionForPane?.cwd ?? getActiveWorkspace()?.path ?? null
   const pane = useSidePaneController(activeId, paneWorkspacePath)
+
+  /**
+   * 可视化请求 → 面板动作。
+   *
+   * - 请求来自当前会话：直接打开/激活浏览器标签并展开面板——这就是
+   *   "AI 调用浏览器工具时自动看到画面"的落点；
+   * - 请求来自后台会话：只给那个会话的 scope 预开浏览器标签并展开，
+   *   不抢当前会话的视图；用户切回去时画面已经在那里。
+   * 同一会话重复请求走 upsert/激活路径，不会叠加多个浏览器标签。
+   */
+  visualRequestRef.current = (sessionId: string) => {
+    if (sessionId === activeId) {
+      pane.openPanel('browser')
+      return
+    }
+    updateSidePane(sessionId, (current) => {
+      const existing = current.tabs.find((tab) => tab.type === 'browser')
+      if (existing) {
+        return current.activeTabId === existing.id
+          ? current
+          : { ...current, activeTabId: existing.id }
+      }
+      return upsertTab(current, {
+        id: `browser:${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+        type: 'browser',
+        openedAt: Date.now(),
+      })
+    })
+    setSidePaneCollapsed(sessionId, false)
+  }
+
+  /** 用户手动收起浏览器：解除 AI 自动展开绑定，并真正收起面板。 */
+  const closeBrowserSidebar = useCallback(() => {
+    dismissBrowserSidebar()
+    pane.setCollapsed(true)
+  }, [dismissBrowserSidebar, pane])
   // 对话区当前选择的模型:右侧「审查」面板的 AI 生成提交信息复用它
   // (同一个用户不该为同一件事选两次模型)。
   const modelSelection = useModelSelection()
@@ -432,6 +473,11 @@ export default function App() {
   useEffect(() => {
     void refreshList()
   }, [])
+
+  // 队列自动发送按会话维度常驻调度:切走会话后原会话本轮结束仍会发送。
+  // 放在 App 层而不是会话页:页面卸载不影响调度器，且全局只有一套 running
+  // 订阅，不会为后台会话额外建 SSE 连接。
+  useEffect(() => startQueueScheduler(), [])
 
   /* ---- URL 会话状态 ---- */
 
@@ -932,6 +978,7 @@ export default function App() {
                 activeId={extensionTab || versionOpen ? null : activeId}
                 secondaryId={extensionTab || versionOpen ? null : split?.secondaryId ?? null}
                 runningIds={runningIds}
+                sessionsLoaded={sessionsLoaded}
                 searchOpen={sidebarSearchOpen}
                 onSearchOpenChange={setSidebarSearchOpen}
                 expandAllTick={sidebarExpandAllTick}

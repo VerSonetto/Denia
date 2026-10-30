@@ -56,6 +56,8 @@ export interface SubagentPreview {
   toolCount?: number
   model?: ModelSelection
   modelOrigin?: 'call-override' | 'profile-explicit' | 'parent'
+  /** 显式模型不可用时的回退说明；有值说明实际用的是父会话模型。 */
+  modelFallback?: string | null
   permissionCeiling?: PermissionCeiling
   effectivePermissionMode?: PermissionMode
   delegationAllowed?: boolean
@@ -211,6 +213,22 @@ export interface QueuedMessage {
   attachments?: PendingAttachment[]
   /** 轨迹引用(与 trajectory.ts 的 TrajectoryQuote 同形,避免循环依赖在此展开)。 */
   quotes?: { id: string; title: string; text: string }[]
+  /**
+   * 发送方式（旧持久化队列缺省视为 guide：原语义就是"本轮结束后发送"）。
+   * - guide：不打断当前轮次，服务端在步骤边界注入（未赶上则由队列在轮次
+   *   结束后按普通消息发送）；
+   * - interject：立即打断并发送（`sendNow` 的语义，用于重试失败的插话）。
+   */
+  mode?: 'guide' | 'interject'
+  /**
+   * 队列投递状态：queued = 等轮次结束；steering = 已交给服务端，等下一步骤。
+   * 只用于显示与自动发送前的宽限判定，不参与服务端状态。
+   */
+  state?: 'queued' | 'steering'
+  /** 入队时的模型选择：切走会话后自动发送仍用当时选择的模型。 */
+  selection?: ModelSelection
+  /** 入队时刻（epoch ms），用于日志与排序诊断。 */
+  queuedAt?: number
 }
 
 /** 旧日志三档值 → 新四档的显示映射(serde alias 的前端对应)。 */

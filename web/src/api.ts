@@ -913,9 +913,27 @@ export function postPrompt(
     quoted?: { title: string; text: string }[]
     /** 显式直调的技能名(user-invocable);后端以「用户显式调用技能」注入正文。 */
     skills?: string[]
+    /** 消息来源（user / queue / interject / guide）；仅用于服务端轨迹记录。 */
+    source?: 'user' | 'queue' | 'interject' | 'guide'
   },
 ): Promise<unknown> {
   return http(`/api/sessions/${encodeURIComponent(id)}/prompt`, {
+    method: 'POST',
+    body: JSON.stringify(body),
+  })
+}
+
+/**
+ * 运行中「引导」：把消息排进当前轮次，在下一个步骤边界注入。
+ *
+ * 会话已空闲时服务端返回 409（`session/not-running`），调用方应把它留在
+ * 持久化队列里，按普通消息发送——引导失败不等于消息丢失。
+ */
+export function steerSession(
+  id: string,
+  body: { id: string; prompt: string },
+): Promise<{ accepted: boolean }> {
+  return http(`/api/sessions/${encodeURIComponent(id)}/steer`, {
     method: 'POST',
     body: JSON.stringify(body),
   })

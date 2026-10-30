@@ -4,19 +4,34 @@ import { saveComposer, type ComposerSnapshot } from '../../composerMemory';
 import { notify } from '../../appStore';
 import { t } from '../../i18n';
 import { queuedPayload, pendingMessageKey, type OutgoingPayload } from './sessionState';
+import {
+  QUEUE_UPDATED_EVENT,
+  flushQueueHead,
+  registerQueueHandler,
+  resumeQueueAuto,
+  suppressQueueAuto,
+  type QueueUpdatedDetail,
+} from './queueScheduler';
+import { peekModelSelection } from '../../modelSelectionStore';
 import type { QueuedMessage, PendingAttachment, UserMessageImage } from '../../types';
 import type { TrajectoryQuote } from '../../trajectory';
 
 export type PostMessageFn = (
   text: string,
-  options?: { clearInput?: boolean; payload?: OutgoingPayload },
+  options?: {
+    clearInput?: boolean
+    payload?: OutgoingPayload
+    /** 队列/插话来源；只用于服务端轨迹记录，不改变发送语义。 */
+    source?: 'user' | 'queue' | 'interject' | 'guide'
+  },
 ) => Promise<boolean>
 
 type PastedImage = { name: string; mime: string; data: string; bytes: number; preview: string }
 
 /**
  * 消息队列:AI 运行中输入的新消息,等本轮结束后自动发送。
- * 含轮次结束的自动发送 effect 与「立即发送/编辑/删除」三个队列操作。
+ * 自动发送由 `queueScheduler` 统一调度(按会话维度,不依赖当前页面),
+ * 本 hook 负责队列状态、页面内发送器注册与「插话/编辑/删除」操作。
  */
 export function useMessageQueue({
   activeId,
@@ -59,44 +74,70 @@ export function useMessageQueue({
   const [queuedMessages, setQueuedMessages] = useState<QueuedMessage[]>([])
   const queuedMessagesRef = useRef(queuedMessages)
   queuedMessagesRef.current = queuedMessages
-  const prevRunningRef = useRef(running)
-  // 正在"立即发送"(sendNow)时抑制自动发送:sendNow 已移除目标消息,
-  // 若此时 running 变 false,effect 不能再取队首发一次(会重复发送)。
+  // 正在"立即发送"(sendNow)/回退时抑制自动发送:这些动作会让 running 转
+  // false,但此时不能由调度器再取队首发一次(会重复发送)。
   const suppressAutoFlushRef = useRef(false)
+  const setAutoFlushSuppressed = useCallback((value: boolean) => {
+    suppressAutoFlushRef.current = value
+    if (!activeId) return
+    if (value) suppressQueueAuto(activeId)
+    else resumeQueueAuto(activeId)
+  }, [activeId])
+
+  // 页面内发送器:调度器优先走这条路径,保留斜杠命令、乐观行与 follow
+  // 等完整发送语义。切走会话后注册被撤销,调度器自动退回存储直发。
+  useEffect(() => {
+    if (!activeId) return
+    return registerQueueHandler(activeId, {
+      getQueue: () => queuedMessagesRef.current,
+      send: async (message) => {
+        if (!composerReadyRef.current) return false
+        return postMessageRef.current(message.text, {
+          clearInput: false,
+          payload: queuedPayload(message),
+          source: message.mode === 'interject' ? 'interject' : 'queue',
+        })
+      },
+      remove: (id) =>
+        setQueuedMessages((previous) => previous.filter((item) => item.id !== id)),
+    })
+  }, [activeId, composerReadyRef, postMessageRef])
+
+  // 其他标签页/调度器改动持久化队列(送达、自动发送)后同步本页。
+  useEffect(() => {
+    if (!activeId) return
+    const onQueueUpdated = (event: Event) => {
+      const detail = (event as CustomEvent<QueueUpdatedDetail>).detail
+      if (!detail || detail.sessionId !== activeId) return
+      setQueuedMessages(detail.queue)
+    }
+    window.addEventListener(QUEUE_UPDATED_EVENT, onQueueUpdated)
+    return () => window.removeEventListener(QUEUE_UPDATED_EVENT, onQueueUpdated)
+  }, [activeId])
 
   /**
-   * 轮次结束自动发送队首队列消息:
-   * running 由 true → false 时,若队列非空,取出队首发送(不打断,因为已结束)。
-   * 用 ref 保存最新 postMessage 与队列,避免 effect 闭包过期。
+   * 页面内兜底触发：running 由 true → false 时也走一次统一调度。
+   *
+   * 跨会话发送由 App 层常驻调度器负责（不依赖本页是否挂载）；这里多一条
+   * 边沿只是让"当前正在看的会话"不必等全局订阅的下一拍，并让不启动 App 的
+   * 测试/嵌入场景仍能自动发送。两处共用调度器的 in-flight 去重，不会重复。
    */
+  const prevRunningRef = useRef(running)
   useEffect(() => {
-    const prev = prevRunningRef.current
+    const previous = prevRunningRef.current
     prevRunningRef.current = running
-    if (composerReadyRef.current && prev && !running && !suppressAutoFlushRef.current) {
-      const next = queuedMessagesRef.current[0]
-      if (next) {
-        void postMessageRef
-          .current(next.text, { clearInput: false, payload: queuedPayload(next) })
-          .then((ok) => {
-            if (ok) {
-              setQueuedMessages((previous) => previous.filter((item) => item.id !== next.id))
-              if (composerScope) void saveComposer(composerScope, { ...composerSnapshotRef.current,
-                queue: composerSnapshotRef.current.queue.filter((item) => item.id !== next.id),
-              }).catch((error) => notify('err', String(error)))
-            }
-          })
-      }
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [running])
+    if (!previous || running || !activeId) return
+    if (suppressAutoFlushRef.current) return
+    void flushQueueHead(activeId)
+  }, [running, activeId])
 
-  /* ---- 队列操作:立即发送(打断)/ 编辑(回填输入框)/ 删除 ---- */
+  /* ---- 队列操作:插话(打断)/ 编辑(回填输入框)/ 删除 ---- */
 
-  /** 立即发送:先打断当前 AI,再直接发送这条队列消息。 */
+  /** 插话:先打断当前 AI,再直接发送这条队列消息。 */
   const sendNow = async (message: QueuedMessage) => {
     if (!activeId) return
     const sendQueuedMessage = postMessageRef.current
-    suppressAutoFlushRef.current = true
+    setAutoFlushSuppressed(true)
     try {
       await api.cancelSession(activeId)
     } catch (error) {
@@ -109,16 +150,17 @@ export function useMessageQueue({
     }
     if (runningRef.current) {
       // 没能打断:消息保留在队列,提示用户。
-      suppressAutoFlushRef.current = false
+      setAutoFlushSuppressed(false)
       notify('err', t('queueSendFailed'))
       return
     }
-    if (!mountedRef.current) { suppressAutoFlushRef.current = false; return }
+    if (!mountedRef.current) { setAutoFlushSuppressed(false); return }
     // 收到服务端确认后才出队，切换或刷新不会丢失待发送消息。
     try {
       const ok = await sendQueuedMessage(message.text, {
         clearInput: false,
         payload: queuedPayload(message),
+        source: 'interject',
       })
       if (ok) {
         setQueuedMessages((previous) => previous.filter((item) => item.id !== message.id))
@@ -127,7 +169,7 @@ export function useMessageQueue({
         })
       }
     } finally {
-      suppressAutoFlushRef.current = false
+      setAutoFlushSuppressed(false)
     }
   }
 
@@ -194,29 +236,47 @@ export function useMessageQueue({
 
   /**
    * 消息入队(AI 运行中):输入区的全部内容(文本 + 图片 + 附件 + 轨迹引用)
-   * 整体搬进队列,输入区随之下空,本轮结束后自动发送。
+   * 整体搬进队列,输入区随之下空。
+   *
+   * `mode` 由发送入口显式选择:guide(默认,不打断)或 interject(插话,
+   * 调用方随后走 `sendNow`)。返回刚入队的消息对象,便于调用方继续标记
+   * steering 状态或立即发送。
    */
-  const enqueueMessage = (text: string) => {
-    setQueuedMessages((previous) => [
-      ...previous,
-      {
-        id: `queue-${crypto.randomUUID()}`,
-        text,
-        images: pastedImages.length > 0 ? pastedImages : undefined,
-        attachments: attachments.length > 0 ? attachments : undefined,
-        quotes: trajQuotes.length > 0 ? trajQuotes : undefined,
-      },
-    ])
+  const enqueueMessage = (
+    text: string,
+    options: { mode?: 'guide' | 'interject'; state?: 'queued' | 'steering' } = {},
+  ): QueuedMessage => {
+    const message: QueuedMessage = {
+      id: `queue-${crypto.randomUUID()}`,
+      text,
+      images: pastedImages.length > 0 ? pastedImages : undefined,
+      attachments: attachments.length > 0 ? attachments : undefined,
+      quotes: trajQuotes.length > 0 ? trajQuotes : undefined,
+      mode: options.mode ?? 'guide',
+      state: options.state ?? 'queued',
+      selection: peekModelSelection() ?? undefined,
+      queuedAt: Date.now(),
+    }
+    setQueuedMessages((previous) => [...previous, message])
     applyDraft('')
     setPastedImages([])
     setAttachments([])
     setTrajQuotes([])
+    return message
   }
+
+  /** 更新一条队列消息的投递状态(引导被服务端接收后标记 steering)。 */
+  const updateQueued = useCallback((id: string, patch: Partial<QueuedMessage>) => {
+    setQueuedMessages((previous) =>
+      previous.map((message) => (message.id === id ? { ...message, ...patch } : message)),
+    )
+  }, [])
 
   return {
     queuedMessages,
     setQueuedMessages,
     suppressAutoFlushRef,
+    setAutoFlushSuppressed,
     sendNow,
     editQueued,
     deleteQueued,
@@ -224,6 +284,7 @@ export function useMessageQueue({
     settlePending,
     pushPending,
     enqueueMessage,
+    updateQueued,
   }
 }
 

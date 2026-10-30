@@ -1,11 +1,23 @@
 import type { QueuedMessage } from '../types'
 import { t } from '../i18n'
-import { IconZap, IconPencil, IconTrash, IconBranch, IconFile } from './icons'
+import {
+  IconZap,
+  IconPencil,
+  IconTrash,
+  IconBranch,
+  IconToolWait,
+  IconFile,
+  IconSpinner,
+} from './icons'
 
 /**
  * 消息队列:AI 运行期间发送的新消息先进入队列,本轮结束后自动发送。
- * 展示在输入框上方(TodoPanel 同级,排列在其上);每条右侧三个按钮:
- * 立即发送(打断当前 AI)/ 编辑(回填输入框)/ 删除。
+ * 每条右侧三个动作:发送方式左右选择器(插话 / 引导)、编辑(回填输入框)、删除。
+ *
+ * 两种发送方式都是"立刻把消息发出去",区别只在模型什么时候看到:
+ * - 插话:取消当前轮次,再作为新消息发送;
+ * - 引导:不打断当前输出/工具调用,由服务端在当前动作结束后的下一个 step
+ *   边界注入。
  *
  * 载荷与输入框同构:文本之外还可以带粘贴图片、附件与轨迹引用 —— 入队时
  * 整体搬进来,这里把图片缩略图与附件/引用芯片一并画出来,避免"排队时看得
@@ -21,14 +33,62 @@ function QueueIcon() {
   )
 }
 
+/**
+ * 队列条目的发送方式左右选择器：左边插话、右边引导。
+ *
+ * 不做下拉浮层：两种方式都是"立即发送"，直接并排放在条目动作区，点击即
+ * 执行。title 里保留两者的时机差异；已交给模型的引导显示为等待态。
+ */
+function QueueSendSelector({
+  message,
+  onInterject,
+  onGuide,
+}: {
+  message: QueuedMessage
+  onInterject: (message: QueuedMessage) => void
+  onGuide: (message: QueuedMessage) => void
+}) {
+  if (message.state === 'steering') {
+    // 等待态由行内的状态徽标统一表达，动作区不再重复放一个禁用选择器。
+    return null
+  }
+
+  return (
+    <span className="queue-send-picker" role="group" aria-label={t('queueSendChoose')}>
+      <button
+        type="button"
+        className="queue-send-choice queue-interject"
+        title={t('queueInterjectDesc')}
+        aria-label={t('queueModeInterject')}
+        onClick={() => onInterject(message)}
+      >
+        <IconZap size={11} />
+        <span>{t('queueModeInterject')}</span>
+      </button>
+      <button
+        type="button"
+        className="queue-send-choice queue-guide"
+        title={t('queueGuideDesc')}
+        aria-label={t('queueModeGuide')}
+        onClick={() => onGuide(message)}
+      >
+        <IconToolWait size={11} />
+        <span>{t('queueModeGuide')}</span>
+      </button>
+    </span>
+  )
+}
+
 export function QueuedMessagePanel({
   messages,
-  onSendNow,
+  onInterject,
+  onGuide,
   onEdit,
   onDelete,
 }: {
   messages: readonly QueuedMessage[]
-  onSendNow: (message: QueuedMessage) => void
+  onInterject: (message: QueuedMessage) => void
+  onGuide: (message: QueuedMessage) => void
   onEdit: (message: QueuedMessage) => void
   onDelete: (message: QueuedMessage) => void
 }) {
@@ -40,17 +100,30 @@ export function QueuedMessagePanel({
         <span className="queue-lead" aria-hidden><QueueIcon /></span>
         <span className="queue-title">{t('queueTitle')}</span>
         <span className="queue-count">{t('queueCount', { count: messages.length })}</span>
-        <span className="queue-hint">{t('queueSentHint')}</span>
+        <span className="queue-hint">{t('queueHeadHint')}</span>
       </div>
       <ul className="queue-list">
-        {messages.map((message) => {
+        {messages.map((message, index) => {
           const images = message.images ?? []
           const attachments = message.attachments ?? []
           const quotes = message.quotes ?? []
+          const steering = message.state === 'steering'
           return (
-            <li key={message.id} className="queue-item">
-              <span className="queue-content" title={message.text}>
-                <span className="queue-text">{message.text}</span>
+            <li key={message.id} className={`queue-item${steering ? ' steering' : ''}`}>
+              <span className="queue-index" aria-hidden="true">{index + 1}</span>
+              <span className="queue-main">
+                <span className="queue-line">
+                  <span className="queue-text" title={message.text}>
+                    {message.text || t('queueEmptyText')}
+                  </span>
+                  <span
+                    className={`queue-mode${steering ? ' steering queue-steering-state' : ''}`}
+                    title={steering ? t('queueSteeringHint') : undefined}
+                  >
+                    {steering && <IconSpinner size={10} />}
+                    {steering ? t('queueStateSteering') : t('queueStateQueued')}
+                  </span>
+                </span>
                 {(images.length > 0 || attachments.length > 0 || quotes.length > 0) && (
                   <span className="queue-media">
                     {quotes.map((quote) => (
@@ -59,13 +132,13 @@ export function QueuedMessagePanel({
                         <span className="queue-chip-name">{quote.title}</span>
                       </span>
                     ))}
-                    {images.map((image, index) => (
-                      <span className="queue-thumb" key={`img-${index}`} title={image.name}>
+                    {images.map((image, imageIndex) => (
+                      <span className="queue-thumb" key={`img-${imageIndex}`} title={image.name}>
                         <img src={image.preview} alt="" />
                       </span>
                     ))}
-                    {attachments.map((attachment, index) => (
-                      <span className="queue-chip" key={`att-${index}`} title={attachment.name}>
+                    {attachments.map((attachment, attachmentIndex) => (
+                      <span className="queue-chip" key={`att-${attachmentIndex}`} title={attachment.name}>
                         <IconFile size={11} />
                         <span className="queue-chip-name">{attachment.name}</span>
                       </span>
@@ -74,20 +147,17 @@ export function QueuedMessagePanel({
                 )}
               </span>
               <span className="queue-actions">
-                <button
-                  type="button"
-                  className="icon-btn queue-action queue-send-now"
-                  title={t('queueSendNow')}
-                  aria-label={t('queueSendNow')}
-                  onClick={() => onSendNow(message)}
-                >
-                  <IconZap size={13} />
-                </button>
+                <QueueSendSelector
+                  message={message}
+                  onInterject={onInterject}
+                  onGuide={onGuide}
+                />
                 <button
                   type="button"
                   className="icon-btn queue-action"
-                  title={t('queueEdit')}
-                  aria-label={t('queueEdit')}
+                  title={steering ? t('queueSteeringHint') : t('queueEdit')}
+                  aria-label={steering ? t('queueSteeringHint') : t('queueEdit')}
+                  disabled={steering}
                   onClick={() => onEdit(message)}
                 >
                   <IconPencil size={13} />
@@ -95,8 +165,9 @@ export function QueuedMessagePanel({
                 <button
                   type="button"
                   className="icon-btn queue-action queue-delete"
-                  title={t('queueDeleteTitle')}
-                  aria-label={t('queueDeleteTitle')}
+                  title={steering ? t('queueSteeringHint') : t('queueDeleteTitle')}
+                  aria-label={steering ? t('queueSteeringHint') : t('queueDeleteTitle')}
+                  disabled={steering}
                   onClick={() => onDelete(message)}
                 >
                   <IconTrash size={13} />
