@@ -31,6 +31,13 @@ export interface PanelDescriptor {
     | 'sidePaneBrowser'
     | 'sidePaneFiles'
     | 'sidePaneFile'
+  /** 空态卡片上的一句话说明。 */
+  descriptionKey:
+    | 'sidePaneReviewDesc'
+    | 'sidePaneTerminalDesc'
+    | 'sidePaneBrowserDesc'
+    | 'sidePaneFilesDesc'
+    | 'sidePaneFileDesc'
   /** 该面板此刻能否打开。 */
   available(ctx: PanelContext): boolean
   /** 单例面板已开时是否从菜单隐藏。 */
@@ -41,6 +48,7 @@ export const PANELS: PanelDescriptor[] = [
   {
     type: 'file',
     labelKey: 'sidePaneFile',
+    descriptionKey: 'sidePaneFileDesc',
     // **永远不在菜单里出现**：文件读取标签页没有手动入口（不能新建、不能
     // 手输路径），它只由四类点击行为打开（见 useSidePane 的 openFile）。
     // 空态引导页与 `+` 菜单都吃 `availablePanels`，所以这里一律返回 false。
@@ -50,6 +58,7 @@ export const PANELS: PanelDescriptor[] = [
   {
     type: 'files',
     labelKey: 'sidePaneFiles',
+    descriptionKey: 'sidePaneFilesDesc',
     // 单例:一棵工作区树开两个没有意义(它们必然显示同一份内容)。
     // 也要求有工作区 —— 树是相对工作区根的,没有根就没有可看的内容,
     // 此时不给入口比给一个空壳按钮诚实。
@@ -59,6 +68,7 @@ export const PANELS: PanelDescriptor[] = [
   {
     type: 'review',
     labelKey: 'sidePaneReview',
+    descriptionKey: 'sidePaneReviewDesc',
     // 单例:已经开着就不给入口。
     available: (ctx) => !ctx.isOpen('review'),
     singleton: true,
@@ -66,6 +76,7 @@ export const PANELS: PanelDescriptor[] = [
   {
     type: 'terminal',
     labelKey: 'sidePaneTerminal',
+    descriptionKey: 'sidePaneTerminalDesc',
     // 终端不依赖工作区:没有工作区时落到 home(后端兜底),
     // 所以永远可用。这是有意的 —— 用户可能只想开个终端看看环境。
     available: () => true,
@@ -74,6 +85,7 @@ export const PANELS: PanelDescriptor[] = [
   {
     type: 'browser',
     labelKey: 'sidePaneBrowser',
+    descriptionKey: 'sidePaneBrowserDesc',
     available: (ctx) => ctx.supportsBrowser,
     singleton: false,
   },

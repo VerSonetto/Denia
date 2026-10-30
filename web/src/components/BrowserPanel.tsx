@@ -530,9 +530,12 @@ export default function BrowserPanel({
   const urlInfo = prettyUrl(activeUrl)
 
   return (
-    <div className="brw">
-      {/* ---- tab 条 ---- */}
-      <div className="brw-tabstrip">
+    <div className="brw pane-panel">
+      {/* ---- 工作台顶栏:浏览器身份 + 页面标签 + 固定动作 ---- */}
+      <div className="brw-topbar">
+        <span className="brw-brand" title={t('sidePaneBrowser')} aria-hidden="true">
+          <IconGlobe size={15} />
+        </span>
         <div className="brw-tabs">
           {tabs.map((tab) => (
             <div
@@ -559,6 +562,8 @@ export default function BrowserPanel({
               </button>
             </div>
           ))}
+        </div>
+        <div className="brw-top-actions">
           <button
             type="button"
             className="brw-newtab"
@@ -566,20 +571,20 @@ export default function BrowserPanel({
             aria-label={t('browserNewTab')}
             onClick={() => void run({ method: 'newTab' })}
           >
-            <IconPlus size={13} />
+            <IconPlus size={14} />
           </button>
+          {onClose && (
+            <button
+              type="button"
+              className="brw-panel-close"
+              title={t('sidebarCollapse')}
+              aria-label={t('sidebarCollapse')}
+              onClick={onClose}
+            >
+              <IconPanelClose size={15} />
+            </button>
+          )}
         </div>
-        {onClose && (
-          <button
-            type="button"
-            className="brw-panel-close"
-            title={t('sidebarCollapse')}
-            aria-label={t('sidebarCollapse')}
-            onClick={onClose}
-          >
-            <IconPanelClose size={15} />
-          </button>
-        )}
       </div>
 
       {/* ---- 导航栏 ---- */}
@@ -852,7 +857,7 @@ export default function BrowserPanel({
         <span className="brw-status-spacer" />
         {viewport && (
           <>
-            <span>
+            <span className="brw-status-viewport">
               {t('browserViewportLabel')} {viewport.width}×{viewport.height}
             </span>
             <span className="brw-status-sep">·</span>

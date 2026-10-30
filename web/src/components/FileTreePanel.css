@@ -1,140 +1,106 @@
-/* 工作区文件面板:筛选头 + 目录树。
+/* 工作区文件面板:一行搜索 + 目录树。
  *
- * 视觉沿用审查面板那套结构(头部一条分隔线 + 列表铺满剩余高度),颜色全部
- * 走语义 token,暗/亮主题自动跟随;树行只靠缩进与图标区分层级,不画连接线
- * —— 缩进已经足够表达从属关系,连接线在窄面板里反而是噪音。 */
+ * 面板头 / 工具条 / 搜索框的共享视觉在 SidePane.css;这里只写树本身。
+ * 所有选择器以 `.side-pane` 作用域收口,懒加载顺序不影响结果。
+ *
+ * 树的表达只靠缩进与图标:不画连接线、不给行加卡片,层级已经足够清楚,
+ * 窄面板里多一道线就是噪音。 */
 
-.file-tree {
+.side-pane .file-tree {
   display: flex;
   flex-direction: column;
   width: 100%;
   height: 100%;
   min-height: 0;
-  background: var(--bg-base);
 }
 
-/* ---- 头部:筛选 + 刷新 ---- */
-
-.file-tree-head {
-  display: flex;
-  flex: 0 0 auto;
-  align-items: center;
-  gap: 6px;
-  padding: 10px 12px;
-  border-bottom: 1px solid var(--border-l1);
+/* 搜索独占一行:工具条里只有它,拉满宽度。 */
+.side-pane .file-tree-toolbar {
+  gap: 0;
 }
 
-.file-tree-filter {
+.side-pane .file-tree-search {
   flex: 1 1 auto;
-  min-width: 0;
-  height: 28px;
-  padding: 0 9px;
-  border: 1px solid var(--border-l1);
-  border-radius: var(--r-xs);
-  background: var(--bg-layer-2);
-  color: var(--label-primary);
-  font-size: 12px;
-  font-family: inherit;
-}
-
-.file-tree-filter::placeholder {
-  color: var(--label-tertiary);
-}
-
-.file-tree-filter:focus {
-  outline: none;
-  border-color: var(--accent-tint);
-}
-
-.file-tree-icon-btn {
-  display: inline-flex;
-  flex: 0 0 auto;
-  align-items: center;
-  justify-content: center;
-  width: 28px;
-  height: 28px;
-  border: 1px solid var(--border-l1);
-  border-radius: var(--r-xs);
-  background: transparent;
-  color: var(--label-tertiary);
-  cursor: pointer;
-  transition: background 0.12s var(--ease), color 0.12s var(--ease);
-}
-
-.file-tree-icon-btn:hover {
-  background: var(--hover-fill);
-  color: var(--label-primary);
 }
 
 /* ---- 树体 ---- */
 
-.file-tree-body {
+.side-pane .file-tree-body {
   flex: 1 1 auto;
   min-height: 0;
   overflow: auto;
-  padding: 6px 0 12px;
+  padding: 4px 6px 12px;
+  scrollbar-width: thin;
 }
 
-.file-tree-row {
+.side-pane .file-tree-row {
   display: flex;
   align-items: center;
   gap: 5px;
-  /* 行高与审查面板的文件行一致(32px),两个面板并排时视觉节奏统一。 */
-  height: 28px;
-  padding-right: 10px;
+  min-height: 28px;
+  margin: 0 2px;
+  padding-right: 8px;
+  border-radius: 6px;
   color: var(--label-secondary);
   font-size: 12px;
-  cursor: default;
-  user-select: none;
-  /* 缩进由内联 paddingLeft 给(层级在运行时才知道),这里只留右边距。 */
-}
-
-.file-tree-row.dir {
-  color: var(--label-primary);
   cursor: pointer;
+  user-select: none;
+  transition:
+    background 0.1s var(--ease),
+    color 0.1s var(--ease);
+  /* 缩进由内联 paddingLeft 给(层级运行时才知道),这里只留右侧呼吸。 */
 }
 
-.file-tree-row:hover {
+.side-pane .file-tree-row:hover {
   background: var(--hover-fill);
+  color: var(--label-primary);
 }
 
-/* 拖拽时给源行一个"正在被拖走"的弱化反馈 */
-.file-tree-row:active {
+.side-pane .file-tree-row:active {
   background: var(--active-fill);
 }
 
-.file-tree-caret {
+.side-pane .file-tree-row.dir {
+  color: var(--label-primary);
+  font-weight: 500;
+}
+
+.side-pane .file-tree-caret {
   display: inline-flex;
   flex: 0 0 auto;
   align-items: center;
   justify-content: center;
-  width: 14px;
+  width: 12px;
   height: 14px;
-  color: var(--label-tertiary);
+  color: var(--label-caption);
 }
 
 /* 折叠指示:默认朝右,展开时旋转朝下(与侧栏工作区树同一套语言)。 */
-.file-tree-caret-icon {
+.side-pane .file-tree-caret-icon {
   display: inline-flex;
   transition: transform 0.12s var(--ease);
 }
 
-.file-tree-caret-icon.open {
+.side-pane .file-tree-caret-icon.open {
   transform: rotate(90deg);
 }
 
-.file-tree-icon {
+/* 图标不上底板:树行只有缩进和图标两层线索。 */
+.side-pane .file-tree-icon {
   display: inline-flex;
   flex: 0 0 auto;
   align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
   color: var(--label-tertiary);
 }
 
-.file-tree-row.dir .file-tree-icon {
+.side-pane .file-tree-row.dir .file-tree-icon {
   color: var(--label-secondary);
 }
 
-.file-tree-name {
+.side-pane .file-tree-name {
   flex: 1 1 auto;
   min-width: 0;
   overflow: hidden;
@@ -142,56 +108,70 @@
   text-overflow: ellipsis;
 }
 
-.file-tree-truncated {
+.side-pane .file-tree-truncated {
   flex: 0 0 auto;
-  color: var(--label-tertiary);
+  color: var(--label-caption);
   letter-spacing: 0.1em;
 }
 
 /* ---- 提示 / 错误 ---- */
 
-.file-tree-hint {
+.side-pane .file-tree-hint {
   display: flex;
   align-items: center;
-  gap: 6px;
-  padding: 10px 14px;
+  gap: 7px;
+  padding: 10px 8px;
   color: var(--label-tertiary);
-  font-size: 12px;
+  font-size: 11.5px;
+  line-height: 1.5;
 }
 
-.file-tree-error,
-.file-tree-row-error {
+.side-pane .file-tree-error,
+.side-pane .file-tree-row-error {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 8px 14px;
-  color: var(--danger);
-  font-size: 12px;
+  margin: 4px 2px;
+  padding: 8px 9px;
+  border-radius: 8px;
+  background: var(--danger-soft);
+  color: var(--danger-fg);
+  font-size: 11.5px;
+  line-height: 1.5;
 }
 
-.file-tree-error {
+.side-pane .file-tree-error {
   flex-direction: column;
   align-items: flex-start;
 }
 
-.file-tree-error p {
+.side-pane .file-tree-error p {
   margin: 0;
   word-break: break-word;
 }
 
-.file-tree-retry {
+/* 重试是文字动作,不画按钮边框:悬停给一层填充即可。 */
+.side-pane .file-tree-retry {
   flex: 0 0 auto;
-  padding: 3px 8px;
-  border: 1px solid var(--danger-border);
-  border-radius: var(--r-xs);
-  background: var(--danger-soft);
-  color: var(--danger);
-  font-size: 11px;
+  min-height: 22px;
+  padding: 0 7px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
   font-family: inherit;
+  font-size: 11px;
+  font-weight: 500;
   cursor: pointer;
+  transition: background 0.12s var(--ease);
 }
 
-.file-tree-retry:hover {
-  background: var(--danger-soft);
-  filter: brightness(1.15);
+.side-pane .file-tree-retry:hover {
+  background: var(--hover-fill);
+}
+
+@container side-pane (max-width: 300px) {
+  .side-pane .file-tree-body {
+    padding-inline: 4px;
+  }
 }

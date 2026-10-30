@@ -49,7 +49,7 @@ import {
 } from '../sidePane'
 import { availablePanels } from '../panelRegistry'
 import { SidePaneTabs, TabIcon, tabTypeLabel } from './SidePaneTabs'
-import { IconChevronDown } from './icons'
+import { IconChevronDown, IconPlus } from './icons'
 import './SidePane.css'
 
 export interface SidePaneProps {
@@ -311,6 +311,11 @@ export function SidePane({
     [state.tabs],
   )
 
+  /** 终端组的轻量头部:显示当前终端的 shell 名与目录,`+` 直接开新终端。 */
+  const activeTerminal = terminalTabs.find((tab) => tab.id === activeId) ?? null
+  const terminalCwd = activeTerminal?.cwd ?? workspacePath ?? ''
+  const terminalCwdName = terminalCwd.split(/[\\/]/).filter(Boolean).pop() ?? terminalCwd
+
   return (
     <aside
       className={`side-pane${collapsed ? ' collapsed' : ''}${dragging ? ' dragging' : ''}`}
@@ -370,8 +375,16 @@ export function SidePane({
                         data-pane-open-item={panel.type}
                         onClick={() => onOpenPanel(panel.type)}
                       >
-                        <TabIcon type={panel.type} size={15} />
-                        <span className="pane-open-label">{tabTypeLabel(panel.type)}</span>
+                        <span className="pane-open-icon" aria-hidden="true">
+                          <TabIcon type={panel.type} size={17} />
+                        </span>
+                        <span className="pane-open-text">
+                          <span className="pane-open-label">{tabTypeLabel(panel.type)}</span>
+                          <span className="pane-open-item-desc">{t(panel.descriptionKey)}</span>
+                        </span>
+                        <span className="pane-open-arrow" aria-hidden="true">
+                          <IconChevronDown size={12} />
+                        </span>
                       </button>
                     ))}
                   </div>
@@ -400,14 +413,50 @@ export function SidePane({
                 onReorder={handleReorder}
                 onReopen={handleReopen}
                 onAdd={onOpenPanel}
+                onCollapse={() => onCollapsedChange(true)}
                 addable={addable}
               />
               <div className="side-pane-body">
                 {/* 终端标签**整组渲染**:TerminalHost 自己给每个终端挂槽并按
                     激活态显隐。逐个包在下面的 per-tab 循环里会导致切标签时
                     终端组件被卸载重建(xterm 的 scrollback 与 WebSocket 全丢)。 */}
-                {terminalTabs.length > 0 &&
-                  renderTerminals?.(terminalTabs, activeId, !collapsed)}
+                {terminalTabs.length > 0 && (
+                  <div
+                    className="terminal-group"
+                    data-visible={activeTerminal !== null ? 'true' : undefined}
+                  >
+                    {/* 终端没有面板组件自己的头部(它由 TerminalHost 直出),
+                        这条工作台条补上标题与新建入口,同时把 xterm 画布
+                        收进一块带圆角的内容区里。 */}
+                    <header className="pane-panel-head terminal-head">
+                      <span className="pane-panel-icon" aria-hidden="true">
+                        <TabIcon type="terminal" size={14} />
+                      </span>
+                      <div className="pane-panel-titles">
+                        <h2 className="pane-panel-title">
+                          {activeTerminal?.title?.trim() || t('sidePaneTerminal')}
+                        </h2>
+                        {terminalCwdName && (
+                          <p className="pane-panel-subtitle" title={terminalCwd}>{terminalCwdName}</p>
+                        )}
+                      </div>
+                      <div className="pane-panel-actions">
+                        <button
+                          type="button"
+                          className="pane-icon-btn"
+                          title={t('terminalNew')}
+                          aria-label={t('terminalNew')}
+                          onClick={() => onOpenPanel('terminal')}
+                        >
+                          <IconPlus size={14} />
+                        </button>
+                      </div>
+                    </header>
+                    <div className="terminal-group-body">
+                      {renderTerminals?.(terminalTabs, activeId, !collapsed)}
+                    </div>
+                  </div>
+                )}
                 {nonTerminalTabs.map((tab) => {
                   const visible = tab.id === activeId
                   return (

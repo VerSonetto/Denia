@@ -29,6 +29,7 @@ import { CodeBlock } from '../markdown/CodeBlock'
 import { formatBytesHuman } from '../lib/bytes'
 import { FilePreview, previewKindOf } from './FilePreview'
 import { IconClose, IconFile, IconRefresh, IconSpinner } from './icons'
+import { PanelHead } from './PanelChrome'
 import './FileReaderPanel.css'
 
 /** 当前文件的加载状态。 */
@@ -144,6 +145,7 @@ export function FileReaderPanel({
     () => files.find((file) => file.path === active) ?? null,
     [files, active],
   )
+  const activeName = activeEntry?.name ?? active.split(/[\\/]/).pop() ?? active
 
   /**
    * 当前文件能不能预览。判定只认文件名(扩展名),不依赖是否已加载 ——
@@ -180,7 +182,7 @@ export function FileReaderPanel({
   }, [activeFile, files])
 
   return (
-    <div className="file-reader" data-file-reader-root={workspacePath}>
+    <div className="file-reader pane-panel" data-file-reader-root={workspacePath}>
       {/* 内部条目标签:文件多开时靠它切换。最后一个条目关掉后标签页自己
           消失(见 sidePane.closeFile),所以这里不需要空态分支。 */}
       {files.length > 1 && (
@@ -239,56 +241,60 @@ export function FileReaderPanel({
         </div>
       )}
 
-      <div className="file-reader-head">
-        <span className="file-reader-path" title={active}>
-          {active}
-        </span>
-        {state?.kind === 'ready' && (
-          <span className="file-reader-meta">
-            {t('sidePaneFileLines', { count: state.view.lines })}
-            {' · '}
-            {formatBytesHuman(state.view.size)}
-          </span>
-        )}
-        {supportsPreview && (
-          <div className="file-reader-switch" role="tablist" aria-label={t('sidePaneFileViewMode')}>
-            {(['preview', 'code'] as const).map((mode) => (
+      <PanelHead
+        icon={<IconFile size={16} />}
+        title={activeName}
+        subtitle={active ? <span title={active}>{active}</span> : undefined}
+        actions={
+          <>
+            {state?.kind === 'ready' && (
+              <span className="file-reader-meta">
+                {t('sidePaneFileLines', { count: state.view.lines })}
+                {' · '}
+                {formatBytesHuman(state.view.size)}
+              </span>
+            )}
+            {supportsPreview && (
+              <div className="pane-seg file-reader-switch" role="tablist" aria-label={t('sidePaneFileViewMode')}>
+                {(['preview', 'code'] as const).map((mode) => (
+                  <button
+                    key={mode}
+                    type="button"
+                    role="tab"
+                    aria-selected={viewMode === mode}
+                    className={`pane-seg-btn file-reader-switch-btn${viewMode === mode ? ' active' : ''}`}
+                    data-file-reader-mode={mode}
+                    onClick={() => active && setViewMode(active, mode)}
+                  >
+                    {mode === 'preview' ? t('sidePaneFilePreview') : t('sidePaneFileCode')}
+                  </button>
+                ))}
+              </div>
+            )}
+            <button
+              type="button"
+              className="pane-icon-btn file-reader-icon-btn"
+              title={t('sidePaneFileReload')}
+              aria-label={t('sidePaneFileReload')}
+              data-file-reader-reload=""
+              onClick={() => active && load(active)}
+            >
+              <IconRefresh size={14} />
+            </button>
+            {files.length === 1 && activeEntry && (
               <button
-                key={mode}
                 type="button"
-                role="tab"
-                aria-selected={viewMode === mode}
-                className={`file-reader-switch-btn${viewMode === mode ? ' active' : ''}`}
-                data-file-reader-mode={mode}
-                onClick={() => active && setViewMode(active, mode)}
+                className="pane-icon-btn file-reader-close"
+                title={t('sidePaneFileCloseEntry')}
+                aria-label={t('sidePaneFileCloseEntry')}
+                onClick={() => onCloseFile(activeEntry.path)}
               >
-                {mode === 'preview' ? t('sidePaneFilePreview') : t('sidePaneFileCode')}
+                <IconClose size={14} />
               </button>
-            ))}
-          </div>
-        )}
-        <button
-          type="button"
-          className="file-reader-icon-btn"
-          title={t('sidePaneFileReload')}
-          aria-label={t('sidePaneFileReload')}
-          data-file-reader-reload=""
-          onClick={() => active && load(active)}
-        >
-          <IconRefresh size={13} />
-        </button>
-        {files.length === 1 && activeEntry && (
-          <button
-            type="button"
-            className="file-reader-icon-btn"
-            title={t('sidePaneFileCloseEntry')}
-            aria-label={t('sidePaneFileCloseEntry')}
-            onClick={() => onCloseFile(activeEntry.path)}
-          >
-            <IconClose size={13} />
-          </button>
-        )}
-      </div>
+            )}
+          </>
+        }
+      />
 
       <div className="file-reader-body">
         {state === undefined || state.kind === 'loading' ? (

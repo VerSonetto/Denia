@@ -1,43 +1,48 @@
-/* 终端面板:xterm 宿主 + 错误/退出提示。
+/* 终端面板:一块内嵌的终端画布 + 错误/退出提示。
  *
- * 面板外壳(padding、边框)由 SidePane 提供;这里只管 xterm 的挂载点。
- * xterm 需要**确定的像素尺寸**才能算 cols/rows,所以宿主必须 h-full 且
- * 不能被内容撑开(overflow:hidden)。 */
+ * 标题条与新建入口在 SidePane 的终端组头部（`.terminal-head`），这里只负责
+ * 画布本身。所有选择器以 `.side-pane` 作用域收口。
+ *
+ * xterm 需要**确定的像素尺寸**才能算 cols/rows,所以宿主必须撑满且不能被
+ * 内容撑开(overflow:hidden);圆角裁切交给外层 `.terminal-panel`,不碰
+ * `.terminal-host` 的滚动行为。 */
 
-.terminal-panel {
+.side-pane .terminal-panel {
   position: relative;
   display: flex;
   flex-direction: column;
   width: 100%;
   height: 100%;
   min-height: 0;
+  overflow: hidden;
+  border-radius: 10px;
   background: var(--code-block);
 }
 
-.terminal-host {
+.side-pane .terminal-host {
   flex: 1 1 auto;
-  min-height: 0;
   width: 100%;
+  min-height: 0;
   /* xterm 会自己往里塞 canvas/rows;宿主不能滚动,滚动由 xterm 的
    * .xterm-viewport 负责,否则会出现双滚动条。 */
   overflow: hidden;
-  padding: 6px 2px 2px 8px;
+  padding: 8px 4px 4px 10px;
 }
 
 /* xterm 自身样式微调 */
 
-.terminal-host .xterm {
+.side-pane .terminal-host .xterm {
   height: 100%;
   padding: 0;
 }
 
-.terminal-host .xterm-viewport {
+.side-pane .terminal-host .xterm-viewport {
   /* 隐藏原生滚动条:14px 的全局滚动条在终端里太占地方,
    * 且与 xterm 的 scrollback 视觉冲突。滚轮仍然可用。 */
   scrollbar-width: none;
 }
 
-.terminal-host .xterm-viewport::-webkit-scrollbar {
+.side-pane .terminal-host .xterm-viewport::-webkit-scrollbar {
   width: 0;
   height: 0;
   display: none;
@@ -45,53 +50,62 @@
 
 /* 聚焦时不要全局的 focus-visible ring:终端整个区域就是输入焦点,
  * 加一圈描边会显得整个面板被选中。 */
-.terminal-host .xterm:focus,
-.terminal-host .xterm:focus-visible {
+.side-pane .terminal-host .xterm:focus,
+.side-pane .terminal-host .xterm:focus-visible {
   outline: none;
   box-shadow: none;
 }
 
 /* ---- 错误条 ---- */
 
-.terminal-error {
+.side-pane .terminal-error {
   flex: 0 0 auto;
   padding: 6px 10px;
-  border-top: 1px solid var(--danger-border);
   background: var(--danger-soft);
-  color: var(--danger);
-  font-size: 12px;
+  color: var(--danger-fg);
+  font-size: 11.5px;
   line-height: 1.5;
 }
 
-/* ---- 退出条 ---- */
+/* ---- 退出条:保留画面,把"新建/关闭"的决定权交给用户 ---- */
 
-.terminal-exited {
-  flex: 0 0 auto;
+.side-pane .terminal-exited {
   display: flex;
+  flex: 0 0 auto;
   align-items: center;
   justify-content: space-between;
   gap: 8px;
   padding: 6px 10px;
-  border-top: 1px solid var(--border-l2);
-  background: var(--bg-layer-2);
+  border-top: 1px solid var(--border-l1);
+  background: var(--hover-fill);
   color: var(--label-tertiary);
-  font-size: 12px;
+  font-size: 11.5px;
   line-height: 1.5;
 }
 
-.terminal-exited-action {
+.side-pane .terminal-exited-action {
   flex: 0 0 auto;
-  padding: 2px 8px;
-  border: 1px solid var(--border-l2);
-  border-radius: var(--r-xs);
-  background: var(--bg-layer-3);
-  color: var(--label-secondary);
-  font-size: 12px;
-  cursor: pointer;
-  transition: background 0.12s var(--ease), color 0.12s var(--ease);
-}
-
-.terminal-exited-action:hover {
+  min-height: 24px;
+  padding: 0 9px;
+  border: none;
+  border-radius: 999px;
   background: var(--hover-fill);
   color: var(--label-primary);
+  font-family: inherit;
+  font-size: 11px;
+  font-weight: 500;
+  cursor: pointer;
+  transition:
+    background 0.12s var(--ease),
+    color 0.12s var(--ease);
+}
+
+.side-pane .terminal-exited-action:hover {
+  background: var(--active-fill);
+}
+
+@container side-pane (max-width: 260px) {
+  .side-pane .terminal-host {
+    padding: 6px 2px 2px 7px;
+  }
 }

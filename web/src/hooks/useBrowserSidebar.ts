@@ -48,7 +48,11 @@ const UNHEALTHY_RECHECK_MS = 1500
  * 帧和控制事件共用一条广播通道,高帧率下接收端 Lagged 会静默丢事件,
  * 轮询兜底保证"AI 关光标签 / 进程退出"迟早把侧栏收掉。
  */
-export function useBrowserSidebar(activeId: string | null): {
+export function useBrowserSidebar(
+  activeId: string | null,
+  /** 可视化请求到达时通知宿主打开/激活浏览器面板（缺省只做会话绑定）。 */
+  onVisualRequest?: (sessionId: string) => void,
+): {
   /** 当前是否应渲染侧栏(绑定会话 === 活跃会话)。 */
   open: boolean
   /** 用户点击面板收起:解除绑定,本轮内 AI 重复请求不再展开。 */
@@ -69,6 +73,9 @@ export function useBrowserSidebar(activeId: string | null): {
   activeIdRef.current = activeId
   const bindingRef = useRef(binding)
   bindingRef.current = binding
+  // 回调每渲染更新,但事件订阅只建一次:用 ref 转发,避免重连丢事件。
+  const visualRequestRef = useRef(onVisualRequest)
+  visualRequestRef.current = onVisualRequest
 
   /* ---- 用户手动收起:本轮 AI 不再自动展开,新一轮开始后解除 ---- */
 
@@ -136,6 +143,9 @@ export function useBrowserSidebar(activeId: string | null): {
         if (dismissedRef.current) return
         if (activeIdRef.current === null) return
         setBinding(activeIdRef.current)
+        // 会话绑定只负责"侧栏属于谁";真正把面板切到浏览器标签、展开
+        // 侧栏由宿主完成(它可以决定后台会话只预开标签、不抢当前视图)。
+        visualRequestRef.current?.(activeIdRef.current)
       } else if (event.type === 'exited') {
         // 进程退出是确定信号,立即销毁;轮询只兜事件丢失的情况。
         if (bindingRef.current) setBinding(null)

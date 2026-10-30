@@ -1,26 +1,33 @@
-/* 右侧面板:标签栏 + 内容区 + 空态引导页。
+/* ============================================================================
+ * 右侧工作台(Side Pane)—— 外壳与共享原语
  *
- * 尺寸与间距取实测值(标签高 28px、基准宽 156px、间距 8px),
- * 颜色走 denia 自己的语义 token。
+ * 分层:
+ * 1. 本文件:外壳(宽度/拖拽/内容槽)、标签栏与浮层、空态引导页,
+ *    以及四个面板共用的 **面板头 / 工具条 / 搜索 / 胶囊切换 / 空态**。
+ * 2. 面板自己的视觉在 ReviewPanel.css、FileTreePanel.css、FileReaderPanel.css、
+ *    BrowserPanel.css、TerminalPanel.css 里,并一律以 `.side-pane` 作用域收口。
+ *    没有两条规则争同一个选择器,懒加载先后顺序因此不影响结果。
  *
- * # 展开 / 收起的过渡
+ * 视觉语言与左侧会话栏、对话输入区同源:
+ * - 底色用 `--sidebar-fill`:右侧是一块"侧边工作台",与左栏同一层;
+ * - chrome 一律透明,分隔只用 1px `--border-l1`,不画卡片描边;
+ * - 选中态只用 `--active-fill` 圆角填充,不出现强调色线条/渐变;
+ * - 浮层与提交卡用 `--composer-surface` + `--composer-shadow` 抬升。
  *
- * 折叠是"宽度归零",不是 `display:none` —— 终端与浏览器要保活。宽度**由组件
- * 写入内联样式**(0 ↔ 记忆宽度),所以这里只声明时长与缓动:把 `width:0`
- * 写死在 `.collapsed` 里,过渡就没有终点可言。
- *
- * 做法与左侧会话栏(styles.css 的 `grid-template-columns`)同一套:
- * 列宽滑动 + 内容冻结宽度只被裁切 + 原地淡出。滑动途中内容不重排 ——
- * 标签栏不会因为容器变窄而改判溢出,终端也不会被反复 fit。
- */
+ * 尺寸约定:标签栏 46px;面板头 46px;工具条 34px;控件 26–30px;
+ * 内容左右内边距 12px(与左侧会话栏的文字基线对齐)。
+ * ========================================================================= */
 
 .side-pane {
-  /* 左边框宽:内容冻结宽度要减掉它(全局 `box-sizing: border-box`) */
   --side-pane-rule: 1px;
-  /* 内容冻结宽度(px),由组件按当前展开宽度写入内联样式 */
   --side-pane-content-w: 100%;
-  /* 与左侧会话栏同一时长:styles.css 的 260ms 列宽过渡 */
   --side-pane-dur: 260ms;
+
+  /* 面板共享表面:正文与 chrome 同色(chrome 透明),卡片只用于浮层/提交区。 */
+  --pane-surface: var(--sidebar-fill);
+  --pane-card: var(--composer-surface);
+  --pane-hairline: var(--border-l1);
+  --pane-pad-x: 12px;
 
   position: relative;
   display: flex;
@@ -28,22 +35,17 @@
   flex-direction: column;
   min-width: 0;
   height: 100%;
-  border-left: var(--side-pane-rule) solid var(--border-l1);
-  background: var(--bg-base);
-  transition: width var(--side-pane-dur) var(--ease),
-    border-left-color var(--side-pane-dur) var(--ease);
+  border-left: var(--side-pane-rule) solid var(--pane-hairline);
+  background: var(--pane-surface);
+  transition: width var(--side-pane-dur) var(--ease), border-left-color var(--side-pane-dur) var(--ease);
 }
 
 .side-pane.collapsed {
-  /* 折叠时不占位;内容仍在 DOM 里(终端/浏览器保活)。
-   * 宽度归零写在组件的内联样式里,这里不能重复声明 —— 会盖掉过渡。
-   * 本元素也**不能**加 `overflow:hidden`:拖拽柄(-3px)与展开把手要露在
-   * 边缘外,裁切交给内层的 `.side-pane-clip`。 */
+  /* 折叠不占位;内容仍在 DOM 里(终端/浏览器保活)。宽度 0 由组件内联样式
+   * 写入,这里不能重复声明,否则会盖掉过渡。 */
   border-left-color: transparent;
 }
 
-/* 裁切层:收起时把冻结宽度的内容裁掉,但不裁拖拽柄与展开把手(它们是它的
- * 兄弟节点,不在这棵子树里)。 */
 .side-pane-clip {
   display: flex;
   flex: 1 1 auto;
@@ -53,7 +55,6 @@
   overflow: hidden;
 }
 
-/* 拖拽中禁用 transition:否则宽度会跟随动画滞后于鼠标。 */
 .side-pane.dragging {
   transition: none;
 }
@@ -71,12 +72,9 @@
   min-height: 0;
   min-width: 0;
   overflow: hidden;
-  /* 内容按「展开宽度」排版,不跟着动画中的容器收缩:
-   * 滑动期间它只是被 `.side-pane-clip` 裁掉,不重排。
-   * 减边框是因为这个值来自 `getBoundingClientRect()`(含边框),而全局是
-   * border-box;`max()` 兜住"还没量过宽度"(变量为 0)的那一帧。 */
+  /* 以面板自身宽度驱动内部响应式(见文件末尾的容器查询)。 */
+  container: side-pane / inline-size;
   width: max(0px, calc(var(--side-pane-content-w) - var(--side-pane-rule)));
-  /* 展开时内容比面板晚一点出现(先让出空间再显内容),收起时先快速淡出。 */
   opacity: 1;
   transition: opacity 150ms var(--ease) 110ms;
 }
@@ -96,7 +94,6 @@
   width: 6px;
   height: 100%;
   cursor: col-resize;
-  /* 命中区 6px、视觉 1px:细到不干扰,但抓得住。 */
   background: transparent;
   transition: background 0.12s var(--ease);
 }
@@ -107,19 +104,20 @@
   outline: none;
 }
 
-/* ================= 标签栏 ================= */
+/* ==========================================================================
+ * 工作台标签栏
+ * ========================================================================= */
 
 .pane-tabs {
   display: flex;
   flex: 0 0 auto;
   align-items: center;
-  gap: 2px;
-  height: 44px;
-  padding: 0 6px 0 8px;
-  border-bottom: 1px solid var(--border-l1);
+  gap: 6px;
+  height: 46px;
+  padding: 0 8px;
+  border-bottom: 1px solid var(--pane-hairline);
+  background: transparent;
 }
-
-/* ---- 标签总览按钮 ---- */
 
 .pane-overview-wrap,
 .pane-add-wrap {
@@ -129,222 +127,48 @@
 
 .pane-overview,
 .pane-add,
-.pane-close-all {
+.pane-close-all,
+.pane-collapse {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 26px;
-  height: 26px;
+  width: 28px;
+  height: 28px;
   padding: 0;
-  border: 1px solid transparent;
-  border-radius: var(--r-xs);
+  border: none;
+  border-radius: 7px;
   background: transparent;
   color: var(--label-tertiary);
   cursor: pointer;
-  transition: background 0.12s var(--ease), color 0.12s var(--ease),
-    border-color 0.12s var(--ease);
+  transition:
+    background 0.12s var(--ease),
+    color 0.12s var(--ease);
 }
 
 .pane-overview:hover,
 .pane-add:hover,
-.pane-close-all:hover {
+.pane-close-all:hover,
+.pane-collapse:hover {
   background: var(--hover-fill);
   color: var(--label-primary);
 }
 
 .pane-overview.active {
-  border-color: var(--border-l2);
-  background: var(--bg-layer-3);
+  background: var(--active-fill);
   color: var(--label-primary);
 }
 
-/* ---- 浮层(portal 到 body) ----
- *
- * 两个菜单都经 `PanePopover` portal 到 body,所以这里是**相对视口**的
- * `position: fixed`,left/top 由组件算好后内联写入。
- *
- * z-index 用 45:必须高于面板自身与其内部一切(z-index 6 / isolation),
- * 又要低于真正的模态层(设置面板 60、确认框 100)—— 菜单不该盖住模态。
- * 先前内联渲染时被 overflow 裁切,z-index 根本没机会生效;portal 之后
- * 它才真正起作用。
- */
-
-.pane-menu,
-.pane-overview-pop {
-  position: fixed;
-  z-index: 45;
-}
-
-/* ---- 新增菜单 ---- */
-
-.pane-menu {
-  min-width: 168px;
-  padding: 4px;
-  border: 1px solid var(--border-l2);
-  border-radius: var(--r-sm);
-  background: var(--bg-layer-3);
-  box-shadow: var(--shadow-lv2);
-}
-
-.pane-menu-item {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  width: 100%;
-  padding: 6px 8px;
-  border: none;
-  border-radius: var(--r-xs);
-  background: transparent;
-  color: var(--label-secondary);
-  font-size: 12px;
-  font-family: inherit;
-  text-align: left;
-  cursor: pointer;
-  transition: background 0.1s var(--ease), color 0.1s var(--ease);
-}
-
-.pane-menu-item:hover {
-  background: var(--hover-fill);
-  color: var(--label-primary);
-}
-
-.pane-menu-empty {
-  margin: 0;
-  padding: 8px;
-  color: var(--label-caption);
-  font-size: 12px;
-}
-
-/* ---- 标签总览 ---- */
-
-.pane-overview-pop {
-  display: flex;
-  flex-direction: column;
-  width: 288px;
-  max-height: 360px;
-  border: 1px solid var(--border-l2);
-  border-radius: var(--r-sm);
-  background: var(--bg-layer-3);
-  box-shadow: var(--shadow-lv2);
-  overflow: hidden;
-}
-
-.pane-overview-search {
+/* 右侧固定动作区:标签再多也不挤走 + / 折叠。 */
+.pane-bar-actions {
   display: flex;
   flex: 0 0 auto;
-  align-items: center;
-  gap: 6px;
-  padding: 7px 9px;
-  border-bottom: 1px solid var(--border-l1);
-  color: var(--label-caption);
-}
-
-.pane-overview-search input {
-  flex: 1 1 auto;
-  min-width: 0;
-  border: none;
-  background: transparent;
-  color: var(--label-primary);
-  font-size: 12px;
-  font-family: inherit;
-  outline: none;
-}
-
-.pane-overview-search input::placeholder {
-  color: var(--label-caption);
-}
-
-.pane-overview-list {
-  flex: 1 1 auto;
-  min-height: 0;
-  overflow-y: auto;
-  padding: 4px;
-}
-
-.pane-overview-group {
-  margin: 0;
-  padding: 6px 8px 3px;
-  color: var(--label-caption);
-  font-size: 10.5px;
-  letter-spacing: 0.03em;
-}
-
-.pane-overview-item {
-  display: flex;
   align-items: center;
   gap: 2px;
-  border-radius: var(--r-xs);
+  padding-left: 2px;
 }
 
-.pane-overview-item:hover {
-  background: var(--hover-fill);
-}
-
-.pane-overview-item.active {
-  background: var(--active-fill);
-}
-
-.pane-overview-main {
-  display: flex;
-  flex: 1 1 auto;
-  min-width: 0;
-  align-items: center;
-  gap: 7px;
-  padding: 6px 8px;
-  border: none;
-  background: transparent;
-  color: var(--label-secondary);
-  font-size: 12px;
-  font-family: inherit;
-  text-align: left;
-  cursor: pointer;
-}
-
-.pane-overview-item.active .pane-overview-main {
-  color: var(--label-primary);
-}
-
-.pane-overview-title {
-  flex: 1 1 auto;
-  min-width: 0;
-  overflow: hidden;
-  white-space: nowrap;
-  text-overflow: ellipsis;
-}
-
-.pane-overview-time {
-  flex: 0 0 auto;
+.pane-close-all {
   color: var(--label-caption);
-  font-size: 11px;
-}
-
-.pane-overview-close {
-  display: inline-flex;
-  flex: 0 0 auto;
-  align-items: center;
-  justify-content: center;
-  width: 20px;
-  height: 20px;
-  margin-right: 4px;
-  padding: 0;
-  border: none;
-  border-radius: var(--r-xs);
-  background: transparent;
-  color: var(--label-caption);
-  cursor: pointer;
-}
-
-.pane-overview-close:hover {
-  background: var(--hover-fill);
-  color: var(--label-primary);
-}
-
-.pane-overview-empty {
-  margin: 0;
-  padding: 14px 8px;
-  color: var(--label-caption);
-  font-size: 12px;
-  text-align: center;
 }
 
 /* ---- 标签滚动区 ---- */
@@ -357,7 +181,6 @@
   overflow-y: hidden;
   display: flex;
   align-items: center;
-  /* 隐藏滚动条:标签栏的横向滚动靠拖拽与滚轮,不需要可见滚动条。 */
   scrollbar-width: none;
 }
 
@@ -366,74 +189,71 @@
   display: none;
 }
 
-/* 三态渐隐 mask:提示两侧还有内容(mask-image 方案)。 */
 .pane-tab-viewport.mask-both {
   mask-image: linear-gradient(
     to right,
     transparent 0,
-    #000 16px,
-    #000 calc(100% - 16px),
+    #000 14px,
+    #000 calc(100% - 14px),
     transparent 100%
   );
 }
 
 .pane-tab-viewport.mask-left {
-  mask-image: linear-gradient(to right, transparent 0, #000 16px, #000 100%);
+  mask-image: linear-gradient(to right, transparent 0, #000 14px, #000 100%);
 }
 
 .pane-tab-viewport.mask-right {
-  mask-image: linear-gradient(to right, #000 0, #000 calc(100% - 16px), transparent 100%);
+  mask-image: linear-gradient(to right, #000 0, #000 calc(100% - 14px), transparent 100%);
 }
 
 .pane-tab-content {
   display: flex;
   flex: 0 0 auto;
   align-items: center;
-  gap: 8px;
+  gap: 4px;
   width: max-content;
   padding: 0 2px;
 }
 
-/* ---- 单个标签 ---- */
+/* ---- 胶囊标签:与左侧会话行的选中态同一套语言 ---- */
 
 .pane-tab {
   position: relative;
   display: inline-flex;
   flex: 0 0 auto;
   align-items: center;
-  gap: 6px;
-  /* 基准宽 156px,窄到 60px、宽到 156px。 */
-  width: 156px;
-  min-width: 60px;
-  max-width: 156px;
-  height: 28px;
-  padding: 0 4px 0 7px;
-  border: 1px solid transparent;
-  border-radius: var(--r-sm);
-  /* 用变量驱动底色:关闭按钮的渐隐带取同一个变量,两态下都无缝。 */
-  --tab-bg: transparent;
-  background: var(--tab-bg);
+  gap: 7px;
+  width: 168px;
+  min-width: 64px;
+  max-width: 168px;
+  height: 30px;
+  padding: 0 4px 0 8px;
+  border: none;
+  border-radius: 7px;
+  background: transparent;
   color: var(--label-tertiary);
-  font-size: 12px;
+  font-size: 12.5px;
   cursor: default;
   overflow: hidden;
-  transition: background 0.12s var(--ease), border-color 0.12s var(--ease),
+  transition:
+    background 0.12s var(--ease),
     color 0.12s var(--ease);
 }
 
 .pane-tab:hover {
-  border-color: var(--border-l1);
+  background: var(--hover-fill);
   color: var(--label-secondary);
 }
 
 .pane-tab.active {
-  --tab-bg: var(--bg-layer-2);
-  border-color: var(--border-l2);
+  background: var(--active-fill);
   color: var(--label-primary);
+  font-weight: 500;
 }
 
 .pane-tab.dragging {
-  opacity: 0.5;
+  opacity: 0.45;
 }
 
 .pane-tab-icon {
@@ -457,33 +277,21 @@
   text-overflow: ellipsis;
 }
 
-/* 关闭按钮:常驻(不 hover 才出现)→ 标签宽度不抖;
- * 前面一条 8px 渐变带,让长标题从右向左淡出而不是硬截断。 */
-.pane-tab-actions {
-  position: absolute;
-  top: 0;
-  right: 0;
-  bottom: 0;
-  z-index: 2;
-  display: flex;
-  align-items: center;
-  pointer-events: none;
-}
-
-.pane-tab-fade {
-  width: 8px;
-  height: 100%;
-  background: linear-gradient(to right, transparent, var(--tab-bg));
-}
-
-.pane-tab-close-bg {
-  display: flex;
+/* 关闭槽常驻但不抢视线:宽度固定,避免 hover 时标签抖动。 */
+.pane-tab-close-slot {
+  display: inline-flex;
+  flex: 0 0 auto;
   align-items: center;
   justify-content: center;
-  width: 22px;
-  height: 100%;
-  background: var(--tab-bg);
-  pointer-events: auto;
+  width: 20px;
+  height: 20px;
+  opacity: 0.45;
+  transition: opacity 0.12s var(--ease);
+}
+
+.pane-tab:hover .pane-tab-close-slot,
+.pane-tab.active .pane-tab-close-slot {
+  opacity: 0.9;
 }
 
 .pane-tab-close {
@@ -494,29 +302,287 @@
   height: 18px;
   padding: 0;
   border: none;
-  border-radius: var(--r-xs);
+  border-radius: 5px;
   background: transparent;
   color: var(--label-caption);
   cursor: pointer;
-  transition: background 0.1s var(--ease), color 0.1s var(--ease);
+  transition:
+    background 0.1s var(--ease),
+    color 0.1s var(--ease);
 }
 
 .pane-tab-close:hover {
-  background: var(--active-fill);
+  background: var(--hover-fill);
   color: var(--label-primary);
 }
 
-/* ---- 右端固定动作区(仅溢出时出现) ---- */
+/* ==========================================================================
+ * 浮层:新增菜单 / 标签总览
+ * ========================================================================= */
 
-.pane-actions {
+.pane-menu,
+.pane-overview-pop {
+  position: fixed;
+  z-index: 45;
+  max-width: calc(100vw - 16px);
+  border: none;
+  border-radius: var(--r-md);
+  /* 浮层经 PanePopover portal 到 body,逃出了 `.side-pane` 的变量作用域;
+   * `--pane-card`/`--pane-hairline` 在那里解析不到,背景会变透明。
+   * 这里必须用它们指向的全局变量。 */
+  background: var(--composer-surface);
+  box-shadow: var(--composer-shadow);
+  overscroll-behavior: contain;
+}
+
+.pane-menu {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  width: 280px;
+  padding: 6px;
+}
+
+.pane-menu-head {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px 10px 4px;
+}
+
+.pane-menu-title {
+  color: var(--label-primary);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.4;
+}
+
+.pane-menu-hint {
+  color: var(--label-tertiary);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.pane-menu-list {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.pane-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 7px 8px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--label-secondary);
+  font-family: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.12s var(--ease);
+}
+
+.pane-menu-item:hover {
+  background: var(--hover-fill);
+}
+
+/* 图标不上底板:菜单里只留一枚小图标,与 composer 的下拉菜单同一种密度。 */
+.pane-menu-icon {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  color: var(--label-tertiary);
+}
+
+.pane-menu-item:hover .pane-menu-icon {
+  color: var(--label-secondary);
+}
+
+.pane-menu-text {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+
+.pane-menu-label {
+  color: var(--label-primary);
+  font-size: 12.5px;
+  font-weight: 500;
+  line-height: 1.4;
+}
+
+.pane-menu-desc {
+  overflow: hidden;
+  color: var(--label-tertiary);
+  font-size: 11px;
+  line-height: 1.45;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.pane-menu-empty {
+  margin: 0;
+  padding: 10px;
+  color: var(--label-caption);
+  font-size: 12px;
+}
+
+.pane-overview-pop {
+  display: flex;
+  flex-direction: column;
+  width: 288px;
+  max-height: 360px;
+  overflow: hidden;
+}
+
+.pane-overview-search {
   display: flex;
   flex: 0 0 auto;
   align-items: center;
-  gap: 2px;
-  padding-left: 4px;
+  gap: 7px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border-l1);
+  color: var(--label-tertiary);
 }
 
-/* ================= 内容区 ================= */
+.pane-overview-search input {
+  flex: 1 1 auto;
+  min-width: 0;
+  border: none;
+  background: transparent;
+  color: var(--label-primary);
+  font-size: 12.5px;
+  font-family: inherit;
+  outline: none;
+}
+
+.pane-overview-search input::placeholder {
+  color: var(--label-caption);
+}
+
+.pane-overview-search input::-webkit-search-cancel-button {
+  display: none;
+}
+
+.pane-overview-list {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 4px;
+  scrollbar-width: thin;
+}
+
+/* 与左侧「工作区」小标题同一种排版:11px / 600 / 字距。 */
+.pane-overview-group {
+  margin: 0;
+  padding: 8px 8px 4px;
+  color: var(--label-secondary);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.pane-overview-item {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  border-radius: 7px;
+}
+
+.pane-overview-item:hover {
+  background: var(--hover-fill);
+}
+
+.pane-overview-item.active {
+  background: var(--active-fill);
+}
+
+.pane-overview-main {
+  display: flex;
+  flex: 1 1 auto;
+  min-width: 0;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border: none;
+  background: transparent;
+  color: var(--label-secondary);
+  font-size: 12.5px;
+  font-family: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.pane-overview-item.active .pane-overview-main {
+  color: var(--label-primary);
+}
+
+.pane-overview-icon {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  color: var(--label-tertiary);
+}
+
+.pane-overview-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.pane-overview-time {
+  flex: 0 0 auto;
+  color: var(--label-caption);
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+}
+
+.pane-overview-close {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  margin-right: 4px;
+  padding: 0;
+  border: none;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--label-caption);
+  cursor: pointer;
+}
+
+.pane-overview-close:hover {
+  background: var(--hover-fill);
+  color: var(--label-primary);
+}
+
+.pane-overview-empty {
+  margin: 0;
+  padding: 18px 8px;
+  color: var(--label-caption);
+  font-size: 12px;
+  text-align: center;
+}
+
+/* ==========================================================================
+ * 内容区
+ * ========================================================================= */
 
 .side-pane-body {
   position: relative;
@@ -530,7 +596,6 @@
   width: 100%;
   height: 100%;
   min-height: 0;
-  background: var(--bg-base);
 }
 
 .side-pane-tab-panel[data-visible='true'] {
@@ -542,13 +607,38 @@
   align-items: center;
   justify-content: center;
   height: 100%;
-  padding: 20px;
+  padding: 24px;
   color: var(--label-caption);
   font-size: 12px;
   text-align: center;
 }
 
-/* 终端槽:同标签面板一样"全挂载、按需显示",切标签不卸载 xterm。 */
+/* ---- 终端组:标题条 + 一块内嵌的终端画布 ---- */
+
+.terminal-group {
+  display: none;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  flex-direction: column;
+}
+
+.terminal-group[data-visible='true'] {
+  display: flex;
+}
+
+.terminal-head {
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--pane-hairline);
+}
+
+.terminal-group-body {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
+  padding: 8px 10px 10px;
+}
+
 .terminal-slot {
   display: none;
   width: 100%;
@@ -560,9 +650,280 @@
   display: block;
 }
 
-/* ================= 空态引导页 ================= */
+/* ==========================================================================
+ * 面板共享原语:头部 / 工具条 / 搜索 / 胶囊 / 空态
+ * ========================================================================= */
 
-/* 容器查询:窄面板竖排列表,宽面板卡片网格 —— 纯 CSS,零 JS 分支。 */
+.pane-panel {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+}
+
+.pane-panel-head {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 8px;
+  min-height: 46px;
+  padding: 6px var(--pane-pad-x);
+  background: transparent;
+}
+
+/* 图标只有 16px,不上底板 —— 面板头的第一层信息是标题,不是图标。 */
+.pane-panel-icon {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  color: var(--label-tertiary);
+}
+
+.pane-panel-titles {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+
+.pane-panel-title {
+  margin: 0;
+  overflow: hidden;
+  color: var(--label-primary);
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.35;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.pane-panel-subtitle {
+  margin: 0;
+  overflow: hidden;
+  color: var(--label-tertiary);
+  font-size: 11.5px;
+  line-height: 1.4;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.pane-panel-actions {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 2px;
+  margin-left: auto;
+}
+
+.pane-icon-btn {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: none;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--label-tertiary);
+  cursor: pointer;
+  transition:
+    background 0.12s var(--ease),
+    color 0.12s var(--ease);
+}
+
+.pane-icon-btn:hover:not(:disabled) {
+  background: var(--hover-fill);
+  color: var(--label-primary);
+}
+
+.pane-icon-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/* 工具条:透明底,只有一条细分隔线把 chrome 与内容分开。 */
+.pane-panel-toolbar {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 8px;
+  min-height: 34px;
+  padding: 0 var(--pane-pad-x) 8px;
+  border-bottom: 1px solid var(--pane-hairline);
+  background: transparent;
+}
+
+/* ---- 搜索框:与左侧会话栏搜索同一套视觉 ---- */
+
+.pane-search {
+  display: flex;
+  flex: 1 1 auto;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  height: 30px;
+  padding: 0 9px;
+  border: 1px solid var(--border-l2);
+  border-radius: 8px;
+  background: var(--bg-layer-1);
+  color: var(--label-tertiary);
+  transition: border-color 0.12s var(--ease);
+}
+
+.pane-search:focus-within {
+  border-color: var(--border-l3);
+}
+
+.pane-search-icon {
+  flex: 0 0 auto;
+  color: var(--label-tertiary);
+}
+
+.pane-search-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 100%;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--label-primary);
+  font-family: inherit;
+  font-size: 12.5px;
+  line-height: 1.2;
+  outline: none;
+}
+
+.pane-search-input::placeholder {
+  color: var(--label-caption);
+}
+
+.pane-search-input::-webkit-search-cancel-button {
+  display: none;
+}
+
+/* 清空按钮与左侧栏搜索一致:只有输入非空时出现,不占常驻位置。 */
+.pane-search-clear {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--label-caption);
+  cursor: pointer;
+  transition:
+    background 0.12s var(--ease),
+    color 0.12s var(--ease);
+}
+
+.pane-search-clear:hover {
+  background: var(--hover-fill);
+  color: var(--label-primary);
+}
+
+/* ---- 胶囊切换:与对话区 .view-switch 同款 ---- */
+
+.pane-seg {
+  display: inline-flex;
+  flex: 0 1 auto;
+  align-items: center;
+  gap: 2px;
+  min-width: 0;
+  padding: 2px;
+  border: 1px solid var(--border-l1);
+  border-radius: 999px;
+  background: var(--bg-base);
+}
+
+.pane-seg-btn {
+  min-width: 0;
+  padding: 3px 10px;
+  border: none;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--label-tertiary);
+  font-family: inherit;
+  font-size: 11.5px;
+  line-height: 1.5;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: pointer;
+  transition:
+    background 0.12s var(--ease),
+    color 0.12s var(--ease);
+}
+
+.pane-seg-btn:hover {
+  color: var(--label-primary);
+}
+
+.pane-seg-btn[aria-selected='true'],
+.pane-seg-btn.active {
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-weight: 500;
+}
+
+/* ---- 空态 ---- */
+
+.pane-empty {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  min-height: 0;
+  padding: 28px 20px;
+  text-align: center;
+}
+
+.pane-empty-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  margin-bottom: 4px;
+  color: var(--label-tertiary);
+}
+
+.pane-empty-title {
+  margin: 0;
+  color: var(--label-primary);
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.4;
+}
+
+.pane-empty-desc {
+  max-width: 30ch;
+  margin: 0;
+  color: var(--label-tertiary);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.pane-empty-action {
+  margin-top: 6px;
+}
+
+/* ==========================================================================
+ * 空态引导页(没有标签时)
+ * ========================================================================= */
+
 .pane-open-shell {
   container: pane-open / inline-size;
   position: relative;
@@ -570,6 +931,7 @@
   flex: 1 1 auto;
   flex-direction: column;
   min-height: 0;
+  background: var(--pane-surface);
 }
 
 .pane-open-scroll {
@@ -579,15 +941,16 @@
   align-items: center;
   justify-content: center;
   overflow-y: auto;
-  padding: 32px 20px;
+  padding: 40px 16px 28px;
+  scrollbar-width: thin;
 }
 
 .pane-open-content {
   display: flex;
   flex-direction: column;
-  gap: 18px;
+  gap: 20px;
   width: 100%;
-  max-width: 20rem;
+  max-width: 22rem;
 }
 
 .pane-open-head {
@@ -600,8 +963,9 @@
 .pane-open-title {
   margin: 0;
   color: var(--label-primary);
-  font-size: 16px;
+  font-size: 15px;
   font-weight: 600;
+  letter-spacing: -0.01em;
   line-height: 1.4;
 }
 
@@ -609,13 +973,14 @@
   margin: 0;
   color: var(--label-tertiary);
   font-size: 12px;
-  line-height: 1.6;
+  line-height: 1.65;
 }
 
+/* 引导项是"平铺的行",不是卡片:无边框、无底色,只有 hover 填充。 */
 .pane-open-list {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 2px;
   width: 100%;
 }
 
@@ -623,60 +988,69 @@
   display: flex;
   align-items: center;
   gap: 10px;
-  height: 44px;
+  min-height: 44px;
   min-width: 0;
-  padding: 0 12px;
-  border: 1px solid var(--border-l1);
-  border-radius: var(--r-md);
-  background: var(--bg-layer-2);
+  padding: 7px 8px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
   color: var(--label-primary);
-  font-size: 13px;
   font-family: inherit;
+  text-align: left;
   cursor: pointer;
-  transition: background 0.12s var(--ease), border-color 0.12s var(--ease);
+  transition: background 0.12s var(--ease);
 }
 
 .pane-open-button:hover {
-  background: var(--bg-layer-3);
-  border-color: var(--border-l2);
+  background: var(--hover-fill);
 }
 
-.pane-open-button > svg {
+.pane-open-icon {
+  display: inline-flex;
   flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
   color: var(--label-tertiary);
 }
 
-.pane-open-label {
+.pane-open-text {
+  display: flex;
   flex: 1 1 auto;
+  flex-direction: column;
+  gap: 1px;
   min-width: 0;
-  overflow: hidden;
-  white-space: nowrap;
-  text-overflow: ellipsis;
-  text-align: left;
 }
 
-@container pane-open (min-width: 480px) {
-  .pane-open-content {
-    max-width: 34rem;
-  }
+.pane-open-label {
+  overflow: hidden;
+  color: var(--label-primary);
+  font-size: 12.5px;
+  font-weight: 500;
+  line-height: 1.4;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
 
-  .pane-open-list {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(9rem, 1fr));
-  }
+.pane-open-item-desc {
+  overflow: hidden;
+  color: var(--label-tertiary);
+  font-size: 11px;
+  line-height: 1.45;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
 
-  .pane-open-button {
-    flex-direction: column;
-    justify-content: center;
-    gap: 6px;
-    height: 5.5rem;
-    padding: 0 8px;
-  }
-
-  .pane-open-label {
-    flex: 0 auto;
-    text-align: center;
-  }
+.pane-open-arrow {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  color: var(--label-caption);
+  transform: rotate(-90deg);
 }
 
 .pane-open-collapse {
@@ -686,17 +1060,18 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 26px;
-  height: 26px;
+  width: 28px;
+  height: 28px;
   padding: 0;
-  border: 1px solid transparent;
-  border-radius: var(--r-xs);
+  border: none;
+  border-radius: 7px;
   background: transparent;
   color: var(--label-caption);
   cursor: pointer;
-  /* 图标默认朝下(收起语义);旋转 90° 指向右侧。 */
-  transform: rotate(90deg);
-  transition: background 0.12s var(--ease), color 0.12s var(--ease);
+  transform: rotate(-90deg);
+  transition:
+    background 0.12s var(--ease),
+    color 0.12s var(--ease);
 }
 
 .pane-open-collapse:hover {
@@ -704,13 +1079,99 @@
   color: var(--label-primary);
 }
 
-/* ---- 无障碍:减少动效 ---- */
+/* 面板较宽时引导项排成两列;仍然是平铺行,不变成卡片网格。 */
+@container pane-open (min-width: 520px) {
+  .pane-open-content {
+    max-width: 34rem;
+  }
+
+  .pane-open-list {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 2px 8px;
+  }
+}
+
+/* ==========================================================================
+ * 容器查询:按面板自身宽度收缩(共享部分)
+ * ========================================================================= */
+
+@container side-pane (max-width: 360px) {
+  .pane-tabs {
+    gap: 4px;
+    padding-inline: 6px;
+  }
+
+  .pane-tab {
+    width: 150px;
+    max-width: 150px;
+  }
+
+  .pane-panel-head {
+    padding-inline: 10px;
+  }
+
+  .pane-panel-toolbar {
+    padding-inline: 10px;
+  }
+
+  .pane-open-scroll {
+    padding-inline: 12px;
+  }
+}
+
+@container side-pane (max-width: 300px) {
+  .pane-tab {
+    width: 132px;
+    max-width: 132px;
+  }
+
+  .pane-panel-head {
+    gap: 6px;
+  }
+
+  .pane-panel-subtitle {
+    font-size: 11px;
+  }
+}
+
+@container side-pane (max-width: 260px) {
+  /* 关闭全部是破坏性动作,窄宽度下先让位;折叠入口必须保留。 */
+  .pane-close-all {
+    display: none;
+  }
+
+  .pane-tab {
+    width: 112px;
+    max-width: 112px;
+  }
+
+  .pane-overview,
+  .pane-add,
+  .pane-collapse {
+    width: 26px;
+    height: 26px;
+  }
+
+  .terminal-group-body {
+    padding-inline: 8px;
+  }
+}
+
+/* ---- 无障碍与减少动效 ---- */
+
+.side-pane :is(button, input, textarea, [tabindex]):focus-visible {
+  outline: 2px solid var(--label-secondary);
+  outline-offset: -2px;
+}
 
 @media (prefers-reduced-motion: reduce) {
   .side-pane,
   .side-pane-inner,
   .pane-tab,
-  .pane-tab-chevron,
+  .pane-tab-close,
+  .pane-open-button,
+  .pane-open-collapse,
   .side-pane-resizer {
     transition: none;
   }

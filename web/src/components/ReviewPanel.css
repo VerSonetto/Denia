@@ -1,163 +1,73 @@
-/* 审查面板:来源切换 + 文件列表 + Diff 正文。
+/* 审查面板:来源胶囊 + 文件列表 + Diff 正文 + 底部提交卡。
  *
- * 信息层级:头部(来源 + 刷新)→ 元信息(分支)→
- * 列表(分组 + 行 + 展开的 Diff)。视觉用 denia 自己的 token,不混用
- * Tailwind 类 —— 两套 token 体系混用会让暗/亮主题下出现不协调的灰阶。 */
+ * 这里只写「审查」自己的结构。面板头、工具条、搜索框、空态与胶囊的共享
+ * 视觉在 SidePane.css(`.pane-panel-*` / `.pane-search` / `.pane-seg`);
+ * 所有选择器都以 `.side-pane` 作用域收口,所以懒加载先后顺序不影响结果。
+ *
+ * 视觉定位:
+ * - 来源切换 = 对话区 `.view-switch` 同款胶囊(细边框 + accent-soft 选中);
+ * - 文件行 = 扁平行,只有 hover 填充,不画分隔线与卡片;
+ * - 分区标题 = 左侧栏「工作区」小标题(11px/600/字距);
+ * - 提交卡 = 输入区同款 `--composer-surface` + `--composer-shadow`。 */
 
-.review-panel {
+.side-pane .review-panel {
   display: flex;
   flex-direction: column;
   width: 100%;
   height: 100%;
   min-height: 0;
-  background: var(--bg-base);
 }
 
-/* ---- 头部:来源切换 ---- */
+/* ---- 工具条:来源 + 筛选 ---- */
 
-.review-head {
-  display: flex;
-  flex: 0 0 auto;
-  align-items: center;
+.side-pane .review-toolbar {
   gap: 8px;
-  padding: 10px 12px;
-  border-bottom: 1px solid var(--border-l1);
 }
 
-.review-sources {
-  display: flex;
-  flex: 1 1 auto;
-  min-width: 0;
-  gap: 2px;
-  padding: 2px;
-  border: 1px solid var(--border-l1);
-  border-radius: var(--r-sm);
-  background: var(--bg-layer-2);
+.side-pane .review-sources {
+  flex: 0 1 auto;
 }
 
-.review-source {
+/* 四段来源等宽,窄面板下一起收缩而不是先挤掉最后一段。 */
+.side-pane .review-sources .review-source {
   flex: 1 1 0;
-  min-width: 0;
-  padding: 4px 8px;
-  border: none;
-  border-radius: var(--r-xs);
-  background: transparent;
-  color: var(--label-tertiary);
-  font-size: 12px;
-  font-family: inherit;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  cursor: pointer;
-  transition: background 0.12s var(--ease), color 0.12s var(--ease);
+  text-align: center;
 }
 
-.review-source:hover {
-  color: var(--label-secondary);
+.side-pane .review-filter {
+  flex: 1 1 auto;
+  min-width: 90px;
 }
 
-.review-source[aria-selected='true'] {
-  background: var(--bg-layer-3);
-  color: var(--label-primary);
-}
+/* ---- 错误 ---- */
 
-.review-refresh {
-  display: inline-flex;
-  flex: 0 0 auto;
-  align-items: center;
-  justify-content: center;
-  width: 28px;
-  height: 28px;
-  border: 1px solid var(--border-l1);
-  border-radius: var(--r-xs);
-  background: transparent;
-  color: var(--label-tertiary);
-  cursor: pointer;
-  transition: background 0.12s var(--ease), color 0.12s var(--ease);
-}
-
-.review-refresh:hover:not(:disabled) {
-  background: var(--hover-fill);
-  color: var(--label-primary);
-}
-
-.review-refresh:disabled {
-  opacity: 0.6;
-  cursor: default;
-}
-
-/* ---- 元信息:分支 + 领先/落后 ---- */
-
-.review-meta {
-  display: flex;
-  flex: 0 0 auto;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  padding: 6px 12px;
-  border-bottom: 1px solid var(--border-l1);
-  color: var(--label-tertiary);
-  font-size: 11px;
-}
-
-.review-branch {
-  display: inline-flex;
-  min-width: 0;
-  align-items: center;
-  gap: 4px;
-  overflow: hidden;
-  white-space: nowrap;
-  text-overflow: ellipsis;
-}
-
-.review-ahead-behind {
-  flex: 0 0 auto;
-  font-family: var(--font-mono);
-  letter-spacing: 0.02em;
-}
-
-/* ---- 筛选 ---- */
-
-.review-filter {
-  flex: 0 0 auto;
-  padding: 8px 12px;
-  border-bottom: 1px solid var(--border-l1);
-}
-
-.review-filter-input {
-  width: 100%;
-  padding: 5px 9px;
-  border: 1px solid var(--border-l1);
-  border-radius: var(--r-xs);
-  background: var(--input-major);
-  color: var(--label-primary);
-  font-size: 12px;
-  font-family: inherit;
-}
-
-.review-filter-input::placeholder {
-  color: var(--label-caption);
-}
-
-.review-filter-input:focus {
-  outline: none;
-  border-color: var(--border-l3);
+.side-pane .review-error {
+  margin: 8px 10px 0;
+  padding: 7px 9px;
+  border-radius: 8px;
+  background: var(--danger-soft);
+  color: var(--danger-fg);
+  font-size: 11.5px;
+  line-height: 1.5;
 }
 
 /* ---- 列表 ---- */
 
-.review-list {
+.side-pane .review-list {
   flex: 1 1 auto;
   min-height: 0;
-  overflow-y: auto;
   overflow-x: hidden;
+  overflow-y: auto;
+  padding: 2px 6px 12px;
+  scrollbar-width: thin;
 }
 
-.review-section {
-  display: block;
+.side-pane .review-section {
+  margin: 0;
 }
 
-.review-section-title {
+/* 与左侧「工作区」分区标题同一套排版;sticky 让分组在长列表里始终可读。 */
+.side-pane .review-section-title {
   position: sticky;
   top: 0;
   z-index: 1;
@@ -165,314 +75,356 @@
   align-items: center;
   gap: 6px;
   margin: 0;
-  padding: 5px 12px;
-  background: var(--bg-layer-2);
-  border-bottom: 1px solid var(--border-l1);
-  color: var(--label-tertiary);
+  padding: 12px 6px 4px;
+  background: var(--pane-surface);
+  color: var(--label-secondary);
   font-size: 11px;
-  font-weight: 500;
-  letter-spacing: 0.02em;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  line-height: 1.4;
+  text-transform: uppercase;
 }
 
-.review-section-count {
-  padding: 0 5px;
-  border-radius: var(--r-pill);
-  background: var(--bg-layer-3);
+.side-pane .review-section-count {
   color: var(--label-caption);
-  font-family: var(--font-mono);
-  font-size: 10px;
+  font-size: 10.5px;
+  font-weight: 500;
+  letter-spacing: 0;
+  font-variant-numeric: tabular-nums;
 }
 
-/* ---- 单行 ---- */
+/* ---- 文件行 ---- */
 
-.review-row {
-  border-bottom: 1px solid var(--border-l1);
+.side-pane .review-row {
+  border-radius: 7px;
 }
 
-.review-row-head {
+.side-pane .review-row-head {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 7px;
   width: 100%;
-  /* 行高 28px:略紧一些,因为 denia 的面板默认更窄。 */
-  min-height: 28px;
-  padding: 0 12px;
+  min-height: 30px;
+  padding: 4px 6px;
   border: none;
+  border-radius: 7px;
   background: transparent;
   color: var(--label-secondary);
-  font-size: 12px;
   font-family: inherit;
   text-align: left;
   cursor: pointer;
-  transition: background 0.1s var(--ease);
+  transition: background 0.12s var(--ease);
 }
 
-.review-row-head:hover {
+.side-pane .review-row-head:hover {
   background: var(--hover-fill);
 }
 
-.review-row-icon {
+.side-pane .review-row-head:hover .review-row-path {
+  color: var(--label-primary);
+}
+
+.side-pane .review-row-icon {
   display: inline-flex;
   flex: 0 0 auto;
   align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
   color: var(--label-caption);
 }
 
-.review-row-path {
+.side-pane .review-row-path {
   flex: 1 1 auto;
   min-width: 0;
   overflow: hidden;
+  color: var(--label-secondary);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  line-height: 1.45;
   white-space: nowrap;
   text-overflow: ellipsis;
-  /* 路径用等宽字体:文件名对齐更好读,也和 diff 正文一致。 */
-  font-family: var(--font-mono);
 }
 
-.review-row-renamed {
+.side-pane .review-row-renamed {
   color: var(--label-caption);
-}
-
-.review-row-status {
-  flex: 0 0 auto;
-  width: 14px;
-  text-align: center;
-  color: var(--label-tertiary);
-  font-family: var(--font-mono);
   font-size: 11px;
 }
 
-.review-row-chevron {
+.side-pane .review-row-status {
   flex: 0 0 auto;
-  color: var(--label-caption);
-  transition: transform 0.15s var(--ease);
+  min-width: 18px;
+  color: var(--label-tertiary);
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  font-weight: 600;
+  text-align: right;
 }
 
-.review-row-chevron.open {
+.side-pane .review-row-chevron {
+  flex: 0 0 auto;
+  color: var(--label-caption);
+  transition: transform 0.12s var(--ease);
+}
+
+.side-pane .review-row-chevron.open {
   transform: rotate(180deg);
 }
 
 /* ---- Diff 正文 ---- */
 
-.review-diff {
-  background: var(--code-block);
-  border-top: 1px solid var(--border-l1);
+.side-pane .review-diff {
+  padding: 2px 0 6px 8px;
 }
 
-.review-diff-hint {
+.side-pane .review-diff-hint {
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 10px 12px;
+  padding: 6px 8px;
   color: var(--label-tertiary);
-  font-size: 12px;
+  font-size: 11.5px;
+  line-height: 1.5;
 }
 
-.review-diff-hint.error {
-  color: var(--danger);
+.side-pane .review-diff-hint.error {
+  color: var(--danger-fg);
 }
 
-.review-patch {
+.side-pane .review-patch {
   margin: 0;
   padding: 6px 0;
-  /* 横向滚动交给 pre 自己:长行不折行,否则 diff 的列对齐会散。 */
-  overflow-x: auto;
-  font-family: var(--font-mono);
-  font-size: 11.5px;
-  line-height: 1.55;
-}
-
-.review-line {
-  padding: 0 12px;
-  white-space: pre;
+  border-radius: 8px;
+  background: var(--code-block);
   color: var(--label-secondary);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.55;
+  overflow-x: auto;
 }
 
-.review-line.add {
+.side-pane .review-line {
+  padding: 0 10px;
+  white-space: pre;
+}
+
+.side-pane .review-line.add {
   background: color-mix(in srgb, var(--success-fg) 12%, transparent);
   color: var(--success-fg);
 }
 
-.review-line.del {
+.side-pane .review-line.del {
   background: color-mix(in srgb, var(--danger) 12%, transparent);
   color: var(--danger);
 }
 
-.review-line.hunk {
-  background: var(--bg-layer-2);
+.side-pane .review-line.hunk {
+  background: color-mix(in srgb, var(--violet-fg) 10%, transparent);
   color: var(--violet-fg);
 }
 
-.review-line.meta {
+.side-pane .review-line.meta {
   color: var(--label-caption);
 }
 
-/* ---- 空态 ---- */
+/* ---- 空态 / 无匹配 ---- */
 
-.review-empty {
+.side-pane .review-empty {
   display: flex;
   flex: 1 1 auto;
   flex-direction: column;
   align-items: center;
   justify-content: center;
   gap: 8px;
-  padding: 24px 20px;
-  color: var(--label-caption);
+  padding: 28px 16px;
+  color: var(--label-tertiary);
   text-align: center;
 }
 
-.review-empty-title {
+.side-pane .review-empty-title {
   margin: 0;
   color: var(--label-secondary);
-  font-size: 13px;
-}
-
-.review-empty-desc {
-  margin: 0;
-  max-width: 260px;
-  font-size: 12px;
-  line-height: 1.55;
-}
-
-.review-empty-line {
-  margin: 0;
-  padding: 14px 12px;
-  color: var(--label-caption);
-  font-size: 12px;
-  text-align: center;
-}
-
-.review-error {
-  margin: 0;
-  padding: 8px 12px;
-  border-bottom: 1px solid var(--danger-border);
-  background: var(--danger-soft);
-  color: var(--danger);
-  font-size: 12px;
+  font-size: 12.5px;
   line-height: 1.5;
 }
 
-/* ---- 提交区(面板底部常驻) ---- */
+.side-pane .review-empty svg {
+  color: var(--label-tertiary);
+}
 
-.review-commit {
+.side-pane .review-empty-desc {
+  max-width: 30ch;
+  margin: 0;
+  color: var(--label-tertiary);
+  font-size: 11.5px;
+  line-height: 1.6;
+}
+
+.side-pane .review-empty-line {
+  margin: 0;
+  padding: 16px 8px;
+  color: var(--label-caption);
+  font-size: 12px;
+  text-align: center;
+}
+
+/* ---- 提交区:输入区同款软阴影卡片 ---- */
+
+.side-pane .review-commit {
   display: flex;
   flex: 0 0 auto;
   flex-direction: column;
-  gap: 8px;
-  padding: 10px 12px;
-  border-top: 1px solid var(--border-l1);
-  background: var(--bg-layer-2);
+  gap: 4px;
+  margin: 8px 10px 10px;
+  padding: 8px 8px 6px;
+  border: none;
+  border-radius: 14px;
+  background: var(--pane-card);
+  box-shadow: var(--composer-shadow);
+  transition: box-shadow 0.18s var(--ease);
 }
 
-.review-commit-input {
+.side-pane .review-commit:focus-within {
+  box-shadow: var(--composer-shadow-focus);
+}
+
+.side-pane .review-commit-input {
   width: 100%;
-  padding: 7px 9px;
-  border: 1px solid var(--border-l1);
-  border-radius: var(--r-xs);
-  background: var(--input-major);
-  color: var(--label-primary);
-  font-size: 12px;
-  font-family: inherit;
-  line-height: 1.5;
-  /* 只允许纵向拉伸:横向拉伸会撑破面板宽度。 */
-  resize: vertical;
   min-height: 44px;
   max-height: 160px;
+  padding: 6px 6px 2px;
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  color: var(--label-primary);
+  font-family: inherit;
+  font-size: 12.5px;
+  line-height: 1.55;
+  resize: vertical;
 }
 
-.review-commit-input::placeholder {
-  color: var(--label-caption);
+.side-pane .review-commit-input::placeholder {
+  color: var(--label-tertiary);
 }
 
-.review-commit-input:focus {
+.side-pane .review-commit-input:focus {
   outline: none;
-  border-color: var(--border-l3);
 }
 
-.review-commit-actions {
+.side-pane .review-commit-actions {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 3px;
+  padding: 0 2px;
 }
 
-/* 生成按钮靠左,推送与提交靠右 —— 视觉上把"写信息"与"发出去"分开。 */
-.review-commit-spacer {
+/* 生成靠左,推送与提交靠右 —— 把"写信息"与"发出去"在视觉上分开。 */
+.side-pane .review-commit-spacer {
   flex: 1 1 auto;
 }
 
-.review-commit-generate,
-.review-commit-push,
-.review-commit-submit {
+.side-pane .review-commit-generate,
+.side-pane .review-commit-push,
+.side-pane .review-commit-submit {
   display: inline-flex;
   align-items: center;
+  justify-content: center;
   gap: 5px;
-  padding: 5px 10px;
-  border: 1px solid var(--border-l1);
-  border-radius: var(--r-xs);
+  min-height: 28px;
+  padding: 0 8px;
+  border: none;
+  border-radius: 999px;
   background: transparent;
   color: var(--label-secondary);
-  font-size: 12px;
   font-family: inherit;
+  font-size: 11.5px;
+  line-height: 1;
   white-space: nowrap;
   cursor: pointer;
-  transition: background 0.12s var(--ease), color 0.12s var(--ease);
+  transition:
+    background 0.12s var(--ease),
+    color 0.12s var(--ease);
 }
 
-.review-commit-generate:hover:not(:disabled),
-.review-commit-push:hover:not(:disabled) {
+.side-pane .review-commit-generate:hover:not(:disabled),
+.side-pane .review-commit-push:hover:not(:disabled) {
   background: var(--hover-fill);
   color: var(--label-primary);
 }
 
-/* 提交是主操作:实心按钮,与两个次要操作拉开层级。 */
-.review-commit-submit {
-  border-color: transparent;
+.side-pane .review-commit-submit {
+  padding: 0 12px;
   background: var(--accent-send);
   color: var(--accent-on);
-  font-weight: 500;
+  font-weight: 600;
 }
 
-.review-commit-submit:hover:not(:disabled) {
-  filter: brightness(0.92);
+.side-pane .review-commit-submit:hover:not(:disabled) {
+  opacity: 0.9;
 }
 
-.review-commit-generate:disabled,
-.review-commit-push:disabled,
-.review-commit-submit:disabled {
-  opacity: 0.45;
-  cursor: default;
+.side-pane .review-commit-generate:disabled,
+.side-pane .review-commit-push:disabled,
+.side-pane .review-commit-submit:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
 }
 
-/* 成功/失败反馈:一次性提示,出现在编辑框上方。 */
-.review-commit-feedback {
-  display: flex;
-  flex-direction: column;
-  gap: 3px;
-  padding: 7px 9px;
-  border: 1px solid var(--border-l1);
-  border-radius: var(--r-xs);
-  background: var(--bg-layer-3);
+.side-pane .review-commit-feedback {
+  padding: 6px 8px;
+  border-radius: 8px;
+  background: var(--hover-fill);
   color: var(--label-secondary);
-  font-size: 11px;
-  line-height: 1.5;
+  font-size: 11.5px;
+  line-height: 1.45;
 }
 
-.review-commit-feedback.error {
-  border-color: var(--danger-border);
+.side-pane .review-commit-feedback.error {
   background: var(--danger-soft);
-  color: var(--danger);
+  color: var(--danger-fg);
 }
 
-.review-commit-feedback-text {
-  /* git 的原文常含换行(提示 + 原文两段),保留换行比压成一行好读。 */
-  white-space: pre-wrap;
+.side-pane .review-commit-feedback-text {
   word-break: break-word;
 }
 
-.review-commit-feedback-hint {
+.side-pane .review-commit-feedback-hint {
+  display: block;
+  margin-top: 2px;
   color: var(--label-tertiary);
 }
 
-.review-commit-feedback.error .review-commit-feedback-hint {
-  color: var(--danger);
-  opacity: 0.85;
+/* ---- 窄面板:来源与筛选各占一行 ---- */
+
+@container side-pane (max-width: 340px) {
+  .side-pane .review-toolbar {
+    flex-wrap: wrap;
+    row-gap: 6px;
+  }
+
+  .side-pane .review-sources {
+    flex: 1 1 100%;
+  }
+
+  .side-pane .review-sources .review-source {
+    padding-inline: 4px;
+    font-size: 11px;
+  }
+
+  .side-pane .review-filter {
+    flex: 1 1 100%;
+    min-width: 0;
+  }
+
+  .side-pane .review-commit {
+    margin: 6px 8px 8px;
+  }
+}
+
+@container side-pane (max-width: 260px) {
+  /* 只留图标:两个次要动作的文字在 240px 下会把提交键挤出去。 */
+  .side-pane .review-commit-generate span,
+  .side-pane .review-commit-push span {
+    display: none;
+  }
 }

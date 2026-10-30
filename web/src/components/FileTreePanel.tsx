@@ -37,6 +37,7 @@ import {
   type TreeRow,
 } from '../fileTree'
 import { IconCaretRight, IconFile, IconFolder, IconRefresh, IconSpinner } from './icons'
+import { PanelHead, PanelSearch, PanelToolbar } from './PanelChrome'
 import './FileTreePanel.css'
 
 export interface FileTreePanelProps {
@@ -153,28 +154,38 @@ export function FileTreePanel({ workspacePath, sessionId, onOpenFile }: FileTree
     return rows.filter((row) => row.entry.path.toLowerCase().includes(query))
   }, [rows, filter])
 
+  const workspaceName =
+    workspacePath.split(/[\\/]/).filter(Boolean).pop() ?? workspacePath
+
   return (
-    <div className="file-tree" data-file-tree-root={tree.root}>
-      <div className="file-tree-head">
-        <input
-          type="search"
-          className="file-tree-filter"
+    <div className="file-tree pane-panel" data-file-tree-root={tree.root}>
+      <PanelHead
+        icon={<IconFolder size={16} />}
+        title={t('sidePaneFiles')}
+        subtitle={<span title={workspacePath}>{workspaceName}</span>}
+        actions={
+          <button
+            type="button"
+            className="pane-icon-btn file-tree-icon-btn"
+            title={t('sidePaneFilesRefresh')}
+            aria-label={t('sidePaneFilesRefresh')}
+            data-file-tree-refresh=""
+            onClick={refresh}
+          >
+            <IconRefresh size={14} />
+          </button>
+        }
+      />
+      <PanelToolbar className="file-tree-toolbar">
+        <PanelSearch
+          className="file-tree-search"
+          inputClassName="file-tree-filter"
           value={filter}
+          onChange={setFilter}
           placeholder={t('sidePaneFilesFilter')}
-          aria-label={t('sidePaneFilesFilter')}
-          onChange={(event) => setFilter(event.target.value)}
+          ariaLabel={t('sidePaneFilesFilter')}
         />
-        <button
-          type="button"
-          className="file-tree-icon-btn"
-          title={t('sidePaneFilesRefresh')}
-          aria-label={t('sidePaneFilesRefresh')}
-          data-file-tree-refresh=""
-          onClick={refresh}
-        >
-          <IconRefresh size={13} />
-        </button>
-      </div>
+      </PanelToolbar>
 
       <div className="file-tree-body" role="tree" aria-label={t('sidePaneFiles')}>
         {rootLoading && rootChildren === null && (

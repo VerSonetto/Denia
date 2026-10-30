@@ -1,25 +1,23 @@
 /**
- * 面板标签栏:标签总览 + 标签列表 + 新增菜单。
+ * 面板工作台标签栏：总览 + 标签列表 + 新增/折叠。
  *
- * # 四处关键交互
+ * # 设计
  *
- * 1. **关闭按钮常驻 + 右侧渐隐带**。标签里关闭按钮**始终渲染**
- *    (不是 hover 才出现),配合一条 8px 的 `transparent → 标签底色` 渐变带,
- *    让长标题从右向左淡出而不是硬截断。按钮常驻 →
- *    标签宽度不随 hover 变化(无布局抖动);渐变带取 `--tab-bg` 变量 →
- *    激活/非激活两态下都无缝。
+ * 标签栏是一层「工作台 chrome」而不是一组普通按钮：
+ * - 左侧是固定的标签总览入口；
+ * - 中间是可横向滚动的胶囊标签，激活项只靠中性底色/边框区分，
+ *   **不使用强调色线条或边框**；
+ * - 右侧是固定操作区（关闭全部 / 新增 / 折叠），标签再多也不会把
+ *   操作按钮挤走。
  *
- * 2. **拖拽用 HTML5 DnD 而不是引 dnd-kit**。denia 不引 UI 库是硬约束,而
- *    HTML5 拖拽的"移动 4px 才启动"由浏览器自己保证(draggable 元素要
- *    真正开始拖动才触发 dragstart),天然满足同一个需求。
+ * # 交互
  *
- * 3. **横向溢出时 `+` 按钮搬家 + 三态渐隐 mask**。标签多到放不下时,
- *    滚动区左右两侧按"能否继续滚"加不同方向的 mask,让用户看出还有内容;
- *    `+` 按钮从滚动区内部移到右端固定位(否则它会被滚走)。
- *
- * 4. **标签总览 Popover**。一次列出"打开的"和"最近关闭的",支持模糊搜索,
- *    最近关闭的可以点回来。这是标签多开后的必要兜底 —— 标签栏只能显示
- *    十来个,总览才是全量入口。
+ * 1. **关闭按钮常驻但弱化**：不靠 hover 才出现（避免宽度抖动），
+ *    颜色只在悬停时抬起。
+ * 2. **HTML5 拖拽重排**：不引 UI 库；浏览器的 4px 启动阈值天然够用。
+ * 3. **溢出时三态渐隐 mask**：提示两侧还有标签，滚轮纵向增量转横向。
+ * 4. **总览 Popover**：打开的 + 最近关闭的，支持模糊搜索；portal 到
+ *    body，避免被标签栏的 overflow 裁切。
  */
 
 import { useEffect, useMemo, useRef, useState } from 'react'
@@ -35,6 +33,7 @@ import {
   IconFile,
   IconFiles,
   IconGlobe,
+  IconPanelClose,
   IconPlus,
   IconSearch,
   IconStack,
@@ -42,13 +41,7 @@ import {
   IconTool,
 } from './icons'
 import { PanePopover } from './PanePopover'
-
-/** 单个标签的宽度基准:156px。 */
-const TAB_BASE_WIDTH = 156
-/** 标签间距:8px。 */
-const TAB_GAP = 8
-/** `+` 按钮占宽(含与标签的间距)。与 `.pane-add` 的 CSS 定宽保持一致。 */
-const ADD_BUTTON_WIDTH = 26 + TAB_GAP
+import { PANELS } from '../panelRegistry'
 
 export function tabTypeLabel(type: SidePaneTabType): string {
   if (type === 'review') return t('sidePaneReview')
@@ -94,8 +87,7 @@ function relativeTime(at: number): string {
 /**
  * 模糊搜索评分(分层加权)。
  *
- * 分层而不是简单的 `includes`:标题前缀命中(120)远强于类型名命中(20),
- * 所以搜 "term" 时"终端"面板会排在只是类型名含 term 的项前面。
+ * 分层而不是简单的 `includes`:标题前缀命中(120)远强于类型名命中(20)。
  * 全部 token 必须命中(AND 预过滤),否则搜两个词会返回一堆只匹配一个的项。
  */
 function score(query: string[], title: string, hint: string): number {
@@ -122,6 +114,8 @@ export interface SidePaneTabsProps {
   onReorder(fromId: string, toId: string): void
   onReopen(id: string): void
   onAdd(type: SidePaneTabType): void
+  /** 收起整个右侧面板(工作台右上角的固定动作)。 */
+  onCollapse(): void
   /** `+` 菜单里可用的类型(由注册表按可用性过滤后传入)。 */
   addable: SidePaneTabType[]
 }
@@ -137,6 +131,7 @@ export function SidePaneTabs({
   onReorder,
   onReopen,
   onAdd,
+  onCollapse,
   addable,
 }: SidePaneTabsProps) {
   const [overviewOpen, setOverviewOpen] = useState(false)
@@ -146,10 +141,8 @@ export function SidePaneTabs({
   /** 浮层锚点:菜单 portal 出去后要靠它算落点(见 `PanePopover`)。 */
   const overviewAnchorRef = useRef<HTMLButtonElement | null>(null)
   const addAnchorRef = useRef<HTMLButtonElement | null>(null)
-  /** 溢出方向:决定滚动区两侧的 mask。 */
+  /** 溢出方向:决定滚动区两侧的渐隐 mask。 */
   const [overflow, setOverflow] = useState({ left: false, right: false })
-  /** 是否溢出:`+` 按钮据此搬家。 */
-  const [overflowing, setOverflowing] = useState(false)
 
   /* ---- 溢出检测 ---- */
 
@@ -161,17 +154,6 @@ export function SidePaneTabs({
       const left = viewport.scrollLeft > 1
       const right = scrollable > 1 && viewport.scrollLeft < scrollable - 1
       setOverflow((prev) => (prev.left === left && prev.right === right ? prev : { left, right }))
-      // 估算:标签按基准宽 + 间距算总需宽,再加 `+` 按钮(定宽)与标签栏内边距,
-      // 超过可用宽就认为溢出。
-      //
-      // `+` 宽度用常量而不是实测:按钮是 CSS 定宽的(26px),实测会让
-      // measure → setState → 重渲染 → measure 形成回路,且首帧量到 0
-      // 会误判为"不溢出",按钮在两种位置间跳一次。
-      const needed =
-        tabs.length * TAB_BASE_WIDTH +
-        Math.max(0, tabs.length - 1) * TAB_GAP +
-        ADD_BUTTON_WIDTH
-      setOverflowing(needed > viewport.clientWidth + 1)
     }
     measure()
     viewport.addEventListener('scroll', measure, { passive: true })
@@ -243,13 +225,7 @@ export function SidePaneTabs({
 
   const noResults = openItems.length === 0 && closedItems.length === 0
 
-  /**
-   * `+` 按钮与它的菜单。
-   *
-   * 菜单走 [`PanePopover`] portal 到 body:标签栏的滚动区有
-   * `overflow-x:auto; overflow-y:hidden`,祖先又有 `overflow:hidden`,
-   * 内联渲染会被**从下方截断**(实测 bug)。portal 出去后 `z-index` 才真正生效。
-   */
+  /** `+` 按钮与它的菜单(菜单 portal 到 body,避免被标签栏 overflow 裁切)。 */
   const addButton = (
     <div className="pane-add-wrap">
       <button
@@ -273,30 +249,44 @@ export function SidePaneTabs({
         className="pane-menu"
         ariaLabel={t('sidePaneAddTab')}
       >
-        {addable.map((type) => (
-          <button
-            key={type}
-            type="button"
-            role="menuitem"
-            className="pane-menu-item"
-            data-pane-add-item={type}
-            onClick={() => {
-              setAddOpen(false)
-              onAdd(type)
-            }}
-          >
-            <TabIcon type={type} size={14} />
-            <span>{tabTypeLabel(type)}</span>
-          </button>
-        ))}
-        {addable.length === 0 && <p className="pane-menu-empty">{t('sidePaneNoAddable')}</p>}
+        <div className="pane-menu-head">
+          <span className="pane-menu-title">{t('sidePaneAddTab')}</span>
+          <span className="pane-menu-hint">{t('sidePaneAddTabHint')}</span>
+        </div>
+        <div className="pane-menu-list">
+          {addable.map((type) => {
+            const descriptor = PANELS.find((panel) => panel.type === type)
+            return (
+              <button
+                key={type}
+                type="button"
+                role="menuitem"
+                className="pane-menu-item"
+                data-pane-add-item={type}
+                onClick={() => {
+                  setAddOpen(false)
+                  onAdd(type)
+                }}
+              >
+                <span className="pane-menu-icon"><TabIcon type={type} size={16} /></span>
+                <span className="pane-menu-text">
+                  <span className="pane-menu-label">{tabTypeLabel(type)}</span>
+                  {descriptor && (
+                    <span className="pane-menu-desc">{t(descriptor.descriptionKey)}</span>
+                  )}
+                </span>
+              </button>
+            )
+          })}
+          {addable.length === 0 && <p className="pane-menu-empty">{t('sidePaneNoAddable')}</p>}
+        </div>
       </PanePopover>
     </div>
   )
 
   return (
     <div className="pane-tabs">
-      {/* 左:标签总览 */}
+      {/* 左:固定的标签总览入口 */}
       <div className="pane-overview-wrap">
         <button
           ref={overviewAnchorRef}
@@ -310,7 +300,6 @@ export function SidePaneTabs({
         >
           <IconStack size={14} />
         </button>
-        {/* 同样 portal:总览比 `+` 菜单更高,更容易被下方内容裁掉。 */}
         <PanePopover
           anchorRef={overviewAnchorRef}
           open={overviewOpen}
@@ -348,7 +337,7 @@ export function SidePaneTabs({
                         setOverviewOpen(false)
                       }}
                     >
-                      <TabIcon type={tab.type} size={13} />
+                      <span className="pane-overview-icon"><TabIcon type={tab.type} size={14} /></span>
                       <span className="pane-overview-title">{tabTitle(tab)}</span>
                       <span className="pane-overview-time">{relativeTime(tab.openedAt)}</span>
                     </button>
@@ -377,7 +366,7 @@ export function SidePaneTabs({
                         setOverviewOpen(false)
                       }}
                     >
-                      <TabIcon type={item.tab.type} size={13} />
+                      <span className="pane-overview-icon"><TabIcon type={item.tab.type} size={14} /></span>
                       <span className="pane-overview-title">{tabTitle(item.tab)}</span>
                       <span className="pane-overview-time">{relativeTime(item.closedAt)}</span>
                     </button>
@@ -463,39 +452,33 @@ export function SidePaneTabs({
                 }}
               >
                 <span className="pane-tab-icon" aria-hidden="true">
-                  <TabIcon type={tab.type} size={13} />
+                  <TabIcon type={tab.type} size={14} />
                 </span>
                 <span className="pane-tab-label">{title}</span>
-                {/* 右侧渐隐带 + 常驻关闭按钮 */}
-                <span className="pane-tab-actions">
-                  <span className="pane-tab-fade" aria-hidden="true" />
-                  <span className="pane-tab-close-bg">
-                    <button
-                      type="button"
-                      className="pane-tab-close"
-                      aria-label={t('sidePaneCloseTab')}
-                      onPointerDown={(event) => event.stopPropagation()}
-                      onClick={(event) => {
-                        event.preventDefault()
-                        event.stopPropagation()
-                        onClose(tab.id)
-                      }}
-                    >
-                      <IconClose size={11} />
-                    </button>
-                  </span>
+                <span className="pane-tab-close-slot">
+                  <button
+                    type="button"
+                    className="pane-tab-close"
+                    aria-label={t('sidePaneCloseTab')}
+                    onPointerDown={(event) => event.stopPropagation()}
+                    onClick={(event) => {
+                      event.preventDefault()
+                      event.stopPropagation()
+                      onClose(tab.id)
+                    }}
+                  >
+                    <IconClose size={10} />
+                  </button>
                 </span>
               </div>
             )
           })}
-          {/* 未溢出时 `+` 在滚动区末尾(跟随标签),溢出时移到右端固定位 */}
-          {!overflowing && addButton}
         </div>
       </div>
 
-      {/* 右:`+` 固定位(仅溢出时) */}
-      {overflowing && (
-        <div className="pane-actions">
+      {/* 右:固定操作区。标签再多也不把动作按钮挤走。 */}
+      <div className="pane-bar-actions">
+        {tabs.length > 1 && (
           <button
             type="button"
             className="pane-close-all"
@@ -505,9 +488,18 @@ export function SidePaneTabs({
           >
             <IconClose size={13} />
           </button>
-          {addButton}
-        </div>
-      )}
+        )}
+        {addButton}
+        <button
+          type="button"
+          className="pane-collapse"
+          title={t('sidePaneCollapse')}
+          aria-label={t('sidePaneCollapse')}
+          onClick={onCollapse}
+        >
+          <IconPanelClose size={15} />
+        </button>
+      </div>
     </div>
   )
 }

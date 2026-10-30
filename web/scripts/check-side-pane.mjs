@@ -8,11 +8,13 @@
  *
  * 与 `check-fold.mjs` 同一套做法:esbuild bundle 成单文件后 import。
  */
-import { mkdtempSync } from 'node:fs'
+import { mkdtempSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { build } from 'esbuild'
+
+const root = fileURLToPath(new URL('..', import.meta.url))
 
 const dir = mkdtempSync(join(tmpdir(), 'side-pane-'))
 const file = join(dir, 'sidePane.mjs')
@@ -298,6 +300,18 @@ const ids = (state) => state.tabs.map((t) => t.id)
   const state = mod.upsertTab(mod.EMPTY_SIDE_PANE, tab('a'))
   const back = mod.closeTab(state, 'a')
   check('桶:关掉最后一个标签回到空态(调用方据此删桶)', ids(back), [])
+}
+
+/* ---------- 浏览器可视化请求接通面板 ---------- */
+
+{
+  const app = readFileSync(join(root, 'src/App.tsx'), 'utf8')
+  check('可视化:活动会话直接开浏览器面板', app.includes("pane.openPanel('browser')"), true)
+  check('可视化:后台会话预开标签', app.includes('visualRequestRef.current'), true)
+  check('可视化:重复请求复用标签', app.includes("current.tabs.find((tab) => tab.type === 'browser')"), true)
+  const hook = readFileSync(join(root, 'src/hooks/useBrowserSidebar.ts'), 'utf8')
+  check('可视化:请求回调随事件触发', hook.includes('visualRequestRef.current?.'), true)
+  check('可视化:用户收起后不再自动展开', hook.includes('dismissedRef.current'), true)
 }
 
 /* ---------- 汇总 ---------- */

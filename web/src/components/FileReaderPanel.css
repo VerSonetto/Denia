@@ -1,57 +1,59 @@
-/* 文件读取标签页:内部条目标签 + 路径头 + 只读代码正文。
+/* 文件读取面板:内部文件 chip + 标题头 + 只读代码/预览正文。
  *
- * 视觉与「工作区文件」面板同族(头部一条分隔线 + 正文铺满剩余高度),
- * 颜色全部走语义 token,暗/亮主题自动跟随;正文复用对话流的 shiki 主题
- * 变量(`--shiki-*`),所以与代码卡片的配色天然一致。 */
+ * 面板头 / 胶囊切换 / 图标的共享视觉在 SidePane.css;这里只写本面板的
+ * 结构。所有选择器以 `.side-pane` 作用域收口,懒加载顺序不影响结果。
+ *
+ * 正文复用对话流的 shiki 主题(`--shiki-*`),所以代码配色与对话里的
+ * 代码块天然一致;这里只把它的外边距/圆角改造成"面板内的一块画布"。 */
 
-.file-reader {
+.side-pane .file-reader {
   display: flex;
   flex-direction: column;
   width: 100%;
   height: 100%;
   min-height: 0;
-  background: var(--bg-base);
 }
 
-/* ---- 内部条目标签(多文件时出现) ---- */
+/* ---- 内部文件 chip(多文件时出现) ---- */
 
-.file-reader-tabs {
+.side-pane .file-reader-tabs {
   display: flex;
   flex: 0 0 auto;
   align-items: center;
-  gap: 4px;
+  gap: 2px;
   width: 100%;
   min-width: 0;
-  padding: 8px 10px 0;
+  padding: 8px 8px 0;
   overflow-x: auto;
   overflow-y: hidden;
   overscroll-behavior-x: contain;
   scrollbar-width: thin;
 }
 
-.file-reader-tab {
+/* 轻量 chip:非激活项没有底也没有边,激活项用与左栏选中行相同的填充。 */
+.side-pane .file-reader-tab {
   display: inline-flex;
   flex: 0 0 auto;
   align-items: center;
-  max-width: 180px;
-  border: 1px solid transparent;
-  border-radius: var(--r-xs);
-  background: transparent;
+  max-width: 190px;
+  border-radius: 7px;
   color: var(--label-tertiary);
+  transition:
+    background 0.12s var(--ease),
+    color 0.12s var(--ease);
 }
 
-.file-reader-tab:hover {
+.side-pane .file-reader-tab:hover {
   background: var(--hover-fill);
   color: var(--label-secondary);
 }
 
-.file-reader-tab.active {
-  border-color: var(--border-l1);
-  background: var(--bg-layer-2);
+.side-pane .file-reader-tab.active {
+  background: var(--active-fill);
   color: var(--label-primary);
 }
 
-.file-reader-tab-main {
+.side-pane .file-reader-tab-main {
   display: inline-flex;
   align-items: center;
   gap: 5px;
@@ -60,25 +62,25 @@
   border: none;
   background: transparent;
   color: inherit;
-  font-size: 11.5px;
   font-family: inherit;
+  font-size: 11.5px;
   cursor: pointer;
 }
 
-.file-reader-tab-name {
+.side-pane .file-reader-tab-name {
   min-width: 0;
   overflow: hidden;
-  text-overflow: ellipsis;
   white-space: nowrap;
+  text-overflow: ellipsis;
 }
 
-.file-reader-tab-close {
+.side-pane .file-reader-tab-close {
   display: inline-flex;
   flex: 0 0 auto;
   align-items: center;
   justify-content: center;
-  width: 18px;
-  height: 18px;
+  width: 16px;
+  height: 16px;
   margin-right: 3px;
   padding: 0;
   border: none;
@@ -88,159 +90,186 @@
   cursor: pointer;
 }
 
-.file-reader-tab-close:hover {
-  background: var(--active-fill);
-  color: var(--label-primary);
-}
-
-/* ---- 头部:路径 + 行数/大小 + 动作 ---- */
-
-.file-reader-head {
-  display: flex;
-  flex: 0 0 auto;
-  align-items: center;
-  gap: 8px;
-  padding: 10px 12px;
-  border-bottom: 1px solid var(--border-l1);
-}
-
-.file-reader-path {
-  flex: 1 1 auto;
-  min-width: 0;
-  overflow: hidden;
-  font-size: 12px;
-  color: var(--label-secondary);
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.file-reader-meta {
-  flex: 0 0 auto;
-  font-size: 11px;
-  color: var(--label-caption);
-  white-space: nowrap;
-}
-
-/* ---- 视图切换(预览 / 代码),仅在文件支持预览时出现 ---- */
-
-.file-reader-switch {
-  display: inline-flex;
-  flex: 0 0 auto;
-  gap: 2px;
-  padding: 2px;
-  border: 1px solid var(--border-l1);
-  border-radius: var(--r-xs);
-  background: var(--bg-layer-1);
-}
-
-.file-reader-switch-btn {
-  padding: 3px 10px;
-  border: 0;
-  border-radius: calc(var(--r-xs) - 1px);
-  background: transparent;
-  color: var(--label-tertiary);
-  font-size: 11px;
-  line-height: 1.5;
-  white-space: nowrap;
-  cursor: pointer;
-}
-
-.file-reader-switch-btn:hover {
-  color: var(--label-secondary);
-}
-
-.file-reader-switch-btn.active {
-  background: var(--bg-layer-2);
-  color: var(--label-primary);
-  font-weight: 500;
-}
-
-.file-reader-icon-btn {
-  display: inline-flex;
-  flex: 0 0 auto;
-  align-items: center;
-  justify-content: center;
-  width: 28px;
-  height: 28px;
-  border: 1px solid var(--border-l1);
-  border-radius: var(--r-xs);
-  background: transparent;
-  color: var(--label-tertiary);
-  cursor: pointer;
-  transition: background 0.12s var(--ease), color 0.12s var(--ease);
-}
-
-.file-reader-icon-btn:hover {
+.side-pane .file-reader-tab-close:hover {
   background: var(--hover-fill);
   color: var(--label-primary);
+}
+
+/* ---- 头部:文件名 / 完整路径 / 行数大小 / 视图切换 ---- */
+
+/* 路径用等宽:斜杠与点号对齐，扫读比比例字体快。 */
+.side-pane .file-reader .pane-panel-subtitle {
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+
+/* 文件读取没有独立工具条:分隔线直接收在头部下沿。 */
+.side-pane .file-reader .pane-panel-head {
+  border-bottom: 1px solid var(--pane-hairline);
+}
+
+.side-pane .file-reader-meta {
+  flex: 0 0 auto;
+  color: var(--label-tertiary);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* 胶囊主体沿用共享 `.pane-seg`;这里只收紧尺寸。 */
+.side-pane .file-reader-switch {
+  flex: 0 0 auto;
+}
+
+.side-pane .file-reader-switch .file-reader-switch-btn {
+  padding: 3px 8px;
+  font-size: 11px;
 }
 
 /* ---- 正文 ---- */
 
-.file-reader-body {
+.side-pane .file-reader-body {
   display: flex;
-  flex-direction: column;
   flex: 1 1 auto;
+  flex-direction: column;
   min-height: 0;
   overflow: auto;
 }
 
-/* 预览态由 .file-preview 自己接管滚动与高度（内部 iframe / markdown 区），
- * 这里不能留 auto 滚动容器，否则预览块只按内容高度渲染、下面留一大片空白。 */
-.file-reader-body:has(> .file-preview) {
+/* 预览态由 .file-preview 自己接管滚动与高度(内部 iframe / markdown 区),
+ * 这里不能留 auto 滚动容器,否则预览块只按内容高度渲染、下面留一大片空白。 */
+.side-pane .file-reader-body:has(> .file-preview) {
   overflow: hidden;
 }
 
-.file-reader-code {
-  /* 代码块自身带内边距,这里不再叠加,避免出现双重留白。 */
-  padding: 0;
+/* 代码画布:一块圆角内嵌面,与终端、浏览器画面同一层"内容底"。
+ *
+ * 底色用 `--shiki-background` 而不是 `--code-block`:vitesse-dark 的 token
+ * 是为深底调的,浅色主题下 `--code-block` 会变成浅灰,浅色 token 落上去
+ * 几乎不可读。`--shiki-background` 在浅色主题里仍是 #1e1e1e(见 markdown.css),
+ * 深色主题下就是 `--code-block`,两套主题都能读。 */
+.side-pane .file-reader-code {
+  padding: 0 8px 8px;
 }
 
-.file-reader-code .shiki {
+.side-pane .file-reader-code .md-code-block {
   margin: 0;
-  border-radius: 0;
-  font-size: 12.5px;
-  line-height: 1.6;
+  overflow: hidden;
+  border-radius: 10px;
+  background: var(--shiki-background);
 }
 
-.file-reader-hint {
+.side-pane .file-reader-code .md-code-banner-wrap {
+  background: var(--shiki-background);
+  border-radius: 10px 10px 0 0;
+  color: var(--shiki-foreground);
+}
+
+.side-pane .file-reader-code .md-code-banner {
+  padding: 7px 12px;
+  border-radius: 10px 10px 0 0;
+  background: var(--shiki-background);
+  color: var(--shiki-foreground);
+}
+
+.side-pane .file-reader-code .md-code-infostring {
+  color: var(--shiki-foreground);
+}
+
+/* 文件阅读器是"看代码"而不是聊天:不折行,长行走自己的横向滚动。 */
+.side-pane .file-reader-code .md-code-block :where(pre) {
+  padding: 10px 12px 14px;
+  border-radius: 0 0 10px 10px;
+  background: var(--shiki-background) !important;
+  white-space: pre;
+  word-break: normal;
+}
+
+/* ---- 提示 / 错误 ---- */
+
+.side-pane .file-reader-hint {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 16px 14px;
-  font-size: 12px;
+  gap: 7px;
+  padding: 16px 12px;
   color: var(--label-tertiary);
+  font-size: 11.5px;
+  line-height: 1.5;
 }
 
-.file-reader-error {
+.side-pane .file-reader-error {
   display: flex;
   flex-direction: column;
   align-items: flex-start;
   gap: 10px;
-  padding: 16px 14px;
+  margin: 12px 10px;
+  padding: 10px 11px;
+  border-radius: 8px;
+  background: var(--danger-soft);
 }
 
-.file-reader-error p {
+.side-pane .file-reader-error p {
   margin: 0;
-  font-size: 12px;
+  color: var(--danger-fg);
+  font-size: 11.5px;
   line-height: 1.6;
-  color: var(--label-secondary);
   word-break: break-word;
 }
 
-.file-reader-retry {
-  padding: 5px 12px;
+.side-pane .file-reader-retry {
+  flex: 0 0 auto;
+  min-height: 24px;
+  padding: 0 9px;
   border: 1px solid var(--border-l2);
-  border-radius: var(--r-xs);
+  border-radius: 6px;
   background: transparent;
   color: var(--label-secondary);
-  font-size: 12px;
   font-family: inherit;
+  font-size: 11px;
   cursor: pointer;
-  transition: background 0.12s var(--ease), color 0.12s var(--ease);
+  transition:
+    background 0.12s var(--ease),
+    color 0.12s var(--ease);
 }
 
-.file-reader-retry:hover {
+.side-pane .file-reader-retry:hover {
   background: var(--hover-fill);
   color: var(--label-primary);
+}
+
+/* ---- 窄面板:动作换到第二行,标题先用满宽度 ---- */
+
+@container side-pane (max-width: 360px) {
+  .side-pane .file-reader-meta {
+    display: none;
+  }
+}
+
+@container side-pane (max-width: 300px) {
+  .side-pane .file-reader .pane-panel-head {
+    flex-wrap: wrap;
+    row-gap: 6px;
+  }
+
+  .side-pane .file-reader .pane-panel-actions {
+    flex: 1 1 100%;
+    justify-content: flex-end;
+    margin-left: 0;
+    padding-left: 22px;
+  }
+
+  .side-pane .file-reader-tabs {
+    padding-inline: 6px;
+  }
+}
+
+@container side-pane (max-width: 260px) {
+  /* 关掉当前文件也有关闭标签页这条路;窄宽度下把位置留给视图切换。 */
+  .side-pane .file-reader-close {
+    display: none;
+  }
+
+  .side-pane .file-reader-switch .file-reader-switch-btn {
+    padding-inline: 7px;
+  }
 }

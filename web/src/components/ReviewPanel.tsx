@@ -34,8 +34,9 @@ import {
   type GitSource,
   type GitStatus,
 } from '../gitApi'
-import { IconBranch, IconChevronDown, IconFile, IconRefresh, IconSparkles, IconSpinner } from './icons'
+import { IconBranch, IconChevronDown, IconFile, IconRefresh, IconSparkles, IconSpinner, IconTool } from './icons'
 import { DiffCard, DiffStat } from './DiffCard'
+import { PanelEmpty, PanelHead, PanelSearch, PanelToolbar } from './PanelChrome'
 import { useTurnChanges } from '../turnChangesStore'
 import { scopeKey } from '../sidePane'
 import type { TurnProducedFile } from '../fold'
@@ -323,17 +324,50 @@ export function ReviewPanel({ workspacePath, sessionId, selection }: ReviewPanel
         ? t('sidePaneReviewBranch')
         : t('sidePaneReviewUnstaged')
 
+  const branchText = status?.detached
+    ? `${t('sidePaneReviewDetached')} ${status.head ?? ''}`.trim()
+    : (status?.branch ?? t('sidePaneReviewNoBranch'))
+  const aheadBehind =
+    status?.ahead != null && status?.behind != null
+      ? ` · ↑${status.ahead} ↓${status.behind}`
+      : ''
+  const subtitle = onTurn
+    ? t('reviewSourceTurn')
+    : status === null
+      ? undefined
+      : isRepo
+        ? <span title={`${branchText}${aheadBehind}`}>{branchText}{aheadBehind}</span>
+        : t('sidePaneReviewNotRepo')
+
   return (
-    <div className="review-panel">
-      <div className="review-head">
-        <div className="review-sources" role="tablist" aria-label={t('sidePaneReviewSource')}>
+    <div className="review-panel pane-panel">
+      <PanelHead
+        icon={<IconTool size={16} />}
+        title={t('sidePaneReview')}
+        subtitle={subtitle}
+        actions={
+          <button
+            type="button"
+            className="pane-icon-btn review-refresh"
+            title={t('sidePaneReviewRefresh')}
+            aria-label={t('sidePaneReviewRefresh')}
+            disabled={loading || onTurn}
+            onClick={() => void refresh()}
+          >
+            {loading ? <IconSpinner size={14} /> : <IconRefresh size={14} />}
+          </button>
+        }
+      />
+
+      <PanelToolbar className="review-toolbar">
+        <div className="pane-seg review-sources" role="tablist" aria-label={t('sidePaneReviewSource')}>
           {/* 「本轮」排在最前:它是变更卡片的直达入口,也是非仓库工作区里
               唯一有内容的来源。 */}
           <button
             type="button"
             role="tab"
             aria-selected={onTurn}
-            className="review-source"
+            className="pane-seg-btn review-source"
             onClick={() => {
               setSource('turn')
               setFilter('')
@@ -347,7 +381,7 @@ export function ReviewPanel({ workspacePath, sessionId, selection }: ReviewPanel
               type="button"
               role="tab"
               aria-selected={source === value}
-              className="review-source"
+              className="pane-seg-btn review-source"
               onClick={() => {
                 setSource(value)
                 setRows({})
@@ -357,33 +391,17 @@ export function ReviewPanel({ workspacePath, sessionId, selection }: ReviewPanel
             </button>
           ))}
         </div>
-        <button
-          type="button"
-          className="review-refresh"
-          title={t('sidePaneReviewRefresh')}
-          aria-label={t('sidePaneReviewRefresh')}
-          disabled={loading || onTurn}
-          onClick={() => void refresh()}
-        >
-          {loading ? <IconSpinner size={14} /> : <IconRefresh size={14} />}
-        </button>
-      </div>
-
-      {isRepo && !onTurn && (
-        <div className="review-meta">
-          <span className="review-branch" title={status.branch ?? undefined}>
-            <IconBranch size={12} />
-            {status.detached
-              ? `${t('sidePaneReviewDetached')} ${status.head ?? ''}`.trim()
-              : (status.branch ?? t('sidePaneReviewNoBranch'))}
-          </span>
-          {status.ahead != null && status.behind != null && (
-            <span className="review-ahead-behind">
-              ↑{status.ahead} ↓{status.behind}
-            </span>
-          )}
-        </div>
-      )}
+        {isRepo && !onTurn && totalFiles > 0 && (
+          <PanelSearch
+            className="review-filter"
+            inputClassName="review-filter-input"
+            value={filter}
+            onChange={setFilter}
+            placeholder={t('sidePaneReviewFilter')}
+            ariaLabel={t('sidePaneReviewFilter')}
+          />
+        )}
+      </PanelToolbar>
 
       {error && (
         <p className="review-error" role="alert">
@@ -409,27 +427,15 @@ export function ReviewPanel({ workspacePath, sessionId, selection }: ReviewPanel
       {/* 非仓库 + 未选本轮来源:给一条能走过去的路,而不是只说"不是仓库"。 */}
       {status && !isRepo && !loading && !onTurn && (
         <div className="review-empty">
-          <IconFile size={28} />
+          <IconFile size={26} />
           <p className="review-empty-title">{t('sidePaneReviewNotRepo')}</p>
           <p className="review-empty-desc">{t('sidePaneReviewNotRepoHint')}</p>
         </div>
       )}
 
-      {isRepo && !onTurn && totalFiles > 0 && (
-        <div className="review-filter">
-          <input
-            type="search"
-            className="review-filter-input"
-            value={filter}
-            placeholder={t('sidePaneReviewFilter')}
-            onChange={(event) => setFilter(event.target.value)}
-          />
-        </div>
-      )}
-
       {isRepo && !onTurn && totalFiles === 0 && !loading && (
         <div className="review-empty">
-          <IconFile size={28} />
+          <IconFile size={26} />
           <p className="review-empty-title">{t('sidePaneReviewClean')}</p>
           <p className="review-empty-desc">{t('sidePaneReviewCleanHint')}</p>
         </div>
@@ -503,10 +509,7 @@ export function ReviewPanel({ workspacePath, sessionId, selection }: ReviewPanel
       )}
 
       {loading && !status && (
-        <div className="review-empty">
-          <IconSpinner size={24} />
-          <p className="review-empty-title">{t('loading')}</p>
-        </div>
+        <PanelEmpty icon={<IconSpinner size={22} />} title={t('loading')} />
       )}
 
       {/* 提交区:常驻在面板底部。
