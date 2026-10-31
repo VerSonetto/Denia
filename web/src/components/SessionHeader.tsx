@@ -4,7 +4,6 @@ import { sessionDisplayTitle } from '../sessionDisplay';
 import type { SessionSummary, WorkspaceRecord } from '../types';
 import { SessionPresetLabel } from './SessionPresetLabel';
 import { OpenInApp } from './OpenInApp';
-import { RuntimePanel } from './RuntimePanel';
 import { AgentPresetSelector } from './AgentPresetSelector';
 import { IconCheck, IconChevron, IconDownload, IconPanelOpen, IconPlus, IconWorkspace } from './icons';
 import type { ExportFormat } from '../lib/exportSession';
@@ -166,7 +165,6 @@ export function SessionHeader({
           </>
         )}
       </div>
-      {activeId && <RuntimePanel key={activeId} id={activeId} />}
     </header>
   )
 }

@@ -449,8 +449,18 @@ export function IconTrash(props: IconProps) {
 export function IconPin(props: IconProps) {
   return (
     <StrokeSvg {...props}>
-      <path d="M6 2.75h4l-.5 2.75 1.75 1.75v1H8.75V12L8 13l-.75-1V8.25H4.75v-1L6.5 5.5 6 2.75Z" />
-      <path d="M8 13v1.25" />
+      <path d="m8.8 2.8 4.4 4.4-1.4 1.4-1.4-.3-2.1 2.1-.4 1.8-4.1-4.1 1.8-.4 2.1-2.1-.3-1.4 1.4-1.4Z" />
+      <path d="m5.8 10.2-3 3" />
+    </StrokeSvg>
+  )
+}
+
+/** 手动标记进行中的任务,与实时运行状态圆点区分。 */
+export function IconProgressFlag(props: IconProps) {
+  return (
+    <StrokeSvg {...props}>
+      <path d="M4 13.5v-11" />
+      <path d="M4 3.2c2.7-1.7 4.3 1.7 8 0v5.5c-3.7 1.7-5.3-1.7-8 0" />
     </StrokeSvg>
   )
 }

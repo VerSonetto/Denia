@@ -211,10 +211,11 @@
 
 .setm-shell {
   --setm-rail-w: 248px;
-  --setm-rail-bg: #070707;
-  --setm-panel-bg: var(--bg-layer-1);
-  --setm-inset: rgba(255, 255, 255, 0.04);
-  --setm-inset-hover: rgba(255, 255, 255, 0.07);
+  --setm-rail-bg: var(--sidebar-fill);
+  --setm-panel-bg: var(--bg-base);
+  --setm-inset: color-mix(in srgb, var(--label-primary) 3%, transparent);
+  --setm-inset-hover: var(--hover-fill);
+  --setm-card-bg: var(--bg-layer-1);
   --setm-accent-line: var(--accent);
 
   width: min(1040px, 100%);
@@ -231,9 +232,9 @@
 }
 
 :root[data-theme='light'] .setm-shell {
-  --setm-rail-bg: #f3f3f3;
-  --setm-inset: rgba(0, 0, 0, 0.04);
-  --setm-inset-hover: rgba(0, 0, 0, 0.07);
+  --setm-rail-bg: color-mix(in srgb, var(--sidebar-fill) 55%, var(--bg-base));
+  --setm-inset: rgba(40, 35, 25, 0.025);
+  --setm-inset-hover: rgba(40, 35, 25, 0.055);
   box-shadow:
     0 0 0 1px rgba(0, 0, 0, 0.06),
     0 24px 64px rgba(0, 0, 0, 0.14);
@@ -241,9 +242,9 @@
 
 @media (prefers-color-scheme: light) {
   :root:not([data-theme='dark']) .setm-shell {
-    --setm-rail-bg: #f3f3f3;
-    --setm-inset: rgba(0, 0, 0, 0.04);
-    --setm-inset-hover: rgba(0, 0, 0, 0.07);
+    --setm-rail-bg: color-mix(in srgb, var(--sidebar-fill) 55%, var(--bg-base));
+    --setm-inset: rgba(40, 35, 25, 0.025);
+    --setm-inset-hover: rgba(40, 35, 25, 0.055);
     box-shadow:
       0 0 0 1px rgba(0, 0, 0, 0.06),
       0 24px 64px rgba(0, 0, 0, 0.14);
@@ -329,9 +330,10 @@
 }
 
 .setm-nav-item.active {
-  background: var(--setm-inset);
-  border-color: var(--border-l2);
+  background: var(--setm-card-bg);
+  border-color: var(--border-l1);
   color: var(--label-primary);
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.04);
 }
 
 .setm-nav-icon {
@@ -342,7 +344,7 @@
   align-items: center;
   justify-content: center;
   border-radius: 9px;
-  background: rgba(255, 255, 255, 0.04);
+  background: var(--setm-inset);
   color: var(--label-secondary);
 }
 
@@ -501,13 +503,13 @@
 .setm-card {
   border-radius: 12px;
   border: 1px solid var(--border-l1);
-  background: var(--setm-inset);
+  background: var(--setm-card-bg);
   overflow: hidden;
   transition: border-color 0.15s var(--ease);
 }
 
 .setm-card.open {
-  background: var(--bg-layer-2);
+  background: var(--setm-card-bg);
   border-color: var(--border-l2);
 }
 

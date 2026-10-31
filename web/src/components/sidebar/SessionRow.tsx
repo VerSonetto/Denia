@@ -4,7 +4,7 @@ import { sessionDisplayTitle } from '../../sessionDisplay'
 import { SESSION_DRAG_MIME } from '../../splitView'
 import type { DropPlacement } from '../../sidebarOrder'
 import type { SessionSummary } from '../../types'
-import { IconCaretRight, IconPin, IconTarget, IconTrash } from '../icons'
+import { IconCaretRight, IconPin, IconProgressFlag, IconTrash } from '../icons'
 import { relativeTimeLabel } from './nesting'
 
 export function SessionRow({
@@ -121,7 +121,7 @@ export function SessionRow({
         <span className="excerpt">{sessionDisplayTitle(session)}</span>
         {pinned && (
           <span className="pin-mark" title={t('pinnedLabel')} aria-label={t('pinnedLabel')}>
-            <IconPin size={10} />
+            <IconPin size={12} />
           </span>
         )}
         {marked && (
@@ -131,7 +131,7 @@ export function SessionRow({
             aria-label={t('markedInProgressHint')}
             data-testid="in-progress-mark"
           >
-            <IconTarget size={11} />
+            <IconProgressFlag size={12} />
           </span>
         )}
         {isSubagent && (

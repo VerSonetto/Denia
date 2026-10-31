@@ -1,17 +1,14 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import type { KeyboardEvent } from 'react'
 import { t } from '../i18n'
 import { setActiveId } from '../appStore'
+import type { SessionEnvelope } from '../types'
+import { getSessionPage } from '../api'
+import { toolCallSummary } from '../toolDisplay'
+import { AgentAvatar, useAgentAvatar } from './AgentAvatar'
 import './RuntimePanel.css'
 
-/**
- * 子代理行：除运行状态外还带派遣快照摘要（profile、有效模型、权限上限、
- * 冻结工具数、项目级指令范围）与等待交互计数。
- *
- * 这些字段全部来自服务端 `GET /api/sessions/{id}/agents`（`Runtime::list`），
- * UI 不做任何本地推论：父代理看到的"这个 child 是谁、能用什么、在等什么"
- * 必须与执行层同源。
- */
+/** 子代理状态来自服务端运行快照，进展来自子会话事件。 */
 type Agent = {
   id: string
   parentId: string
@@ -65,13 +62,6 @@ function tone(value: string): Tone {
   if (value === 'failed') return 'failed'
   return 'idle'
 }
-function profileLabel(agent: Agent) {
-  if (!agent.profile?.qualifiedId) return t('runtimeProfileUnknown')
-  return agent.profile.inline ? `${agent.profile.qualifiedId} · ${t('runtimeProfileInline')}` : agent.profile.qualifiedId
-}
-function ceilingLabel(agent: Agent) {
-  return agent.permissionCeiling === 'read-only' ? t('subagentsCeilingReadOnly') : t('subagentsCeilingInherit')
-}
 function waitingLabel(agent: Agent) {
   const approvals = agent.pendingApprovals ?? 0
   const asks = agent.pendingAsks ?? 0
@@ -81,12 +71,64 @@ function waitingLabel(agent: Agent) {
     .join(' · ')
 }
 
+/** 稳定排序，避免轮询返回顺序变化导致折叠列表抖动。 */
+function agentPriority(agent: Agent): number {
+  if (agent.waitingInteraction || (agent.pendingApprovals ?? 0) > 0 || (agent.pendingAsks ?? 0) > 0) return 0
+  if (agent.status === 'running' || agent.status === 'waiting') return 1
+  return 2
+}
+
 /** 轮询节奏：展开时盯紧，折叠时放慢 —— 省请求又不至于看着不动。 */
 const INTERVAL_OPEN = 1500
-const IDLE_INTERVAL = 4000
 
-export function RuntimePanel({ id }: { id: string }) {
-  const [open, setOpen] = useState(false)
+/** 只呈现实际产生的动作与正文，不展示推理或完整工具结果。 */
+export function agentProgress(events: SessionEnvelope[]): { action: string; progress: string } {
+  let action = ''
+  let progress = ''
+  for (const event of events) {
+    if (event.type === 'user-message' && !event.injected) { action = ''; progress = '' }
+    if (event.type === 'tool-call') {
+      const summary = toolCallSummary(event.name, event.arguments)
+      action = [event.name, summary].filter(Boolean).join(' · ')
+    }
+    if (event.type === 'assistant-message') {
+      const text = event.blocks.filter((block) => block.type === 'text').map((block) => block.text).join(' ').trim()
+      if (text) progress = text
+    }
+  }
+  return { action: action.slice(0, 180), progress: progress.slice(-400) }
+}
+
+function AgentProgress({ id, running }: { id: string; running: boolean }) {
+  const [progress, setProgress] = useState<{ action: string; progress: string } | null>(null)
+  useEffect(() => {
+    const controller = new AbortController()
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const load = async () => {
+      try {
+        const page = await getSessionPage(id, { limit: 50 }, controller.signal)
+        if (!controller.signal.aborted) setProgress(agentProgress(page.events))
+      } catch {
+        // 状态和操作仍可用；网络失败不伪造进度，下次轮询重试。
+      }
+      if (running && !controller.signal.aborted) timer = setTimeout(load, 3000)
+    }
+    void load()
+    return () => { controller.abort(); if (timer) clearTimeout(timer) }
+  }, [id, running])
+  if (!progress?.action && !progress?.progress) return null
+  return <div className="runtime-progress" data-testid="agent-progress">
+    {progress.action && <p><span>{t('runtimeLatestAction')}</span><span className="runtime-progress-text" title={progress.action}>{progress.action}</span></p>}
+    {progress.progress && <p><span>{t('runtimeLatestProgress')}</span><span className="runtime-progress-text" title={progress.progress}>{progress.progress}</span></p>}
+  </div>
+}
+
+function RuntimeAvatar({ id, cwd }: { id: string; cwd?: string | null }) {
+  const avatar = useAgentAvatar(id, cwd)
+  return <AgentAvatar avatar={avatar} size={30} />
+}
+
+export function RuntimePanel({ id, cwd, events, pendingCount, onVisibilityChange }: { id: string; cwd?: string | null; events: SessionEnvelope[]; pendingCount: number; onVisibilityChange(visible: boolean): void }) {
   const [tab, setTab] = useState<'agents' | 'jobs'>('agents')
   const [agents, setAgents] = useState<Agent[]>([])
   const [jobs, setJobs] = useState<Job[]>([])
@@ -96,11 +138,21 @@ export function RuntimePanel({ id }: { id: string }) {
   const [outputTarget, setOutputTarget] = useState('')
   const [target, setTarget] = useState('')
   const [drafts, setDrafts] = useState<Record<string, string>>({})
-  const [detail, setDetail] = useState('')
-  const rootRef = useRef<HTMLElement | null>(null)
-
-  const activeAgents = agents.filter((agent) => agent.status === 'running' || agent.status === 'waiting').length
-  const activeJobs = jobs.filter((job) => !job.finishedAt && job.status !== 'killed' && job.status !== 'failed').length
+  const [agentsExpanded, setAgentsExpanded] = useState(false)
+  // 本轮工具调用及结果中出现的任务 ID 才属于当前轮次。活跃任务跨轮保留；
+  // 乐观用户消息到达时立即隐藏上轮结束项，与 Todo 的收起时机一致。
+  const currentTurn = useMemo(() => {
+    let start = 0
+    events.forEach((event, index) => { if (event.type === 'user-message' && !event.injected) start = index })
+    return JSON.stringify(events.slice(start).filter((event) => event.type === 'tool-call' || event.type === 'tool-result'))
+  }, [events])
+  const visibleAgents = agents.filter((agent) => agent.status === 'running' || agent.status === 'waiting' || (!pendingCount && currentTurn.includes(agent.id)))
+  const orderedAgents = [...visibleAgents].sort((a, b) => agentPriority(a) - agentPriority(b) || a.id.localeCompare(b.id))
+  const displayedAgents = agentsExpanded ? orderedAgents : orderedAgents.slice(0, 2)
+  const hiddenAgentCount = orderedAgents.length - 2
+  const visibleJobs = jobs.filter((job) => (!job.finishedAt && job.status !== 'killed' && job.status !== 'failed') || (!pendingCount && currentTurn.includes(job.id)))
+  const activeAgents = visibleAgents.length
+  const activeJobs = visibleJobs.length
   const base = `/api/sessions/${encodeURIComponent(id)}`
 
   const isPending = (key: PendingKey) => pending[key] === true
@@ -139,36 +191,16 @@ export function RuntimePanel({ id }: { id: string }) {
       if (!disposed && document.visibilityState === 'visible') {
         try { await refresh() } catch (e) { if (!disposed) setError(e instanceof Error ? e.message : String(e)) }
       }
-      if (!disposed) timer = setTimeout(loop, open ? INTERVAL_OPEN : IDLE_INTERVAL)
+      if (!disposed) timer = setTimeout(loop, INTERVAL_OPEN)
     }
     void loop()
     return () => { disposed = true; if (timer) clearTimeout(timer) }
-  }, [open, refresh])
+  }, [refresh])
 
-  // 浮层开着时点外面 / 按 Esc 收起，别让它一直挂在会话头上。
   useEffect(() => {
-    if (!open) return
-    const onPointerDown = (event: PointerEvent) => {
-      const node = event.target
-      if (!(node instanceof Node)) return
-      if (rootRef.current?.contains(node) === true) return
-      setOpen(false)
-    }
-    const onKeyDown = (event: globalThis.KeyboardEvent) => {
-      if (event.key !== 'Escape') return
-      // 发消息表单开着时,Esc 归表单自己处理(收起表单而不是连带关掉面板)。
-      // 这里跑在捕获阶段,拦不住表单的 stopPropagation,所以显式让位。
-      if (target) return
-      event.stopPropagation()
-      setOpen(false)
-    }
-    document.addEventListener('pointerdown', onPointerDown)
-    document.addEventListener('keydown', onKeyDown, true)
-    return () => {
-      document.removeEventListener('pointerdown', onPointerDown)
-      document.removeEventListener('keydown', onKeyDown, true)
-    }
-  }, [open, target])
+    onVisibilityChange(activeAgents + activeJobs > 0)
+    return () => onVisibilityChange(false)
+  }, [activeAgents, activeJobs, onVisibilityChange])
 
   const run = async (key: PendingKey, operation: () => Promise<void>) => {
     setPendingFlag(key, true)
@@ -214,7 +246,6 @@ export function RuntimePanel({ id }: { id: string }) {
     ...(activeAgents > 0 ? (['agents'] as const) : []),
     ...(activeJobs > 0 ? (['jobs'] as const) : []),
   ]
-  const detailAgent = agents.find((agent) => agent.id === detail)
   const output = outputTarget ? outputs[outputTarget] : undefined
   const outputJob = jobs.find((job) => job.id === outputTarget)
 
@@ -229,13 +260,9 @@ export function RuntimePanel({ id }: { id: string }) {
     setTab(tabs[next])
   }
 
-  return <section className={`runtime-panel${open ? ' open' : ''}`} ref={rootRef} data-testid="runtime-panel">
-    <button type="button" className="runtime-toggle" aria-expanded={open} aria-haspopup="dialog" onClick={() => setOpen(!open)} title={t('runtimeTitle')}>
-      <span className="runtime-toggle-icon" aria-hidden="true">✦</span>
-      {(activeAgents > 0 || activeJobs > 0) && <span className="runtime-activity-dot" aria-hidden="true" />}
-      {(activeAgents > 0 || activeJobs > 0) && <span className="runtime-toggle-label">{activeAgents + activeJobs} {t('runtimeActive')}</span>}
-    </button>
-    {open && <div className="runtime-content" role="dialog" aria-label={t('runtimeTitle')} data-testid="runtime-content">
+  return <section className="runtime-panel open" aria-label={t('runtimeTitle')} data-testid="runtime-panel">
+    <div className="runtime-card-heading"><strong>{t('runtimeTitle')}</strong><span className="runtime-card-count">{activeAgents + activeJobs}</span></div>
+    <div className="runtime-content" data-testid="runtime-content">
       <div className="runtime-tabs" role="tablist" aria-label={t('runtimeTitle')}>
         {tabs.map((key, index) => <button
           type="button"
@@ -247,36 +274,35 @@ export function RuntimePanel({ id }: { id: string }) {
           tabIndex={tab === key ? 0 : -1}
           onKeyDown={(event) => onTabKeyDown(event, index)}
           onClick={() => setTab(key)}
-        >{t(key === 'agents' ? 'runtimeAgents' : 'runtimeJobs')}</button>)}
+        ><span>{t(key === 'agents' ? 'runtimeAgents' : 'runtimeJobs')}</span><span className="runtime-tab-count">{key === 'agents' ? activeAgents : activeJobs}</span></button>)}
       </div>
       {error && <p role="alert" className="runtime-error">{error}</p>}
       {tab === 'agents' && <div className="runtime-rows" role="tabpanel" id="runtime-tabpanel-agents" aria-labelledby="runtime-tab-agents" data-testid="runtime-agents-panel">
         {!agents.length && <p className="runtime-empty">{t('runtimeNoAgents')}</p>}
-        {agents.map((agent) => {
+        {displayedAgents.map((agent) => {
           const waiting = waitingLabel(agent)
           const interruptKey = pendingKey('agent', agent.id, 'interrupt')
           const interrupting = isPending(interruptKey)
           const label = agent.name || agent.label
           return <div className="runtime-row" key={agent.id} data-agent={agent.id} data-tone={tone(agent.status)} data-testid={`runtime-agent-${agent.id}`}>
             <div className="runtime-row-main">
+              <div className="runtime-row-heading">
+              <RuntimeAvatar id={agent.profile?.qualifiedId || agent.id} cwd={cwd} />
               <button type="button" className="runtime-row-name" title={label} onClick={() => setActiveId(agent.id, null)}>{label}</button>
               <small className="runtime-row-status">
                 <span className="runtime-status" data-tone={tone(agent.status)}>
                   <i className="runtime-status-dot" aria-hidden="true" />
                   {status(agent.status)}
                 </span>
-                <span className="runtime-row-model">{agent.selection.provider}/{agent.selection.model} · {t('runtimeDepth')} {agent.depth}</span>
               </small>
-              <small className="runtime-meta" data-profile={agent.profile?.qualifiedId ?? ''} title={profileLabel(agent)}>
-                {profileLabel(agent)} · {t('subagentsToolsCount').replace('{n}', String(agent.toolCount ?? 0))} · {ceilingLabel(agent)}
-                {agent.instructionScope === 'project-only' && ` · ${t('runtimeProjectOnly')}`}
-              </small>
-              {waiting && <small className="runtime-waiting" role="status">⏳ {waiting}</small>}
+              </div>
+              {waiting && <small className="runtime-waiting" role="status">{waiting}</small>}
+              <AgentProgress id={agent.id} running={agent.status === 'running' || agent.status === 'waiting'} />
               {agent.result && agent.status === 'settled' && <small className="runtime-result">{t('runtimeResult')}：{agent.result}</small>}
               {agent.migration && <small className="runtime-result" role="status" data-migration={agent.migration.projection ?? ''}>{agent.migration.diagnostic}</small>}
             </div>
             <div className="runtime-row-actions">
-              <button type="button" className="runtime-action" aria-expanded={detail === agent.id} onClick={() => setDetail(detail === agent.id ? '' : agent.id)}>{t('runtimeSnapshot')}</button>
+              <button type="button" className="runtime-action" onClick={() => setActiveId(agent.id, null)}>{t('runtimeOpenChild')}</button>
               {agent.parentId === id && <button type="button" className="runtime-action" aria-expanded={target === agent.id} onClick={() => setTarget(target === agent.id ? '' : agent.id)}>{t('runtimeMessage')}</button>}
               {agent.status === 'running' && <button
                 type="button"
@@ -289,20 +315,18 @@ export function RuntimePanel({ id }: { id: string }) {
             </div>
           </div>
         })}
-        {detailAgent && <div className="runtime-snapshot" data-testid="runtime-snapshot">
-          <div><strong>{t('runtimeSnapshot')}</strong><button type="button" className="runtime-action" onClick={() => setDetail('')}>{t('runtimeClose')}</button></div>
-          <dl>
-            <dt>{t('runtimeProfile')}</dt><dd>{profileLabel(detailAgent)}</dd>
-            <dt>{t('subagentsDescription')}</dt><dd>{detailAgent.description || '-'}</dd>
-            <dt>{t('subagentsModelTitle')}</dt><dd>{detailAgent.selection.provider}/{detailAgent.selection.model}{detailAgent.selection.reasoningEffort ? ` · ${detailAgent.selection.reasoningEffort}` : ''}</dd>
-            <dt>{t('subagentsCeilingTitle')}</dt><dd>{ceilingLabel(detailAgent)}{detailAgent.createdPermissionMode ? ` · ${t('runtimeCreatedMode')} ${detailAgent.createdPermissionMode}` : ''}</dd>
-            <dt>{t('subagentsToolsTitle')}</dt><dd>{(detailAgent.tools ?? []).join('、') || t('subagentsToolsNone')}</dd>
-            <dt>{t('runtimeInstructionScope')}</dt><dd>{detailAgent.instructionScope ?? '-'}</dd>
-            <dt>{t('runtimeDelegation')}</dt><dd>{t('runtimeDelegationDenied')}</dd>
-            <dt>{t('runtimeResult')}</dt><dd>{detailAgent.result ?? '-'}</dd>
-          </dl>
-          <button type="button" className="runtime-action" onClick={() => setActiveId(detailAgent.id, null)}>{t('runtimeOpenChild')}</button>
-        </div>}
+        {hiddenAgentCount > 0 && <button
+          type="button"
+          className="runtime-show-agents"
+          aria-expanded={agentsExpanded}
+          onClick={() => {
+            if (agentsExpanded && target && !orderedAgents.slice(0, 2).some((agent) => agent.id === target)) setTarget('')
+            setAgentsExpanded((expanded) => !expanded)
+          }}
+        >
+          <span>{agentsExpanded ? t('runtimeShowFewer') : t('runtimeShowMoreAgents', { n: hiddenAgentCount })}</span>
+          <svg className={agentsExpanded ? 'expanded' : undefined} width="12" height="12" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="m4 6 4 4 4-4" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" /></svg>
+        </button>}
         {target && <form
           className="runtime-message"
           data-testid="runtime-message-form"
@@ -339,7 +363,7 @@ export function RuntimePanel({ id }: { id: string }) {
       </div>}
       {tab === 'jobs' && <div className="runtime-rows" role="tabpanel" id="runtime-tabpanel-jobs" aria-labelledby="runtime-tab-jobs" data-testid="runtime-jobs-panel">
         {!jobs.length && <p className="runtime-empty">{t('runtimeNoJobs')}</p>}
-        {jobs.map((job) => {
+        {visibleJobs.map((job) => {
           const outputKey = pendingKey('job', job.id, 'output')
           const killKey = pendingKey('job', job.id, 'kill')
           const reading = isPending(outputKey)
@@ -387,6 +411,6 @@ export function RuntimePanel({ id }: { id: string }) {
           ? <pre>{output.text}</pre>
           : <p className="runtime-preview-state">{t('runtimeNoOutput')}</p>)}
       </div>}
-    </div>}
+    </div>
   </section>
 }

@@ -19,7 +19,7 @@ import { applyManualOrder, applyPins, moveId, toggleId } from '../../sidebarOrde
 import { sessionAlias, setSessionAlias } from '../../sessionAliases'
 import { sessionDisplayTitle } from '../../sessionDisplay'
 import type { SessionSummary, WorkspaceRecord } from '../../types'
-import { IconClose, IconNewSession, IconPencil, IconPin, IconSessionSearch, IconTarget, IconTrash, IconWorkspace } from '../icons'
+import { IconClose, IconNewSession, IconPencil, IconPin, IconProgressFlag, IconSessionSearch, IconTrash, IconWorkspace } from '../icons'
 import { SidebarContextMenu, type SidebarMenuState } from '../SidebarContextMenu'
 import { ConfirmDialog } from '../ConfirmDialog'
 import type { SidebarDrag, SidebarDropTarget } from './nesting'
@@ -529,7 +529,7 @@ export function SidebarWorkspaces({
         {
           key: 'in-progress',
           label: inProgress.has(session.id) ? t('unmarkInProgress') : t('markInProgress'),
-          icon: <IconTarget size={13} />,
+          icon: <IconProgressFlag size={13} />,
           onSelect: () => toggleInProgress(session.id),
         },
         {
@@ -693,7 +693,7 @@ export function SidebarWorkspaces({
                   <span className="name">{ws.title}</span>
                   {pinnedWorkspaces.has(ws.id) && (
                     <span className="pin-mark" title={t('pinnedLabel')} aria-label={t('pinnedLabel')}>
-                      <IconPin size={11} />
+                      <IconPin size={12} />
                     </span>
                   )}
                   <span className="count">{members.length}</span>

@@ -122,14 +122,32 @@
   flex: none;
 }
 
+.runtime-workspace {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+}
+
 .conversation-scroll {
   flex: 1;
+  min-width: 0;
   min-height: 0;
   overflow-y: auto;
   overflow-x: hidden;
   scrollbar-gutter: stable;
   display: flex;
   flex-direction: column;
+}
+
+/* 任务卡占据右列时，对话滚动条会夹在两列之间；保留滚动能力但隐藏轨道。 */
+.runtime-workspace[data-runtime-visible] > .conversation-scroll {
+  scrollbar-width: none;
+  scrollbar-gutter: auto;
+}
+
+.runtime-workspace[data-runtime-visible] > .conversation-scroll::-webkit-scrollbar {
+  display: none;
 }
 
 /* ---- 对话轴:左侧浮动导航轨道 ---- */
@@ -429,6 +447,18 @@
 
 .hero-ws-row {
   padding-left: 4px;
+}
+
+@media (max-width: 820px) {
+  .runtime-workspace { flex-direction: column-reverse; }
+  .runtime-panel { flex: none; width: auto; max-height: 30vh; align-self: stretch; margin: 8px 12px; }
+}
+
+.hero-pane-btn {
+  position: absolute;
+  top: 12px;
+  right: 20px;
+  z-index: 2;
 }
 
 /* ---- 状态栏(输入框下方,Denia 自有设计:分段胶囊条) ---- */

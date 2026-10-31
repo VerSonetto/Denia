@@ -834,8 +834,8 @@ export default function App() {
       onSelectWorkspace={selectWorkspaceForPane}
       onOpenPicker={openWorkspacePicker}
       onAddWorkspace={openDirectoryFlow}
-      sidePaneOpen={!pane.collapsed && pane.state.tabs.length > 0}
-      onToggleSidePane={toggleSidePane}
+      sidePaneOpen={!pane.collapsed}
+      onToggleSidePane={isMobile ? undefined : toggleSidePane}
     />
   )
 

@@ -179,7 +179,7 @@ assert.equal(10 + 36 + 10, 56, '收起态 56px 应恰好容纳 36px 控件与 10
 
 const markDecls = declarations(rule(shellCss, '.in-progress-mark'))
 assert.equal(value(markDecls, 'flex', '.in-progress-mark'), 'none', '标记不能参与压缩')
-assert.equal(value(markDecls, 'color', '.in-progress-mark'), 'var(--accent)')
+assert.equal(value(markDecls, 'color', '.in-progress-mark'), 'var(--warn-fg)')
 assert.equal(markDecls.get('position'), undefined, '标记不应脱离文档流覆盖标题')
 
 const sessionRowDecls = declarations(rule(shellCss, '.session-row'))

@@ -1,11 +1,41 @@
-/* 运行时面板(右上角):折叠时是一个带活动计数的小按钮，展开时是浮在会话头上
-   的一层浮层。浮层里的每一行都要在余光里分得清"在跑 / 在等人 / 已经完了 /
-   炸了"，所以状态同时用颜色、左侧竖条和脉冲点编码，不只靠文字。 */
+/* 对话右侧任务卡:与输入区使用同一层表面和克制的中性色。 */
 
 .runtime-panel {
-  position: relative;
-  margin-left: 8px;
+  flex: 0 0 320px;
+  min-width: 0;
+  max-height: calc(100% - 24px);
+  margin: 12px 12px 0 0;
+  overflow: auto;
+  align-self: flex-start;
+  background: var(--composer-surface);
+  border: 1px solid var(--border-l1);
+  border-radius: var(--r-md);
+  box-shadow: var(--composer-shadow);
   font-size: 12px;
+}
+
+.runtime-card-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 16px 16px 0;
+  color: var(--label-primary);
+}
+
+.runtime-card-heading strong { font-size: 13px; font-weight: 600; }
+.runtime-card-count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 20px;
+  height: 20px;
+  padding: 0 6px;
+  border-radius: var(--r-pill);
+  background: var(--hover-fill);
+  color: var(--label-tertiary);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
 }
 
 /* ---- 折叠态按钮 ---- */
@@ -65,23 +95,7 @@
 /* ---- 浮层 ---- */
 
 .runtime-content {
-  position: absolute;
-  top: calc(100% + 8px);
-  right: 0;
-  z-index: 20;
-  width: min(430px, calc(100vw - 32px));
-  max-height: min(70vh, 560px);
-  overflow: auto;
   padding: 12px;
-  /* 明确浮在内容之上:比 shadow-float 多一层深投影 + 一道更亮的外描边。 */
-  background: var(--bg-layer-1);
-  border: 1px solid var(--border-l3);
-  border-radius: var(--r-md);
-  box-shadow:
-    0 0 0 1px rgba(0, 0, 0, 0.28),
-    var(--shadow-lv2),
-    var(--shadow-float);
-  animation: runtime-pop-in 0.14s var(--ease);
 }
 
 .runtime-content:focus-within {
@@ -530,6 +544,168 @@
   color: var(--danger);
   overflow-wrap: anywhere;
 }
+
+/* 任务卡使用平铺列表而非小浮窗里的彩色描边与一排按钮。 */
+.runtime-content { padding: 12px 10px 10px; }
+.runtime-tabs {
+  gap: 2px;
+  margin: 0 4px 8px;
+  padding: 3px;
+  border-radius: 9px;
+  background: var(--hover-fill);
+}
+.runtime-tabs button {
+  display: inline-flex;
+  flex: 1;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-width: 0;
+  padding: 6px 8px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--label-tertiary);
+  font: inherit;
+}
+.runtime-tabs button:hover { border: 0; background: var(--hover-fill); }
+.runtime-tabs [aria-selected='true'] {
+  border: 0;
+  background: var(--composer-surface);
+  color: var(--label-primary);
+  box-shadow: var(--composer-shadow);
+  font-weight: 500;
+}
+.runtime-tab-count { color: var(--label-tertiary); font-size: 11px; font-variant-numeric: tabular-nums; }
+.runtime-rows { max-height: none; overflow: visible; }
+.runtime-row {
+  flex-direction: column;
+  gap: 8px;
+  padding: 11px 8px;
+  border: 0;
+  border-radius: 8px;
+}
+.runtime-row + .runtime-row { border-top: 1px solid var(--border-l1); }
+.runtime-row[data-tone] { border-left: 0; background: transparent; opacity: 1; }
+.runtime-row[data-tone]:hover { background: var(--hover-fill); }
+.runtime-row-main { width: 100%; }
+.runtime-row-name {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  font: inherit;
+  font-size: 12.5px;
+  font-weight: 600;
+  line-height: 1.45;
+}
+button.runtime-row-name { cursor: pointer; }
+button.runtime-row-name:hover { text-decoration: underline; text-underline-offset: 3px; }
+.runtime-row-status { margin-top: 5px; align-items: center; line-height: 1.5; }
+.runtime-row small { font-size: 11px; line-height: 1.5; }
+.runtime-row .runtime-meta { color: var(--label-tertiary); }
+.runtime-row .runtime-waiting { color: var(--warn-fg); }
+.runtime-progress { margin-top: 9px; }
+.runtime-progress p {
+  display: -webkit-box;
+  margin: 5px 0 0;
+  overflow: hidden;
+  color: var(--label-secondary);
+  font-size: 11.5px;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+}
+.runtime-progress p span { display: block; color: var(--label-tertiary); font-size: 10.5px; }
+.runtime-row[data-tone='failed'] .runtime-row-name { color: var(--label-primary); }
+.runtime-status-dot { width: 5px; height: 5px; }
+.runtime-row-actions { justify-content: flex-start; gap: 4px; }
+.runtime-action {
+  padding: 4px 8px;
+  border: 0;
+  border-radius: 6px;
+  background: var(--hover-fill);
+  color: var(--label-secondary);
+  font: inherit;
+  font-size: 11px;
+}
+.runtime-action:hover:not(:disabled) { border: 0; background: var(--active-fill); }
+.runtime-action[aria-expanded='true'] { border: 0; background: var(--active-fill); }
+.runtime-action-primary { background: var(--accent); color: var(--accent-on); }
+.runtime-snapshot, .runtime-message, .runtime-preview {
+  background: var(--hover-fill);
+  border: 0;
+  border-radius: 8px;
+}
+
+/* 紧凑任务观察卡：弱高光与柔和投影，状态和标题同一基线。 */
+.runtime-panel {
+  background: var(--composer-surface);
+  box-shadow: var(--composer-shadow), 0 4px 16px color-mix(in srgb, #000 9%, transparent);
+}
+.runtime-card-heading { padding: 13px 14px 0; }
+.runtime-content { padding: 9px 10px 10px; }
+.runtime-tabs { margin-bottom: 5px; }
+.runtime-tabs button { padding: 5px 8px; }
+.runtime-row { gap: 5px; padding: 9px 7px; }
+.runtime-row-heading { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.runtime-row-heading .runtime-row-name { flex: 1; min-width: 0; }
+.runtime-row-heading .runtime-row-status { flex: none; margin: 0; }
+.runtime-progress { margin-top: 5px; }
+.runtime-progress p {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  margin: 3px 0 0;
+  white-space: normal;
+  line-height: 1.4;
+}
+.runtime-progress p span { display: inline; flex: none; }
+.runtime-progress p .runtime-progress-text {
+  display: -webkit-box;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--label-secondary);
+  font-size: 11.5px;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+.runtime-row-actions { gap: 3px; }
+.runtime-action { padding: 3px 7px; }
+.runtime-row .runtime-result {
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+  overflow-wrap: anywhere;
+}
+
+.runtime-show-agents {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  margin-top: 3px;
+  padding: 8px;
+  border: 0;
+  border-top: 1px solid var(--border-l1);
+  border-radius: 0 0 7px 7px;
+  background: transparent;
+  color: var(--label-tertiary);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+.runtime-show-agents:hover { background: var(--hover-fill); color: var(--label-primary); }
+.runtime-show-agents:focus-visible { outline: 2px solid var(--label-secondary); outline-offset: -2px; }
+.runtime-show-agents svg { transition: transform 0.15s var(--ease); }
+.runtime-show-agents svg.expanded { transform: rotate(180deg); }
+@media (prefers-reduced-motion: reduce) { .runtime-show-agents svg { transition: none; } }
 
 /* ---- 子会话横幅(SessionsPage 的只读输入区) ---- */
 

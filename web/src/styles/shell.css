@@ -755,16 +755,17 @@
   flex: none;
   display: inline-flex;
   align-items: center;
-  color: var(--label-caption);
+  justify-content: center;
+  color: var(--label-tertiary);
 }
 
-/* 手动「进行中」标记:与运行圆点区分(几何图标、强调色,不脉动)。 */
+/* 手动「进行中」旗帜:与实时运行圆点区分,不脉动。 */
 .in-progress-mark {
   flex: none;
   display: inline-flex;
   align-items: center;
-  color: var(--accent);
-  opacity: 0.9;
+  justify-content: center;
+  color: var(--warn-fg);
 }
 
 .ws-group-head-row {

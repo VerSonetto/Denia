@@ -17,6 +17,7 @@
  * - 不手改 generated 类型：wire 类型来自 Rust。
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { AgentAvatar, AVATARS, getAgentAvatar, saveAgentAvatar, useAgentAvatar, type AvatarId } from '../AgentAvatar'
 import * as api from '../../api'
 import { subscribeServerEvents } from '../../serverEvents'
 import { t } from '../../i18n'
@@ -70,6 +71,7 @@ interface Draft {
   revision: number
   profile: SubagentProfile
   dirty: boolean
+  avatar: AvatarId
 }
 
 export function SubagentSettings({ notify }: { notify: Notify }) {
@@ -163,6 +165,7 @@ export function SubagentSettings({ notify }: { notify: Notify }) {
       revision: 0,
       profile,
       dirty: true,
+      avatar: getAgentAvatar(`user:${profile.id}`, cwd),
     })
   }
 
@@ -176,6 +179,7 @@ export function SubagentSettings({ notify }: { notify: Notify }) {
       revision: view.revision,
       profile,
       dirty: true,
+      avatar: getAgentAvatar(view.qualifiedId, cwd),
     })
   }
 
@@ -203,11 +207,13 @@ export function SubagentSettings({ notify }: { notify: Notify }) {
           expectedRevision: draft.revision,
           ...scope,
         })
+        saveAgentAvatar(result.profile.qualifiedId, cwd, draft.avatar)
         // 以服务端返回为准：内置定义的编辑落到用户覆盖层，目标随返回的
         // qualifiedId 与 revision 更新（不靠本地推论）。
         setDraft({
           kind: 'edit',
           dirty: false,
+          avatar: draft.avatar,
           ...draftAfterSave(draft.writeScope, result.profile),
         })
         notify('ok', t('subagentsSaved'))
@@ -217,9 +223,11 @@ export function SubagentSettings({ notify }: { notify: Notify }) {
           profile: draft.profile,
           ...scope,
         })
+        saveAgentAvatar(result.profile.qualifiedId, cwd, draft.avatar)
         setDraft({
           kind: 'edit',
           dirty: false,
+          avatar: draft.avatar,
           ...draftAfterSave(draft.writeScope, result.profile),
         })
         notify('ok', t('subagentsCreated'))
@@ -421,6 +429,7 @@ export function SubagentSettings({ notify }: { notify: Notify }) {
             projectWritable={Boolean(catalog?.projectDir)}
             saving={saving}
             onChange={update}
+            onAvatarChange={(avatar) => setDraft({ ...draft, avatar, dirty: true })}
             onScopeChange={(writeScope) => setDraft({ ...draft, writeScope, dirty: true })}
             onToolsChange={(next) => setDraft({ ...draft, profile: { ...draft.profile, tools: next }, dirty: true })}
             onModelChange={(next) => setDraft({ ...draft, profile: { ...draft.profile, model: next }, dirty: true })}
@@ -455,6 +464,7 @@ export function SubagentSettings({ notify }: { notify: Notify }) {
                     <ProfileRow
                       key={view.qualifiedId}
                       view={view}
+                      cwd={cwd}
                       models={models}
                       active={draft?.target === view.qualifiedId}
                       onEdit={() => startEdit(view, 'edit')}
@@ -506,6 +516,7 @@ export function SubagentSettings({ notify }: { notify: Notify }) {
               <ProfileRow
                 key={view.qualifiedId}
                 view={view}
+                cwd={cwd}
                 models={models}
                 shadowed
                 onCopy={() => startEdit(view, 'copy')}
@@ -533,6 +544,7 @@ export function SubagentSettings({ notify }: { notify: Notify }) {
 
 function ProfileRow({
   view,
+  cwd,
   models,
   active,
   shadowed,
@@ -543,6 +555,7 @@ function ProfileRow({
   onDelete,
 }: {
   view: SubagentProfileView
+  cwd: string
   models: ModelCatalog | null
   active?: boolean
   shadowed?: boolean
@@ -552,6 +565,7 @@ function ProfileRow({
   onReset?: () => void
   onDelete?: () => void
 }) {
+  const avatar = useAgentAvatar(view.qualifiedId, cwd)
   // 摘要由共享纯函数产出：inherit 与"空列表"必须给出不同文案。
   const tools = toolSelectionSummary(view.profile.tools, {
     inherit: t('subagentsToolsInherit'),
@@ -579,7 +593,8 @@ function ProfileRow({
       data-qualified={view.qualifiedId}
     >
       <div className={styles.defHead}>
-        <div>
+        <div className={styles.defIdentity}>
+          <AgentAvatar avatar={avatar} size={34} />
           <div className={styles.defTitle}>
             <span className={styles.defName}>{view.profile.name}</span>
             <code className={styles.defId}>{view.qualifiedId}</code>
@@ -652,6 +667,7 @@ function DraftEditor({
   projectWritable,
   saving,
   onChange,
+  onAvatarChange,
   onScopeChange,
   onToolsChange,
   onModelChange,
@@ -666,6 +682,7 @@ function DraftEditor({
   projectWritable: boolean
   saving: boolean
   onChange: (patch: Partial<SubagentProfile>) => void
+  onAvatarChange: (avatar: AvatarId) => void
   onScopeChange: (scope: ProfileWriteScope) => void
   onToolsChange: (next: ToolSelection) => void
   onModelChange: (next: SubagentProfile['model']) => void
@@ -709,6 +726,13 @@ function DraftEditor({
       <div className="setm-card-body">
         {/* ---------- 基本信息 ---------- */}
         <div className="setm-field-label">{t('subagentsBasic')}</div>
+        <Field label={t('subagentsAvatar')} hint={t('subagentsAvatarLocal')} error={null}>
+          <div className={styles.avatarGrid} role="group" aria-label={t('subagentsAvatar')}>
+            {AVATARS.map((avatar, index) => <button key={avatar} type="button" className={styles.avatarOption}
+              aria-label={`${t('subagentsAvatar')} ${index + 1}`} aria-pressed={draft.avatar === avatar}
+              onClick={() => onAvatarChange(avatar)}><AgentAvatar avatar={avatar} size={36} /></button>)}
+          </div>
+        </Field>
         <div className="setm-form-grid two">
           <Field label="id" hint="^[a-z0-9][a-z0-9-]{0,63}$" error={null}>
             <TextInput

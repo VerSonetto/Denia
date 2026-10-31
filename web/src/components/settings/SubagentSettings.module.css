@@ -95,6 +95,13 @@
   flex-wrap: wrap;
 }
 
+.defIdentity {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
 .defTitle {
   display: flex;
   align-items: center;
@@ -410,3 +417,8 @@
     display: none;
   }
 }
+.avatarGrid { display: flex; flex-wrap: wrap; gap: 6px; }
+.avatarOption { display: inline-flex; padding: 3px; border: 1px solid transparent; border-radius: 12px; background: transparent; cursor: pointer; }
+.avatarOption:hover { background: var(--hover-fill); }
+.avatarOption[aria-pressed='true'] { border-color: var(--label-secondary); background: var(--active-fill); }
+.avatarOption:focus-visible { outline: 2px solid var(--label-secondary); outline-offset: 2px; }

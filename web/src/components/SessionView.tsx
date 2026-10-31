@@ -72,6 +72,7 @@ export function SessionView({
   pendingMessages,
   compacting = null,
   onTodosChange,
+  onRuntimeEvents,
   onNotFound,
   onPendingSettled,
   onNodesChange,
@@ -92,6 +93,7 @@ export function SessionView({
   /** 已发送未获服务端确认的用户消息(乐观行,渲染在 transcript 尾部)。 */
   pendingMessages: { text: string; images?: UserMessageImage[] }[]
   onTodosChange?: (todos: TodoItem[]) => void
+  onRuntimeEvents?: (events: SessionEnvelope[]) => void
   /** 会话已被删除:父级应清空 activeId。 */
   onNotFound?: () => void
   /** 某条乐观消息已被服务端事件确认(从 pending 列表移除)。 */
@@ -155,6 +157,8 @@ export function SessionView({
   jumpSettledRef.current = onJumpSettled
   const todosChangeRef = useRef(onTodosChange)
   todosChangeRef.current = onTodosChange
+  const runtimeEventsRef = useRef(onRuntimeEvents)
+  runtimeEventsRef.current = onRuntimeEvents
   const goalTouchRef = useRef(onGoalTouch)
   goalTouchRef.current = onGoalTouch
   const pendingCountRef = useRef(pendingMessages.length)
@@ -195,6 +199,7 @@ export function SessionView({
 
   useEffect(() => {
     eventsRef.current = events
+    runtimeEventsRef.current?.(events)
   }, [events])
 
   useEffect(() => {

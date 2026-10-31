@@ -136,6 +136,12 @@ const zh = {
   runtimeWaitingApproval: "等待审批",
   runtimeWaitingAsk: "等待回答",
   runtimeSnapshot: "快照摘要",
+  runtimeLatestAction: "最近动作",
+  subagentsAvatar: "头像",
+  subagentsAvatarLocal: "头像保存在当前设备，不随定义同步。",
+  runtimeLatestProgress: "最新进展",
+  runtimeShowMoreAgents: "还有 {n} 个子代理",
+  runtimeShowFewer: "收起",
   runtimeCreatedMode: "创建时权限",
   runtimeInstructionScope: "指令范围",
   runtimeDelegation: "可派遣子代理",
@@ -1520,6 +1526,12 @@ const en: typeof zh = {
   runtimeWaitingApproval: "Awaiting approval",
   runtimeWaitingAsk: "Awaiting answer",
   runtimeSnapshot: "Snapshot",
+  runtimeLatestAction: "Latest action",
+  subagentsAvatar: "Avatar",
+  subagentsAvatarLocal: "Avatars are saved on this device and do not sync with profiles.",
+  runtimeLatestProgress: "Latest progress",
+  runtimeShowMoreAgents: "Show {n} more agents",
+  runtimeShowFewer: "Show less",
   runtimeCreatedMode: "Created with",
   runtimeInstructionScope: "Instruction scope",
   runtimeDelegation: "Can dispatch subagents",
@@ -2798,4 +2810,3 @@ export function t(key: keyof typeof zh, params?: Record<string, string | number>
   }
   return text
 }
-

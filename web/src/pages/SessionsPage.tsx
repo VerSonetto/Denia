@@ -31,7 +31,7 @@ import { PlanReviewPanel } from '../components/PlanReviewPanel';
 import { ApprovalDialog } from '../components/ApprovalDialog';
 import { ConfirmDialog } from '../components/ConfirmDialog';
 import { ContextRing } from '../components/ContextRing';
-import { IconBranch, IconArrowDown, IconClose, IconFile, IconFolder, IconPromptOptimize, IconSend, IconSparkles, IconUndo, IconSpinner, IconStop, IconSlashCommand, IconAgentSpawn } from '../components/icons';
+import { IconBranch, IconArrowDown, IconClose, IconFile, IconFolder, IconPanelOpen, IconPromptOptimize, IconSend, IconSparkles, IconUndo, IconSpinner, IconStop, IconSlashCommand, IconAgentSpawn } from '../components/icons';
 import { resolveSessionReasoningEffort } from '../modelCatalog';
 import { useFollow } from '../streaming/useFollow';
 import { SmoothStreamContext } from '../streaming/pressure';
@@ -42,6 +42,8 @@ import { insertFileChip, selectionOffsetsIn, serializeEditor, setCaretOffset, sy
 import { REFERENCE_MIME } from '../fileTree';
 import { applyTotalsEvent, emptyTotals, formatTokens, resetTotals, totalsFromPage, type TotalsAccumulator } from '../stats';
 import { TodoPanel } from '../components/TodoPanel';
+import { RuntimePanel } from '../components/RuntimePanel';
+import type { SessionEnvelope } from '../types';
 import { GoalBar } from '../components/GoalBar';
 import { QueuedMessagePanel } from '../components/QueuedMessagePanel';
 import { ConversationAxis } from '../components/ConversationAxis';
@@ -195,6 +197,8 @@ export default function SessionsPage({
   // 轮次轴跳转请求:点击未加载刻度时递增 nonce 触发视图翻页定位。
   const [axisJump, setAxisJump] = useState<{ seq: number; nonce: number; behavior?: ScrollBehavior } | null>(null)
   const [todos, setTodos] = useState<TodoItem[]>([])
+  const [runtimeEvents, setRuntimeEvents] = useState<SessionEnvelope[]>([])
+  const [runtimeVisible, setRuntimeVisible] = useState(false)
   // 当前会话的目标视图(goal 模式);服务端权威,goal/turn-end 事件触发重拉。
   const [goalView, setGoalView] = useState<api.GoalView | null>(null)
   // 消息队列:AI 运行中输入的新消息,等本轮结束后自动发送(状态与操作在 useMessageQueue)。
@@ -364,6 +368,8 @@ export default function SessionsPage({
     setAxisAnchors([])
     setAxisJump(null)
     setTodos([])
+    setRuntimeEvents([])
+    setRuntimeVisible(false)
     // 新会话从顶部开始且重新吸底:复位归属,不写 DOM(scrollTop 归零)。
     resetFollowRef.current()
     const el = scrollRef.current
@@ -1840,6 +1846,19 @@ export default function SessionsPage({
       data-compact={layoutFit !== 'wide' || undefined}
       data-tight={layoutFit === 'tight' || undefined}
     >
+      {phase === 'hero' && !secondary && activeWs && onToggleSidePane && (
+        <button
+          type="button"
+          className={`icon-btn session-pane-btn hero-pane-btn${sidePaneOpen ? ' active' : ''}`}
+          title={t('sidePaneToggle')}
+          aria-label={sidePaneOpen ? t('sidePaneCollapse') : t('sidePaneExpand')}
+          aria-pressed={sidePaneOpen}
+          data-testid="side-pane-toggle"
+          onClick={onToggleSidePane}
+        >
+          <IconPanelOpen size={15} />
+        </button>
+      )}
       {phase === 'active' && (
         <SessionHeader
           activeSession={activeSession}
@@ -1856,6 +1875,7 @@ export default function SessionsPage({
           setExportBusy={setExportBusy}
         />
       )}
+      <div className="runtime-workspace" data-runtime-visible={runtimeVisible || undefined}>
       <div
         className="conversation-scroll"
         ref={follower.setPort}
@@ -1897,6 +1917,7 @@ export default function SessionsPage({
                   pendingMessages={pendingMessages}
                   compacting={compactingAt}
                   onTodosChange={setTodos}
+                  onRuntimeEvents={setRuntimeEvents}
                   onGoalTouch={handleGoalTouch}
                   onPendingSettled={settlePending}
                   onNotFound={handleNotFound}
@@ -1994,6 +2015,10 @@ export default function SessionsPage({
             </div>
           </div>
         )}
+      </div>
+      {phase === 'active' && activeId && (
+        <RuntimePanel key={activeId} id={activeId} cwd={activeSession?.cwd} events={runtimeEvents} pendingCount={pendingMessages.length} onVisibilityChange={setRuntimeVisible} />
+      )}
       </div>
       {phase === 'active' && view === 'chat' && !stick && (
         <button

@@ -308,22 +308,20 @@ assert(
     generated.includes('delegationAllowed: boolean'),
 )
 
-// 运行观察：父侧面板与子会话横幅必须展示同一份运行快照事实。
+// 运行观察：父侧面板展示实际进展，不暴露冗余的授权快照。
 const runtimePanel = read('web/src/components/RuntimePanel.tsx')
 for (const needle of [
-  'profileLabel(',
   'pendingApprovals',
   'pendingAsks',
   'waitingLabel(',
-  't(\'runtimeSnapshot\')',
   't(\'runtimeOpenChild\')',
   'agent.result',
-  'instructionScope',
-  'tools',
+  'agentProgress(',
+  't(\'runtimeLatestAction\')',
 ]) {
   assert(`RuntimePanel 展示 ${needle}`, runtimePanel.includes(needle))
 }
-assert('RuntimePanel 不做本地授权推论', runtimePanel.includes('delegationAllowed'))
+assert('RuntimePanel 不展示快照摘要', !runtimePanel.includes("t('runtimeSnapshot')"))
 const sessionsPage = read('web/src/pages/SessionsPage.tsx')
 assert('子会话横幅使用共享的身份摘要', sessionsPage.includes('subagentSnapshotText'))
 assert('子会话横幅渲染摘要', sessionsPage.includes('child-snapshot'))
