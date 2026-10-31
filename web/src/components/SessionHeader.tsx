@@ -24,6 +24,9 @@ export function SessionHeader({
   setView,
   sidePaneOpen,
   onToggleSidePane,
+  runtimeCounts,
+  runtimeCollapsed,
+  onExpandRuntime,
   exportOpen,
   exportBusy,
   setExportOpen,
@@ -37,6 +40,9 @@ export function SessionHeader({
   setView: (view: ComposerView) => void
   sidePaneOpen: boolean
   onToggleSidePane?: () => void
+  runtimeCounts?: { agents: number; jobs: number }
+  runtimeCollapsed?: boolean
+  onExpandRuntime?: () => void
   exportOpen: boolean
   exportBusy: boolean
   setExportOpen: Dispatch<SetStateAction<boolean>>
@@ -82,6 +88,13 @@ export function SessionHeader({
             presetId={agentPresetId}
             presets={agentPresetCatalog?.presets ?? []}
           />
+        )}
+        {runtimeCollapsed && runtimeCounts && onExpandRuntime && (runtimeCounts.agents > 0 || runtimeCounts.jobs > 0) && (
+          <button type="button" className="runtime-header-entry" onClick={onExpandRuntime} aria-label={t('runtimeExpand')}>
+            {runtimeCounts.agents > 0 && <span>{t('runtimeAgentCount', { n: runtimeCounts.agents })}</span>}
+            {runtimeCounts.agents > 0 && runtimeCounts.jobs > 0 && <span aria-hidden="true">{t('runtimeCountJoin')}</span>}
+            {runtimeCounts.jobs > 0 && <span>{t('runtimeJobCount', { n: runtimeCounts.jobs })}</span>}
+          </button>
         )}
       </div>
       {activeSession?.cwd_alive === false && (

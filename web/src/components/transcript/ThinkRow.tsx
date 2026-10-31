@@ -56,16 +56,13 @@ export function ThinkRow({
       </button>
       {open && (
         <div className="disc-body">
-          <div className="code-card">
-            {/* 跟随滚动发生在 240px 内部框自己身上,外层不撑高。 */}
-            <pre
-              ref={follow.setPort}
-              className={streaming ? 'think-streaming' : undefined}
-              style={{ color: 'var(--label-tertiary)' }}
-            >
-              {reveal.text}
-            </pre>
-          </div>
+          {/* 思考正文不套代码卡外框；限制仍放在自身滚动区，外层对话高度不被撑开。 */}
+          <pre
+            ref={follow.setPort}
+            className={`think-content${streaming ? ' think-streaming' : ''}`}
+          >
+            {reveal.text}
+          </pre>
         </div>
       )}
     </div>

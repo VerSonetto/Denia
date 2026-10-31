@@ -24,6 +24,21 @@
 }
 
 .runtime-card-heading strong { font-size: 13px; font-weight: 600; }
+.runtime-collapse {
+  display: inline-flex;
+  width: 26px;
+  height: 26px;
+  align-items: center;
+  justify-content: center;
+  margin-left: auto;
+  color: var(--label-tertiary);
+  background: transparent;
+  border: 0;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.runtime-collapse:hover { color: var(--label-primary); background: var(--hover-fill); }
+.runtime-collapse:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 .runtime-card-count {
   display: inline-flex;
   align-items: center;
@@ -684,6 +699,45 @@ button.runtime-row-name:hover { text-decoration: underline; text-underline-offse
   overflow-wrap: anywhere;
 }
 
+/* 后台任务是独立作业卡：名称、状态与作业操作聚在首行，不借用子代理头像和进度布局。 */
+.runtime-job-list { display: grid; gap: 7px; }
+.runtime-job-card {
+  padding: 10px;
+  border: 1px solid var(--border-l1);
+  border-radius: 9px;
+  background: color-mix(in srgb, var(--hover-fill) 48%, transparent);
+}
+.runtime-job-card[data-tone='running'] { border-color: color-mix(in srgb, var(--success-fg) 35%, var(--border-l1)); }
+.runtime-job-card[data-tone='waiting'] { border-color: color-mix(in srgb, var(--warn-fg) 42%, var(--border-l1)); }
+.runtime-job-card[data-tone='failed'] { border-color: var(--danger-border); background: var(--danger-soft); }
+.runtime-job-heading { display: flex; align-items: flex-start; gap: 8px; }
+.runtime-job-icon { display: flex; flex: none; margin-top: 1px; color: var(--label-tertiary); }
+.runtime-job-copy { flex: 1; min-width: 0; }
+.runtime-job-name {
+  display: block;
+  overflow: hidden;
+  color: var(--label-primary);
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.45;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.runtime-job-card .runtime-row-status { margin-top: 4px; }
+.runtime-job-actions { display: flex; flex-wrap: wrap; justify-content: flex-start; gap: 4px; margin: 9px 0 0 24px; }
+.runtime-job-card[data-tone='failed'] .runtime-status { color: var(--danger); }
+.runtime-job-output {
+  max-height: 190px;
+  overflow: auto;
+  padding: 8px;
+  margin: 9px 0 0 24px;
+  border-radius: 7px;
+  background: var(--composer-surface);
+}
+.runtime-job-output-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 5px; color: var(--label-tertiary); font-size: 10.5px; }
+.runtime-job-output pre { margin: 0; color: var(--label-secondary); font: 11px/1.5 var(--font-mono); white-space: pre-wrap; overflow-wrap: anywhere; }
+.runtime-job-output .runtime-preview-state { font-size: 11px; }
+
 .runtime-show-agents {
   display: flex;
   width: 100%;
@@ -706,6 +760,27 @@ button.runtime-row-name:hover { text-decoration: underline; text-underline-offse
 .runtime-show-agents svg { transition: transform 0.15s var(--ease); }
 .runtime-show-agents svg.expanded { transform: rotate(180deg); }
 @media (prefers-reduced-motion: reduce) { .runtime-show-agents svg { transition: none; } }
+
+.runtime-header-entry {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: 5px;
+  max-width: min(34vw, 360px);
+  overflow: hidden;
+  padding: 3px 8px;
+  color: var(--label-secondary);
+  background: var(--hover-fill);
+  border: 1px solid var(--border-l1);
+  border-radius: var(--r-pill);
+  font: inherit;
+  font-size: 11px;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  cursor: pointer;
+}
+.runtime-header-entry:hover { color: var(--label-primary); background: var(--active-fill); }
+.runtime-header-entry:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
 /* ---- 子会话横幅(SessionsPage 的只读输入区) ---- */
 

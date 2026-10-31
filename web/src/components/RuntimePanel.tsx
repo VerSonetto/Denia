@@ -128,7 +128,7 @@ function RuntimeAvatar({ id, cwd }: { id: string; cwd?: string | null }) {
   return <AgentAvatar avatar={avatar} size={30} />
 }
 
-export function RuntimePanel({ id, cwd, events, pendingCount, onVisibilityChange }: { id: string; cwd?: string | null; events: SessionEnvelope[]; pendingCount: number; onVisibilityChange(visible: boolean): void }) {
+export function RuntimePanel({ id, cwd, events, pendingCount, collapsed, onCollapse, onCountsChange }: { id: string; cwd?: string | null; events: SessionEnvelope[]; pendingCount: number; collapsed: boolean; onCollapse(): void; onCountsChange(counts: { agents: number; jobs: number }): void }) {
   const [tab, setTab] = useState<'agents' | 'jobs'>('agents')
   const [agents, setAgents] = useState<Agent[]>([])
   const [jobs, setJobs] = useState<Job[]>([])
@@ -198,9 +198,8 @@ export function RuntimePanel({ id, cwd, events, pendingCount, onVisibilityChange
   }, [refresh])
 
   useEffect(() => {
-    onVisibilityChange(activeAgents + activeJobs > 0)
-    return () => onVisibilityChange(false)
-  }, [activeAgents, activeJobs, onVisibilityChange])
+    onCountsChange({ agents: activeAgents, jobs: activeJobs })
+  }, [activeAgents, activeJobs, onCountsChange])
 
   const run = async (key: PendingKey, operation: () => Promise<void>) => {
     setPendingFlag(key, true)
@@ -240,14 +239,13 @@ export function RuntimePanel({ id, cwd, events, pendingCount, onVisibilityChange
     })
   }
 
-  if (activeAgents === 0 && activeJobs === 0) return null
+  if (collapsed || (activeAgents === 0 && activeJobs === 0)) return null
 
   const tabs = [
     ...(activeAgents > 0 ? (['agents'] as const) : []),
     ...(activeJobs > 0 ? (['jobs'] as const) : []),
   ]
   const output = outputTarget ? outputs[outputTarget] : undefined
-  const outputJob = jobs.find((job) => job.id === outputTarget)
 
   const onTabKeyDown = (event: KeyboardEvent<HTMLButtonElement>, index: number) => {
     const keys = ['ArrowLeft', 'ArrowRight', 'Home', 'End']
@@ -260,9 +258,9 @@ export function RuntimePanel({ id, cwd, events, pendingCount, onVisibilityChange
     setTab(tabs[next])
   }
 
-  return <section className="runtime-panel open" aria-label={t('runtimeTitle')} data-testid="runtime-panel">
-    <div className="runtime-card-heading"><strong>{t('runtimeTitle')}</strong><span className="runtime-card-count">{activeAgents + activeJobs}</span></div>
-    <div className="runtime-content" data-testid="runtime-content">
+  return <section className={`runtime-panel${collapsed ? ' collapsed' : ' open'}`} aria-label={t('runtimeTitle')} data-testid="runtime-panel">
+    <div className="runtime-card-heading"><strong>{t('runtimeTitle')}</strong><span className="runtime-card-count">{activeAgents + activeJobs}</span><button type="button" className="runtime-collapse" aria-label={t('runtimeCollapse')} title={t('runtimeCollapse')} onClick={onCollapse}><svg width="14" height="14" viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="m4 6 4 4 4-4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" /></svg></button></div>
+    {!collapsed && <div className="runtime-content" data-testid="runtime-content">
       <div className="runtime-tabs" role="tablist" aria-label={t('runtimeTitle')}>
         {tabs.map((key, index) => <button
           type="button"
@@ -361,56 +359,43 @@ export function RuntimePanel({ id, cwd, events, pendingCount, onVisibilityChange
           </div>
         </form>}
       </div>}
-      {tab === 'jobs' && <div className="runtime-rows" role="tabpanel" id="runtime-tabpanel-jobs" aria-labelledby="runtime-tab-jobs" data-testid="runtime-jobs-panel">
+      {tab === 'jobs' && <div className="runtime-rows runtime-job-list" role="tabpanel" id="runtime-tabpanel-jobs" aria-labelledby="runtime-tab-jobs" data-testid="runtime-jobs-panel">
         {!jobs.length && <p className="runtime-empty">{t('runtimeNoJobs')}</p>}
         {visibleJobs.map((job) => {
           const outputKey = pendingKey('job', job.id, 'output')
           const killKey = pendingKey('job', job.id, 'kill')
           const reading = isPending(outputKey)
           const killing = isPending(killKey)
-          return <div className="runtime-row" key={job.id} data-job={job.id} data-tone={tone(job.status)} data-testid={`runtime-job-${job.id}`}>
-            <div className="runtime-row-main">
-              <span className="runtime-row-name" title={job.label}>{job.label}</span>
-              <small className="runtime-row-status">
+          return <div className="runtime-job-card" key={job.id} data-job={job.id} data-tone={tone(job.status)} data-testid={`runtime-job-${job.id}`}>
+            <div className="runtime-job-heading">
+              <span className="runtime-job-icon" aria-hidden="true"><svg width="16" height="16" viewBox="0 0 16 16" fill="none"><rect x="1.5" y="2.5" width="13" height="11" rx="2" stroke="currentColor" strokeWidth="1.2"/><path d="m4 6 2 2-2 2m4 0h3" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round"/></svg></span>
+              <div className="runtime-job-copy">
+                <strong className="runtime-job-name" title={job.label}>{job.label}</strong>
+                <small className="runtime-row-status">
                 <span className="runtime-status" data-tone={tone(job.status)}>
                   <i className="runtime-status-dot" aria-hidden="true" />
                   {status(job.status)}{job.exitCode != null && ` · ${t('runtimeExit')} ${job.exitCode}`}
                 </span>
-              </small>
+                </small>
+              </div>
             </div>
-            <div className="runtime-row-actions">
-              <button
-                type="button"
-                className="runtime-action"
-                disabled={reading}
-                aria-busy={reading}
-                data-pending={reading}
-                onClick={() => void readOutput(job)}
-              >{reading ? <><i className="runtime-spinner" aria-hidden="true" />{t('runtimeLoading')}</> : t('runtimeOutput')}</button>
-              {!job.finishedAt && <button
-                type="button"
-                className="runtime-action runtime-action-danger"
-                disabled={killing || job.status === 'stopping'}
-                aria-busy={killing}
-                data-pending={killing}
-                onClick={() => void run(killKey, async () => { await request(`${base}/jobs/${job.id}/kill`, {}) })}
-              >{killing ? <><i className="runtime-spinner" aria-hidden="true" />{t('runtimeLoading')}</> : t('runtimeInterrupt')}</button>}
+            <div className="runtime-job-actions">
+              <button type="button" className="runtime-action" disabled={reading} aria-busy={reading} data-pending={reading} onClick={() => void readOutput(job)}>{reading ? <><i className="runtime-spinner" aria-hidden="true" />{t('runtimeLoading')}</> : t('runtimeOutput')}</button>
+              {!job.finishedAt && <button type="button" className="runtime-action runtime-action-danger" disabled={killing || job.status === 'stopping'} aria-busy={killing} data-pending={killing} onClick={() => void run(killKey, async () => { await request(`${base}/jobs/${job.id}/kill`, {}) })}>{killing ? <><i className="runtime-spinner" aria-hidden="true" />{t('runtimeLoading')}</> : t('runtimeInterrupt')}</button>}
             </div>
+            {outputTarget === job.id && <div className="runtime-job-output" data-phase={output?.phase ?? 'idle'}>
+              <div className="runtime-job-output-head">
+                <strong>{t('runtimeOutput')}</strong>
+                <button type="button" className="runtime-action" onClick={() => setOutputTarget('')}>{t('runtimeClose')}</button>
+              </div>
+              {output?.phase === 'loading' && <p className="runtime-preview-state" role="status"><i className="runtime-spinner" aria-hidden="true" />{t('runtimeLoading')}</p>}
+              {output?.phase === 'error' && <p className="runtime-preview-state" role="alert" data-error="true">{output.message}</p>}
+              {output?.phase === 'ready' && (output.text ? <pre>{output.text}</pre> : <p className="runtime-preview-state">{t('runtimeNoOutput')}</p>)}
+            </div>}
           </div>
         })}
       </div>}
 
-      {outputJob && <div className="runtime-preview" data-testid="runtime-preview" data-phase={output?.phase ?? 'idle'}>
-        <div className="runtime-preview-head">
-          <strong>{outputJob.label}</strong>
-          <button type="button" className="runtime-action" onClick={() => setOutputTarget('')}>{t('runtimeClose')}</button>
-        </div>
-        {output?.phase === 'loading' && <p className="runtime-preview-state" role="status"><i className="runtime-spinner" aria-hidden="true" />{t('runtimeLoading')}</p>}
-        {output?.phase === 'error' && <p className="runtime-preview-state" role="alert" data-error="true">{output.message}</p>}
-        {output?.phase === 'ready' && (output.text
-          ? <pre>{output.text}</pre>
-          : <p className="runtime-preview-state">{t('runtimeNoOutput')}</p>)}
-      </div>}
-    </div>
+    </div>}
   </section>
 }

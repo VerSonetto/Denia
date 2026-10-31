@@ -411,6 +411,11 @@ export function useFollow<T extends HTMLElement>(
       // 引擎自己管位置:浏览器的滚动锚定会在同一帧里回写 scrollTop,两边打架。
       el.style.overflowAnchor = 'none'
       sync()
+      // React 的实际文本提交不一定伴随 transcript 节点变化:打字机揭示、思考
+      // 内容结算和 Markdown 回流都可能只改容器子树。直接观察 DOM 变更，避免
+      // 只靠父级事件回调唤醒而漏掉流式增量。脱跟时 wake 只刷新基线，不抢位置。
+      const contentObserver = typeof MutationObserver === 'undefined' ? null : new MutationObserver(() => wake())
+      contentObserver?.observe(el, { childList: true, characterData: true, subtree: true })
       const onWheel = (event: WheelEvent) => {
         if (insideNestedScroller(el, event.target)) return
         const delta = wheelPixels(event, el.clientHeight)
@@ -424,6 +429,7 @@ export function useFollow<T extends HTMLElement>(
       el.addEventListener('scroll', handleScroll, { passive: true })
       el.addEventListener('wheel', onWheel, { passive: true })
       detachRef.current = () => {
+        contentObserver?.disconnect()
         el.removeEventListener('scroll', handleScroll)
         el.removeEventListener('wheel', onWheel)
       }

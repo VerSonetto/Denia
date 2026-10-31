@@ -198,7 +198,11 @@ export default function SessionsPage({
   const [axisJump, setAxisJump] = useState<{ seq: number; nonce: number; behavior?: ScrollBehavior } | null>(null)
   const [todos, setTodos] = useState<TodoItem[]>([])
   const [runtimeEvents, setRuntimeEvents] = useState<SessionEnvelope[]>([])
-  const [runtimeVisible, setRuntimeVisible] = useState(false)
+  const [runtimeCounts, setRuntimeCounts] = useState({ agents: 0, jobs: 0 })
+  const [runtimeCollapsed, setRuntimeCollapsed] = useState(false)
+  const handleRuntimeCountsChange = useCallback((counts: { agents: number; jobs: number }) => {
+    setRuntimeCounts((current) => current.agents === counts.agents && current.jobs === counts.jobs ? current : counts)
+  }, [])
   // 当前会话的目标视图(goal 模式);服务端权威,goal/turn-end 事件触发重拉。
   const [goalView, setGoalView] = useState<api.GoalView | null>(null)
   // 消息队列:AI 运行中输入的新消息,等本轮结束后自动发送(状态与操作在 useMessageQueue)。
@@ -369,7 +373,8 @@ export default function SessionsPage({
     setAxisJump(null)
     setTodos([])
     setRuntimeEvents([])
-    setRuntimeVisible(false)
+    setRuntimeCounts({ agents: 0, jobs: 0 })
+    setRuntimeCollapsed(false)
     // 新会话从顶部开始且重新吸底:复位归属,不写 DOM(scrollTop 归零)。
     resetFollowRef.current()
     const el = scrollRef.current
@@ -1869,13 +1874,16 @@ export default function SessionsPage({
           setView={setView}
           sidePaneOpen={sidePaneOpen}
           onToggleSidePane={onToggleSidePane}
+          runtimeCounts={runtimeCounts}
+          runtimeCollapsed={runtimeCollapsed}
+          onExpandRuntime={() => setRuntimeCollapsed(false)}
           exportOpen={exportOpen}
           exportBusy={exportBusy}
           setExportOpen={setExportOpen}
           setExportBusy={setExportBusy}
         />
       )}
-      <div className="runtime-workspace" data-runtime-visible={runtimeVisible || undefined}>
+      <div className="runtime-workspace" data-runtime-visible={runtimeCounts.agents + runtimeCounts.jobs > 0 && !runtimeCollapsed || undefined}>
       <div
         className="conversation-scroll"
         ref={follower.setPort}
@@ -2017,7 +2025,7 @@ export default function SessionsPage({
         )}
       </div>
       {phase === 'active' && activeId && (
-        <RuntimePanel key={activeId} id={activeId} cwd={activeSession?.cwd} events={runtimeEvents} pendingCount={pendingMessages.length} onVisibilityChange={setRuntimeVisible} />
+        <RuntimePanel key={activeId} id={activeId} cwd={activeSession?.cwd} events={runtimeEvents} pendingCount={pendingMessages.length} collapsed={runtimeCollapsed} onCollapse={() => setRuntimeCollapsed(true)} onCountsChange={handleRuntimeCountsChange} />
       )}
       </div>
       {phase === 'active' && view === 'chat' && !stick && (
