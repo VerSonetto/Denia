@@ -3,6 +3,7 @@ const ORDER_KEY = 'denia.sidebar-order.v1'
 const FILTER_KEY = 'denia.sidebar-filter.v1'
 const PINS_KEY = 'denia.sidebar-pins.v1'
 const IN_PROGRESS_KEY = 'denia.sidebar-in-progress.v1'
+const IN_PROGRESS_WORKSPACES_KEY = 'denia.sidebar-in-progress-workspaces.v1'
 
 /** 侧栏手动排序账本:工作区顺序、未分组会话顺序、每个工作区的会话顺序。 */
 export interface SidebarOrder {
@@ -155,6 +156,26 @@ export function writeInProgressMarks(ids: readonly string[]): void {
     const unique = [...new Set(ids.filter((id) => id.length > 0))]
     if (unique.length === 0) window.localStorage.removeItem(IN_PROGRESS_KEY)
     else window.localStorage.setItem(IN_PROGRESS_KEY, JSON.stringify(unique))
+  } catch {
+    // 写入失败只影响刷新后的标记,本次页面内的勾选仍然生效。
+  }
+}
+
+/** 手动标记为「进行中」的工作区;标记覆盖工作区当前及以后创建的会话。 */
+export function readInProgressWorkspaces(): string[] {
+  try {
+    const value: unknown = JSON.parse(window.localStorage.getItem(IN_PROGRESS_WORKSPACES_KEY) ?? '[]')
+    return [...new Set(readIdList(value))]
+  } catch {
+    return []
+  }
+}
+
+export function writeInProgressWorkspaces(ids: readonly string[]): void {
+  try {
+    const unique = [...new Set(ids.filter((id) => id.length > 0))]
+    if (unique.length === 0) window.localStorage.removeItem(IN_PROGRESS_WORKSPACES_KEY)
+    else window.localStorage.setItem(IN_PROGRESS_WORKSPACES_KEY, JSON.stringify(unique))
   } catch {
     // 写入失败只影响刷新后的标记,本次页面内的勾选仍然生效。
   }

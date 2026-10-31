@@ -1105,15 +1105,10 @@
   border-radius: 5px;
   background: transparent;
   color: var(--label-caption);
-  cursor: pointer;
+  cursor: default;
   transition:
     color 0.15s var(--ease),
     background 0.15s var(--ease);
-}
-
-.session-caret:hover {
-  color: var(--label-primary);
-  background: var(--active-fill);
 }
 
 .session-caret svg {

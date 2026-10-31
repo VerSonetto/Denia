@@ -88,7 +88,10 @@ export function SessionRow({
             className={`session-caret${collapsed ? '' : ' open'}`}
             title={collapsed ? t('expandChildren', { n: childCount }) : t('collapseChildren')}
             aria-expanded={!collapsed}
-            onClick={onToggleCollapse}
+            onClick={(event) => {
+              event.stopPropagation()
+              onToggleCollapse()
+            }}
           >
             <IconCaretRight size={10} />
           </button>

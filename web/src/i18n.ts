@@ -844,6 +844,8 @@ const zh = {
   childSessions: '{n} 个子会话',
   collapseChildren: '收起子会话',
   expandChildren: '展开子会话',
+  collapseOtherSessions: '折叠其他会话',
+  expandOtherSessions: '展开其他会话',
   childRunningHint: '有子会话正在运行',
 
   trajQuoteRecord: '引用此记录',
@@ -2225,6 +2227,8 @@ const en: typeof zh = {
   childSessions: '{n} child sessions',
   collapseChildren: 'Collapse child sessions',
   expandChildren: 'Expand child sessions',
+  collapseOtherSessions: 'Collapse other sessions',
+  expandOtherSessions: 'Expand other sessions',
   childRunningHint: 'A child session is running',
 
   trajQuoteRecord: 'Quote this record',
