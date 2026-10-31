@@ -142,47 +142,82 @@
   overflow: hidden;
 }
 
-/* 代码画布:一块圆角内嵌面,与终端、浏览器画面同一层"内容底"。
- *
- * 底色用 `--shiki-background` 而不是 `--code-block`:vitesse-dark 的 token
- * 是为深底调的,浅色主题下 `--code-block` 会变成浅灰,浅色 token 落上去
- * 几乎不可读。`--shiki-background` 在浅色主题里仍是 #1e1e1e(见 markdown.css),
- * 深色主题下就是 `--code-block`,两套主题都能读。 */
+/* 代码画布是阅读器自己的编辑区,跟随应用明暗主题。 */
 .side-pane .file-reader-code {
-  padding: 0 8px 8px;
+  --reader-code-bg: #111315;
+  --reader-code-fg: #d7dce2;
+  --shiki-background: var(--reader-code-bg);
+  --shiki-foreground: var(--reader-code-fg);
+  flex: 1 1 auto;
+  min-height: 100%;
+  padding: 14px 12px 20px;
+  background: var(--bg-base);
+}
+
+:root[data-theme='light'] .side-pane .file-reader-code {
+  --reader-code-bg: #fbfaf7;
+  --reader-code-fg: #343a40;
+  background: #fbfaf7;
+}
+
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme='dark']) .side-pane .file-reader-code {
+    --reader-code-bg: #fbfaf7;
+    --reader-code-fg: #343a40;
+    background: #fbfaf7;
+  }
 }
 
 .side-pane .file-reader-code .md-code-block {
   margin: 0;
-  overflow: hidden;
-  border-radius: 10px;
-  background: var(--shiki-background);
+  overflow: visible;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
 }
 
 .side-pane .file-reader-code .md-code-banner-wrap {
-  background: var(--shiki-background);
-  border-radius: 10px 10px 0 0;
-  color: var(--shiki-foreground);
-}
-
-.side-pane .file-reader-code .md-code-banner {
-  padding: 7px 12px;
-  border-radius: 10px 10px 0 0;
-  background: var(--shiki-background);
-  color: var(--shiki-foreground);
-}
-
-.side-pane .file-reader-code .md-code-infostring {
-  color: var(--shiki-foreground);
+  display: none;
 }
 
 /* 文件阅读器是"看代码"而不是聊天:不折行,长行走自己的横向滚动。 */
 .side-pane .file-reader-code .md-code-block :where(pre) {
-  padding: 10px 12px 14px;
-  border-radius: 0 0 10px 10px;
-  background: var(--shiki-background) !important;
+  min-height: 100%;
+  padding: 4px 8px 20px;
+  border-radius: 0;
+  background: var(--reader-code-bg) !important;
+  color: var(--reader-code-fg);
+  font-size: 12.5px;
+  line-height: 1.75;
   white-space: pre;
   word-break: normal;
+}
+
+.side-pane .file-reader-code .md-code-block :where(pre code),
+.side-pane .file-reader-code .md-code-plain {
+  color: var(--reader-code-fg);
+}
+
+.side-pane .file-reader-code .shiki code {
+  display: block;
+  counter-reset: file-reader-line;
+}
+
+.side-pane .file-reader-code .shiki .line {
+  display: block;
+  min-height: 1.75em;
+}
+
+.side-pane .file-reader-code .shiki .line::before {
+  display: inline-block;
+  width: 3.5em;
+  margin-right: 1.5em;
+  color: var(--label-caption);
+  content: counter(file-reader-line);
+  counter-increment: file-reader-line;
+  text-align: right;
+  user-select: none;
 }
 
 /* ---- 提示 / 错误 ---- */

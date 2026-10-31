@@ -218,6 +218,12 @@ function renderNode(node: Md.RootContent, key: Key, context: MarkdownRenderConte
       // its code chrome and gains the same safe external anchor as a link.
       const href = inlineCodeHttpUrl(value)
       if (href !== undefined) return <code key={key}>{renderSafeLink(href, [value], 'link')}</code>
+      // File paths are commonly emitted as inline code in tool explanations.
+      // Only path-shaped values with a recognized file extension become links;
+      // ordinary identifiers such as `config` remain inert code.
+      if (looksLikeInlineFileReference(value)) {
+        return renderWorkspaceFileLink(value, [<code key="code">{value}</code>], key)
+      }
       return <code key={key}>{value}</code>
     }
     case 'html':
@@ -425,29 +431,7 @@ function renderSafeLink(href: string, children: ReactNode[], key: Key): ReactNod
     // （包括右键“在新标签页打开”），比“设了 href 再 preventDefault”更彻底。
     if (!looksLikeWorkspacePath(href)) return <Fragment key={key}>{children}</Fragment>
     const filePath = decodeFileHref(href)
-    return (
-      <span
-        key={key}
-        className="md-file-link"
-        role="button"
-        tabIndex={0}
-        onClick={(event: ReactMouseEvent<HTMLSpanElement>) => {
-          // 即使在 span 上，也显式拦一下：嵌套在其他可点元素里时
-          // （如工具行头部）避免冒泡触发外层的展开/收起。
-          event.preventDefault()
-          event.stopPropagation()
-          openWorkspaceFile(filePath)
-        }}
-        onKeyDown={(event: ReactKeyboardEvent<HTMLSpanElement>) => {
-          if (event.key !== 'Enter' && event.key !== ' ') return
-          event.preventDefault()
-          event.stopPropagation()
-          openWorkspaceFile(filePath)
-        }}
-      >
-        {children}
-      </span>
-    )
+    return renderWorkspaceFileLink(filePath, children, key)
   }
   const external = ['http:', 'https:'].includes(new URL(safeHref).protocol)
   // 外部链接保持默认行为（新标签打开），不拦截。
@@ -628,5 +612,52 @@ export function renderFootnoteSection(context: MarkdownRenderContext): ReactNode
       <h2 id="footnote-label" className="sr-only">{context.labels.footnotes}</h2>
       <ol>{items}</ol>
     </section>
+  )
+}
+
+/**
+ * Inline code is a file reference only when it looks like a path or a known
+ * filename. Requiring a separator or familiar extension avoids turning code
+ * identifiers and short option names into clickable controls.
+ */
+function looksLikeInlineFileReference(value: string): boolean {
+  const raw = value.trim()
+  if (!raw || raw !== value || raw.startsWith('#') || raw.startsWith('//') || raw.includes(':')) return false
+  if (/[\\/]/.test(raw)) return true
+  const basename = raw.split(/[\\/]/).pop() ?? ''
+  if (basename.startsWith('.') && basename.length > 1 && !basename.includes('..')) return true
+  const extension = /\.([a-zA-Z0-9]+)$/.exec(basename)?.[1]?.toLowerCase()
+  return extension !== undefined && INLINE_FILE_EXTENSIONS.has(extension)
+}
+
+const INLINE_FILE_EXTENSIONS = new Set([
+  'c', 'cc', 'cfg', 'conf', 'cpp', 'cs', 'css', 'csv', 'dart', 'diff', 'dockerfile', 'env',
+  'go', 'graphql', 'h', 'hpp', 'html', 'ini', 'java', 'js', 'json', 'jsonc', 'jsx', 'kt',
+  'kts', 'less', 'lua', 'md', 'mdx', 'mjs', 'mts', 'patch', 'php', 'prisma', 'proto',
+  'ps1', 'py', 'rb', 'rs', 'sass', 'scss', 'sh', 'sql', 'svelte', 'swift', 'toml', 'ts',
+  'tsx', 'txt', 'vim', 'vue', 'xml', 'yaml', 'yml', 'zsh',
+])
+
+function renderWorkspaceFileLink(filePath: string, children: ReactNode[], key: Key): ReactNode {
+  return (
+    <span
+      key={key}
+      className="md-file-link"
+      role="button"
+      tabIndex={0}
+      onClick={(event: ReactMouseEvent<HTMLSpanElement>) => {
+        event.preventDefault()
+        event.stopPropagation()
+        openWorkspaceFile(filePath)
+      }}
+      onKeyDown={(event: ReactKeyboardEvent<HTMLSpanElement>) => {
+        if (event.key !== 'Enter' && event.key !== ' ') return
+        event.preventDefault()
+        event.stopPropagation()
+        openWorkspaceFile(filePath)
+      }}
+    >
+      {children}
+    </span>
   )
 }

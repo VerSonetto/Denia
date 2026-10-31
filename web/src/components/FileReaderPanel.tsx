@@ -64,6 +64,11 @@ export function FileReaderPanel({
   onActivate,
   onCloseFile,
 }: FileReaderPanelProps) {
+  const [codeTheme, setCodeTheme] = useState<'github-dark' | 'github-light'>(() => {
+    const explicit = document.documentElement.dataset.theme
+    const light = explicit === 'light' || (!explicit && window.matchMedia('(prefers-color-scheme: light)').matches)
+    return light ? 'github-light' : 'github-dark'
+  })
   /**
    * 只驻留当前文件的正文;后台标签仅保留路径与名称。
    */
@@ -84,6 +89,24 @@ export function FileReaderPanel({
   const requestRef = useRef<AbortController | null>(null)
   const tabsRef = useRef<HTMLDivElement | null>(null)
   const aliveRef = useRef(true)
+
+  useEffect(() => {
+    const root = document.documentElement
+    const media = window.matchMedia('(prefers-color-scheme: light)')
+    const updateTheme = () => {
+      const explicit = root.dataset.theme
+      const light = explicit === 'light' || (!explicit && media.matches)
+      setCodeTheme(light ? 'github-light' : 'github-dark')
+    }
+    const observer = new MutationObserver(updateTheme)
+    observer.observe(root, { attributes: true, attributeFilter: ['data-theme'] })
+    media.addEventListener('change', updateTheme)
+    updateTheme()
+    return () => {
+      observer.disconnect()
+      media.removeEventListener('change', updateTheme)
+    }
+  }, [])
 
   useEffect(() => {
     aliveRef.current = true
@@ -327,6 +350,8 @@ export function FileReaderPanel({
                 lang={state.view.language ?? ''}
                 copyLabel={t('copy')}
                 copiedLabel={t('copied')}
+                theme={codeTheme}
+                lineNumbers
               />
             </div>
           )

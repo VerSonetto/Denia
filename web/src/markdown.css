@@ -112,6 +112,24 @@
   box-shadow: 0 0 0 2px var(--border-l3);
 }
 
+.markdown .md-file-link {
+  border-radius: 3px;
+  cursor: pointer;
+  text-decoration: underline;
+  text-decoration-color: var(--border-l3);
+  text-underline-offset: 2px;
+}
+
+.markdown .md-file-link:hover,
+.markdown .md-file-link:focus-visible {
+  outline: none;
+  text-decoration-color: var(--label-primary);
+}
+
+.markdown .md-file-link:focus-visible {
+  box-shadow: 0 0 0 2px var(--border-l3);
+}
+
 .markdown :where(ul, ol) {
   margin: 14px 0;
   padding-left: 18px;

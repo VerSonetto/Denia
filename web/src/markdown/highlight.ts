@@ -1,8 +1,8 @@
 /**
  * The console's ONE syntax highlighter: a synchronous fine-grained shiki core
  * (JavaScript regex engine — no oniguruma WASM, bundle-friendly) with an
- * explicit grammar allowlist and the vitesse-dark theme (see {@link THEME} for
- * why colors come from the theme rather than the design sheet).
+ * explicit grammar allowlist and Shiki themes (see {@link THEME} for why token
+ * colors come from the theme rather than the design sheet).
  *
  * Only the three markdown-fence grammars (TypeScript, shell, JSON) load into
  * the singleton at boot — the set every session renders. The wider extension
@@ -22,6 +22,9 @@
 import { createHighlighterCoreSync } from 'shiki/core'
 import { createJavaScriptRegexEngine, defaultJavaScriptRegexConstructor } from 'shiki/engine/javascript'
 import themeVitesseDark from '@shikijs/themes/vitesse-dark'
+import themeVitesseLight from '@shikijs/themes/vitesse-light'
+import themeGithubDark from '@shikijs/themes/github-dark'
+import themeGithubLight from '@shikijs/themes/github-light'
 import langTs from '@shikijs/langs/typescript'
 import langBash from '@shikijs/langs/shellscript'
 import langJson from '@shikijs/langs/json'
@@ -167,7 +170,7 @@ const LANG_ALIASES = new Map<string, string>([
 ])
 
 /**
- * 唯一的主题：vitesse-dark 的实际色值。
+ * 默认主题：vitesse-dark。阅读器可请求 GitHub 的明暗主题；聊天代码块仍使用默认主题。
  *
  * 早先这里用 `createCssVariablesTheme` 把 token 颜色外置成 `--shiki-token-*`
  * 交由 [markdown.css](markdown.css) 定调，但那张表定的是**纯灰阶**（文件头
@@ -180,6 +183,7 @@ const LANG_ALIASES = new Map<string, string>([
  * 只保留 `--shiki-background`（见 markdown.css）给代码块底色用。
  */
 const THEME = 'vitesse-dark'
+export type HighlightTheme = 'vitesse-dark' | 'vitesse-light' | 'github-dark' | 'github-light'
 
 /**
  * The JS regex engine compiles each TextMate pattern when its scanner is
@@ -207,7 +211,7 @@ const BOOT_GRAMMAR_WARMUPS = [
 /** Construct and pre-tokenize the boot grammars outside the user-content scan budget. */
 function createHighlighter(): HighlighterCore {
   const instance = createHighlighterCoreSync({
-    themes: [themeVitesseDark],
+    themes: [themeVitesseDark, themeVitesseLight, themeGithubDark, themeGithubLight],
     langs: LANGS,
     engine: regexEngine,
   })
@@ -292,11 +296,26 @@ function ensureGrammar(resolved: string): boolean {
  * @param lang - the language hint (a markdown fence info string).
  * @returns the highlighted HTML, or `undefined` for unknown or not-yet-loaded languages.
  */
-export function highlightToHtml(code: string, lang: string | undefined): string | undefined {
+export function highlightToHtml(
+  code: string,
+  lang: string | undefined,
+  theme: HighlightTheme = THEME,
+): string | undefined {
   const resolved = lang === undefined ? undefined : LANG_ALIASES.get(lang.toLowerCase())
   if (resolved === undefined) return undefined
   if (!ensureGrammar(resolved)) return undefined
-  return highlighter().codeToHtml(code, { lang: resolved, theme: THEME })
+  return highlighter().codeToHtml(code, { lang: resolved, theme })
+}
+
+/** Tokenize a settled code file into styled lines for editor-like file views. */
+export function highlightToLines(
+  code: string,
+  lang: string | undefined,
+  theme: HighlightTheme = THEME,
+): HighlightSpan[][] | undefined {
+  const resolved = lang === undefined ? undefined : LANG_ALIASES.get(lang.toLowerCase())
+  if (resolved === undefined || !ensureGrammar(resolved)) return undefined
+  return highlighter().codeToTokens(code, { lang: resolved, theme }).tokens.map(lineSpans)
 }
 
 /**
