@@ -743,6 +743,43 @@ export function IconAlert(props: IconProps) {
   )
 }
 
+/**
+ * 死循环:两道首尾相接的箭头 —— 与"重试"(单箭头绕回)区分开:
+ * 重试是"再试一次",死循环是"它自己转圈出不来"。
+ */
+export function IconLoop(props: IconProps) {
+  return (
+    <StrokeSvg {...props}>
+      <path d="M3.6 8a4.4 4.4 0 0 1 4.4-4.4h4" />
+      <path d="m10.4 2.2 1.8 1.4-1.8 1.5" />
+      <path d="M12.4 8a4.4 4.4 0 0 1-4.4 4.4H4" />
+      <path d="m5.6 13.8-1.8-1.4 1.8-1.5" />
+    </StrokeSvg>
+  )
+}
+
+/**
+ * 触顶:上下夹住一段文字的两条横线 + 中间的省略号 ——
+ * "输出被这个上限卡住了"。比通用警告三角更贴题。
+ */
+export function IconTokenLimit(props: IconProps) {
+  return (
+    <StrokeSvg {...props}>
+      <path d="M3.5 3.5h9M3.5 12.5h9" />
+      <path d="M6 8h.01M8 8h.01M10 8h.01" strokeWidth="1.6" />
+    </StrokeSvg>
+  )
+}
+
+/** 中断:一道竖切线 —— 进程被从中间切断,不是"按了停止"。 */
+export function IconInterrupt(props: IconProps) {
+  return (
+    <StrokeSvg {...props}>
+      <path d="M8 2.5v11" />
+    </StrokeSvg>
+  )
+}
+
 /** 环形箭头:重试/重新探测。 */
 export function IconRefresh(props: IconProps) {
   return (

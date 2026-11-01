@@ -10,6 +10,11 @@ import { billedInputTokens, cacheHitPercent, formatTokens } from '../stats'
  * denia 原先把 `输入12.3k ·输出4.5k` 做成一个死 tooltip —— 有精确值却看不全,
  * 缓存读与推理更是完全没有出口。这里把它变成可点开的明细。
  *
+ * **视觉主线是那条比例条**:未缓存输入 / 缓存读 / 输出 三段按 token 数
+ * 成比例排开。用量是三个数,读成三个数只是"抄下来";读成一条比例条才是
+ * "这轮贵在哪" —— 大半是缓存命中,还是大半在重新喂上下文,一眼就分得开。
+ * 精确值仍然都在(条下方逐行),但先给形态再给数字。
+ *
  * **必须走 portal 到 body**。会话行 `.turn-chrome` 带着
  * `content-visibility: auto`(长会话性能优化),它带来 paint containment:
  * 绝对定位在锚点内的浮层会被整块裁掉 —— 卡片渲染了却一个像素都画不出来,
@@ -100,6 +105,31 @@ export function TurnUsageCard({ usage }: { usage: TokenUsage }) {
   const cachePercent = hasCacheData ? cacheHitPercent(usage.inputTokens, cacheRead) : null
   const total = billed + usage.outputTokens
 
+  // 比例条的三段:未缓存输入 / 缓存读 / 输出。宽度按 token 数分配,
+  // 全为 0 时留一条底槽(而不是画一条空条 —— 空条会被读成"有数据但为零")。
+  const segments = [
+    { key: 'uncached', value: usage.inputTokens, title: t('turnUsageInputUncached') },
+    ...(hasCacheData
+      ? [{ key: 'cache', value: cacheRead, title: t('cacheReadTokens') }]
+      : []),
+    { key: 'output', value: usage.outputTokens, title: t('outputTokens') },
+  ]
+  const segmentTotal = segments.reduce((sum, segment) => sum + segment.value, 0)
+
+  // 收起态的 tooltip 给**精确口径**:行内的箭头只是速记("进了多少、
+  // 出了多少"),而输入侧实际分未缓存与缓存读两桶 —— 悬停要说准,
+  // 否则"12.4k↑"会被读成总 prompt(实际是未缓存那半)。
+  const hint = hasCacheData
+    ? t('turnUsageHint', {
+        input: formatTokens(usage.inputTokens),
+        cache: formatTokens(cacheRead),
+        output: formatTokens(usage.outputTokens),
+      })
+    : t('turnUsageHintNoCache', {
+        input: formatTokens(usage.inputTokens),
+        output: formatTokens(usage.outputTokens),
+      })
+
   return (
     <span className="turn-usage-anchor" ref={rootRef}>
       <button
@@ -107,10 +137,17 @@ export function TurnUsageCard({ usage }: { usage: TokenUsage }) {
         className="turn-usage"
         aria-haspopup="dialog"
         aria-expanded={open}
+        title={hint}
         onClick={() => setOpen((value) => !value)}
       >
-        {t('turnUsageInputUncached')} {formatTokens(usage.inputTokens)} ·{' '}
-        {t('outputTokens')} {formatTokens(usage.outputTokens)}
+        {/* 收起态只给数:输入↑ / 输出↓。
+            这里**刻意不画比例条** —— 一条横向填充的色块挨着一行数字,
+            读起来就是加载进度条:它没有标签、没有终点、宽度还会让人误以为
+            "快好了"。三段的比例是"为什么这么贵",属于展开后的明细;收起态
+            只需要回答"花了多少"。 */}
+        <span className="turn-usage-figures stats-mono">
+          {formatTokens(usage.inputTokens)}↑ {formatTokens(usage.outputTokens)}↓
+        </span>
       </button>
       {open && createPortal(
         <div
@@ -124,15 +161,34 @@ export function TurnUsageCard({ usage }: { usage: TokenUsage }) {
             <span>{t('turnUsageTitle')}</span>
             <span className="turn-usage-total stats-mono">{formatTokens(total)}</span>
           </div>
+          {/* 比例条:只在明细里出现。收起态不画 —— 横向填充的色块会被
+              读成加载进度条(见 CSS 注释)。 */}
+          <div className="turn-usage-bar" aria-hidden>
+            {segmentTotal > 0
+              ? segments.map((segment) => (
+                  <span
+                    key={segment.key}
+                    className={`turn-usage-seg turn-usage-seg-${segment.key}`}
+                    style={{ flexGrow: segment.value }}
+                  />
+                ))
+              : <span className="turn-usage-seg turn-usage-seg-empty" />}
+          </div>
           <dl className="turn-usage-rows">
             {/* 输入侧三桶:未缓存输入与缓存读互斥,相加才是计费输入。 */}
             <div>
-              <dt>{t('turnUsageInputUncached')}</dt>
+              <dt>
+                <span className="turn-usage-chip turn-usage-chip-uncached" aria-hidden />
+                {t('turnUsageInputUncached')}
+              </dt>
               <dd className="stats-mono">{formatTokens(usage.inputTokens)}</dd>
             </div>
             {hasCacheData && (
               <div>
-                <dt>{t('cacheReadTokens')}</dt>
+                <dt>
+                  <span className="turn-usage-chip turn-usage-chip-cache" aria-hidden />
+                  {t('cacheReadTokens')}
+                </dt>
                 <dd className="stats-mono">{formatTokens(cacheRead)}</dd>
               </div>
             )}
@@ -143,7 +199,10 @@ export function TurnUsageCard({ usage }: { usage: TokenUsage }) {
               </div>
             )}
             <div>
-              <dt>{t('outputTokens')}</dt>
+              <dt>
+                <span className="turn-usage-chip turn-usage-chip-output" aria-hidden />
+                {t('outputTokens')}
+              </dt>
               <dd className="stats-mono">
                 {formatTokens(usage.outputTokens)}
                 {reasoning > 0 && (

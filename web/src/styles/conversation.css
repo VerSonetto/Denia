@@ -1351,21 +1351,180 @@
   padding: 4px 0;
 }
 
-/* 状态行:圆点 + 结局 + 用量。三者同属"这轮怎么结束的"一件事,同行读作
+/* 状态行:徽标 + 结局 + 用量。三者同属"这轮怎么结束的"一件事,同行读作
    一句;用量单独成行(原来还包了个胶囊)会被读成并列的第二条信息。
    文案过长/视口过窄时用量整体折到下一行,而不是被挤出容器。 */
 .turn-reason-row {
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   flex-wrap: wrap;
   gap: 0 8px;
   min-width: 0;
   max-width: 100%;
 }
 
-/* 圆点锚定首行;单行时恰为垂直居中((18 - 7) / 2)。 */
-.turn-reason-row .dot {
-  margin-top: 5.5px;
+/* 状态徽标:图标 + 文字,一枚有边框的小胶囊。
+ *
+ * 为什么不再是"7px 圆点 + 纯文字":圆点在 11.5px 字号下只是 7 个像素,
+ * 五个结局(完成/中止/触顶/死循环/出错)全靠文字颜色区分 —— 而这套
+ * 界面是黑白体系,`--error`/`--warn` 本身都是灰阶,红黄只在
+ * `--error-fg`/`--warn-fg` 上才有。圆点 + 灰字 = 一行读不出严重度。
+ * 徽标给了三样东西:图标(形状通道,扫读即分档)、边框(把状态从正文里
+ * 框出来)、以及真正带色的前景(见下)。
+ *
+ * 色档只走**前景 + 边框**两处,不铺底色:收尾行在长对话里出现很多次,
+ * 一排彩色底块会变成噪音。 */
+.turn-status {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 7px 1px 6px;
+  border: 1px solid var(--border-l2);
+  border-radius: var(--r-pill);
+  font-size: 11px;
+  line-height: 15px;
+  white-space: nowrap;
+  color: var(--label-tertiary);
+}
+
+.turn-status svg {
+  flex: none;
+  opacity: 0.9;
+}
+
+/* 正常完成:最弱的一档 —— 它是默认状态,不该抢戏。 */
+.turn-status-ok {
+  color: var(--label-tertiary);
+  border-color: var(--border-l1);
+}
+
+/* 没跑完(中止/触顶/死循环/被打断):警示色,但不给红 —— 这几种都是
+   "这轮不完整",不是"系统故障"。 */
+.turn-status-warn {
+  color: var(--warn-fg);
+  border-color: color-mix(in srgb, var(--warn-fg) 30%, transparent);
+}
+
+/* 真失败:红色。这是收尾行里唯一的红,用户扫一眼就能定位到问题轮次。 */
+.turn-status-err {
+  color: var(--error-fg);
+  border-color: color-mix(in srgb, var(--error-fg) 35%, transparent);
+}
+
+/* 收尾错误详情:收起态一行摘要,展开给原始报文。
+ *
+ * 错误文案不进状态行本身 —— 提供方的完整报错能有几百字符,摊在行里
+ * 会把整行撑成一堵墙,还会把"这轮结束了"这条主线淹掉。 */
+.turn-error {
+  min-width: 0;
+  max-width: 100%;
+  border: 1px solid color-mix(in srgb, var(--error-fg) 22%, transparent);
+  border-left-width: 2px;
+  border-radius: var(--r-xs);
+  background: color-mix(in srgb, var(--error-fg) 5%, transparent);
+  overflow: hidden;
+}
+
+/* 摘要行:失败码(原始码,给排障)+ 人话短语(给阅读)+ 展开钮。
+   三者一条横排,不用竖排 —— 竖排会把它读成一块独立面板。 */
+.turn-error-summary {
+  appearance: none;
+  -webkit-appearance: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-width: 0;
+  padding: 4px 8px;
+  border: none;
+  background: none;
+  font: inherit;
+  font-size: 11.5px;
+  line-height: 16px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.turn-error-summary:hover .turn-error-phrase {
+  color: var(--label-primary);
+}
+
+/* 失败码:等宽 + 弱化。它是给人 copy 去搜的,不是给人读懂的。 */
+.turn-error-code {
+  flex: none;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--label-caption);
+  letter-spacing: 0.02em;
+}
+
+/* 人话短语:这才是用户真正要读的一句话。 */
+.turn-error-phrase {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--label-secondary);
+  transition: color var(--ease);
+}
+
+/* 展开钮:右端的文字按钮,默认很淡 —— 它是备选动作,不该抢主句。 */
+.turn-error-toggle {
+  flex: none;
+  color: var(--label-caption);
+  font-size: 11px;
+  transition: color var(--ease);
+}
+
+.turn-error-summary:hover .turn-error-toggle,
+.turn-error.open .turn-error-toggle {
+  color: var(--label-secondary);
+}
+
+/* 展开区:原始报文 + 排障事实。报文用等宽、可换行、限高 ——
+   一段几百字符的 HTML 报错不该把对话流撑到需要滚动条。 */
+.turn-error-body {
+  padding: 0 8px 8px;
+  border-top: 1px solid color-mix(in srgb, var(--error-fg) 14%, transparent);
+}
+
+.turn-error-message {
+  margin: 7px 0 0;
+  max-height: 180px;
+  overflow: auto;
+  color: var(--label-secondary);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+}
+
+.turn-error-facts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 3px 18px;
+  margin: 7px 0 0;
+}
+
+.turn-error-facts div {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+}
+
+.turn-error-facts dt {
+  color: var(--label-caption);
+  font-size: 11px;
+}
+
+.turn-error-facts dd {
+  margin: 0;
+  color: var(--label-secondary);
+  font-size: 11px;
 }
 
 /* 用量:状态行的量级注脚。紧凑计数(6.4m / 168.8k)与底部状态栏同一套
@@ -1379,11 +1538,14 @@
 }
 
 /* 触发件就是原来那行文字:继承 .turn-chrome 的字号/颜色,只把死 tooltip
-   换成可点开。去掉 button 原生外观,免得在状态行里多出一个灰块。 */
+   换成可点开。去掉 button 原生外观,免得在状态行里多出一个灰块。
+   收起态是「输入↑ 输出↓」+ 缓存命中率,没有横向条 —— 见下。 */
 .turn-usage {
   appearance: none;
   -webkit-appearance: none;
-  display: inline;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
   min-width: 0;
   padding: 0;
   border: none;
@@ -1395,6 +1557,86 @@
   transition: color var(--ease);
 }
 
+/* 数字组:输入↑ / 输出↓。 */
+.turn-usage-figures {
+  white-space: nowrap;
+}
+
+/* 比例条:未缓存输入 / 缓存读 / 输出 三段按 token 数成比例。
+ *
+ * **只在展开的明细卡里出现**(见 .turn-usage-bar-wide)。收起态刻意不画 ——
+ * 一条横向填充的色块挨着一行数字,读起来就是加载进度条:它没有标签、没有
+ * 终点、宽度还会让人误以为"快好了"。比例是"为什么这么贵",属于明细;
+ * 收起态只需要回答"花了多少"。
+ *
+ * 三段配色:灰(未缓存输入)/ 绿(缓存读)/ 琥珀(输出)。
+ * 不用"两级灰"分未缓存与缓存 —— 8px 高的条上,#737373 与 #525252 的差别
+ * 肉眼分不出,三段看着就是一条线。换成三个色相:灰是"本底",绿是"命中
+ * (省下的钱)",琥珀是"产出"。用户扫一眼就知道这轮是重喂上下文还是
+ * 命中缓存。 */
+.turn-usage-bar {
+  display: flex;
+  width: 100%;
+  height: 8px;
+  margin-bottom: 9px;
+  border-radius: var(--r-xs);
+  overflow: hidden;
+  background: var(--accent-soft);
+}
+
+.turn-usage-seg {
+  display: block;
+  height: 100%;
+  min-width: 0;
+}
+
+/* 段间留 1px 底色缝:三段是同一个量的三部分,但各占一格 —— 没有这道缝
+   时相邻两段会糊成一段,比例就读错了。 */
+.turn-usage-seg + .turn-usage-seg {
+  border-left: 1px solid var(--bg-layer-2);
+}
+
+/* 三段配色:见上。 */
+.turn-usage-seg-uncached {
+  background: var(--label-tertiary);
+}
+
+.turn-usage-seg-cache {
+  background: var(--success-fg);
+}
+
+.turn-usage-seg-output {
+  background: var(--ctx-messages);
+}
+
+/* 全零:一条空槽。它读作"这里没有数",不是"有一个 0 的段"。 */
+.turn-usage-seg-empty {
+  flex: 1;
+  background: transparent;
+}
+
+/* 明细表里的色块:与比例条同色,让"色块 = 比例条上那一段"一眼对上。 */
+.turn-usage-chip {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  margin-right: 6px;
+  border-radius: 2px;
+  vertical-align: baseline;
+}
+
+.turn-usage-chip-uncached {
+  background: var(--label-tertiary);
+}
+
+.turn-usage-chip-cache {
+  background: var(--success-fg);
+}
+
+.turn-usage-chip-output {
+  background: var(--ctx-messages);
+}
+
 .turn-usage:hover,
 .turn-usage:focus-visible {
   color: var(--label-secondary);
@@ -1404,11 +1646,6 @@
   outline: none;
   box-shadow: 0 0 0 2px var(--border-l3);
   border-radius: 3px;
-}
-
-.turn-usage::before {
-  content: '·';
-  margin-right: 6px;
 }
 
 /* 明细卡片:portal 到 body 后用 fixed 定位,落点由 JS 按视口钳制算出
@@ -1847,40 +2084,15 @@
   max-height: none;
 }
 
-.turn-chrome .err {
-  color: var(--error);
-}
-
-.turn-chrome .warn {
-  color: var(--warn);
-}
-
 .turn-chrome .reason {
   min-width: 0;
   max-width: min(100%, 72ch);
 }
 
-/* 错误/警示文案可能极长(含提供方完整报错):强度控制——最多两行、
-   超出省略,长 token 任意处可断;完整文案悬停 title 可见(回注的
-   injected 消息里也有完整错误)。 */
-.turn-chrome .reason.err,
-.turn-chrome .reason.warn {
-  overflow: hidden;
-  display: -webkit-box;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 2;
-  overflow-wrap: anywhere;
-  line-height: 1.5;
-}
-
-.turn-chrome .dot {
-  flex: none;
-}
-
 /* 死循环保护提示行:警示色文案 + 下划线可点「继续」。
    样式基准同 .markdown a(下划线用弱边框色,悬停强调)。 */
 .turn-chrome .loop-hint {
-  color: var(--warn);
+  color: var(--warn-fg);
   white-space: nowrap;
 }
 
