@@ -105,9 +105,13 @@ try {
   assert.ok(app.includes('sessionsLoaded'), '列表加载完成前不清理标记')
   assert.ok(app.includes('sawSessionsRef'), '首次空列表不清标记,见过真实列表后空列表才权威')
   assert.equal(
-    app.split('marked={inProgress.has(session.id)}').length - 1,
+    app.split('marked={isSessionMarked(session)}').length - 1,
     2,
     '分组与未分组会话都传入标记',
+  )
+  assert.ok(
+    app.includes('(session: SessionSummary) => inProgress.has(session.id)'),
+    '标记判定来自手动标记账本',
   )
   const row = readFileSync(join(root, 'src/components/sidebar/SessionRow.tsx'), 'utf8')
   assert.ok(row.includes('data-testid="in-progress-mark"'), '标记有稳定的测试锚点')

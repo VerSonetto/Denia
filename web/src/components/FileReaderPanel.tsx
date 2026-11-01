@@ -44,6 +44,17 @@ type FileState =
  */
 type ViewMode = 'code' | 'preview'
 
+/**
+ * 系统是否偏好浅色。
+ *
+ * jsdom 与部分 WebView 测试环境没有 `matchMedia`,缺省按深色处理:
+ * 探测失败只影响代码块用哪套配色,不值得让整个文件面板挂掉。
+ */
+function systemPrefersLight(): boolean {
+  if (typeof window.matchMedia !== 'function') return false
+  return window.matchMedia('(prefers-color-scheme: light)').matches
+}
+
 export interface FileReaderPanelProps {
   /** 工作区绝对路径(文件读取的根)。 */
   workspacePath: string
@@ -66,7 +77,7 @@ export function FileReaderPanel({
 }: FileReaderPanelProps) {
   const [codeTheme, setCodeTheme] = useState<'github-dark' | 'github-light'>(() => {
     const explicit = document.documentElement.dataset.theme
-    const light = explicit === 'light' || (!explicit && window.matchMedia('(prefers-color-scheme: light)').matches)
+    const light = explicit === 'light' || (!explicit && systemPrefersLight())
     return light ? 'github-light' : 'github-dark'
   })
   /**
@@ -92,19 +103,21 @@ export function FileReaderPanel({
 
   useEffect(() => {
     const root = document.documentElement
-    const media = window.matchMedia('(prefers-color-scheme: light)')
+    const media = typeof window.matchMedia === 'function'
+      ? window.matchMedia('(prefers-color-scheme: light)')
+      : null
     const updateTheme = () => {
       const explicit = root.dataset.theme
-      const light = explicit === 'light' || (!explicit && media.matches)
+      const light = explicit === 'light' || (!explicit && media?.matches === true)
       setCodeTheme(light ? 'github-light' : 'github-dark')
     }
     const observer = new MutationObserver(updateTheme)
     observer.observe(root, { attributes: true, attributeFilter: ['data-theme'] })
-    media.addEventListener('change', updateTheme)
+    media?.addEventListener('change', updateTheme)
     updateTheme()
     return () => {
       observer.disconnect()
-      media.removeEventListener('change', updateTheme)
+      media?.removeEventListener('change', updateTheme)
     }
   }, [])
 
