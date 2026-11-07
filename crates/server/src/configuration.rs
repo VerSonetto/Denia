@@ -60,6 +60,11 @@ pub struct ConsoleSettings {
     /// 在某次会话里显式进入的临时档位,不适合当全局默认值)。
     #[serde(default = "default_permission_mode")]
     pub default_permission_mode: String,
+    /// 运行中发送到消息队列的默认处理方式:
+    /// `ask` 先排队等用户选择,`interject` 立即打断并发送,`guide` 交给
+    /// 模型在下一个步骤边界注入。缺省保持原有语义(排队后手动选择)。
+    #[serde(default = "default_queue_default_action")]
+    pub queue_default_action: String,
 }
 
 fn default_max_parallel_tool_calls() -> usize {
@@ -77,6 +82,14 @@ pub fn default_permission_mode() -> String {
 
 /// 设置里可选的新建会话默认档位(剔除 plan,见字段注释)。
 pub const SELECTABLE_DEFAULT_PERMISSION_MODES: [&str; 3] = ["read-only", "auto-edit", "full"];
+
+/// 队列消息默认处理方式:每次询问 / 立即插话 / 立即引导。
+pub fn default_queue_default_action() -> String {
+    "ask".to_string()
+}
+
+/// 设置里可选的队列消息默认处理方式。
+pub const SELECTABLE_QUEUE_DEFAULT_ACTIONS: [&str; 3] = ["ask", "interject", "guide"];
 
 /// `console.compaction` 段(层叠上下文管理配置,默认带自动压缩缓冲
 /// 语义)。
@@ -233,6 +246,13 @@ pub(crate) fn validate_console(value: Value) -> Result<Value, String> {
                 .to_string(),
         );
     }
+    if !SELECTABLE_QUEUE_DEFAULT_ACTIONS.contains(&parsed.queue_default_action.as_str()) {
+        return Err(format!(
+            "queueDefaultAction must be one of {}; got '{}'",
+            SELECTABLE_QUEUE_DEFAULT_ACTIONS.join(", "),
+            parsed.queue_default_action
+        ));
+    }
     serde_json::to_value(parsed).map_err(|e| e.to_string())
 }
 
@@ -258,5 +278,36 @@ pub fn console_settings(settings: &SettingsStore) -> ConsoleSettings {
             cache_warming: denia_agent_loop::CacheWarmingMode::Off,
             cache_warm_ttl_seconds: default_cache_warm_ttl_seconds(),
             default_permission_mode: default_permission_mode(),
+            queue_default_action: default_queue_default_action(),
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn console_queue_default_action_accepts_three_values() {
+        for action in SELECTABLE_QUEUE_DEFAULT_ACTIONS {
+            let value = serde_json::json!({ "queueDefaultAction": action });
+            assert!(
+                validate_console(value).is_ok(),
+                "queueDefaultAction '{action}' 必须被接受"
+            );
+        }
+    }
+
+    #[test]
+    fn console_queue_default_action_defaults_to_ask() {
+        let parsed: ConsoleSettings =
+            serde_json::from_value(serde_json::json!({})).expect("空配置必须可按默认值解析");
+        assert_eq!(parsed.queue_default_action, "ask");
+    }
+
+    #[test]
+    fn console_queue_default_action_rejects_unknown_value() {
+        let value = serde_json::json!({ "queueDefaultAction": "random" });
+        let error = validate_console(value).expect_err("未知处理方式必须被拒绝");
+        assert!(error.contains("queueDefaultAction"));
+    }
 }

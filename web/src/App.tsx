@@ -40,6 +40,10 @@ import { useBrowserSidebar } from './hooks/useBrowserSidebar'
 import { useIsMobile } from './hooks/useIsMobile'
 import { useSidePaneController, useTerminalReconcile } from './hooks/useSidePane'
 import { startQueueScheduler } from './features/conversation/queueScheduler'
+import {
+  normalizeQueueDefaultAction,
+  setQueueDefaultAction,
+} from './features/conversation/queueDefaults'
 import { useSidebarCollapse } from './hooks/useSidebarCollapse'
 import { useSplitView } from './hooks/useSplitView'
 import { registerOpenFile } from './fileOpen'
@@ -392,6 +396,7 @@ export default function App() {
         if (theme === 'system') delete document.documentElement.dataset.theme
         else document.documentElement.dataset.theme = theme
         setLocale((console?.value.locale as string) ?? 'zh')
+        setQueueDefaultAction(normalizeQueueDefaultAction(console?.value.queueDefaultAction))
         bumpCatalogTick()
       })
       .catch(() => {})

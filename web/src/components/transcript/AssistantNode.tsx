@@ -41,8 +41,8 @@ export function AssistantNode({
           return <ThinkRow key={index} text={block.text} streaming={thinking} />
         }
         return (
-          <div key={index} className={`prose${node.streaming ? ' streaming-block' : ''}`}>
-            <MarkdownText text={block.text} streaming={node.streaming} labels={labels} />
+          <div key={index} className="prose">
+            <MarkdownText text={block.text} streaming={node.streaming && index === node.blocks.length - 1} labels={labels} />
           </div>
         )
       })}

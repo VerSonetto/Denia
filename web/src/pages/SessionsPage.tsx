@@ -8,6 +8,7 @@ import { normalizeSelection, LAST_MODEL_KEY, LAST_MODEL_KEY_LEGACY, NODES_THROTT
 import { usePermissions } from '../features/conversation/usePermissions';
 import { usePromptOptimize } from '../features/conversation/usePromptOptimize';
 import { useMessageQueue, type PostMessageFn } from '../features/conversation/useMessageQueue';
+import { peekQueueDefaultAction } from '../features/conversation/queueDefaults';
 import { SessionHeader, HeroWorkspaceRow } from '../components/SessionHeader';
 import { useCallback, useEffect, useMemo, useRef, useState, Fragment, type ClipboardEvent, type KeyboardEvent } from 'react';
 import * as api from '../api';
@@ -1309,11 +1310,21 @@ export default function SessionsPage({
       onOpenPicker()
       return
     }
-    // AI 正在运行:照旧入队,本轮结束自动发送。立即发出的两种方式由队列
-    // 条目上的发送选择器决定(插话 / 引导),不在输入区打断用户写作。
+    // AI 正在运行:照旧入队,本轮结束自动发送。常规设置里的默认方式决定
+    // 是否立即投递:插话打断当前轮次后发送,引导交给模型在步骤边界接收;
+    // 「每次询问」保留原行为,由队列条目上的选择器决定。
     if (running) {
-      enqueueMessage(trimmed)
-      notify('ok', t('queueSentHint'))
+      const defaultAction = peekQueueDefaultAction()
+      const queued = enqueueMessage(trimmed)
+      if (defaultAction === 'interject') {
+        // 插话失败时消息会留在队列，mode 一并记成 interject 以保留来源。
+        updateQueued(queued.id, { mode: 'interject' })
+        await sendNow(queued)
+      } else if (defaultAction === 'guide') {
+        await guideQueued(queued)
+      } else {
+        notify('ok', t('queueSentHint'))
+      }
       return
     }
     // 不运行时:附件随消息一起发。

@@ -1,7 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { t } from '../../i18n'
 import { useFollow } from '../../streaming/useFollow'
-import { useTypewriter } from '../../typewriter'
 import { firstLine } from '../../toolDisplay'
 import { IconChevron, IconThink } from '../icons'
 
@@ -23,10 +22,8 @@ export function ThinkRow({
     active: streaming,
     alignOnAttach: streaming,
   })
-  // 思考正文:揭示引擎逐字展开,settle 后残余匀速排空。
-  // 内层滚动框有自己的压力通道:背压由框内的滞后决定,不吃外层对话流的。
-  const reveal = useTypewriter(text, streaming, { pressure: follow.pressure })
-  const revealing = streaming || !reveal.done
+  // 思考摘要与正文按参考方案随流直接更新，不再使用旧的逐字揭示引擎。
+  const revealing = streaming
   // 排空期间保持展开:残余还在长,这时折叠等于把没播完的字吞掉。
   useEffect(() => {
     setOpen(revealing)
@@ -61,7 +58,7 @@ export function ThinkRow({
             ref={follow.setPort}
             className={`think-content${streaming ? ' think-streaming' : ''}`}
           >
-            {reveal.text}
+            {text}
           </pre>
         </div>
       )}

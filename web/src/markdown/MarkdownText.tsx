@@ -11,7 +11,7 @@
  * full parse self-heals it.
  */
 
-import { memo, useMemo, useRef } from 'react'
+import { memo, useLayoutEffect, useMemo, useRef } from 'react'
 import type { ReactNode } from 'react'
 import { IncrementalMarkdownParser } from './incremental'
 import { parseGfm, parseGfmWithMath } from './parse'
@@ -21,7 +21,7 @@ import {
   wrapBlockChildren,
 } from './render'
 import type { MarkdownLabels, MarkdownRenderContext, ReferenceTargets } from './render'
-import { useTypewriter } from '../typewriter'
+import { useParagraphReveal } from './paragraphReveal'
 import 'katex/dist/katex.min.css'
 
 export type { MarkdownCodeLabels, MarkdownLabels } from './render'
@@ -137,9 +137,8 @@ class StreamingRenderer {
 /**
  * Render untrusted assistant-authored Markdown as semantic React elements.
  * @param props - Markdown source text preserved by the session projection;
- * `streaming` parses incrementally across chunks and highlights fences as
- * they grow (each fence re-tokenizes only appended text; TeX stays literal
- * until the finalize swap so incomplete formulae never flash errors);
+ * `streaming` reveals completed batches and parses them incrementally;
+ * TeX stays literal until the finalized full parse;
  * `labels` forwards localized fence and footnote chrome — pass a
  * reference-stable object (memoized per locale revision), because a new
  * identity discards the streaming render cache mid-message.
@@ -155,10 +154,10 @@ export const MarkdownText = memo(function MarkdownText({ text, streaming = false
   const streamRef = useRef<StreamingRenderer | null>(null)
   const repairRef = useRef<HeadingRepair | null>(null)
   const streamLabelsRef = useRef<MarkdownLabels>(labels)
-  // 流式时逐字 reveal:显示文本与模型到达文本分离(揭示引擎,见 typewriter.ts)。
-  // 生产端停下后残余还要按恒定速度排空;`done` 之前仍走增量解析路径,
-  // 定稿那一遍全量解析(数学公式、标题修复)因此顺延一个呼吸的时间。
-  const reveal = useTypewriter(text, streaming)
+  const containerRef = useRef<HTMLDivElement>(null)
+  const animatedBlocks = useRef<WeakSet<HTMLElement>>(new WeakSet())
+  const wasStreaming = useRef(streaming)
+  const reveal = useParagraphReveal(text, streaming)
   const displayText = reveal.text
   const live = streaming || !reveal.done
   const children = useMemo(() => {
@@ -177,5 +176,20 @@ export const MarkdownText = memo(function MarkdownText({ text, streaming = false
     // 重置冻结前缀。这是刻意取舍:拆分依赖后到的信息,只追加的方案做不到。
     return streamRef.current.render(repairRef.current.repair(displayText))
   }, [displayText, live, labels])
-  return <div className="markdown">{children}</div>
+  useLayoutEffect(() => {
+    const container = containerRef.current
+    if (!container) return
+    const blocks = Array.from(container.children) as HTMLElement[]
+    if (streaming || wasStreaming.current) {
+      let order = 0
+      blocks.forEach(block => {
+        if (animatedBlocks.current.has(block)) return
+        animatedBlocks.current.add(block)
+        block.style.animationDelay = `${Math.min(order++, 4) * 70}ms`
+        block.classList.add('streaming-paragraph-in')
+      })
+    }
+    wasStreaming.current = live
+  }, [children, streaming, live])
+  return <div className="markdown" ref={containerRef}>{children}</div>
 })

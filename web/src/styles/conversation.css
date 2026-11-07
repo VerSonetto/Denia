@@ -1020,26 +1020,26 @@
   color: var(--label-primary);
 }
 
-/* 流式期间新增的 markdown 块:柔和淡入 + 微上浮,吐字有"生长"感。
-   只对挂载瞬间生效一次(React 新增 DOM 节点时触发),历史/翻页消息
-   streaming=false 不挂此 class,不会误动画。 */
-.msg-assistant .prose.streaming-block {
-  animation: streaming-block-in 160ms var(--ease) both;
+/* Smooth Stream's default fade, applied only to newly revealed text. */
+.streaming-paragraph-in {
+  animation: streaming-paragraph-in 520ms ease-out both;
 }
 
-@keyframes streaming-block-in {
+@keyframes streaming-paragraph-in {
   from {
     opacity: 0;
+    filter: blur(2px);
     transform: translateY(3px);
   }
   to {
     opacity: 1;
-    transform: translateY(0);
+    filter: none;
+    transform: none;
   }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .msg-assistant .prose.streaming-block {
+  .streaming-paragraph-in {
     animation: none;
   }
 }

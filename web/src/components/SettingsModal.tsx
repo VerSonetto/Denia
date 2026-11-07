@@ -21,6 +21,11 @@ import { LlmPanel } from './llm/LlmPanel'
 import { AgentPresetSettings } from './settings/AgentPresetSettings'
 import { normalizePermissionMode, type PermissionMode } from '../types'
 import { PERMISSION_LEVELS, storePermission } from './PermissionSelector'
+import {
+  normalizeQueueDefaultAction,
+  setQueueDefaultAction,
+  type QueueDefaultAction,
+} from '../features/conversation/queueDefaults'
 
 type SettingsTab =
   | 'runtime'
@@ -59,6 +64,16 @@ const DEFAULT_PERMISSION_OPTIONS: {
   label: t(level.nameKey),
   nameKey: level.nameKey,
 }))
+
+/** 队列消息默认处理方式:每次询问 / 插话 / 引导。 */
+const QUEUE_DEFAULT_OPTIONS: {
+  id: QueueDefaultAction
+  nameKey: Parameters<typeof t>[0]
+}[] = [
+  { id: 'ask', nameKey: 'queueDefaultAsk' },
+  { id: 'interject', nameKey: 'queueModeInterject' },
+  { id: 'guide', nameKey: 'queueModeGuide' },
+]
 
 function normalizeDefaultPermission(raw: unknown): PermissionMode {
   const mode = typeof raw === 'string' ? normalizePermissionMode(raw) : 'auto-edit'
@@ -205,6 +220,7 @@ export function SettingsModal({ notify, onClose, onOpenVersion }: { notify: Noti
   const [theme, setTheme] = useState('system')
   const [locale, setLocaleState] = useState('zh')
   const [defaultPermission, setDefaultPermission] = useState<PermissionMode>('auto-edit')
+  const [queueDefaultAction, setQueueDefaultActionState] = useState<QueueDefaultAction>('ask')
   const [consoleValue, setConsoleValue] = useState<Record<string, unknown>>({})
   const [consoleRevision, setConsoleRevision] = useState(0)
   const [promptText, setPromptText] = useState('')
@@ -240,6 +256,9 @@ export function SettingsModal({ notify, onClose, onOpenVersion }: { notify: Noti
         setLocaleState((console.value.locale as string) ?? 'zh')
         setDefaultPermission(
           normalizeDefaultPermission(console.value.defaultPermissionMode),
+        )
+        setQueueDefaultActionState(
+          normalizeQueueDefaultAction(console.value.queueDefaultAction),
         )
         setConsoleRevision(console.revision)
       }
@@ -319,6 +338,30 @@ export function SettingsModal({ notify, onClose, onOpenVersion }: { notify: Noti
       }))
       storePermission(defaultPermission)
       notify('ok', t('defaultPermissionSaved'))
+    } catch (error) {
+      notify('err', error instanceof Error ? error.message : String(error))
+      void load()
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  /** 队列消息默认处理方式:写 console 设置,并同步发送路径的前端缓存。 */
+  const saveQueueDefaultAction = async () => {
+    setSaving(true)
+    try {
+      const next = {
+        ...consoleValue,
+        theme,
+        locale,
+        defaultPermissionMode: defaultPermission,
+        queueDefaultAction,
+      }
+      const view = await api.replaceNamespace(CONSOLE_NS, next, consoleRevision)
+      setConsoleRevision((view as { revision: number }).revision)
+      setConsoleValue(next)
+      setQueueDefaultAction(queueDefaultAction)
+      notify('ok', t('queueDefaultSaved'))
     } catch (error) {
       notify('err', error instanceof Error ? error.message : String(error))
       void load()
@@ -494,27 +537,54 @@ export function SettingsModal({ notify, onClose, onOpenVersion }: { notify: Noti
                 {tab === 'runtime' && <RuntimeSettings />}
                 {tab === 'subagents' && <SubagentSettings notify={notify} />}
                 {tab === 'general' && (
-                  <SetmCard
-                    title={t('defaultPermissionTitle')}
-                    hint={t('defaultPermissionHint')}
-                    summary={t(
-                      (DEFAULT_PERMISSION_OPTIONS.find((o) => o.id === defaultPermission) ??
-                        DEFAULT_PERMISSION_OPTIONS[1]).nameKey,
-                    )}
-                    open={openCard === 'permission'}
-                    onToggle={() => toggleCard('permission')}
-                  >
-                    <SetmTiles
-                      value={defaultPermission}
-                      options={DEFAULT_PERMISSION_OPTIONS}
-                      onChange={setDefaultPermission}
-                    />
-                    <SetmActions>
-                      <SetmBtn disabled={saving} onClick={() => void saveDefaultPermission()}>
-                        {t('save')}
-                      </SetmBtn>
-                    </SetmActions>
-                  </SetmCard>
+                  <div className="setm-cards">
+                    <SetmCard
+                      title={t('defaultPermissionTitle')}
+                      hint={t('defaultPermissionHint')}
+                      summary={t(
+                        (DEFAULT_PERMISSION_OPTIONS.find((o) => o.id === defaultPermission) ??
+                          DEFAULT_PERMISSION_OPTIONS[1]).nameKey,
+                      )}
+                      open={openCard === 'permission'}
+                      onToggle={() => toggleCard('permission')}
+                    >
+                      <SetmTiles
+                        value={defaultPermission}
+                        options={DEFAULT_PERMISSION_OPTIONS}
+                        onChange={setDefaultPermission}
+                      />
+                      <SetmActions>
+                        <SetmBtn disabled={saving} onClick={() => void saveDefaultPermission()}>
+                          {t('save')}
+                        </SetmBtn>
+                      </SetmActions>
+                    </SetmCard>
+
+                    <SetmCard
+                      title={t('queueDefaultActionTitle')}
+                      hint={t('queueDefaultActionHint')}
+                      summary={t(
+                        (QUEUE_DEFAULT_OPTIONS.find((o) => o.id === queueDefaultAction) ??
+                          QUEUE_DEFAULT_OPTIONS[0]).nameKey,
+                      )}
+                      open={openCard === 'queue-default'}
+                      onToggle={() => toggleCard('queue-default')}
+                    >
+                      <SetmTiles
+                        value={queueDefaultAction}
+                        options={QUEUE_DEFAULT_OPTIONS.map((option) => ({
+                          id: option.id,
+                          label: t(option.nameKey),
+                        }))}
+                        onChange={setQueueDefaultActionState}
+                      />
+                      <SetmActions>
+                        <SetmBtn disabled={saving} onClick={() => void saveQueueDefaultAction()}>
+                          {t('save')}
+                        </SetmBtn>
+                      </SetmActions>
+                    </SetmCard>
+                  </div>
                 )}
 
                 {tab === 'prompts' && (

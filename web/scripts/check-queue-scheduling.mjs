@@ -56,4 +56,29 @@ assert.ok(loop.includes('steering:{}'), '引导落成带稳定 id 的真实用�
 const route = read('../../crates/server/src/api/sessions.rs')
 assert.ok(route.includes('/steer'), '会话路由暴露引导接口')
 
+/* ---- 任务四：队列消息默认处理方式（常规设置） ---- */
+
+const settings = web('components/SettingsModal.tsx')
+assert.ok(settings.includes('queueDefaultActionTitle'), '常规设置提供队列默认处理配置')
+assert.ok(
+  settings.includes('QUEUE_DEFAULT_OPTIONS') &&
+    settings.includes("id: 'ask'") &&
+    settings.includes("id: 'interject'") &&
+    settings.includes("id: 'guide'"),
+  '队列默认处理必须提供「每次询问 / 插话 / 引导」三个选项',
+)
+assert.ok(page.includes('peekQueueDefaultAction'), '运行中发送读取队列默认处理方式')
+assert.ok(
+  page.includes("defaultAction === 'interject'") && page.includes("defaultAction === 'guide'"),
+  '默认插话/引导在入队后立即按对应方式投递',
+)
+assert.ok(app.includes('setQueueDefaultAction'), '设置更新后同步队列默认处理缓存')
+
+const configuration = read('../../crates/server/src/configuration.rs')
+assert.ok(configuration.includes('queue_default_action'), '后端持久化队列默认处理字段')
+assert.ok(
+  configuration.includes('SELECTABLE_QUEUE_DEFAULT_ACTIONS'),
+  '后端校验三个可选值',
+)
+
 console.log('ok queue guide/interject split, per-session scheduler and steer delivery')
